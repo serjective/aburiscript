@@ -1,0 +1,5817 @@
+#include "collect.h"
+#include "collect_internal.h"
+#include "collect_templates_internal.h"
+#include "../ast/ast_clone.h"
+#include "../helpers/auto_type_utils.h"
+#include "../ast/expr_clone.h"
+#include "../ast/special_members.h"
+#include "lookup_engine.h"
+#include <functional>
+#include <limits>
+#include <optional>
+
+using namespace collect_internal;
+
+namespace {
+
+void collect_lambda_local_symbols_from_decl(
+    const Decl* decl,
+    std::unordered_set<const Symbol*>& local_symbols);
+
+void collect_lambda_referenced_symbols_from_expr(
+    const Expr* expr,
+    std::vector<std::shared_ptr<Symbol>>& referenced_symbols,
+    std::unordered_set<const Symbol*>& seen_symbols,
+    bool& referenced_this);
+
+void collect_lambda_local_symbols_from_stmt(
+    const Stmt* stmt,
+    std::unordered_set<const Symbol*>& local_symbols) {
+    if (!stmt) {
+        return;
+    }
+
+    if (auto* compound = dyn_cast<const CompoundStmt>(stmt)) {
+        for (const auto& child : compound->statements) {
+            collect_lambda_local_symbols_from_stmt(child.get(), local_symbols);
+        }
+        return;
+    }
+    if (auto* decl_stmt = dyn_cast<const Decl2Stmt>(stmt)) {
+        for (const auto& decl : decl_stmt->decls) {
+            collect_lambda_local_symbols_from_decl(decl.get(), local_symbols);
+        }
+        return;
+    }
+    if (auto* if_stmt = dyn_cast<const IfStmt>(stmt)) {
+        collect_lambda_local_symbols_from_stmt(if_stmt->then_stmt.get(), local_symbols);
+        collect_lambda_local_symbols_from_stmt(if_stmt->else_stmt.get(), local_symbols);
+        return;
+    }
+    if (auto* switch_stmt = dyn_cast<const SwitchStmt>(stmt)) {
+        collect_lambda_local_symbols_from_stmt(switch_stmt->stmt.get(), local_symbols);
+        return;
+    }
+    if (auto* while_stmt = dyn_cast<const WhileStmt>(stmt)) {
+        collect_lambda_local_symbols_from_stmt(while_stmt->body_stmt.get(), local_symbols);
+        return;
+    }
+    if (auto* do_stmt = dyn_cast<const DoWhileStmt>(stmt)) {
+        collect_lambda_local_symbols_from_stmt(do_stmt->body_stmt.get(), local_symbols);
+        return;
+    }
+    if (auto* for_stmt = dyn_cast<const ForStmt>(stmt)) {
+        collect_lambda_local_symbols_from_stmt(for_stmt->init.get(), local_symbols);
+        collect_lambda_local_symbols_from_stmt(for_stmt->body_stmt.get(), local_symbols);
+        return;
+    }
+    if (auto* labeled = dyn_cast<const LabeledStmt>(stmt)) {
+        collect_lambda_local_symbols_from_stmt(labeled->stmt.get(), local_symbols);
+        return;
+    }
+    if (auto* case_stmt = dyn_cast<const CaseStmt>(stmt)) {
+        collect_lambda_local_symbols_from_stmt(case_stmt->stmt.get(), local_symbols);
+        return;
+    }
+    if (auto* default_stmt = dyn_cast<const DefaultStmt>(stmt)) {
+        collect_lambda_local_symbols_from_stmt(default_stmt->stmt.get(), local_symbols);
+        return;
+    }
+    if (auto* try_stmt = dyn_cast<const CppTryStmt>(stmt)) {
+        collect_lambda_local_symbols_from_stmt(try_stmt->try_block.get(), local_symbols);
+        for (const auto& handler : try_stmt->handlers) {
+            if (handler.exception_symbol) {
+                local_symbols.insert(handler.exception_symbol.get());
+            }
+            collect_lambda_local_symbols_from_stmt(handler.handler.get(), local_symbols);
+        }
+        return;
+    }
+}
+
+void collect_lambda_local_symbols_from_decl(
+    const Decl* decl,
+    std::unordered_set<const Symbol*>& local_symbols) {
+    if (!decl) {
+        return;
+    }
+
+    if (auto* param = dyn_cast<const ParamDecl>(decl)) {
+        if (param->sym) {
+            local_symbols.insert(param->sym.get());
+        }
+        return;
+    }
+    if (auto* variable = dyn_cast<const VariableDecl>(decl)) {
+        if (variable->sym) {
+            local_symbols.insert(variable->sym.get());
+        }
+        return;
+    }
+}
+
+void collect_lambda_referenced_symbols_from_stmt(
+    const Stmt* stmt,
+    std::vector<std::shared_ptr<Symbol>>& referenced_symbols,
+    std::unordered_set<const Symbol*>& seen_symbols,
+    bool& referenced_this) {
+    if (!stmt) {
+        return;
+    }
+
+    if (auto* expr = dyn_cast<const Expr>(stmt)) {
+        collect_lambda_referenced_symbols_from_expr(
+            expr,
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* compound = dyn_cast<const CompoundStmt>(stmt)) {
+        for (const auto& child : compound->statements) {
+            collect_lambda_referenced_symbols_from_stmt(
+                child.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+        }
+        return;
+    }
+    if (auto* decl_stmt = dyn_cast<const Decl2Stmt>(stmt)) {
+        for (const auto& decl : decl_stmt->decls) {
+            if (auto* variable = dyn_cast<const VariableDecl>(decl.get())) {
+                collect_lambda_referenced_symbols_from_expr(
+                    variable->init.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+        }
+        return;
+    }
+    if (auto* if_stmt = dyn_cast<const IfStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_expr(
+            if_stmt->condition.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_stmt(
+            if_stmt->then_stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_stmt(
+            if_stmt->else_stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* switch_stmt = dyn_cast<const SwitchStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_expr(
+            switch_stmt->condition.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_stmt(
+            switch_stmt->stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* while_stmt = dyn_cast<const WhileStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_expr(
+            while_stmt->condition.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_stmt(
+            while_stmt->body_stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* do_stmt = dyn_cast<const DoWhileStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_stmt(
+            do_stmt->body_stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_expr(
+            do_stmt->condition.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* for_stmt = dyn_cast<const ForStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_stmt(
+            for_stmt->init.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_expr(
+            for_stmt->cond.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_expr(
+            for_stmt->action.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_stmt(
+            for_stmt->body_stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* ret = dyn_cast<const ReturnStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_expr(
+            ret->expression.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* labeled = dyn_cast<const LabeledStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_stmt(
+            labeled->stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* case_stmt = dyn_cast<const CaseStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_expr(
+            case_stmt->const_expr.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_expr(
+            case_stmt->range_end.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_stmt(
+            case_stmt->stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* default_stmt = dyn_cast<const DefaultStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_stmt(
+            default_stmt->stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* try_stmt = dyn_cast<const CppTryStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_stmt(
+            try_stmt->try_block.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        for (const auto& handler : try_stmt->handlers) {
+            collect_lambda_referenced_symbols_from_stmt(
+                handler.handler.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+        }
+        return;
+    }
+}
+
+void collect_lambda_referenced_symbols_from_expr(
+    const Expr* expr,
+    std::vector<std::shared_ptr<Symbol>>& referenced_symbols,
+    std::unordered_set<const Symbol*>& seen_symbols,
+    bool& referenced_this) {
+    if (!expr || isa<CppLambdaExpr>(expr) || isa<BlockExpr>(expr)) {
+        return;
+    }
+
+    switch (expr->get_kind()) {
+        case StmtKind::VarRef:
+        case StmtKind::QualifiedVarRef: {
+            auto* var_ref = static_cast<const VarRef*>(expr);
+            if (var_ref->symref && seen_symbols.insert(var_ref->symref.get()).second) {
+                referenced_symbols.push_back(var_ref->symref);
+            }
+            return;
+        }
+        case StmtKind::BlockByrefAccessExpr: {
+            const auto* byref_expr = static_cast<const BlockByrefAccessExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                byref_expr->cell_expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::CppThisExpr:
+            referenced_this = true;
+            return;
+        case StmtKind::FuncCall: {
+            const auto* call = static_cast<const FuncCall*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                call->func.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            for (const auto& arg : call->args) {
+                collect_lambda_referenced_symbols_from_expr(
+                    arg.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            return;
+        }
+        case StmtKind::DependentCallExpr: {
+            const auto* call = static_cast<const DependentCallExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                call->callee.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            for (const auto& arg : call->args) {
+                collect_lambda_referenced_symbols_from_expr(
+                    arg.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            return;
+        }
+        case StmtKind::CppMemberCallExpr: {
+            const auto* call = static_cast<const CppMemberCallExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                call->lowered_call.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::CppConstructExpr: {
+            const auto* construct = static_cast<const CppConstructExpr*>(expr);
+            for (const auto& arg : construct->args) {
+                collect_lambda_referenced_symbols_from_expr(
+                    arg.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            return;
+        }
+        case StmtKind::CppThrowExpr: {
+            const auto* throw_expr = static_cast<const CppThrowExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                throw_expr->thrown_expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::CppNewExpr: {
+            const auto* new_expr = static_cast<const CppNewExpr*>(expr);
+            for (const auto& arg : new_expr->placement_args) {
+                collect_lambda_referenced_symbols_from_expr(
+                    arg.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            collect_lambda_referenced_symbols_from_expr(
+                new_expr->initializer.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            for (const auto& arg : new_expr->constructor_args) {
+                collect_lambda_referenced_symbols_from_expr(
+                    arg.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            return;
+        }
+        case StmtKind::CppDeleteExpr: {
+            const auto* delete_expr = static_cast<const CppDeleteExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                delete_expr->operand.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::UnaryOperation: {
+            const auto* unary = static_cast<const UnaryOperation*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                unary->exp.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::DependentUnaryExpr: {
+            const auto* unary = static_cast<const DependentUnaryExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                unary->operand.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::BinaryOperation: {
+            const auto* binary = static_cast<const BinaryOperation*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                binary->left.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                binary->right.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::DependentBinaryExpr: {
+            const auto* binary = static_cast<const DependentBinaryExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                binary->left.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                binary->right.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::CompoundAssignOperation: {
+            const auto* binary =
+                static_cast<const CompoundAssignOperation*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                binary->left.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                binary->right.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::ArraySubscriptExpr: {
+            const auto* subscript = static_cast<const ArraySubscriptExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                subscript->array.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                subscript->index.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::DependentArraySubscriptExpr: {
+            const auto* subscript =
+                static_cast<const DependentArraySubscriptExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                subscript->array.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                subscript->index.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::MemberExpr: {
+            const auto* member = static_cast<const MemberExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                member->base.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::UnresolvedMemberExpr: {
+            const auto* member = static_cast<const UnresolvedMemberExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                member->base.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::MemberPointerAccessExpr: {
+            const auto* member = static_cast<const MemberPointerAccessExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                member->base.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                member->member_pointer.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::DependentMemberPointerAccessExpr: {
+            const auto* member =
+                static_cast<const DependentMemberPointerAccessExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                member->base.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                member->member_pointer.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::ImplicitCast: {
+            const auto* cast = static_cast<const ImplicitCast*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                cast->expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::ExplicitCast: {
+            const auto* cast = static_cast<const ExplicitCast*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                cast->expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::CondExpr: {
+            const auto* conditional = static_cast<const CondExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                conditional->condition.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                conditional->true_expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                conditional->false_expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::InitListExpr: {
+            const auto* init_list = static_cast<const InitListExpr*>(expr);
+            for (const auto& element : init_list->elements) {
+                for (const auto& designator : element.designators) {
+                    collect_lambda_referenced_symbols_from_expr(
+                        designator.index.get(),
+                        referenced_symbols,
+                        seen_symbols,
+                        referenced_this);
+                    collect_lambda_referenced_symbols_from_expr(
+                        designator.range_end.get(),
+                        referenced_symbols,
+                        seen_symbols,
+                        referenced_this);
+                }
+                collect_lambda_referenced_symbols_from_expr(
+                    element.value.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            for (const auto& action : init_list->actions) {
+                collect_lambda_referenced_symbols_from_expr(
+                    action.value.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            for (const auto& mapping : init_list->mappings) {
+                collect_lambda_referenced_symbols_from_expr(
+                    mapping.second.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            return;
+        }
+        case StmtKind::CompoundLiteralExpr: {
+            const auto* literal = static_cast<const CompoundLiteralExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                literal->init.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::StmtExpr: {
+            const auto* stmt_expr = static_cast<const StmtExpr*>(expr);
+            collect_lambda_referenced_symbols_from_stmt(
+                stmt_expr->compound_stmt.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::CppTypeIdExpr: {
+            const auto* typeid_expr = static_cast<const CppTypeIdExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                typeid_expr->expr_operand.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::CppDynamicCastExpr: {
+            const auto* dyn_cast_expr =
+                static_cast<const CppDynamicCastExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                dyn_cast_expr->expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::PackExpansionExpr: {
+            const auto* pack = static_cast<const PackExpansionExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                pack->pattern.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::FoldExpr: {
+            const auto* fold = static_cast<const FoldExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                fold->pattern.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                fold->init.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::SizeOfExpr: {
+            const auto* sizeof_expr = static_cast<const SizeOfExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                sizeof_expr->expr_operand.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::AlignOfExpr: {
+            const auto* alignof_expr = static_cast<const AlignOfExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                alignof_expr->expr_operand.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::OffsetOfExpr: {
+            const auto* offsetof_expr = static_cast<const OffsetOfExpr*>(expr);
+            (void)offsetof_expr;
+            return;
+        }
+        case StmtKind::GenericExpr: {
+            const auto* generic_expr = static_cast<const GenericExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                generic_expr->controlling_expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            for (const auto& association : generic_expr->associations) {
+                collect_lambda_referenced_symbols_from_expr(
+                    association.expr.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            return;
+        }
+        case StmtKind::VaArgExpr: {
+            const auto* va_arg_expr = static_cast<const VaArgExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                va_arg_expr->va_list_expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::VaStartExpr: {
+            const auto* va_start_expr = static_cast<const VaStartExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                va_start_expr->va_list_expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                va_start_expr->last_param.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::VaEndExpr: {
+            const auto* va_end_expr = static_cast<const VaEndExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                va_end_expr->va_list_expr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::VaCopyExpr: {
+            const auto* va_copy_expr = static_cast<const VaCopyExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                va_copy_expr->dest.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                va_copy_expr->src.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
+        case StmtKind::BuiltinCallExpr: {
+            const auto* builtin_expr = static_cast<const BuiltinCallExpr*>(expr);
+            for (const auto& arg : builtin_expr->args) {
+                collect_lambda_referenced_symbols_from_expr(
+                    arg.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            return;
+        }
+        default:
+            return;
+    }
+}
+
+std::vector<CppLambdaCapture> build_lambda_semantic_captures(
+    const CppLambdaExpr& lambda) {
+    std::vector<CppLambdaCapture> captures = lambda.closure_info.captures;
+    bool captures_this = false;
+    for (const auto& capture : captures) {
+        if (capture.captures_this) {
+            captures_this = true;
+            break;
+        }
+    }
+
+    std::unordered_set<const Symbol*> lambda_local_symbols;
+    for (const auto& parameter : lambda.parameters) {
+        collect_lambda_local_symbols_from_decl(
+            parameter.get(),
+            lambda_local_symbols);
+    }
+    collect_lambda_local_symbols_from_stmt(lambda.body.get(), lambda_local_symbols);
+
+    std::unordered_set<const Symbol*> captured_symbols;
+    for (const auto& capture : captures) {
+        if (capture.symbol) {
+            captured_symbols.insert(capture.symbol.get());
+        }
+    }
+
+    std::vector<std::shared_ptr<Symbol>> referenced_symbols;
+    std::unordered_set<const Symbol*> seen_symbols;
+    bool referenced_this = false;
+    collect_lambda_referenced_symbols_from_stmt(
+        lambda.body.get(),
+        referenced_symbols,
+        seen_symbols,
+        referenced_this);
+
+    if (lambda.closure_info.default_capture != CppLambdaCaptureDefault::None &&
+        referenced_this &&
+        !captures_this) {
+        CppLambdaCapture capture;
+        capture.name = "this";
+        capture.captures_this = true;
+        capture.location = lambda.location;
+        captures.push_back(std::move(capture));
+        captures_this = true;
+    }
+
+    if (lambda.closure_info.default_capture == CppLambdaCaptureDefault::None) {
+        return captures;
+    }
+
+    for (const auto& symbol : referenced_symbols) {
+        if (!symbol ||
+            !is_local_variable_or_parameter_symbol(symbol) ||
+            lambda_local_symbols.contains(symbol.get()) ||
+            captured_symbols.contains(symbol.get())) {
+            continue;
+        }
+
+        CppLambdaCapture capture;
+        capture.name = symbol->name;
+        capture.symbol = symbol;
+        capture.by_reference =
+            lambda.closure_info.default_capture ==
+            CppLambdaCaptureDefault::ByReference;
+        captures.push_back(std::move(capture));
+        captured_symbols.insert(symbol.get());
+    }
+
+    return captures;
+}
+
+QualType build_lambda_call_operator_type(const CppLambdaExpr& lambda,
+                                         std::string* error_out) {
+    auto written_type =
+        lambda.written_call_operator_type.as_shared<FunctionType>();
+    if (!written_type) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "internal error: lambda is missing a written call operator type";
+        }
+        return nullptr;
+    }
+
+    auto closure_owner_type = lambda.semantic_info.closure_type();
+    if (!closure_owner_type) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "internal error: lambda closure semantic owner has no object type";
+        }
+        return nullptr;
+    }
+
+    auto call_operator_type = std::make_shared<FunctionType>(*written_type);
+    uint8_t this_object_quals = lambda.is_mutable ? QUAL_NONE : QUAL_CONST;
+    QualType qualified_owner_type(
+        closure_owner_type.get_shared(),
+        this_object_quals);
+    QualType this_type(
+        std::make_shared<PointerType>(qualified_owner_type));
+    call_operator_type->parameters.insert(
+        call_operator_type->parameters.begin(),
+        this_type);
+    return QualType(call_operator_type);
+}
+
+std::vector<BlockCapture> build_block_semantic_captures(
+    const BlockExpr& block,
+    const ASTContext* ast_ctx) {
+    (void)ast_ctx;
+
+    std::unordered_set<const Symbol*> block_local_symbols;
+    for (const auto& parameter : block.parameters) {
+        collect_lambda_local_symbols_from_decl(
+            parameter.get(),
+            block_local_symbols);
+    }
+    collect_lambda_local_symbols_from_stmt(block.body.get(), block_local_symbols);
+
+    std::vector<std::shared_ptr<Symbol>> referenced_symbols;
+    std::unordered_set<const Symbol*> seen_symbols;
+    bool referenced_this = false;
+    collect_lambda_referenced_symbols_from_stmt(
+        block.body.get(),
+        referenced_symbols,
+        seen_symbols,
+        referenced_this);
+
+    std::vector<BlockCapture> captures;
+    std::unordered_set<const Symbol*> captured_symbols;
+    for (const auto& symbol : referenced_symbols) {
+        if (!symbol ||
+            !is_local_variable_or_parameter_symbol(symbol) ||
+            block_local_symbols.contains(symbol.get()) ||
+            !captured_symbols.insert(symbol.get()).second) {
+            continue;
+        }
+
+        BlockCapture capture;
+        capture.name = symbol->name;
+        capture.symbol = symbol;
+        capture.kind = symbol->is_block_byref
+            ? BlockCaptureKind::ByRef
+            : BlockCaptureKind::ConstCopy;
+        captures.push_back(std::move(capture));
+    }
+    return captures;
+}
+
+QualType build_block_invoke_type(const BlockExpr& block,
+                                 std::string* error_out) {
+    auto written_type = block.function_type().as_shared<FunctionType>();
+    if (!written_type) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "internal error: block is missing a written function type";
+        }
+        return nullptr;
+    }
+
+    auto literal_type = block.semantic_info.literal_type();
+    if (!literal_type) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "internal error: block literal is missing a synthesized storage type";
+        }
+        return nullptr;
+    }
+
+    auto invoke_type = std::make_shared<FunctionType>(*written_type);
+    if (invoke_type->parameters.size() == 1 &&
+        invoke_type->parameters.front() &&
+        invoke_type->parameters.front()->isVoid() &&
+        !invoke_type->is_variadic) {
+        invoke_type->parameters.clear();
+    }
+    invoke_type->parameters.insert(
+        invoke_type->parameters.begin(),
+        QualType(std::make_shared<PointerType>(literal_type)));
+    return QualType(invoke_type);
+}
+
+} // namespace
+
+std::unique_ptr<Expr> Collect::collect_integer_literal(const std::string& value, std::shared_ptr<CType> int_type, SrcLoc loc) const {
+    const std::string* interned_value = ast_ctx_ ? ast_ctx_->intern_identifier(value) : nullptr;
+    if (interned_value) {
+        return collect_make<IntegerLiteral>(interned_value, std::move(int_type), loc);
+    }
+    return collect_make<IntegerLiteral>(value, std::move(int_type), loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_floating_literal(const std::string& value, std::shared_ptr<CType> float_type, bool is_imaginary, SrcLoc loc) const {
+
+    if (is_imaginary) {
+        return collect_make<FloatingLiteral>(value, std::move(float_type), true, loc);
+    }
+    return collect_make<FloatingLiteral>(value, std::move(float_type), loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_character_literal(const std::string& value, int32_t int_value, QualType char_type, SrcLoc loc) const {
+
+    return collect_make<CharacterLiteral>(value, int_value, std::move(char_type), loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_string_literal(const std::string& value, QualType array_type, SrcLoc loc) const {
+
+    return collect_make<StringLiteral>(value, std::move(array_type), loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_cpp_this_expression(SrcLoc loc) const {
+
+    if (!func_state_.in_function ||
+        !func_state_.current_function_is_cpp_member ||
+        func_state_.current_function_is_static_cpp_member ||
+        !func_state_.current_function_cpp_this_type) {
+        report_error("invalid use of 'this' outside of a non-static member function", loc);
+        return collect_make<ErrorExpr>("invalid 'this' expression", loc);
+    }
+    return collect_make<CppThisExpr>(func_state_.current_function_cpp_this_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
+    const std::string& name, bool looks_like_call, SrcLoc loc) const {
+
+    auto sym = collect_lookup_variable_symbol(name, true);
+    bool symbol_is_local = is_local_variable_or_parameter_symbol(sym);
+    bool is_predefined_ident =
+        (name == "__func__" || name == "__FUNCTION__" ||
+         name == "__PRETTY_FUNCTION__");
+
+    if (lang_opts_.is_cxx_mode() && func_state_.current_function_is_cpp_member) {
+        auto current_record =
+            current_record_from_this_type(func_state_.current_function_cpp_this_type, ast_ctx_.get());
+        auto member_lookup = lookup_record_member_name(current_record.get(), name);
+        if (member_lookup.has_member_match() && !symbol_is_local) {
+            size_t static_template_candidate_matches =
+                member_lookup.static_method_template_matches;
+            size_t nonstatic_template_candidate_matches =
+                member_lookup.nonstatic_method_template_matches;
+            if (func_state_.current_function_is_static_cpp_member) {
+                if (member_lookup.field_matches > 0 ||
+                    member_lookup.nonstatic_method_matches > 0 ||
+                    nonstatic_template_candidate_matches > 0) {
+                    report_error(
+                        "invalid use of non-static member '" + name +
+                        "' in static member function",
+                        loc);
+                    return collect_make<ErrorExpr>(
+                        "invalid use of non-static member", loc);
+                }
+                size_t static_candidate_matches =
+                    member_lookup.static_method_matches +
+                    static_template_candidate_matches +
+                    member_lookup.static_data_matches;
+                if (static_candidate_matches > 1) {
+                    report_error("member '" + name + "' is ambiguous", loc);
+                    return collect_make<ErrorExpr>(
+                        "ambiguous member lookup", loc);
+                }
+                if (member_lookup.static_data_matches == 1 &&
+                    member_lookup.single_static_data_member &&
+                    member_lookup.single_static_data_member->symbol) {
+                    return collect_identifier_reference(
+                        name,
+                        member_lookup.single_static_data_member->symbol,
+                        loc);
+                }
+                if (member_lookup.single_static_method &&
+                    member_lookup.single_static_method->symbol) {
+                    return collect_identifier_reference(
+                        name, member_lookup.single_static_method->symbol, loc);
+                }
+                report_error(
+                    "internal error: unresolved member function symbol '" + name +
+                    "'",
+                    loc);
+                return collect_make<ErrorExpr>(
+                    "unresolved member function symbol", loc);
+            }
+
+            size_t static_candidate_matches =
+                member_lookup.static_method_matches +
+                static_template_candidate_matches +
+                member_lookup.static_data_matches;
+            if (member_lookup.field_matches == 0 &&
+                member_lookup.nonstatic_method_matches == 0 &&
+                nonstatic_template_candidate_matches == 0 &&
+                static_candidate_matches > 0) {
+                if (static_candidate_matches > 1) {
+                    report_error("member '" + name + "' is ambiguous", loc);
+                    return collect_make<ErrorExpr>(
+                        "ambiguous member lookup", loc);
+                }
+                if (member_lookup.static_data_matches == 1 &&
+                    member_lookup.single_static_data_member &&
+                    member_lookup.single_static_data_member->symbol) {
+                    return collect_identifier_reference(
+                        name,
+                        member_lookup.single_static_data_member->symbol,
+                        loc);
+                }
+                if (member_lookup.single_static_method &&
+                    member_lookup.single_static_method->symbol) {
+                    return collect_identifier_reference(
+                        name, member_lookup.single_static_method->symbol, loc);
+                }
+            }
+
+            if (!func_state_.current_function_cpp_this_type) {
+                report_error(
+                    "internal error: missing implicit object parameter type",
+                    loc);
+                return collect_make<ErrorExpr>(
+                    "missing implicit object parameter type", loc);
+            }
+
+            auto this_expr = collect_make<CppThisExpr>(
+                func_state_.current_function_cpp_this_type, loc);
+            return collect_member_expression(
+                std::move(this_expr), name, true, loc, looks_like_call);
+        }
+    }
+
+    if (sym || is_predefined_ident) {
+        return collect_identifier_reference(name, std::move(sym), loc);
+    }
+    if (!looks_like_call) {
+        report_error("use of undeclared identifier '" + name + "'", loc);
+        return collect_make<ErrorExpr>("undeclared identifier", loc);
+    }
+    return collect_identifier_reference(name, nullptr, loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_identifier_reference(const std::string& name, std::shared_ptr<Symbol> sym, SrcLoc loc) const {
+
+    if (name == "__func__" || name == "__FUNCTION__" || name == "__PRETTY_FUNCTION__") {
+        PredefinedIdentKind kind = PredefinedIdentKind::Func;
+        if (name == "__FUNCTION__") {
+            kind = PredefinedIdentKind::Function;
+        } else if (name == "__PRETTY_FUNCTION__") {
+            kind = PredefinedIdentKind::PrettyFunction;
+        }
+        std::string value;
+        if (func_state_.in_function) {
+            if (kind == PredefinedIdentKind::PrettyFunction) {
+                value = func_state_.current_pretty_function_name;
+            } else {
+                value = func_state_.current_function_name;
+            }
+        }
+        size_t len = value.size() + 1;
+        auto char_type = get_builtin_char();
+        auto arr_type = std::make_shared<ArrayType>(QualType(char_type), len);
+        QualType qt(arr_type, QUAL_CONST);
+        return collect_make<PredefinedExpr>(kind, value, qt, loc);
+    }
+    if (sym) {
+        return collect_make<VarRef>(std::move(sym), loc);
+    }
+    if (!ast_ctx_) {
+        return collect_make<VarRef>(name, loc);
+    }
+    return collect_make<VarRef>(ast_ctx_->intern_identifier(name), loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_unresolved_lookup_expression(
+    std::string name,
+    DependentLookupQualifier qualifier,
+    bool requires_template_keyword,
+    SrcLoc loc) const {
+    QualType unresolved_type(
+        std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
+    return collect_make<UnresolvedLookupExpr>(
+        std::move(name),
+        std::move(qualifier),
+        std::nullopt,
+        requires_template_keyword,
+        /*is_dependent=*/true,
+        unresolved_type,
+        loc);
+}
+
+
+Collect::LookupResult Collect::collect_lookup_result(const std::string& name, std::shared_ptr<Symbol> selected) const {
+
+    LookupResult result;
+    result.name = name;
+    if (selected) {
+        result.candidates.push_back(selected);
+        result.selected = std::move(selected);
+    }
+    result.ambiguous = result.candidates.size() > 1;
+    return result;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_identifier_reference(LookupResult lookup, SrcLoc loc) const {
+
+    if (lookup.ambiguous) {
+        report_error("ambiguous lookup for identifier '" + lookup.name + "'", loc);
+        return collect_make<ErrorExpr>("ambiguous identifier lookup", loc);
+    }
+    return collect_identifier_reference(lookup.name, std::move(lookup.selected), loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_error_expression(const std::string& message, SrcLoc loc) const {
+
+    return collect_make<ErrorExpr>(message, loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_statement_expression(std::unique_ptr<CompoundStmt> compound_stmt, SrcLoc loc) const {
+
+    auto node = collect_make<StmtExpr>(std::move(compound_stmt), loc);
+    QualType result_type = QualType(get_builtin_void());
+    if (node->compound_stmt && !node->compound_stmt->statements.empty()) {
+        auto* last_stmt = node->compound_stmt->statements.back().get();
+        if (auto* last_expr = dyn_cast<Expr>(last_stmt)) {
+            auto last_type = last_expr->get_type();
+            if (last_type) {
+                result_type = last_type;
+            }
+        }
+    }
+    node->type = result_type;
+    return node;
+}
+
+bool Collect::finalize_cpp_lambda_semantics(
+    CppLambdaExpr& lambda,
+    std::string* error_out) const {
+    auto fail = [&](const std::string& message, SrcLoc loc) -> bool {
+        report_error(message, loc);
+        if (error_out && error_out->empty()) {
+            *error_out = message;
+        }
+        return false;
+    };
+
+    if (!ast_ctx_) {
+        return false;
+    }
+
+    QualType call_operator_type =
+        build_lambda_call_operator_type(lambda, error_out);
+    if (!call_operator_type) {
+        return fail(
+            error_out && !error_out->empty()
+                ? *error_out
+                : "internal error: failed to build lambda call operator type",
+            lambda.location);
+    }
+
+    if (!lambda.semantic_info.closure_record_decl) {
+        lambda.semantic_info.closure_record_decl = make_ast<CppRecordDecl>(
+            *ast_ctx_,
+            CppRecordKind::Class,
+            lambda.closure_name(),
+            std::vector<CppBaseSpecifier>{},
+            std::vector<std::unique_ptr<Decl>>{},
+            true,
+            lambda.location);
+    }
+
+    auto* closure_owner = lambda.closure_semantic_owner();
+    if (!closure_owner || !closure_owner->get_record_type()) {
+        return fail(
+            "internal error: lambda closure is missing a semantic record owner",
+            lambda.location);
+    }
+
+    auto function_type = call_operator_type.as_shared<FunctionType>();
+    if (!function_type || function_type->parameters.empty()) {
+        return fail(
+            "internal error: lambda call operator type is missing an implicit object parameter",
+            lambda.location);
+    }
+
+    if (lambda.semantic_info.closure_record_decl) {
+        lambda.semantic_info.closure_record_decl->members.clear();
+    }
+    lambda.semantic_info.capture_fields.clear();
+    lambda.semantic_info.this_capture_field = nullptr;
+    lambda.semantic_info.capture_initializers.clear();
+    lambda.semantic_info.closure_initializer.reset();
+    lambda.semantic_info.call_operator_symbol.reset();
+
+    auto semantic_captures = build_lambda_semantic_captures(lambda);
+    bool lambda_references_this = false;
+    {
+        std::vector<std::shared_ptr<Symbol>> referenced_symbols;
+        std::unordered_set<const Symbol*> seen_symbols;
+        collect_lambda_referenced_symbols_from_stmt(
+            lambda.body.get(),
+            referenced_symbols,
+            seen_symbols,
+            lambda_references_this);
+    }
+    bool has_this_capture = false;
+    for (const auto& capture : semantic_captures) {
+        if (capture.captures_this) {
+            has_this_capture = true;
+            break;
+        }
+    }
+    if (lambda_references_this && !has_this_capture) {
+        return fail(
+            "lambda body references 'this' or a non-static member without capturing 'this'",
+            lambda.location);
+    }
+
+    std::vector<ObjectType::Field> closure_fields;
+    closure_fields.reserve(semantic_captures.size());
+    std::unordered_map<const Symbol*, const FieldDecl*> capture_field_by_symbol;
+    std::unordered_map<std::string, const FieldDecl*> capture_field_by_uid;
+    const FieldDecl* this_capture_field = nullptr;
+    std::string this_capture_field_name;
+
+    for (const auto& capture : semantic_captures) {
+        QualType field_type = nullptr;
+        std::unique_ptr<Expr> capture_initializer;
+        std::string field_name = capture.name;
+
+        if (capture.captures_this) {
+            const auto& lexical_this_context =
+                lambda.semantic_info.lexical_this_context;
+            if (!lexical_this_context.is_member_function ||
+                lexical_this_context.is_static_member_function ||
+                !lexical_this_context.this_type) {
+                return fail(
+                    "lambda capture 'this' is only valid in a non-static member function",
+                    capture.location.isInvalid() ? lambda.location
+                                                : capture.location);
+            }
+            field_type = lexical_this_context.this_type;
+            field_name = "__lambda_this_capture";
+            capture_initializer = collect_make<CppThisExpr>(
+                lexical_this_context.this_type,
+                capture.location.isInvalid() ? lambda.location
+                                            : capture.location);
+        } else if (capture.is_init_capture) {
+            if (!capture.symbol) {
+                return fail(
+                    "lambda init-capture '" + capture.name +
+                        "' does not have a synthesized local symbol",
+                    capture.location);
+            }
+            if (!capture.initializer) {
+                return fail(
+                    "lambda init-capture '" + capture.name +
+                        "' is missing an initializer",
+                    capture.location);
+            }
+            field_type = capture.symbol->type;
+            std::string init_clone_error;
+            capture_initializer = clone_expr_tree(
+                capture.initializer.get(),
+                ast_ctx_.get(),
+                &init_clone_error);
+            if (!capture_initializer) {
+                return fail(
+                    init_clone_error.empty()
+                        ? "failed to clone lambda init-capture initializer"
+                        : init_clone_error,
+                    capture.location);
+            }
+            if (capture.by_reference) {
+                field_type = QualType(
+                    std::make_shared<ReferenceType>(
+                        remove_reference(field_type, ast_ctx_.get()),
+                        ReferenceKind::LValue));
+            } else {
+                field_type = remove_reference(field_type, ast_ctx_.get());
+            }
+        } else if (!capture.symbol) {
+            return fail(
+                "lambda capture '" + capture.name + "' does not name a captured local entity",
+                capture.location);
+        } else {
+            field_type = capture.symbol->type;
+            if (capture.by_reference) {
+                field_type = QualType(
+                    std::make_shared<ReferenceType>(
+                        remove_reference(field_type, ast_ctx_.get()),
+                        ReferenceKind::LValue));
+            } else {
+                field_type = remove_reference(field_type, ast_ctx_.get());
+            }
+            capture_initializer =
+                collect_make<VarRef>(capture.symbol, capture.location);
+        }
+
+        auto field_decl_base =
+            collect_field_declaration(field_type, field_name, capture.location);
+        auto* field_decl = dyn_cast<FieldDecl>(field_decl_base.get());
+        if (!field_decl) {
+            return fail(
+                "internal error: lambda capture did not synthesize a field declaration",
+                capture.location);
+        }
+
+        CppMemberDeclInfo field_member_info;
+        field_member_info.declared_access =
+            static_cast<uint8_t>(CppAccessSpecifier::Public);
+        ast_ctx_->set_cpp_member_decl_info(field_decl->node_id, field_member_info);
+
+        closure_fields.emplace_back(
+            field_decl->name,
+            field_decl->type,
+            0,
+            RecordMemberAccess::Public);
+        lambda.semantic_info.capture_fields.push_back(field_decl);
+        lambda.semantic_info.capture_initializers.push_back(
+            std::move(capture_initializer));
+        if (capture.captures_this) {
+            this_capture_field = field_decl;
+            this_capture_field_name = field_decl->name;
+            lambda.semantic_info.this_capture_field = field_decl;
+        } else {
+            capture_field_by_symbol.emplace(capture.symbol.get(), field_decl);
+        }
+        if (capture.symbol && !capture.symbol->uid.empty()) {
+            capture_field_by_uid.emplace(capture.symbol->uid, field_decl);
+        }
+        lambda.semantic_info.closure_record_decl->members.push_back(
+            std::move(field_decl_base));
+    }
+
+    auto* closure_owner_type = closure_owner->get_record_type().get();
+    RecordSemanticState updated_state;
+    if (closure_fields.empty()) {
+        updated_state.is_incomplete = false;
+        updated_state.alignment = 1;
+        updated_state.non_virtual_alignment = 1;
+        updated_state.size_bits = 8;
+        updated_state.non_virtual_size_bits = 8;
+    } else {
+        updated_state = compute_record_semantics(
+            std::move(closure_fields),
+            closure_owner_type->is_union,
+            closure_owner_type->is_packed,
+            closure_owner_type->requested_alignment,
+            closure_owner_type->pack_alignment,
+            false,
+            ast_ctx_->abi_policy.get());
+    }
+    record_semantics_cache_set(closure_owner, updated_state);
+
+    if (!lambda.semantic_info.capture_initializers.empty()) {
+        auto init_list = collect_initializer_list_expression(lambda.location);
+        ASTCloneContext init_clone_ctx;
+        init_clone_ctx.ast_ctx = ast_ctx_.get();
+        init_clone_ctx.finalize_lambda_expr =
+            [this](CppLambdaExpr& nested_lambda,
+                   std::string* nested_error_out) -> bool {
+                return collect_finalize_cpp_lambda_expression(
+                    nested_lambda,
+                    nested_error_out);
+            };
+        for (const auto& capture_init : lambda.semantic_info.capture_initializers) {
+            if (!capture_init) {
+                continue;
+            }
+            std::string init_clone_error;
+            auto cloned_init = clone_expr_with_substitution(
+                capture_init.get(),
+                init_clone_ctx,
+                &init_clone_error);
+            if (!cloned_init) {
+                return fail(
+                    init_clone_error.empty()
+                        ? "failed to clone lambda capture initializer"
+                        : init_clone_error,
+                    capture_init->location);
+            }
+
+            InitElement element;
+            element.loc = capture_init->location;
+            element.value = std::move(cloned_init);
+            init_list->elements.push_back(std::move(element));
+        }
+        lambda.semantic_info.closure_initializer = process_initializer_for_type(
+            std::move(init_list),
+            lambda.semantic_info.closure_type(),
+            lambda.location);
+        if (!lambda.semantic_info.closure_initializer) {
+            return fail(
+                "failed to build lambda closure initializer",
+                lambda.location);
+        }
+    }
+
+    ASTCloneContext clone_ctx;
+    clone_ctx.ast_ctx = ast_ctx_.get();
+    clone_ctx.finalize_lambda_expr =
+        [this](CppLambdaExpr& nested_lambda,
+               std::string* nested_error_out) -> bool {
+            return collect_finalize_cpp_lambda_expression(
+                nested_lambda,
+                nested_error_out);
+        };
+    clone_ctx.rewrite_var_ref =
+        [&](const VarRef* var_ref, std::string* error_out)
+        -> std::unique_ptr<Expr> {
+            if (!var_ref || !var_ref->symref) {
+                return nullptr;
+            }
+            auto capture_it = capture_field_by_symbol.find(var_ref->symref.get());
+            if ((capture_it == capture_field_by_symbol.end() ||
+                 !capture_it->second) &&
+                !var_ref->symref->uid.empty()) {
+                auto uid_it = capture_field_by_uid.find(var_ref->symref->uid);
+                if (uid_it != capture_field_by_uid.end()) {
+                    capture_it = capture_field_by_symbol.emplace(
+                                     var_ref->symref.get(),
+                                     uid_it->second)
+                                     .first;
+                }
+            }
+            if (capture_it == capture_field_by_symbol.end() || !capture_it->second) {
+                return nullptr;
+            }
+
+            auto this_expr = collect_make<CppThisExpr>(
+                function_type->parameters.front(),
+                var_ref->location);
+            auto member_expr = collect_member_expression(
+                std::move(this_expr),
+                capture_it->second->name,
+                true,
+                var_ref->location,
+                false,
+                false);
+            if (!member_expr) {
+                if (error_out) {
+                    *error_out =
+                        "failed to rewrite lambda capture reference '" +
+                        var_ref->get_name() + "'";
+                }
+                return collect_make<ErrorExpr>(
+                    "failed to rewrite lambda capture reference",
+                    var_ref->location);
+            }
+            return member_expr;
+        };
+    clone_ctx.rewrite_expr =
+        [&](std::unique_ptr<Expr>& expr, std::string* error_out) -> bool {
+            if (this_capture_field_name.empty() || !this_capture_field) {
+                return true;
+            }
+            auto* this_expr = dyn_cast<CppThisExpr>(expr.get());
+            if (!this_expr) {
+                return true;
+            }
+            if (!lambda.semantic_info.lexical_this_context.this_type ||
+                !this_expr->this_type) {
+                return true;
+            }
+            if (!this_expr->this_type.equals_unqualified(
+                    lambda.semantic_info.lexical_this_context.this_type)) {
+                return true;
+            }
+
+            auto closure_this_expr = collect_make<CppThisExpr>(
+                function_type->parameters.front(),
+                this_expr->location);
+            auto rewritten_this = collect_member_expression(
+                std::move(closure_this_expr),
+                this_capture_field_name,
+                true,
+                this_expr->location,
+                false,
+                false);
+            if (!rewritten_this) {
+                if (error_out) {
+                    *error_out =
+                        "failed to rewrite lambda enclosing 'this' capture";
+                }
+                return false;
+            }
+            expr = std::move(rewritten_this);
+            return true;
+        };
+
+    std::vector<std::unique_ptr<Decl>> method_parameters;
+    method_parameters.reserve(lambda.parameters.size() + 1);
+    method_parameters.push_back(collect_parameter_declaration(
+        function_type->parameters.front(),
+        "this",
+        nullptr,
+        StorageClass::NONE,
+        lambda.location));
+
+    for (const auto& parameter : lambda.parameters) {
+        std::string clone_error;
+        auto cloned_parameter = clone_decl_tree(
+            parameter.get(),
+            clone_ctx,
+            &clone_error);
+        if (parameter && !cloned_parameter) {
+            return fail(
+                clone_error.empty()
+                    ? "failed to clone lambda parameter for synthesized call operator"
+                    : clone_error,
+                parameter->location);
+        }
+
+        auto* original_param = dyn_cast<ParamDecl>(parameter.get());
+        auto* cloned_param = dyn_cast<ParamDecl>(cloned_parameter.get());
+        if (original_param && cloned_param) {
+            if (const Expr* default_expr =
+                    get_param_decl_default_argument(original_param)) {
+                std::string default_clone_error;
+                auto cloned_default = clone_expr_with_substitution(
+                    default_expr,
+                    clone_ctx,
+                    &default_clone_error);
+                if (!cloned_default) {
+                    return fail(
+                        default_clone_error.empty()
+                            ? "failed to clone lambda default argument"
+                            : default_clone_error,
+                        default_expr->location);
+                }
+                if (!rewrite_expr_tree_in_place(
+                        cloned_default,
+                        clone_ctx,
+                        &default_clone_error)) {
+                    return fail(
+                        default_clone_error.empty()
+                            ? "failed to rewrite lambda default argument"
+                            : default_clone_error,
+                        default_expr->location);
+                }
+                set_param_decl_default_argument(
+                    cloned_param,
+                    std::move(cloned_default));
+            }
+        }
+
+        method_parameters.push_back(std::move(cloned_parameter));
+    }
+
+    std::string body_clone_error;
+    auto cloned_body_stmt = clone_stmt_tree(
+        lambda.body.get(),
+        clone_ctx,
+        &body_clone_error);
+    if (lambda.body && !dyn_cast<CompoundStmt>(cloned_body_stmt.get())) {
+        return fail(
+            body_clone_error.empty()
+                ? "failed to clone lambda body for synthesized call operator"
+                : body_clone_error,
+            lambda.location);
+    }
+    if (cloned_body_stmt &&
+        !rewrite_stmt_tree_in_place(
+            cloned_body_stmt,
+            clone_ctx,
+            &body_clone_error)) {
+        return fail(
+            body_clone_error.empty()
+                ? "failed to rewrite lambda body for synthesized call operator"
+                : body_clone_error,
+            lambda.location);
+    }
+    auto cloned_body = std::unique_ptr<CompoundStmt>(
+        dyn_cast<CompoundStmt>(cloned_body_stmt.release()));
+
+    auto synthesized_method = make_ast<CppMethodDecl>(
+        *ast_ctx_,
+        "operator()",
+        call_operator_type.get_shared(),
+        std::move(method_parameters),
+        std::move(cloned_body),
+        lambda.stmt_labels,
+        StorageClass::NONE,
+        true,
+        lambda.location);
+    synthesized_method->type = call_operator_type.get_shared();
+    synthesized_method->scope =
+        synthesized_method->body
+            ? dyn_cast<CompoundStmt>(synthesized_method->body.get())->scope
+            : nullptr;
+    synthesized_method->set_language_linkage(LanguageLinkage::None);
+
+    auto synthesized_method_type =
+        QualType(synthesized_method->type).as_shared<FunctionType>();
+    auto written_method_type =
+        lambda.written_call_operator_type.as_shared<FunctionType>();
+    bool needs_post_clone_auto_return_deduction =
+        !lambda.is_generic &&
+        synthesized_method_type &&
+        auto_type_utils::has_cxx_auto_type(
+            synthesized_method_type->ret_type.get_shared());
+    if (needs_post_clone_auto_return_deduction) {
+        std::string finalize_error;
+        if (!const_cast<Collect*>(this)->with_function_definition_state(
+                synthesized_method.get(),
+                [&]() {
+                    return template_sema_internal::
+                        finalize_specialized_stmt_semantics(
+                            *this,
+                            synthesized_method->body,
+                            QualType(synthesized_method->type),
+                            &finalize_error);
+                })) {
+            return fail(
+                finalize_error.empty()
+                    ? "failed to finalize cloned lambda body after substitution"
+                    : finalize_error,
+                lambda.location);
+        }
+        synthesized_method->scope =
+            synthesized_method->body
+                ? dyn_cast<CompoundStmt>(synthesized_method->body.get())->scope
+                : nullptr;
+        if (written_method_type) {
+            written_method_type->ret_type = synthesized_method_type->ret_type;
+        }
+    }
+
+    set_func_decl_cxx_qualifier_prefix(
+        synthesized_method.get(),
+        lambda.closure_name());
+    set_func_decl_owner_record_type(
+        synthesized_method.get(),
+        lambda.semantic_info.closure_type());
+
+    CppMemberDeclInfo member_info;
+    member_info.declared_access =
+        static_cast<uint8_t>(CppAccessSpecifier::Public);
+    member_info.is_method = true;
+    member_info.is_constexpr = synthesized_method->is_constexpr;
+    ast_ctx_->set_cpp_member_decl_info(synthesized_method->node_id, member_info);
+
+    lambda.semantic_info.call_operator_decl = synthesized_method.get();
+    lambda.semantic_info.call_operator_template = nullptr;
+
+    std::shared_ptr<Symbol> synthesized_symbol = nullptr;
+    if (!lambda.is_generic) {
+        synthesized_symbol = collect_declare_function_symbol(
+            synthesized_method->name,
+            QualType(synthesized_method->type),
+            synthesized_method->storage_class,
+            synthesized_method->is_inline,
+            synthesized_method->body != nullptr,
+            synthesized_method->location,
+            synthesized_method->get_language_linkage(),
+            true);
+        if (synthesized_symbol) {
+            set_symbol_cxx_qualifier_prefix(
+                synthesized_symbol.get(),
+                lambda.closure_name());
+            set_symbol_owner_record_type(
+                synthesized_symbol.get(),
+                lambda.semantic_info.closure_type());
+            std::vector<const Expr*> default_arguments(
+                synthesized_method->parameters.size(),
+                nullptr);
+            for (size_t index = 0;
+                 index < synthesized_method->parameters.size();
+                 ++index) {
+                auto* param_decl = dyn_cast<ParamDecl>(
+                    synthesized_method->parameters[index].get());
+                if (!param_decl) {
+                    continue;
+                }
+                default_arguments[index] =
+                    get_param_decl_default_argument(param_decl);
+            }
+            merge_symbol_cpp_default_arguments(
+                synthesized_symbol.get(),
+                default_arguments,
+                nullptr);
+            if (synthesized_method->body) {
+                synthesized_symbol->function_definition =
+                    synthesized_method.get();
+            }
+        }
+        lambda.semantic_info.call_operator_symbol = synthesized_symbol;
+
+        RecordSemanticState::Method semantic_method;
+        semantic_method.name = synthesized_method->name;
+        semantic_method.type = QualType(synthesized_method->type);
+        semantic_method.declared_access = RecordMemberAccess::Public;
+        semantic_method.is_static = false;
+        semantic_method.is_virtual = false;
+        semantic_method.is_override = false;
+        semantic_method.is_final = false;
+        semantic_method.is_pure = false;
+        semantic_method.decl = synthesized_method.get();
+        semantic_method.symbol = synthesized_symbol;
+        updated_state.methods.push_back(std::move(semantic_method));
+        lambda.semantic_info.closure_record_decl->members.push_back(
+            std::move(synthesized_method));
+    } else {
+        if (lambda.call_operator_template_parameters.empty()) {
+            return fail(
+                "internal error: generic lambda is missing synthesized template parameters",
+                lambda.location);
+        }
+
+        auto function_template = make_ast<FunctionTemplateDecl>(
+            *ast_ctx_,
+            std::move(lambda.call_operator_template_parameters),
+            std::move(synthesized_method),
+            lambda.location);
+        set_template_decl_canonical_decl(
+            function_template.get(),
+            function_template.get());
+
+        RecordSemanticState::MethodTemplate semantic_method_template;
+        semantic_method_template.name = "operator()";
+        semantic_method_template.declared_access =
+            RecordMemberAccess::Public;
+        semantic_method_template.is_static = false;
+        semantic_method_template.decl = function_template.get();
+        updated_state.method_templates.push_back(
+            std::move(semantic_method_template));
+
+        lambda.semantic_info.call_operator_decl =
+            function_template->function_decl();
+        lambda.semantic_info.call_operator_template = function_template.get();
+        lambda.semantic_info.closure_record_decl->members.push_back(
+            std::move(function_template));
+    }
+    record_semantics_cache_set(closure_owner, std::move(updated_state));
+
+    bool has_syntactic_captures =
+        lambda.closure_info.default_capture != CppLambdaCaptureDefault::None ||
+        !lambda.closure_info.captures.empty() ||
+        !semantic_captures.empty();
+
+    lambda.semantic_info.function_pointer_invoker_decl.reset();
+    if (!lambda.is_generic && !has_syntactic_captures) {
+        auto invoker_type = std::make_shared<FunctionType>();
+        invoker_type->ret_type = function_type->ret_type;
+        invoker_type->parameters.assign(
+            function_type->parameters.begin() + 1,
+            function_type->parameters.end());
+        invoker_type->is_variadic = function_type->is_variadic;
+        invoker_type->has_prototype = function_type->has_prototype;
+        invoker_type->has_explicit_exception_spec =
+            function_type->has_explicit_exception_spec;
+        invoker_type->exception_spec = function_type->exception_spec;
+
+        std::vector<std::unique_ptr<Decl>> invoker_parameters;
+        invoker_parameters.reserve(lambda.parameters.size());
+        for (size_t index = 0; index < lambda.parameters.size(); ++index) {
+            auto* original_param =
+                dyn_cast<ParamDecl>(lambda.parameters[index].get());
+            std::string param_name =
+                original_param ? original_param->get_name() : "";
+            QualType param_type =
+                index + 1 < function_type->parameters.size()
+                    ? function_type->parameters[index + 1]
+                    : (original_param ? original_param->type : QualType());
+            invoker_parameters.push_back(collect_parameter_declaration(
+                param_type,
+                param_name,
+                nullptr,
+                StorageClass::NONE,
+                lambda.parameters[index]
+                    ? lambda.parameters[index]->location
+                    : lambda.location));
+        }
+
+        auto invoker_decl = make_ast<FuncDecl>(
+            *ast_ctx_,
+            "__invoke",
+            invoker_type,
+            std::move(invoker_parameters),
+            nullptr,
+            std::unordered_set<std::string>{},
+            StorageClass::STATIC,
+            true,
+            lambda.location);
+        invoker_decl->type = invoker_type;
+        invoker_decl->set_language_linkage(LanguageLinkage::None);
+        set_func_decl_cxx_qualifier_prefix(
+            invoker_decl.get(),
+            lambda.closure_name());
+        set_func_decl_owner_record_type(
+            invoker_decl.get(),
+            lambda.semantic_info.closure_type());
+
+        CppLambdaInvokerInfo invoker_info;
+        invoker_info.closure_type = lambda.semantic_info.closure_type();
+        invoker_info.call_operator_decl = lambda.semantic_info.call_operator_decl;
+        ast_ctx_->set_cpp_lambda_invoker_info(
+            invoker_decl->node_id,
+            std::move(invoker_info));
+        lambda.semantic_info.function_pointer_invoker_decl =
+            std::move(invoker_decl);
+    }
+
+    CppLambdaClosureDeclInfo closure_decl_info;
+    closure_decl_info.call_operator_decl = lambda.semantic_info.call_operator_decl;
+    closure_decl_info.call_operator_template =
+        lambda.semantic_info.call_operator_template;
+    closure_decl_info.function_pointer_invoker_decl =
+        lambda.semantic_info.function_pointer_invoker_decl.get();
+    closure_decl_info.has_syntactic_captures = has_syntactic_captures;
+    ast_ctx_->set_cpp_lambda_closure_decl_info(
+        closure_owner->node_id,
+        std::move(closure_decl_info));
+    return true;
+}
+
+bool Collect::collect_finalize_cpp_lambda_expression(CppLambdaExpr& lambda,
+                                                     std::string* error_out) const {
+    return finalize_cpp_lambda_semantics(lambda, error_out);
+}
+
+bool Collect::collect_finalize_block_expression(BlockExpr& block,
+                                                std::string* error_out) const {
+    auto fail = [&](const std::string& message, SrcLoc loc) -> bool {
+        report_error(message, loc);
+        if (error_out && error_out->empty()) {
+            *error_out = message;
+        }
+        return false;
+    };
+
+    if (!ast_ctx_) {
+        return false;
+    }
+
+    if (!block.semantic_info.literal_record()) {
+        block.semantic_info = make_block_semantic_info(*ast_ctx_, block.location);
+    }
+
+    auto invoke_type = build_block_invoke_type(block, error_out);
+    if (!invoke_type) {
+        return fail(
+            error_out && !error_out->empty()
+                ? *error_out
+                : "internal error: failed to build block invoke type",
+            block.location);
+    }
+
+    auto* literal_record = block.semantic_info.literal_record();
+    if (!literal_record || !literal_record->get_record_type()) {
+        return fail(
+            "internal error: block literal is missing a synthesized record owner",
+            block.location);
+    }
+
+    literal_record->fields.clear();
+    block.semantic_info.captures.clear();
+
+    auto void_type = QualType(get_builtin_void());
+    auto int_type = QualType(get_builtin_int());
+    auto void_ptr_type = QualType(std::make_shared<PointerType>(void_type));
+    auto invoke_ptr_type = QualType(std::make_shared<PointerType>(invoke_type));
+
+    std::vector<ObjectType::Field> literal_fields;
+    auto append_literal_field =
+        [&](QualType field_type, const std::string& field_name, SrcLoc loc)
+        -> FieldDecl* {
+            auto field_decl_base =
+                collect_field_declaration(field_type, field_name, loc);
+            auto* field_decl = dyn_cast<FieldDecl>(field_decl_base.get());
+            if (!field_decl) {
+                return nullptr;
+            }
+            literal_fields.emplace_back(field_decl->name, field_decl->type, 0);
+            literal_record->fields.push_back(std::move(field_decl_base));
+            return field_decl;
+        };
+
+    if (!append_literal_field(void_ptr_type, "__isa", block.location) ||
+        !append_literal_field(int_type, "__flags", block.location) ||
+        !append_literal_field(int_type, "__reserved", block.location) ||
+        !append_literal_field(invoke_ptr_type, "__invoke", block.location) ||
+        !append_literal_field(void_ptr_type, "__descriptor", block.location)) {
+        return fail(
+            "internal error: failed to synthesize block literal header fields",
+            block.location);
+    }
+
+    auto captures = build_block_semantic_captures(block, ast_ctx_.get());
+    for (size_t index = 0; index < captures.size(); ++index) {
+        auto& capture = captures[index];
+        capture.location = capture.symbol ? capture.symbol->variable_definition
+                                               ? capture.symbol->variable_definition->location
+                                               : block.location
+                                          : block.location;
+        QualType field_type =
+            remove_reference(capture.symbol ? capture.symbol->type : QualType(),
+                             ast_ctx_.get());
+        if (capture.kind == BlockCaptureKind::ByRef) {
+            field_type = QualType(
+                void_ptr_type.get_shared(),
+                static_cast<uint8_t>(void_ptr_type.get_qualifiers() | QUAL_CONST));
+        } else if (!field_type) {
+            return fail(
+                "internal error: block capture '" + capture.name +
+                    "' is missing a valid type",
+                block.location);
+        }
+        field_type = QualType(
+            field_type.get_shared(),
+            static_cast<uint8_t>(field_type.get_qualifiers() | QUAL_CONST));
+        capture.capture_type = field_type;
+        std::string field_name =
+            "__capture_" + capture.name + "_" + std::to_string(index);
+        auto* field_decl =
+            append_literal_field(field_type, field_name, capture.location);
+        if (!field_decl) {
+            return fail(
+                "internal error: failed to synthesize block capture field '" +
+                    capture.name + "'",
+                capture.location);
+        }
+        capture.field = field_decl;
+        block.semantic_info.captures.push_back(std::move(capture));
+    }
+
+    auto* literal_type = literal_record->get_record_type().get();
+    RecordSemanticState literal_state = compute_record_semantics(
+        std::move(literal_fields),
+        literal_type->is_union,
+        literal_type->is_packed,
+        literal_type->requested_alignment,
+        literal_type->pack_alignment,
+        false,
+        ast_ctx_->abi_policy.get());
+    record_semantics_cache_set(literal_record, std::move(literal_state));
+
+    auto* invoke_function_type =
+        invoke_type.as_shared<FunctionType>().get();
+    if (!invoke_function_type || invoke_function_type->parameters.empty()) {
+        return fail(
+            "internal error: invalid synthesized block invoke type",
+            block.location);
+    }
+
+    auto hidden_param_sym = std::make_shared<Symbol>(
+        "__block_literal",
+        SymbolKind::VARIABLE,
+        invoke_function_type->parameters.front(),
+        StorageClass::NONE,
+        VariableLinkage::NONE);
+    hidden_param_sym->uid =
+        block.semantic_info.literal_name() + "::__block_literal";
+
+    std::vector<std::unique_ptr<Decl>> invoke_parameters;
+    invoke_parameters.reserve(block.parameters.size() + 1);
+    invoke_parameters.push_back(collect_parameter_declaration(
+        invoke_function_type->parameters.front(),
+        "__block_literal",
+        hidden_param_sym,
+        StorageClass::NONE,
+        block.location));
+
+    bool has_void_parameter =
+        block.parameters.size() == 1 &&
+        block.parameters.front() &&
+        dyn_cast<ParamDecl>(block.parameters.front().get()) &&
+        dyn_cast<ParamDecl>(block.parameters.front().get())->type &&
+        dyn_cast<ParamDecl>(block.parameters.front().get())->type->isVoid();
+
+    ASTCloneContext clone_ctx;
+    clone_ctx.ast_ctx = ast_ctx_.get();
+    clone_ctx.finalize_lambda_expr =
+        [this](CppLambdaExpr& nested_lambda,
+               std::string* nested_error_out) -> bool {
+            return collect_finalize_cpp_lambda_expression(
+                nested_lambda,
+                nested_error_out);
+        };
+    clone_ctx.finalize_block_expr =
+        [this](BlockExpr& nested_block,
+               std::string* nested_error_out) -> bool {
+            return collect_finalize_block_expression(
+                nested_block,
+                nested_error_out);
+        };
+    clone_ctx.rewrite_var_ref =
+        [&](const VarRef* var_ref, std::string* rewrite_error_out)
+        -> std::unique_ptr<Expr> {
+            if (!var_ref || !var_ref->symref) {
+                return nullptr;
+            }
+            for (const auto& capture : block.semantic_info.captures) {
+                if (!capture.symbol || capture.symbol.get() != var_ref->symref.get() ||
+                    !capture.field) {
+                    continue;
+                }
+                auto base_expr = collect_make<VarRef>(hidden_param_sym, var_ref->location);
+                auto member_expr = collect_member_expression(
+                    std::move(base_expr),
+                    capture.field->name,
+                    true,
+                    var_ref->location,
+                    false,
+                    false);
+                if (!member_expr && rewrite_error_out) {
+                    *rewrite_error_out =
+                        "failed to rewrite block capture reference '" +
+                        var_ref->get_name() + "'";
+                }
+                if (!member_expr) {
+                    return member_expr;
+                }
+                if (capture.kind == BlockCaptureKind::ByRef) {
+                    return collect_make<BlockByrefAccessExpr>(
+                        std::move(member_expr),
+                        capture.symbol,
+                        capture.symbol->type,
+                        var_ref->location);
+                }
+                return member_expr;
+            }
+            return nullptr;
+        };
+
+    if (!has_void_parameter) {
+        for (const auto& parameter : block.parameters) {
+            std::string clone_error;
+            auto cloned_parameter = clone_decl_tree(
+                parameter.get(),
+                clone_ctx,
+                &clone_error);
+            if (parameter && !cloned_parameter) {
+                return fail(
+                    clone_error.empty()
+                        ? "failed to clone block parameter for synthesized invoke function"
+                        : clone_error,
+                    parameter->location);
+            }
+            invoke_parameters.push_back(std::move(cloned_parameter));
+        }
+    }
+
+    std::string body_clone_error;
+    auto cloned_body_stmt = clone_stmt_tree(
+        block.body.get(),
+        clone_ctx,
+        &body_clone_error);
+    if (block.body && !dyn_cast<CompoundStmt>(cloned_body_stmt.get())) {
+        return fail(
+            body_clone_error.empty()
+                ? "failed to clone block body for synthesized invoke function"
+                : body_clone_error,
+            block.location);
+    }
+    if (cloned_body_stmt &&
+        !rewrite_stmt_tree_in_place(
+            cloned_body_stmt,
+            clone_ctx,
+            &body_clone_error)) {
+        return fail(
+            body_clone_error.empty()
+                ? "failed to rewrite block body for synthesized invoke function"
+                : body_clone_error,
+            block.location);
+    }
+    auto cloned_body = std::unique_ptr<CompoundStmt>(
+        dyn_cast<CompoundStmt>(cloned_body_stmt.release()));
+
+    auto invoke_decl = make_ast<FuncDecl>(
+        *ast_ctx_,
+        "__invoke",
+        invoke_type.get_shared(),
+        std::move(invoke_parameters),
+        std::move(cloned_body),
+        block.stmt_labels,
+        StorageClass::STATIC,
+        true,
+        block.location);
+    invoke_decl->type = invoke_type.get_shared();
+    invoke_decl->scope =
+        invoke_decl->body
+            ? dyn_cast<CompoundStmt>(invoke_decl->body.get())->scope
+            : nullptr;
+    invoke_decl->set_asm_label(
+        "__block_invoke_" + block.semantic_info.literal_name());
+    invoke_decl->set_language_linkage(LanguageLinkage::None);
+    if (invoke_decl->body) {
+        std::string finalize_error;
+        if (!const_cast<Collect*>(this)->with_function_definition_state(
+                invoke_decl.get(),
+                [&]() {
+                    return template_sema_internal::
+                        finalize_specialized_stmt_semantics(
+                            *this,
+                            invoke_decl->body,
+                            QualType(invoke_decl->type),
+                            &finalize_error);
+                })) {
+            return fail(
+                finalize_error.empty()
+                    ? "failed to finalize synthesized block invoke body"
+                    : finalize_error,
+                block.location);
+        }
+        invoke_decl->scope =
+            invoke_decl->body
+                ? dyn_cast<CompoundStmt>(invoke_decl->body.get())->scope
+                : nullptr;
+    }
+
+    set_func_decl_owner_record_type(
+        invoke_decl.get(),
+        block.semantic_info.literal_type());
+    block.semantic_info.invoke_decl = std::move(invoke_decl);
+    return true;
+}
+
+std::unique_ptr<Expr> Collect::collect_cpp_lambda_expression(
+    LambdaClosureInfo closure_info,
+    LambdaSemanticInfo semantic_info,
+    QualType written_call_operator_type,
+    TemplateParameterList call_operator_template_parameters,
+    std::vector<std::unique_ptr<Decl>> parameters,
+    std::unique_ptr<CompoundStmt> body,
+    std::unordered_set<std::string> stmt_labels,
+    QualType explicit_return_type,
+    bool has_parameter_clause,
+    bool is_mutable,
+    bool has_noexcept,
+    bool has_trailing_return,
+    bool is_generic,
+    SrcLoc loc) const {
+    auto lambda = collect_make<CppLambdaExpr>(
+        std::move(closure_info),
+        std::move(semantic_info),
+        std::move(written_call_operator_type),
+        std::move(call_operator_template_parameters),
+        std::move(parameters),
+        std::move(body),
+        std::move(stmt_labels),
+        std::move(explicit_return_type),
+        has_parameter_clause,
+        is_mutable,
+        has_noexcept,
+        has_trailing_return,
+        is_generic,
+        loc);
+    collect_finalize_cpp_lambda_expression(*lambda, nullptr);
+    return lambda;
+}
+
+std::unique_ptr<Expr> Collect::collect_block_expression(
+    BlockSemanticInfo semantic_info,
+    QualType block_type,
+    std::vector<std::unique_ptr<Decl>> parameters,
+    std::unique_ptr<CompoundStmt> body,
+    std::unordered_set<std::string> stmt_labels,
+    QualType explicit_return_type,
+    bool has_parameter_clause,
+    bool has_explicit_return_type,
+    SrcLoc loc) const {
+    auto block = collect_make<BlockExpr>(
+        std::move(semantic_info),
+        std::move(block_type),
+        std::move(parameters),
+        std::move(body),
+        std::move(stmt_labels),
+        std::move(explicit_return_type),
+        has_parameter_clause,
+        has_explicit_return_type,
+        loc);
+    collect_finalize_block_expression(*block, nullptr);
+    return block;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_compound_literal_expression(QualType type, std::unique_ptr<Expr> init, SrcLoc loc) const {
+    if (type && contains_deferred_semantic_type(type.get_shared())) {
+        type = resolve_typeof_types(type, loc);
+    }
+
+    if (!type) {
+        report_error("compound literal has unknown type", loc);
+    } else if (type->isIncomplete() && canonical_type_kind(type) != TypeKind::Array) {
+        report_error("compound literal has incomplete type", loc);
+    }
+    if (init) {
+        type = clone_top_level_incomplete_array(type);
+        init = process_initializer_for_type(std::move(init), type, loc);
+    }
+    auto node = collect_make<CompoundLiteralExpr>(std::move(type), std::move(init), loc);
+    node->has_static_storage = !func_state_.in_function;
+    return node;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_label_address_expression(const std::string& label, SrcLoc loc) {
+
+    collect_register_label_reference(label, loc);
+    auto void_ty = QualType(get_builtin_void());
+    auto ptr_ty = QualType(std::make_shared<PointerType>(void_ty));
+    return collect_make<LabelAddressExpr>(label, ptr_ty, loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_va_arg_expression(std::unique_ptr<Expr> va_list_expr, QualType arg_type, SrcLoc loc) const {
+
+    if (arg_type && contains_deferred_semantic_type(arg_type.get_shared())) {
+        arg_type = resolve_typeof_types(arg_type, loc);
+    }
+    if (!arg_type) {
+        report_error("__builtin_va_arg requires a valid type argument", loc);
+        return collect_make<ErrorExpr>("invalid __builtin_va_arg type", loc);
+    }
+    if (canonical_type_kind(arg_type) == TypeKind::Function) {
+        report_error("__builtin_va_arg cannot use function type", loc);
+    }
+    if (auto builtin = arg_type.as_shared<BuiltinType>()) {
+        switch (builtin->builtin_kind) {
+            case BuiltinTypes::Char:
+            case BuiltinTypes::UChar:
+            case BuiltinTypes::Short:
+            case BuiltinTypes::UShort:
+                report_warning(
+                    "second argument to 'va_arg' is of promotable integer type; this va_arg has undefined behavior",
+                    loc);
+                break;
+            case BuiltinTypes::Float:
+                report_warning(
+                    "second argument to 'va_arg' is 'float'; this va_arg has undefined behavior because arguments are promoted to 'double'",
+                    loc);
+                break;
+            default:
+                break;
+        }
+    }
+    return collect_make<VaArgExpr>(std::move(va_list_expr), arg_type, loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_builtin_types_compatible_expression(QualType lhs, QualType rhs, SrcLoc loc) const {
+
+    if (lhs && contains_deferred_semantic_type(lhs.get_shared())) {
+        lhs = resolve_typeof_types(lhs, loc);
+    }
+    if (rhs && contains_deferred_semantic_type(rhs.get_shared())) {
+        rhs = resolve_typeof_types(rhs, loc);
+    }
+
+    std::vector<std::unique_ptr<Expr>> args;
+    std::vector<QualType> type_args = {lhs, rhs};
+    auto node = collect_make<BuiltinCallExpr>(BuiltinKind::TYPES_COMPATIBLE_P,
+        std::move(args), std::move(type_args), QualType(get_builtin_int()), loc);
+    bool compatible = false;
+    auto enum_int_compatible = [](QualType enum_ty, QualType int_ty) -> bool {
+        auto* en = enum_ty.as<EnumType>();
+        auto* bi = int_ty.as<BuiltinType>();
+        if (!en || !bi) {
+            return false;
+        }
+        auto underlying = en->semantic_underlying_type();
+        if (!underlying) {
+            return false;
+        }
+        return QualType(underlying).equals_unqualified(int_ty);
+    };
+    if (lhs && rhs) {
+        auto lhs_canonical = desugar_type(lhs);
+        auto rhs_canonical = desugar_type(rhs);
+        // GNU-family semantics ignore qualifiers on the compared type itself
+        // while still considering qualifiers nested within the type, such as
+        // pointee qualifiers for pointer types.
+        auto lhs_compare = lhs_canonical.without_qualifiers();
+        auto rhs_compare = rhs_canonical.without_qualifiers();
+        if (lhs_compare->kind == TypeKind::Array &&
+            rhs_compare->kind == TypeKind::Array) {
+            auto lhs_arr = lhs_compare.as_shared<ArrayType>();
+            auto rhs_arr = rhs_compare.as_shared<ArrayType>();
+            bool elem_compatible = lhs_arr && rhs_arr &&
+                lhs_arr->element_type.equals_qualified(rhs_arr->element_type);
+            if (elem_compatible) {
+                bool lhs_const = lhs_arr->size_kind == ArraySizeKind::Constant && lhs_arr->size.has_value();
+                bool rhs_const = rhs_arr->size_kind == ArraySizeKind::Constant && rhs_arr->size.has_value();
+                compatible = !(lhs_const && rhs_const) || lhs_arr->size == rhs_arr->size;
+            }
+        } else if (lhs_compare->kind == TypeKind::Pointer &&
+                   rhs_compare->kind == TypeKind::Pointer) {
+            compatible = lhs_compare.equals_qualified(rhs_compare);
+        } else {
+            compatible = lhs_compare.equals_qualified(rhs_compare) ||
+                enum_int_compatible(lhs_compare, rhs_compare) ||
+                enum_int_compatible(rhs_compare, lhs_compare);
+        }
+    }
+    node->const_value = compatible ? 1 : 0;
+    return node;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_builtin_choose_expression(std::unique_ptr<Expr> const_expr, std::unique_ptr<Expr> true_expr, std::unique_ptr<Expr> false_expr, SrcLoc loc) const {
+
+    if (!const_expr) {
+        report_error("__builtin_choose_expr requires a constant first argument", loc);
+        return collect_make<ErrorExpr>("__builtin_choose_expr requires constant expression", loc);
+    }
+    const_expr = collect_apply_standard_conversions(std::move(const_expr), ExprUseContext::ConditionalOperand);
+    ConstEvalResult const_eval = evaluate_with_consteval_compat(
+        const_expr.get(), ConstEvalMode::c_ice());
+    if (const_eval.status != ConstEvalStatus::Constant || !const_eval.int_value.has_value()) {
+        report_error(
+            "__builtin_choose_expr first argument must be a compile-time integer constant expression: " +
+                describe_consteval_failure(const_eval),
+            loc);
+        return collect_make<ErrorExpr>("__builtin_choose_expr requires constant expression", loc);
+    }
+    if (*const_eval.int_value != 0) {
+        if (!true_expr) {
+            report_error("__builtin_choose_expr selected missing true branch", loc);
+            return collect_make<ErrorExpr>("invalid __builtin_choose_expr true branch", loc);
+        }
+        return std::move(true_expr);
+    }
+    if (!false_expr) {
+        report_error("__builtin_choose_expr selected missing false branch", loc);
+        return collect_make<ErrorExpr>("invalid __builtin_choose_expr false branch", loc);
+    }
+    return std::move(false_expr);
+}
+
+std::unique_ptr<Expr> Collect::collect_builtin_convertvector_expression(std::unique_ptr<Expr> vector_expr, QualType target_type, SrcLoc loc) const {
+
+    if (target_type && contains_deferred_semantic_type(target_type.get_shared())) {
+        target_type = resolve_typeof_types(target_type, loc);
+    }
+    vector_expr = collect_apply_standard_conversions(std::move(vector_expr), ExprUseContext::CallArgument);
+
+    QualType source_type = vector_expr ? vector_expr->get_type() : QualType();
+    auto source_vector = desugar_type(source_type).as_shared<VectorType>();
+    auto target_vector = desugar_type(target_type).as_shared<VectorType>();
+    if (!source_vector) {
+        report_error("__builtin_convertvector first argument must be a vector type", loc);
+        return collect_make<ErrorExpr>("invalid __builtin_convertvector argument", loc);
+    }
+    if (!target_vector) {
+        report_error("__builtin_convertvector second argument must be a vector type", loc);
+        return collect_make<ErrorExpr>("invalid __builtin_convertvector type argument", loc);
+    }
+    if (source_vector->num_elements != target_vector->num_elements) {
+        report_error("__builtin_convertvector source and destination vectors must have the same number of elements", loc);
+        return collect_make<ErrorExpr>("mismatched __builtin_convertvector element counts", loc);
+    }
+
+    std::vector<std::unique_ptr<Expr>> args;
+    args.push_back(std::move(vector_expr));
+    std::vector<QualType> type_args = {target_type};
+    return collect_make<BuiltinCallExpr>(
+        BuiltinKind::CONVERTVECTOR, std::move(args), std::move(type_args), target_type, loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_offsetof_expression(QualType type_operand, const std::string& member_name, std::vector<OffsetOfComponent> designator_path, SrcLoc loc) const {
+
+    if (contains_deferred_semantic_type(type_operand.get_shared())) {
+        type_operand = resolve_typeof_types(type_operand, loc);
+    }
+    auto node = collect_make<OffsetOfExpr>(type_operand, member_name, loc);
+    node->designator_path = std::move(designator_path);
+    node->result_type = QualType(get_builtin_ulong());
+
+    auto object_type = desugar_type(type_operand).as_shared<ObjectType>();
+    if (!object_type) {
+        report_error("__builtin_offsetof requires a class/struct/union type", loc);
+        return node;
+    }
+    if (object_type->isIncomplete()) {
+        report_error("__builtin_offsetof requires a complete class/struct/union type", loc);
+        return node;
+    }
+
+    object_type->getWidth();
+
+    FieldLookupResult lookup;
+    std::vector<uint32_t> path;
+    find_field_recursive(object_type.get(), member_name, path, 0, lookup);
+    if (lookup.matches == 0 || lookup.field == nullptr) {
+        report_error("no member named '" + member_name + "' in class/struct/union", loc);
+        return node;
+    }
+    if (lookup.matches > 1) {
+        report_error("member '" + member_name + "' is ambiguous in __builtin_offsetof", loc);
+        return node;
+    }
+
+    int64_t offset = static_cast<int64_t>(lookup.byte_offset);
+    QualType current_type = lookup.field->type;
+    std::unique_ptr<Expr> dynamic_offset_expr;
+
+    auto add_runtime_offset = [&](std::unique_ptr<Expr> term) {
+        if (!term) {
+            return;
+        }
+        if (!dynamic_offset_expr) {
+            dynamic_offset_expr = std::move(term);
+            return;
+        }
+        dynamic_offset_expr = collect_binary_operation(
+            std::move(dynamic_offset_expr), std::move(term), BinOpTypes::ADD, loc);
+    };
+
+    for (auto& comp : node->designator_path) {
+        current_type = desugar_type(current_type);
+        if (comp.array_index >= 0 || comp.array_index_expr) {
+            auto arr = current_type.as_shared<ArrayType>();
+            if (!arr) {
+                report_error("array designator in __builtin_offsetof applied to non-array type", loc);
+                return node;
+            }
+            int64_t elem_size = arr->element_type->getWidthBytes();
+            if (elem_size < 0) {
+                report_error("array designator in __builtin_offsetof has incomplete element type", loc);
+                return node;
+            }
+            if (comp.array_index_expr) {
+                auto scale = collect_integer_literal(
+                    std::to_string(elem_size), get_builtin_ulong(), loc);
+                auto term = collect_binary_operation(
+                    std::move(comp.array_index_expr), std::move(scale), BinOpTypes::MULT, loc);
+                add_runtime_offset(std::move(term));
+            } else {
+                offset += comp.array_index * elem_size;
+            }
+            current_type = arr->element_type;
+            continue;
+        }
+        if (!comp.field_name.empty()) {
+            auto nested_obj = current_type.as_shared<ObjectType>();
+            if (!nested_obj || nested_obj->isIncomplete()) {
+                report_error("field designator in __builtin_offsetof applied to non-class/struct/union type", loc);
+                return node;
+            }
+            nested_obj->getWidth();
+            FieldLookupResult nested_lookup;
+            std::vector<uint32_t> nested_path;
+            find_field_recursive(nested_obj.get(), comp.field_name, nested_path, 0, nested_lookup);
+            if (nested_lookup.matches == 0 || nested_lookup.field == nullptr) {
+                report_error("no member named '" + comp.field_name + "' in nested class/struct/union", loc);
+                return node;
+            }
+            if (nested_lookup.matches > 1) {
+                report_error("member '" + comp.field_name + "' is ambiguous in __builtin_offsetof", loc);
+                return node;
+            }
+            offset += static_cast<int64_t>(nested_lookup.byte_offset);
+            current_type = nested_lookup.field->type;
+        }
+    }
+
+    if (dynamic_offset_expr) {
+        if (offset != 0) {
+            add_runtime_offset(collect_integer_literal(
+                std::to_string(offset), get_builtin_ulong(), loc));
+        }
+        return collect_explicit_cast(std::move(dynamic_offset_expr), QualType(get_builtin_ulong()), loc);
+    }
+
+    node->computed_offset = offset;
+    return node;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_explicit_cast(std::unique_ptr<Expr> expr, QualType target_type, SrcLoc loc) const {
+
+    if (target_type && contains_deferred_semantic_type(target_type.get_shared())) {
+        target_type = resolve_typeof_types(target_type, loc);
+    }
+    expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
+    if (expr && canonical_type_kind(target_type) == TypeKind::Vector) {
+        auto expr_type = expr->get_type();
+        if (expr_type && canonical_type_kind(expr_type) != TypeKind::Vector) {
+            auto src_width = expr_type->getWidth();
+            auto dst_width = target_type->getWidth();
+            if (src_width > 0 && src_width == dst_width) {
+                return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
+            }
+            auto vec_ty = desugar_type(target_type).as_shared<VectorType>();
+            if (vec_ty) {
+                expr = cast_if_needed(std::move(expr), vec_ty->element_type);
+            }
+            return collect_make<ImplicitCast>(ImplicitCastTypes::VECTOR_SPLAT, std::move(expr), target_type);
+        }
+    }
+    return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::named_cast_error(
+    const std::string& message,
+    SrcLoc loc) const {
+    report_error(message, loc);
+    return collect_error_expression(message, loc);
+}
+
+std::unique_ptr<Expr> Collect::cpp_const_named_cast(
+    std::unique_ptr<Expr> expr,
+    QualType target_type,
+    QualType target_no_ref,
+    SrcLoc loc) const {
+    auto source_type = desugar_type(expr->get_type());
+    if (!source_type) {
+        return named_cast_error("const_cast operand has unknown type", loc);
+    }
+
+    auto source_no_ref =
+        remove_reference_and_desugar(source_type, ast_ctx_.get());
+    if (!source_no_ref) {
+        return named_cast_error("const_cast operand has unknown type", loc);
+    }
+
+    bool target_is_pointer = canonical_type_kind(target_type) == TypeKind::Pointer;
+    bool source_is_pointer = canonical_type_kind(source_type) == TypeKind::Pointer;
+    bool target_is_reference = canonical_type_kind(target_type) == TypeKind::Reference;
+    bool source_is_reference = canonical_type_kind(source_type) == TypeKind::Reference;
+    if (!((target_is_pointer && source_is_pointer) ||
+          (target_is_reference && source_is_reference))) {
+        return named_cast_error(
+            "const_cast requires pointer or reference operand types", loc);
+    }
+
+    if (!same_type_ignoring_all_qualifiers(
+            target_no_ref,
+            source_no_ref,
+            ast_ctx_.get())) {
+        return named_cast_error(
+            "const_cast target type is not similar to source type", loc);
+    }
+
+    if (target_is_reference && source_is_reference) {
+        auto target_ref = desugar_type(target_type).as_shared<ReferenceType>();
+        auto source_ref = desugar_type(source_type).as_shared<ReferenceType>();
+        if (!target_ref || !source_ref ||
+            target_ref->reference_kind != source_ref->reference_kind) {
+            return named_cast_error("const_cast target/reference kind mismatch", loc);
+        }
+        return collect_make<ImplicitCast>(
+            ImplicitCastTypes::RAW_CAST, std::move(expr), target_type);
+    }
+
+    expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
+    return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::cpp_dynamic_named_cast(
+    std::unique_ptr<Expr> expr,
+    QualType target_type,
+    QualType target_no_ref,
+    SrcLoc loc) const {
+    auto source_type = desugar_type(expr->get_type());
+    if (!source_type) {
+        return named_cast_error("dynamic_cast operand has unknown type", loc);
+    }
+
+    bool target_is_pointer = canonical_type_kind(target_type) == TypeKind::Pointer;
+    bool source_is_pointer = canonical_type_kind(source_type) == TypeKind::Pointer;
+    bool target_is_reference = canonical_type_kind(target_type) == TypeKind::Reference;
+    bool source_is_reference = canonical_type_kind(source_type) == TypeKind::Reference;
+    if (!((target_is_pointer && source_is_pointer) ||
+          (target_is_reference && source_is_reference))) {
+        return named_cast_error(
+            "dynamic_cast requires pointer or reference operand types", loc);
+    }
+
+    constexpr const char* runtime_polymorphic_error =
+        "dynamic_cast runtime checks require source type to be polymorphic";
+    auto require_runtime_polymorphic_source = [&](QualType source_object_type) -> bool {
+        const ObjectDecl* source_decl =
+            object_decl_from_object_qualtype(source_object_type, ast_ctx_.get());
+        if (!source_decl) {
+            return true;
+        }
+        const RecordSemanticState* source_state = record_semantics_cache_lookup(source_decl);
+        if (!source_state) {
+            return true;
+        }
+        if (!source_state->is_polymorphic) {
+            report_error(runtime_polymorphic_error, loc);
+            return false;
+        }
+        return true;
+    };
+
+    if (target_is_pointer && source_is_pointer) {
+        expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
+        if (!expr) {
+            return named_cast_error("dynamic_cast requires a valid expression operand", loc);
+        }
+
+        auto source_ptr =
+            remove_reference_and_desugar(
+                expr->get_type(),
+                ast_ctx_.get())
+                .as_shared<PointerType>();
+        auto target_ptr = target_no_ref.as_shared<PointerType>();
+        if (!source_ptr || !target_ptr) {
+            return named_cast_error("dynamic_cast requires pointer operand types", loc);
+        }
+
+        auto source_object =
+            remove_reference_and_desugar(
+                source_ptr->pointed_type,
+                ast_ctx_.get());
+        if (!source_object.as_shared<ObjectType>()) {
+            return named_cast_error("dynamic_cast requires pointers to class types", loc);
+        }
+
+        if (target_ptr->pointed_type && target_ptr->pointed_type->isVoid()) {
+            if (!require_runtime_polymorphic_source(source_object)) {
+                return collect_error_expression(runtime_polymorphic_error, loc);
+            }
+            return collect_make<CppDynamicCastExpr>(std::move(expr), target_type, loc);
+        }
+
+        auto target_object =
+            remove_reference_and_desugar(
+                target_ptr->pointed_type,
+                ast_ctx_.get());
+        if (!target_object.as_shared<ObjectType>()) {
+            return named_cast_error("dynamic_cast requires pointers to class types", loc);
+        }
+
+        bool same_type =
+            source_object.equals_unqualified(target_object) &&
+            target_object.has_all_qualifiers_of(source_object);
+        bool safe_upcast = can_convert_derived_to_base_object(source_object, target_object);
+        if (same_type || safe_upcast) {
+            return collect_make<ImplicitCast>(std::move(expr), target_type);
+        }
+
+        if (!require_runtime_polymorphic_source(source_object)) {
+            return collect_error_expression(runtime_polymorphic_error, loc);
+        }
+        return collect_make<CppDynamicCastExpr>(std::move(expr), target_type, loc);
+    }
+
+    auto source_ref = desugar_type(source_type).as_shared<ReferenceType>();
+    auto target_ref = desugar_type(target_type).as_shared<ReferenceType>();
+    if (!source_ref || !target_ref) {
+        return named_cast_error(
+            "dynamic_cast requires pointer or reference operand types", loc);
+    }
+
+    auto source_object =
+        remove_reference_and_desugar(
+            source_ref->referred_type,
+            ast_ctx_.get());
+    auto target_object =
+        remove_reference_and_desugar(
+            target_ref->referred_type,
+            ast_ctx_.get());
+    if (!source_object.as_shared<ObjectType>() ||
+        !target_object.as_shared<ObjectType>()) {
+        return named_cast_error("dynamic_cast requires references to class types", loc);
+    }
+
+    bool same_type =
+        source_object.equals_unqualified(target_object) &&
+        target_object.has_all_qualifiers_of(source_object);
+    bool safe_upcast = can_convert_derived_to_base_object(source_object, target_object);
+    if (same_type || safe_upcast) {
+        return collect_make<ImplicitCast>(
+            ImplicitCastTypes::RAW_CAST, std::move(expr), target_type);
+    }
+
+    if (!require_runtime_polymorphic_source(source_object)) {
+        return collect_error_expression(runtime_polymorphic_error, loc);
+    }
+    return collect_make<CppDynamicCastExpr>(std::move(expr), target_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::cpp_reinterpret_named_cast(
+    std::unique_ptr<Expr> expr,
+    QualType source_type,
+    QualType target_type,
+    QualType target_no_ref,
+    SrcLoc loc) const {
+    bool source_pointer_like = is_pointer_like_type(source_type, ast_ctx_.get());
+    bool target_pointer_like = is_pointer_like_type(target_no_ref, ast_ctx_.get());
+    bool source_integer_like = is_integer_or_enum_type(source_type, ast_ctx_.get());
+    bool target_integer_like = is_integer_or_enum_type(target_no_ref, ast_ctx_.get());
+
+    bool allowed = (source_pointer_like && target_pointer_like) ||
+                   (source_pointer_like && target_integer_like) ||
+                   (source_integer_like && target_pointer_like);
+    if (!allowed) {
+        return named_cast_error("invalid operands to reinterpret_cast", loc);
+    }
+
+    if (source_pointer_like && target_integer_like) {
+        int64_t source_bits = source_type->getWidth();
+        int64_t target_bits = target_no_ref->getWidth();
+        if (source_bits > 0 && target_bits > 0 && target_bits < source_bits) {
+            return named_cast_error(
+                "reinterpret_cast from pointer to smaller integer type loses information",
+                loc);
+        }
+    }
+
+    return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::cpp_static_named_cast(
+    std::unique_ptr<Expr> expr,
+    QualType source_type,
+    QualType target_type,
+    QualType target_no_ref,
+    SrcLoc loc) const {
+    auto source_ptr = source_type.as_shared<PointerType>();
+    auto target_ptr = target_no_ref.as_shared<PointerType>();
+    auto source_member_ptr = source_type.as_shared<MemberPointerType>();
+    auto target_member_ptr = target_no_ref.as_shared<MemberPointerType>();
+
+    bool source_integer_like = is_integer_or_enum_type(source_type, ast_ctx_.get());
+    bool target_integer_like = is_integer_or_enum_type(target_no_ref, ast_ctx_.get());
+
+    auto member_pointer_static_cast_error =
+        [](MemberPointerConversionIssue issue) -> std::string {
+        switch (issue) {
+            case MemberPointerConversionIssue::MemberTypeMismatch:
+                return "invalid static_cast between pointer-to-member types with different member types";
+            case MemberPointerConversionIssue::QualificationDrops:
+                return "static_cast cannot cast away qualifiers in pointer-to-member conversion";
+            case MemberPointerConversionIssue::AmbiguousBase:
+                return "invalid static_cast between pointer-to-member types across ambiguous base class";
+            case MemberPointerConversionIssue::VirtualBase:
+                return "invalid static_cast between pointer-to-member types across virtual base class";
+            case MemberPointerConversionIssue::InaccessibleBase:
+                return "invalid static_cast between pointer-to-member types across inaccessible base class";
+            case MemberPointerConversionIssue::UnrelatedClass:
+                return "invalid static_cast between unrelated pointer-to-member types";
+            case MemberPointerConversionIssue::NotMemberPointerType:
+            case MemberPointerConversionIssue::None:
+                break;
+        }
+        return "invalid static_cast between pointer-to-member types";
+    };
+
+    if (source_ptr && target_ptr) {
+        bool target_points_to_void =
+            target_ptr->pointed_type && target_ptr->pointed_type->isVoid();
+        bool source_points_to_void =
+            source_ptr->pointed_type && source_ptr->pointed_type->isVoid();
+        if (!target_points_to_void &&
+            !source_points_to_void &&
+            !pointers_to_compatible_types(target_no_ref, source_type)) {
+            return named_cast_error(
+                "invalid static_cast between unrelated pointer types", loc);
+        }
+
+        if (target_ptr->pointed_type.equals_unqualified(source_ptr->pointed_type) &&
+            !target_ptr->pointed_type.has_all_qualifiers_of(source_ptr->pointed_type)) {
+            return named_cast_error("static_cast cannot cast away qualifiers", loc);
+        }
+    } else if (source_member_ptr && target_member_ptr) {
+        auto conversion = analyze_member_pointer_conversion(source_type, target_no_ref);
+        if (!conversion.viable) {
+            return named_cast_error(member_pointer_static_cast_error(conversion.issue), loc);
+        }
+    } else if (target_ptr && source_integer_like) {
+        if (!is_null_pointer_constant_expr(expr.get())) {
+            return named_cast_error("invalid static_cast from integer to pointer type", loc);
+        }
+    } else if (target_member_ptr && source_integer_like) {
+        if (!is_null_pointer_constant_expr(expr.get())) {
+            return named_cast_error(
+                "invalid static_cast from integer to member pointer type", loc);
+        }
+    } else if (source_ptr && target_integer_like) {
+        return named_cast_error("invalid static_cast from pointer to integer type", loc);
+    } else if (source_member_ptr && target_integer_like) {
+        return named_cast_error(
+            "invalid static_cast from member pointer to integer type", loc);
+    }
+
+    return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_cpp_named_cast(CppNamedCastKind cast_kind,
+                                                      std::unique_ptr<Expr> expr,
+                                                      QualType target_type,
+                                                      SrcLoc loc) const {
+    if (!expr) {
+        return named_cast_error("named cast requires a valid expression operand", loc);
+    }
+
+    if (target_type && contains_deferred_semantic_type(target_type.get_shared())) {
+        target_type = resolve_typeof_types(target_type, loc);
+    }
+    if (!target_type) {
+        return named_cast_error("named cast requires a valid target type", loc);
+    }
+
+    auto target_no_ref =
+        remove_reference_and_desugar(target_type, ast_ctx_.get());
+    if (!target_no_ref) {
+        return named_cast_error("named cast requires a valid target type", loc);
+    }
+
+    if (cast_kind == CppNamedCastKind::Const) {
+        return cpp_const_named_cast(
+            std::move(expr), target_type, target_no_ref, loc);
+    }
+    if (cast_kind == CppNamedCastKind::Dynamic) {
+        return cpp_dynamic_named_cast(
+            std::move(expr), target_type, target_no_ref, loc);
+    }
+
+    expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
+    if (!expr) {
+        return named_cast_error("named cast requires a valid expression operand", loc);
+    }
+
+    auto source_type =
+        remove_reference_and_desugar(expr->get_type(), ast_ctx_.get());
+    if (!source_type) {
+        return named_cast_error("named cast operand has unknown type", loc);
+    }
+
+    if (cast_kind == CppNamedCastKind::Reinterpret) {
+        return cpp_reinterpret_named_cast(
+            std::move(expr), source_type, target_type, target_no_ref, loc);
+    }
+    if (cast_kind == CppNamedCastKind::Static) {
+        return cpp_static_named_cast(
+            std::move(expr), source_type, target_type, target_no_ref, loc);
+    }
+
+    return named_cast_error("unknown named cast kind", loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_cpp_throw_expression(
+    std::unique_ptr<Expr> thrown_expr,
+    SrcLoc loc) const {
+    bool is_rethrow = !thrown_expr;
+    if (thrown_expr) {
+        thrown_expr = collect_apply_standard_conversions(
+            std::move(thrown_expr),
+            ExprUseContext::RValue);
+    }
+    return collect_make<CppThrowExpr>(
+        std::move(thrown_expr),
+        QualType(get_builtin_void()),
+        is_rethrow,
+        loc);
+}
+
+std::shared_ptr<Symbol> Collect::make_default_allocation_like_operator_symbol(
+    const std::string& operator_name) const {
+    auto fn_type = std::make_shared<FunctionType>();
+    fn_type->has_prototype = true;
+    fn_type->is_variadic = false;
+    if (operator_name == "operatornew" || operator_name == "operatornew[]") {
+        fn_type->ret_type =
+            QualType(std::make_shared<PointerType>(QualType(get_builtin_void())));
+        fn_type->parameters.push_back(QualType(get_builtin_ulong()));
+    } else if (operator_name == "operatordelete" ||
+               operator_name == "operatordelete[]") {
+        fn_type->ret_type = QualType(get_builtin_void());
+        fn_type->parameters.push_back(
+            QualType(std::make_shared<PointerType>(QualType(get_builtin_void()))));
+    } else {
+        return nullptr;
+    }
+    auto sym = std::make_shared<Symbol>(
+        operator_name, SymbolKind::FUNCTION, QualType(fn_type));
+    sym->storage_class = StorageClass::EXTERN;
+    sym->linkage = VariableLinkage::EXTERNAL;
+    sym->set_language_linkage(LanguageLinkage::CXX);
+    return sym;
+}
+
+std::unique_ptr<Expr> Collect::select_cpp_allocation_like_function(
+    const std::string& operator_name,
+    const std::shared_ptr<ObjectType>& lookup_record,
+    bool force_global_lookup,
+    const std::vector<std::unique_ptr<Expr>>& call_args,
+    SrcLoc loc,
+    std::shared_ptr<Symbol>& selected_symbol_out) const {
+    selected_symbol_out = nullptr;
+
+    std::vector<OverloadCallCandidate> overload_candidates;
+    bool saw_member_match = false;
+    bool saw_private_method = false;
+    bool saw_protected_method = false;
+
+    if (!force_global_lookup && lookup_record) {
+        auto member_candidates = find_record_methods(lookup_record.get(), operator_name);
+        if (!member_candidates.empty()) {
+            saw_member_match = true;
+        }
+
+        const ObjectDecl* access_context_decl = nullptr;
+        if (lang_opts_.is_cxx_mode() && func_state_.current_function_is_cpp_member) {
+            access_context_decl =
+                current_record_decl_from_this_type(func_state_.current_function_cpp_this_type);
+        }
+
+        for (const auto& member_match : member_candidates) {
+            const auto* method = member_match.method;
+            if (!method || method->name != operator_name) {
+                continue;
+            }
+            if (!method->is_static) {
+                continue;
+            }
+
+            bool is_accessible = true;
+            if (lang_opts_.is_cxx_mode() &&
+                method->declared_access == RecordMemberAccess::Private) {
+                const ObjectDecl* owner_decl =
+                    canonical_record_decl(member_match.owner_record_decl);
+                const ObjectDecl* context_decl =
+                    canonical_record_decl(access_context_decl);
+                if (!owner_decl || owner_decl != context_decl) {
+                    saw_private_method = true;
+                    is_accessible = false;
+                }
+            } else if (lang_opts_.is_cxx_mode() &&
+                       method->declared_access == RecordMemberAccess::Protected) {
+                bool protected_ok = can_access_protected_member_in_context(
+                    member_match.owner_record_decl,
+                    access_context_decl,
+                    member_match.owner_record_decl,
+                    true);
+                if (!protected_ok) {
+                    saw_protected_method = true;
+                    is_accessible = false;
+                }
+            }
+            if (!is_accessible) {
+                continue;
+            }
+
+            if (!method->symbol) {
+                report_error(
+                    "internal error: unresolved member function symbol '" +
+                        operator_name + "'",
+                    loc);
+                return collect_error_expression(
+                    "unresolved member function symbol", loc);
+            }
+
+            OverloadCallCandidate call_candidate;
+            call_candidate.symbol = method->symbol;
+            call_candidate.implicit_object_arg_kind =
+                OverloadImplicitObjectArgKind::None;
+            overload_candidates.push_back(std::move(call_candidate));
+        }
+
+        if (saw_member_match && overload_candidates.empty()) {
+            if (auto inaccessible_error = report_inaccessible_member(
+                    operator_name,
+                    saw_private_method,
+                    saw_protected_method,
+                    loc)) {
+                return inaccessible_error;
+            }
+            report_error("inaccessible member '" + operator_name + "'", loc);
+            return collect_error_expression("inaccessible member", loc);
+        }
+    }
+
+    if (!saw_member_match) {
+        append_unqualified_overload_candidates(
+            operator_name,
+            OverloadImplicitObjectArgKind::None,
+            overload_candidates);
+        if (overload_candidates.empty()) {
+            auto default_symbol =
+                make_default_allocation_like_operator_symbol(operator_name);
+            if (default_symbol) {
+                OverloadCallCandidate default_candidate;
+                default_candidate.symbol = std::move(default_symbol);
+                default_candidate.implicit_object_arg_kind =
+                    OverloadImplicitObjectArgKind::None;
+                overload_candidates.push_back(std::move(default_candidate));
+            }
+        }
+    }
+
+    if (overload_candidates.empty()) {
+        report_error("no matching function for call to '" + operator_name + "'", loc);
+        return collect_error_expression("no matching overload", loc);
+    }
+
+    OverloadImplicitObjectArgKind selected_implicit_arg_kind =
+        OverloadImplicitObjectArgKind::None;
+    if (auto overload_error = resolve_overloaded_call_candidates(
+            operator_name,
+            overload_candidates,
+            call_args,
+            nullptr,
+            loc,
+            selected_symbol_out,
+            selected_implicit_arg_kind)) {
+        return overload_error;
+    }
+    return nullptr;
+}
+
+std::unique_ptr<Expr> Collect::collect_cpp_new_expression(
+    QualType allocated_type,
+    std::vector<std::unique_ptr<Expr>> placement_args,
+    std::unique_ptr<Expr> initializer,
+    bool is_global_allocation,
+    SrcLoc loc) const {
+    if (!allocated_type) {
+        report_error("new-expression requires a valid allocated type", loc);
+        return collect_error_expression("new-expression requires a valid allocated type", loc);
+    }
+    if (contains_deferred_semantic_type(allocated_type.get_shared())) {
+        allocated_type = finalize_deferred_semantic_type(allocated_type, loc);
+    }
+    if (!allocated_type) {
+        report_error("new-expression requires a valid allocated type", loc);
+        return collect_error_expression("new-expression requires a valid allocated type", loc);
+    }
+
+    for (auto& placement_arg : placement_args) {
+        placement_arg = collect_apply_standard_conversions(
+            std::move(placement_arg),
+            ExprUseContext::CallArgument);
+    }
+
+    QualType canonical_allocated = desugar_type(allocated_type);
+    bool is_array_form = canonical_type_kind(canonical_allocated) == TypeKind::Array;
+
+    QualType pointee_type = allocated_type;
+    if (is_array_form) {
+        auto array_type = canonical_allocated.as_shared<ArrayType>();
+        if (!array_type || !array_type->element_type) {
+            report_error("new-expression array type has invalid element type", loc);
+            return collect_error_expression("new-expression array type has invalid element type", loc);
+        }
+        bool has_known_bound = array_type->size_kind == ArraySizeKind::Variable ||
+            (array_type->size_kind == ArraySizeKind::Constant &&
+             array_type->size.has_value());
+        if (!has_known_bound) {
+            report_error("new-expression array type requires a bound", loc);
+            return collect_error_expression("new-expression array type requires a bound", loc);
+        }
+        pointee_type = array_type->element_type;
+    }
+
+    pointee_type = remove_reference(pointee_type);
+    QualType canonical_pointee = desugar_type(pointee_type);
+    auto pointee_kind = canonical_type_kind(canonical_pointee);
+
+    if (!canonical_pointee ||
+        pointee_kind == TypeKind::Function ||
+        pointee_kind == TypeKind::Reference) {
+        report_error("new-expression cannot allocate function or reference type", loc);
+        return collect_error_expression(
+            "new-expression cannot allocate function or reference type", loc);
+    }
+    if (canonical_pointee->isVoid()) {
+        report_error("new-expression cannot allocate incomplete type 'void'", loc);
+        return collect_error_expression(
+            "new-expression cannot allocate incomplete type 'void'", loc);
+    }
+    if (canonical_pointee->isIncomplete()) {
+        report_error(
+            "new-expression cannot allocate incomplete type '" +
+                canonical_pointee.to_string() + "'",
+            loc);
+        return collect_error_expression("new-expression cannot allocate incomplete type", loc);
+    }
+
+    auto pointee_record = canonical_pointee.as_shared<ObjectType>();
+    const ObjectDecl* pointee_record_decl =
+        pointee_record ? dyn_cast<ObjectDecl>(pointee_record->get_decl()) : nullptr;
+    const RecordSemanticState* pointee_record_state =
+        pointee_record_decl ? record_semantics_cache_lookup(pointee_record_decl) : nullptr;
+
+    if (lang_opts_.is_cxx_mode() &&
+        pointee_record &&
+        pointee_record_state &&
+        pointee_record_state->is_abstract) {
+        report_error(
+            "cannot instantiate abstract class type '" +
+                canonical_pointee.to_string() + "'",
+            loc);
+        return collect_error_expression("cannot instantiate abstract class type", loc);
+    }
+
+    QualType result_type(std::make_shared<PointerType>(pointee_type));
+    std::string allocator_name = is_array_form ? "operatornew[]" : "operatornew";
+    std::string deallocator_name = is_array_form ? "operatordelete[]" : "operatordelete";
+
+    std::vector<std::unique_ptr<Expr>> allocator_call_args;
+    allocator_call_args.reserve(1 + placement_args.size());
+    // First allocator argument is always the computed allocation size; placement
+    // arguments are appended after it.
+    allocator_call_args.push_back(collect_sizeof_type(allocated_type, loc));
+    for (auto& arg : placement_args) {
+        allocator_call_args.push_back(std::move(arg));
+    }
+    placement_args.clear();
+
+    std::shared_ptr<Symbol> selected_allocator_sym = nullptr;
+    if (auto alloc_error = select_cpp_allocation_like_function(
+            allocator_name,
+            pointee_record,
+            is_global_allocation,
+            allocator_call_args,
+            loc,
+            selected_allocator_sym)) {
+        return alloc_error;
+    }
+    if (!selected_allocator_sym) {
+        report_error("no viable allocation function selected", loc);
+        return collect_error_expression("no viable allocation function selected", loc);
+    }
+
+    placement_args.reserve(allocator_call_args.size() > 0
+        ? allocator_call_args.size() - 1
+        : 0);
+    for (size_t idx = 1; idx < allocator_call_args.size(); ++idx) {
+        placement_args.push_back(std::move(allocator_call_args[idx]));
+    }
+
+    std::shared_ptr<Symbol> selected_ctor_sym = nullptr;
+    std::vector<std::unique_ptr<Expr>> constructor_args;
+    bool is_list_init = false;
+
+    if (is_array_form &&
+        pointee_record &&
+        pointee_record_state &&
+        (pointee_record_state->definition_data.has_user_declared_constructor ||
+         pointee_record_state->definition_data.has_user_declared_destructor)) {
+        // Current lowering does not yet synthesize per-element ctor/dtor loops
+        // for class arrays; reject before creating partial semantic state.
+        report_error(
+            "new[] for class types with user-declared constructors/destructors is not supported yet",
+            loc);
+        return collect_error_expression("new[] class-object initialization not supported yet", loc);
+    }
+
+    if (pointee_record &&
+        pointee_record_state &&
+        !is_array_form &&
+        pointee_record_state->definition_data.has_user_declared_constructor &&
+        !pointee_record_state->constructors.empty()) {
+        std::vector<std::unique_ptr<Expr>> ctor_input_args;
+        bool ctor_is_list_init = false;
+        if (initializer) {
+            if (auto* init_list = dyn_cast<InitListExpr>(initializer.get())) {
+                ctor_is_list_init = !init_list->is_paren_init;
+                auto owned_list = std::unique_ptr<InitListExpr>(
+                    static_cast<InitListExpr*>(initializer.release()));
+                ctor_input_args.reserve(owned_list->elements.size());
+                for (auto& elem : owned_list->elements) {
+                    if (!elem.designators.empty()) {
+                        report_error(
+                            "designated initializers are not supported in constructor initialization",
+                            elem.loc);
+                    }
+                    if (!elem.value) {
+                        report_error(
+                            "missing initializer expression in constructor argument list",
+                            elem.loc);
+                        continue;
+                    }
+                    ctor_input_args.push_back(std::move(elem.value));
+                }
+            } else {
+                ctor_input_args.push_back(std::move(initializer));
+            }
+        }
+
+        bool had_ctor_input_args = !ctor_input_args.empty();
+        auto ctor_init_expr = collect_member_initializer_expression(
+            std::move(ctor_input_args),
+            pointee_type,
+            ctor_is_list_init,
+            loc,
+            false);
+        if (!ctor_init_expr) {
+            if (had_ctor_input_args) {
+                report_error(
+                    "internal error: failed to build constructor initialization for new-expression",
+                    loc);
+                return collect_error_expression(
+                    "failed to build constructor initialization for new-expression",
+                    loc);
+            }
+            // Implicit default construction with no explicit constructor call.
+            initializer.reset();
+        } else {
+            if (auto* err = dyn_cast<ErrorExpr>(ctor_init_expr.get())) {
+                return std::move(ctor_init_expr);
+            }
+
+            if (auto* ctor_expr = dyn_cast<CppConstructExpr>(ctor_init_expr.get())) {
+                selected_ctor_sym = ctor_expr->ctor_sym;
+                is_list_init = ctor_expr->is_list_init;
+                auto owned_ctor_expr = std::unique_ptr<CppConstructExpr>(
+                    static_cast<CppConstructExpr*>(ctor_init_expr.release()));
+                constructor_args = std::move(owned_ctor_expr->args);
+                initializer.reset();
+            } else {
+                initializer = std::move(ctor_init_expr);
+            }
+        }
+    }
+
+    if (!selected_ctor_sym && initializer) {
+        QualType init_target_type = is_array_form ? allocated_type : pointee_type;
+        initializer = process_initializer_for_type(
+            std::move(initializer),
+            init_target_type,
+            loc);
+        if (initializer && dyn_cast<ErrorExpr>(initializer.get())) {
+            return std::move(initializer);
+        }
+        if (auto* init_list = dyn_cast<InitListExpr>(initializer.get())) {
+            is_list_init = !init_list->is_paren_init;
+        }
+    }
+
+    std::shared_ptr<Symbol> selected_deallocator_sym = nullptr;
+    if (selected_ctor_sym) {
+        std::vector<std::unique_ptr<Expr>> deallocator_lookup_args;
+        deallocator_lookup_args.reserve(1 + placement_args.size());
+        deallocator_lookup_args.push_back(
+            collect_integer_literal("0", get_builtin_int(), loc));
+        for (auto& arg : placement_args) {
+            deallocator_lookup_args.push_back(std::move(arg));
+        }
+        placement_args.clear();
+
+        if (auto dealloc_error = select_cpp_allocation_like_function(
+                deallocator_name,
+                pointee_record,
+                is_global_allocation,
+                deallocator_lookup_args,
+                loc,
+                selected_deallocator_sym)) {
+            return dealloc_error;
+        }
+
+        placement_args.reserve(deallocator_lookup_args.size() > 0
+            ? deallocator_lookup_args.size() - 1
+            : 0);
+        for (size_t idx = 1; idx < deallocator_lookup_args.size(); ++idx) {
+            placement_args.push_back(std::move(deallocator_lookup_args[idx]));
+        }
+    }
+
+    return collect_make<CppNewExpr>(
+        allocated_type,
+        result_type,
+        std::move(placement_args),
+        std::move(initializer),
+        std::move(constructor_args),
+        std::move(selected_allocator_sym),
+        std::move(selected_deallocator_sym),
+        std::move(selected_ctor_sym),
+        is_array_form,
+        is_global_allocation,
+        is_list_init,
+        loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_cpp_delete_expression(
+    std::unique_ptr<Expr> operand,
+    bool is_array_form,
+    bool is_global_delete,
+    SrcLoc loc) const {
+    if (!operand) {
+        report_error("delete-expression requires an operand", loc);
+        return collect_error_expression("delete-expression requires an operand", loc);
+    }
+
+    operand = collect_apply_standard_conversions(
+        std::move(operand),
+        ExprUseContext::RValue);
+
+    QualType destroyed_type = nullptr;
+    auto operand_type = operand ? desugar_type(remove_reference(operand->get_type()))
+                                : QualType();
+    auto pointer_type = operand_type.as_shared<PointerType>();
+    if (!pointer_type) {
+        if (operand && is_null_pointer_constant_expr(operand.get())) {
+            QualType void_ptr(std::make_shared<PointerType>(QualType(get_builtin_void())));
+            operand = cast_if_needed(std::move(operand), void_ptr);
+            pointer_type = desugar_type(remove_reference(
+                operand ? operand->get_type() : QualType())).as_shared<PointerType>();
+        }
+    }
+    if (!pointer_type) {
+        report_error("delete-expression requires a pointer operand", loc);
+        return collect_error_expression("delete-expression requires a pointer operand", loc);
+    }
+    destroyed_type = remove_reference(pointer_type->pointed_type);
+    QualType canonical_destroyed = desugar_type(destroyed_type);
+    auto destroyed_kind = canonical_type_kind(canonical_destroyed);
+
+    if (!canonical_destroyed || destroyed_kind == TypeKind::Function ||
+        destroyed_kind == TypeKind::Reference) {
+        report_error("delete-expression requires a pointer to object type", loc);
+        return collect_error_expression(
+            "delete-expression requires a pointer to object type",
+            loc);
+    }
+
+    if (canonical_destroyed->isVoid()) {
+        report_warning("deleting 'void *' is undefined", loc);
+    } else if (canonical_destroyed->isIncomplete()) {
+        report_warning(
+            "delete-expression has pointer to incomplete type '" +
+                canonical_destroyed.to_string() + "'",
+            loc);
+    }
+
+    auto destroyed_record = canonical_destroyed.as_shared<ObjectType>();
+    const ObjectDecl* destroyed_record_decl =
+        destroyed_record ? dyn_cast<ObjectDecl>(destroyed_record->get_decl()) : nullptr;
+    const RecordSemanticState* destroyed_record_state =
+        destroyed_record_decl ? record_semantics_cache_lookup(destroyed_record_decl)
+                              : nullptr;
+
+    std::shared_ptr<Symbol> selected_destructor_sym = nullptr;
+    CppDeleteExpr::DestructionKind destruction_kind =
+        CppDeleteExpr::DestructionKind::None;
+    if (destroyed_record &&
+        destroyed_record_state &&
+        !destroyed_record_state->destructors.empty()) {
+        auto describe_destructor = [](const RecordSemanticState::Destructor& dtor) {
+            std::string description = dtor.name + "()";
+            if (dtor.is_deleted) {
+                description += " = delete";
+            }
+            if (dtor.declared_access != RecordMemberAccess::Public) {
+                description += " [not accessible]";
+            }
+            return description;
+        };
+        auto describe_destructor_candidates =
+            [&](const std::vector<size_t>& indices) {
+                std::string out;
+                size_t emitted = 0;
+                for (size_t idx : indices) {
+                    if (idx >= destroyed_record_state->destructors.size()) {
+                        continue;
+                    }
+                    if (!out.empty()) {
+                        out += ", ";
+                    }
+                    out += describe_destructor(destroyed_record_state->destructors[idx]);
+                    ++emitted;
+                    if (emitted == 4 && indices.size() > emitted) {
+                        out += ", ...";
+                        break;
+                    }
+                }
+                return out;
+            };
+
+        std::vector<size_t> viable_indices;
+        viable_indices.reserve(destroyed_record_state->destructors.size());
+        for (size_t idx = 0; idx < destroyed_record_state->destructors.size(); ++idx) {
+            const auto& dtor = destroyed_record_state->destructors[idx];
+            if (!cpp_destructor_is_viable_candidate(dtor, false)) {
+                continue;
+            }
+            viable_indices.push_back(idx);
+        }
+
+        if (viable_indices.empty()) {
+            std::vector<size_t> all_indices;
+            all_indices.reserve(destroyed_record_state->destructors.size());
+            for (size_t idx = 0; idx < destroyed_record_state->destructors.size(); ++idx) {
+                all_indices.push_back(idx);
+            }
+            std::string candidates = describe_destructor_candidates(all_indices);
+            report_error(
+                "no viable destructor for type '" +
+                    canonical_destroyed.to_string() + "'" +
+                    (candidates.empty() ? "" : "; candidate destructors: " + candidates),
+                loc);
+            return collect_error_expression("no viable destructor", loc);
+        }
+        const auto& selected_destructor =
+            destroyed_record_state->destructors[viable_indices.front()];
+        selected_destructor_sym = selected_destructor.symbol;
+        destruction_kind = selected_destructor.is_virtual
+            ? CppDeleteExpr::DestructionKind::Virtual
+            : CppDeleteExpr::DestructionKind::Direct;
+    } else if (!is_array_form && destroyed_record) {
+        destruction_kind = CppDeleteExpr::DestructionKind::Direct;
+    }
+
+    if (is_array_form &&
+        destroyed_record_state &&
+        destroyed_record_state->definition_data.has_user_declared_destructor) {
+        report_error(
+            "delete[] for class types with user-declared destructor is not supported yet",
+            loc);
+        return collect_error_expression("delete[] class-object destruction not supported yet", loc);
+    }
+
+    std::string deallocator_name = is_array_form ? "operatordelete[]" : "operatordelete";
+    std::vector<std::unique_ptr<Expr>> deallocator_call_args;
+    deallocator_call_args.push_back(
+        collect_integer_literal("0", get_builtin_int(), loc));
+    std::shared_ptr<Symbol> selected_deallocator_sym = nullptr;
+    if (auto dealloc_error = select_cpp_allocation_like_function(
+            deallocator_name,
+            destroyed_record,
+            is_global_delete,
+            deallocator_call_args,
+            loc,
+            selected_deallocator_sym)) {
+        return dealloc_error;
+    }
+
+    return collect_make<CppDeleteExpr>(
+        std::move(operand),
+        QualType(get_builtin_void()),
+        destroyed_type,
+        std::move(selected_deallocator_sym),
+        std::move(selected_destructor_sym),
+        destruction_kind,
+        is_array_form,
+        is_global_delete,
+        loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_cpp_typeid_type(QualType type_operand,
+                                                       SrcLoc loc) const {
+    if (!type_operand) {
+        report_error("typeid requires a valid type operand", loc);
+        return collect_error_expression("typeid requires a valid type operand", loc);
+    }
+    // `typeid(T)` is another semantic-demand site for template-id types, so it
+    // must instantiate supported class specializations before RTTI/codegen.
+    if (contains_deferred_semantic_type(type_operand.get_shared())) {
+        type_operand = finalize_deferred_semantic_type(type_operand, loc);
+    }
+
+    auto void_ty = ast_ctx_ && ast_ctx_->type_ctx
+        ? ast_ctx_->type_ctx->get_builtin(BuiltinTypes::Void)
+        : nullptr;
+    if (!void_ty) {
+        report_error("typeid requires builtin void type support", loc);
+        return collect_error_expression("typeid requires builtin void type support", loc);
+    }
+
+    QualType result_type(std::make_shared<PointerType>(QualType(void_ty, QUAL_CONST)));
+    return collect_make<CppTypeIdExpr>(type_operand, result_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_cpp_typeid_expression(std::unique_ptr<Expr> expr_operand,
+                                                             SrcLoc loc) const {
+    if (!expr_operand) {
+        report_error("typeid requires a valid expression operand", loc);
+        return collect_error_expression("typeid requires a valid expression operand", loc);
+    }
+    QualType operand_type = expr_operand->get_type();
+    if (!operand_type) {
+        report_error("typeid operand has unknown type", loc);
+        return collect_error_expression("typeid operand has unknown type", loc);
+    }
+    if (contains_deferred_semantic_type(operand_type.get_shared())) {
+        operand_type = finalize_deferred_semantic_type(operand_type, loc);
+        if (!operand_type) {
+            report_error("typeid operand has unknown type", loc);
+            return collect_error_expression("typeid operand has unknown type", loc);
+        }
+    }
+
+    auto void_ty = ast_ctx_ && ast_ctx_->type_ctx
+        ? ast_ctx_->type_ctx->get_builtin(BuiltinTypes::Void)
+        : nullptr;
+    if (!void_ty) {
+        report_error("typeid requires builtin void type support", loc);
+        return collect_error_expression("typeid requires builtin void type support", loc);
+    }
+
+    QualType result_type(std::make_shared<PointerType>(QualType(void_ty, QUAL_CONST)));
+    return collect_make<CppTypeIdExpr>(std::move(expr_operand), result_type, loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_sizeof_type(QualType type, SrcLoc loc) const {
+
+    auto node = collect_make<SizeOfExpr>(type, loc);
+    finalize_sizeof_node(node.get(), type.get_shared(), loc);
+    return node;
+}
+
+std::unique_ptr<Expr> Collect::collect_sizeof_pack_expression(
+    std::string pack_name,
+    const TemplateParameterDecl* parameter_pack,
+    SrcLoc loc) const {
+    if (!parameter_pack || !parameter_pack->is_parameter_pack) {
+        report_error("sizeof... requires a template parameter pack", loc);
+        return collect_error_expression("invalid sizeof... operand", loc);
+    }
+
+    auto node =
+        collect_make<SizeOfPackExpr>(std::move(pack_name), parameter_pack, loc);
+    auto size_t_type = get_builtin_ulong();
+    node->result_type =
+        size_t_type ? QualType(size_t_type) : QualType(get_builtin_int());
+    return node;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_sizeof_expression(std::unique_ptr<Expr> expr, SrcLoc loc) const {
+
+    expr = prepare_unevaluated_operand(std::move(expr), "sizeof");
+    std::shared_ptr<CType> target_type = nullptr;
+    if (expr) {
+        target_type = expr->get_type().get_shared();
+    }
+    auto node = collect_make<SizeOfExpr>(std::move(expr), loc);
+    finalize_sizeof_node(node.get(), target_type, loc);
+    return node;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_alignof_type(QualType type, SrcLoc loc) const {
+
+    auto node = collect_make<AlignOfExpr>(type.get_shared(), loc);
+    finalize_alignof_node(node.get(), type.get_shared(), loc);
+    return node;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_alignof_expression(std::unique_ptr<Expr> expr, SrcLoc loc) const {
+
+    expr = prepare_unevaluated_operand(std::move(expr), "_Alignof");
+    std::shared_ptr<CType> target_type = nullptr;
+    if (expr) {
+        target_type = expr->get_type().get_shared();
+    }
+    auto node = collect_make<AlignOfExpr>(std::move(expr), loc);
+    node->type_operand = QualType(target_type);
+    finalize_alignof_node(node.get(), target_type, loc);
+    return node;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::unique_ptr<Expr> expr, SrcLoc loc) const {
+
+    if (lang_opts_.is_cxx_mode() &&
+        expr &&
+        type_can_participate_in_cpp_operator_overload(
+            expr->get_type(),
+            ast_ctx_.get())) {
+        std::string_view op_suffix = unary_operator_function_suffix(uop);
+        if (!op_suffix.empty()) {
+            std::string op_name = "operator";
+            op_name += op_suffix;
+
+            bool had_member_match = false;
+            bool saw_private_method = false;
+            bool saw_protected_method = false;
+            std::vector<OverloadCallCandidate> overload_candidates;
+
+            auto operand_record =
+                remove_reference_and_desugar(
+                    expr->get_type(),
+                    ast_ctx_.get())
+                    .as_shared<ObjectType>();
+            if (auto candidate_error = append_member_overload_candidates(
+                    operand_record.get(),
+                    op_name,
+                    expr.get(),
+                    OverloadImplicitObjectArgKind::Regular,
+                    overload_candidates,
+                    had_member_match,
+                    saw_private_method,
+                    saw_protected_method,
+                    loc)) {
+                return candidate_error;
+            }
+            append_unqualified_overload_candidates(
+                op_name,
+                OverloadImplicitObjectArgKind::Regular,
+                overload_candidates);
+
+            if (overload_candidates.empty() && had_member_match) {
+                if (auto inaccessible_error = report_inaccessible_member(
+                        op_name,
+                        saw_private_method,
+                        saw_protected_method,
+                        loc)) {
+                    return inaccessible_error;
+                }
+            } else {
+                std::vector<std::unique_ptr<Expr>> explicit_args;
+                if (unary_operator_is_postfix_incdec(uop)) {
+                    explicit_args.push_back(
+                        collect_integer_literal("0", get_builtin_int(), loc));
+                }
+
+                std::shared_ptr<Symbol> selected_symbol = nullptr;
+                OverloadImplicitObjectArgKind selected_implicit_object_arg_kind =
+                    OverloadImplicitObjectArgKind::None;
+                if (auto overload_error = select_overload_candidate(
+                        op_name,
+                        overload_candidates,
+                        explicit_args,
+                        expr.get(),
+                        loc,
+                        selected_symbol,
+                        selected_implicit_object_arg_kind)) {
+                    return overload_error;
+                }
+
+                if (selected_symbol) {
+                    auto implicit_object_arg =
+                        build_overload_implicit_object_arg(
+                            selected_implicit_object_arg_kind,
+                            std::move(expr),
+                            /*object_expr_is_pointer=*/false,
+                            loc);
+
+                    if (selected_implicit_object_arg_kind !=
+                            OverloadImplicitObjectArgKind::None &&
+                        implicit_object_arg) {
+                        explicit_args.insert(
+                            explicit_args.begin(), std::move(implicit_object_arg));
+                    }
+
+                    auto callee_expr = make_hidden_overload_callee(
+                        std::move(selected_symbol), loc);
+                    return collect_function_call(
+                        std::move(callee_expr), std::move(explicit_args), loc);
+                }
+            }
+        }
+    }
+
+    bool is_incdec = (uop == UnaryOpTypes::INCREMENT_PREFIX ||
+        uop == UnaryOpTypes::DECREMENT_PREFIX ||
+        uop == UnaryOpTypes::INCREMENT_POSTFIX ||
+        uop == UnaryOpTypes::DECREMENT_POSTFIX);
+
+    if (uop == UnaryOpTypes::REAL_PART || uop == UnaryOpTypes::IMAG_PART) {
+        auto exp_type = expr ? expr->get_type() : QualType();
+        if (!exp_type || !exp_type->isComplex()) {
+            expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
+        }
+    } else if (uop != UnaryOpTypes::ADDRESS_OF && !is_incdec) {
+        expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
+    }
+
+    auto node = collect_make<UnaryOperation>(uop, std::move(expr), loc);
+    auto exp_type = node->exp ? node->exp->get_type() : QualType();
+    if (!exp_type) {
+        return node;
+    }
+
+    if (lang_opts_.is_cxx_mode() &&
+        type_depends_on_template_parameters(exp_type, ast_ctx_.get())) {
+        QualType dependent_result_type(
+            std::make_shared<AutoType>(AutoTypeFlavor::TemplateNonType));
+        return collect_make<DependentUnaryExpr>(
+            uop,
+            std::move(node->exp),
+            dependent_result_type,
+            loc);
+    }
+
+    switch (uop) {
+        case UnaryOpTypes::ADDRESS_OF: {
+            auto* raw = strip_implicit_casts(node->exp.get());
+            bool is_lvalue_operand = raw && raw->isLValue();
+            if (lang_opts_.is_cxx_mode() && raw) {
+                is_lvalue_operand =
+                    classify_value_category(raw) == ValueCategory::LValue;
+            }
+            if (!raw ||
+                (!is_lvalue_operand &&
+                 !(raw->get_type() &&
+                   canonical_type_kind(raw->get_type()) == TypeKind::Function))) {
+                report_error("cannot take address of non-lvalue expression", loc);
+            }
+            if (auto* member = dyn_cast<MemberExpr>(raw)) {
+                if (member->is_bitfield) {
+                    report_error("cannot take address of bit-field", loc);
+                }
+            }
+            node->ctype =
+                QualType(std::make_shared<PointerType>(remove_reference(exp_type)));
+            break;
+        }
+        case UnaryOpTypes::DEREFERENCE: {
+            auto ptr_type = desugar_type(exp_type).as_shared<PointerType>();
+            if (ptr_type) {
+                // Keep spelled pointee type when available so typedef sugar
+                // survives lvalue uses, but still allow typedef-wrapped pointers.
+                if (auto spelled_ptr = exp_type.as_shared<PointerType>()) {
+                    node->ctype = spelled_ptr->pointed_type;
+                } else {
+                    node->ctype = ptr_type->pointed_type;
+                }
+            } else {
+                report_error("dereferencing non-pointer type", loc);
+            }
+            break;
+        }
+        case UnaryOpTypes::LOGICAL_NOT:
+            if (!exp_type->isScalar()) {
+                report_error("logical not requires scalar operand", loc);
+            }
+            node->ctype = QualType(get_builtin_int());
+            break;
+        case UnaryOpTypes::NEG:
+        case UnaryOpTypes::POSITIVE:
+            if (!exp_type->isArithmetic()) {
+                report_error("invalid argument type to unary expression", loc);
+            }
+            if (exp_type->isInteger()) {
+                node->ctype = integer_promotion_type(exp_type);
+            } else {
+                node->ctype = exp_type;
+            }
+            break;
+        case UnaryOpTypes::BITWISE_NOT:
+            if (exp_type->isComplex()) {
+                node->ctype = exp_type;
+                break;
+            }
+            if (!exp_type->isInteger()) {
+                report_error("invalid argument type to unary expression", loc);
+            }
+            node->ctype = integer_promotion_type(exp_type);
+            break;
+        case UnaryOpTypes::INCREMENT_PREFIX:
+        case UnaryOpTypes::DECREMENT_PREFIX:
+        case UnaryOpTypes::INCREMENT_POSTFIX:
+        case UnaryOpTypes::DECREMENT_POSTFIX:
+            if (!is_modifiable_lvalue(node->exp.get())) {
+                if (is_const_qualified_lvalue(node->exp.get())) {
+                    report_error("cannot assign to variable of type '" + exp_type.to_string() + "'", loc);
+                } else {
+                    report_error("expression is not assignable", loc);
+                }
+            }
+            if (!(exp_type->isArithmetic() ||
+                  canonical_type_kind(exp_type) == TypeKind::Pointer)) {
+                report_error("invalid argument type for increment/decrement", loc);
+            }
+            node->ctype = exp_type;
+            break;
+        case UnaryOpTypes::REAL_PART:
+        case UnaryOpTypes::IMAG_PART: {
+            auto complex_type = exp_type.as_shared<ComplexType>();
+            if (complex_type) {
+                node->ctype = QualType(complex_type->element_type);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    return node;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lhs, std::unique_ptr<Expr> rhs, BinOpTypes bop, SrcLoc loc) const {
+
+    if (bop == BinOpTypes::MEMBER_PTR_DOT ||
+        bop == BinOpTypes::MEMBER_PTR_ARROW) {
+        return collect_member_pointer_access_expression(
+            std::move(lhs),
+            std::move(rhs),
+            bop == BinOpTypes::MEMBER_PTR_ARROW,
+            loc);
+    }
+
+    if (lang_opts_.is_cxx_mode() &&
+        (expression_depends_on_template_parameters(lhs.get()) ||
+         expression_depends_on_template_parameters(rhs.get()))) {
+        QualType dependent_result_type(
+            std::make_shared<AutoType>(AutoTypeFlavor::TemplateNonType));
+        return collect_make<DependentBinaryExpr>(
+            std::move(lhs),
+            std::move(rhs),
+            bop,
+            dependent_result_type,
+            loc);
+    }
+
+    // In C++, user-defined operators get first chance before built-in operator
+    // typing/conversion rules.
+    if (auto overloaded =
+            try_cpp_binary_operator_overload(lhs, rhs, bop, loc)) {
+        return overloaded;
+    }
+
+    if (bop == BinOpTypes::ASSIGN) {
+        rhs = collect_apply_standard_conversions(std::move(rhs), ExprUseContext::RValue);
+    } else {
+        lhs = collect_apply_standard_conversions(std::move(lhs), ExprUseContext::RValue);
+        if (!(lang_opts_.is_cxx_mode() && bop == BinOpTypes::COMMA)) {
+            rhs = collect_apply_standard_conversions(std::move(rhs), ExprUseContext::RValue);
+        }
+    }
+    auto node = make_ast<BinaryOperation>(*ast_ctx_, std::move(lhs), std::move(rhs), bop);
+    node->location = loc;
+    auto lhs_ty = node->left ? node->left->get_type() : QualType();
+    auto rhs_ty = node->right ? node->right->get_type() : QualType();
+    auto lhs_kind = canonical_type_kind(lhs_ty);
+    auto rhs_kind = canonical_type_kind(rhs_ty);
+    auto refresh_types = [&]() {
+        lhs_ty = node->left ? node->left->get_type() : QualType();
+        rhs_ty = node->right ? node->right->get_type() : QualType();
+        lhs_kind = canonical_type_kind(lhs_ty);
+        rhs_kind = canonical_type_kind(rhs_ty);
+    };
+    // Coerce both operands to a common arithmetic type via the usual
+    // arithmetic conversions (C11 6.3.1.8).  Handles vector-scalar promotion:
+    // when one operand is a vector and the other a scalar, the scalar is
+    // broadcast to the vector type rather than forcing scalar promotion.
+    auto ensure_arithmetic_common = [&]() -> QualType {
+        if (lhs_ty && rhs_ty) {
+            bool lhs_vector = lhs_kind == TypeKind::Vector;
+            bool rhs_vector = rhs_kind == TypeKind::Vector;
+            if (lhs_vector ^ rhs_vector) {
+                // For vector-scalar arithmetic, broadcast/coerce the scalar to
+                // the vector element domain instead of forcing scalar result type.
+                QualType vector_type = lhs_vector ? lhs_ty : rhs_ty;
+                QualType scalar_type = lhs_vector ? rhs_ty : lhs_ty;
+                if (scalar_type && scalar_type->isArithmetic()) {
+                    if (lhs_vector) {
+                        node->right = cast_if_needed(std::move(node->right), vector_type);
+                    } else {
+                        node->left = cast_if_needed(std::move(node->left), vector_type);
+                    }
+                    refresh_types();
+                    return vector_type;
+                }
+            }
+        }
+        auto common = usual_arithmetic_conversion_type(lhs_ty, rhs_ty);
+        if (!common) {
+            return QualType();
+        }
+        node->left = cast_if_needed(std::move(node->left), common);
+        node->right = cast_if_needed(std::move(node->right), common);
+        refresh_types();
+        return common;
+    };
+    // Comparison result type: vector comparisons produce a vector of the
+    // same width; scalar comparisons produce int.
+    auto comparison_result_type = [&]() -> QualType {
+        if (lhs_kind == TypeKind::Vector) {
+            return lhs_ty;
+        }
+        if (rhs_kind == TypeKind::Vector) {
+            return rhs_ty;
+        }
+        return QualType(get_builtin_int());
+    };
+
+    switch (bop) {
+        // --- Assignment ---
+        case BinOpTypes::ASSIGN: {
+            QualType lhs_assignment_type = lhs_ty;
+            if (lhs_kind == TypeKind::Reference) {
+                lhs_assignment_type = remove_reference(lhs_ty);
+            }
+            auto lhs_assignment_kind = canonical_type_kind(lhs_assignment_type);
+
+            if (!is_modifiable_lvalue(node->left.get())) {
+                if (is_const_qualified_lvalue(node->left.get())) {
+                    report_error("cannot assign to variable of type '" + lhs_ty.to_string() + "'", loc);
+                } else {
+                    report_error("expression is not assignable", loc);
+                }
+            }
+            if (lhs_ty && rhs_ty &&
+                lhs_assignment_kind == TypeKind::MemberPointer &&
+                rhs_kind == TypeKind::MemberPointer) {
+                if (!member_pointer_convertible_to(rhs_ty, lhs_assignment_type)) {
+                    report_error("incompatible member pointer types in assignment ('" +
+                        lhs_assignment_type.to_string() + "' from '" + rhs_ty.to_string() + "')",
+                        loc);
+                }
+            } else if (lhs_ty && rhs_ty &&
+                lhs_assignment_kind == TypeKind::MemberPointer &&
+                rhs_ty->isInteger()) {
+                if (!is_null_pointer_constant_expr(node->right.get())) {
+                    report_error("incompatible integer to member pointer conversion in assignment",
+                                 loc);
+                }
+            } else if (lhs_ty && rhs_ty &&
+                lhs_assignment_kind == TypeKind::Pointer &&
+                rhs_kind == TypeKind::Pointer) {
+                auto lhs_ptr = desugar_type(lhs_assignment_type).as_shared<PointerType>();
+                auto rhs_ptr = desugar_type(rhs_ty).as_shared<PointerType>();
+                bool lhs_void = lhs_ptr && lhs_ptr->pointed_type && lhs_ptr->pointed_type->isVoid();
+                bool rhs_void = rhs_ptr && rhs_ptr->pointed_type && rhs_ptr->pointed_type->isVoid();
+                if (!lhs_void && !rhs_void && !pointers_to_compatible_types(lhs_assignment_type, rhs_ty)) {
+                    report_warning("incompatible pointer types in assignment ('" +
+                        lhs_assignment_type.to_string() + "' from '" + rhs_ty.to_string() + "')", loc);
+                }
+            } else if (lhs_ty && rhs_ty &&
+                lhs_assignment_kind == TypeKind::Pointer &&
+                rhs_ty->isInteger()) {
+                if (!is_null_pointer_constant_expr(node->right.get())) {
+                    if (lang_opts_.implicit_int) {
+                        report_warning("incompatible integer to pointer conversion in assignment", loc);
+                    } else {
+                        report_error("incompatible integer to pointer conversion in assignment", loc);
+                    }
+                }
+            } else if (lhs_ty && rhs_ty &&
+                lhs_assignment_kind == TypeKind::BlockPointer &&
+                rhs_ty->isInteger()) {
+                if (!is_null_pointer_constant_expr(node->right.get())) {
+                    if (lang_opts_.implicit_int) {
+                        report_warning("incompatible integer to block pointer conversion in assignment", loc);
+                    } else {
+                        report_error("incompatible integer to block pointer conversion in assignment", loc);
+                    }
+                }
+            } else if (lhs_ty && rhs_ty &&
+                lhs_assignment_type && lhs_assignment_type->isInteger() &&
+                (rhs_kind == TypeKind::Pointer ||
+                 rhs_kind == TypeKind::BlockPointer)) {
+                // Preserve historical C-extension behavior for implicit-int mode:
+                // downgrade pointer->integer assignment diagnostics to warnings.
+                bool lhs_is_bool = false;
+                if (auto lhs_builtin = lhs_assignment_type.as_shared<BuiltinType>()) {
+                    lhs_is_bool = lhs_builtin->builtin_kind == BuiltinTypes::Bool;
+                }
+                if (!lhs_is_bool) {
+                    if (lang_opts_.implicit_int) {
+                        report_warning("incompatible pointer to integer conversion in assignment", loc);
+                    } else {
+                        report_error("incompatible pointer to integer conversion in assignment", loc);
+                    }
+                }
+            }
+            node->right = cast_if_needed(std::move(node->right), lhs_assignment_type);
+            node->ctype = lhs_assignment_type ? lhs_assignment_type : rhs_ty;
+            break;
+        }
+        // --- Logical operators ---
+        case BinOpTypes::LOGICAL_AND:
+        case BinOpTypes::LOGICAL_OR: {
+            if ((lhs_ty && !lhs_ty->isScalar()) || (rhs_ty && !rhs_ty->isScalar())) {
+                report_error("logical operator requires scalar operands", loc);
+            }
+            node->ctype = QualType(get_builtin_int());
+            break;
+        }
+        // --- Comparisons (equality + relational) ---
+        // Handles: pointer comparison, nullptr adaptation, member-pointer
+        // comparison, mixed pointer-integer, and arithmetic comparison.
+        // "Ordered" comparisons (<, <=, >, >=) have stricter type rules than
+        // equality (==, !=) — e.g., nullptr ordered comparison is invalid.
+        case BinOpTypes::EQUAL:
+        case BinOpTypes::NOT_EQUAL:
+        case BinOpTypes::LESS_THAN:
+        case BinOpTypes::LESS_EQUAL_THAN:
+        case BinOpTypes::GREATER_THAN:
+        case BinOpTypes::GREATER_EQUAL_THAN: {
+            bool ordered = (bop == BinOpTypes::LESS_THAN ||
+                bop == BinOpTypes::LESS_EQUAL_THAN ||
+                bop == BinOpTypes::GREATER_THAN ||
+                bop == BinOpTypes::GREATER_EQUAL_THAN);
+            bool lhs_nullptr = is_nullptr_type(lhs_ty, ast_ctx_.get());
+            bool rhs_nullptr = is_nullptr_type(rhs_ty, ast_ctx_.get());
+            if ((lhs_ty && lhs_ty->isComplex()) || (rhs_ty && rhs_ty->isComplex())) {
+                if (ordered) {
+                    report_error("invalid operands to binary expression (have '" +
+                        lhs_ty.to_string() + "' and '" + rhs_ty.to_string() + "')", loc);
+                } else {
+                    auto common = ensure_arithmetic_common();
+                    if (!common) {
+                        report_error("invalid operands to binary expression", loc);
+                    }
+                }
+                node->ctype = comparison_result_type();
+                break;
+            }
+            if (lhs_ty && rhs_ty && (lhs_nullptr || rhs_nullptr)) {
+                if (ordered) {
+                    report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                    node->ctype = comparison_result_type();
+                    break;
+                }
+
+                // Adapt a nullptr_t operand for comparison with a pointer,
+                // member pointer, or integer null constant on the other side.
+                // Returns true if adaptation succeeded, false if the types
+                // are incompatible.
+                auto adapt_nullptr_operand = [&](bool lhs_is_nullptr) {
+                    auto& nullptr_operand =
+                        lhs_is_nullptr ? node->left : node->right;
+                    auto& other_operand =
+                        lhs_is_nullptr ? node->right : node->left;
+                    QualType nullptr_type = lhs_is_nullptr ? lhs_ty : rhs_ty;
+                    QualType other_type = lhs_is_nullptr ? rhs_ty : lhs_ty;
+                    auto other_kind = lhs_is_nullptr ? rhs_kind : lhs_kind;
+
+                    if (other_kind == TypeKind::Pointer ||
+                        other_kind == TypeKind::MemberPointer ||
+                        other_kind == TypeKind::BlockPointer) {
+                        nullptr_operand =
+                            cast_if_needed(std::move(nullptr_operand), other_type);
+                        return true;
+                    }
+                    if (other_type && other_type->isInteger() &&
+                        is_null_pointer_constant_expr(other_operand.get())) {
+                        other_operand =
+                            cast_if_needed(std::move(other_operand), nullptr_type);
+                        return true;
+                    }
+                    return false;
+                };
+
+                if (!(lhs_nullptr && rhs_nullptr) &&
+                    !adapt_nullptr_operand(lhs_nullptr)) {
+                    report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                }
+                node->ctype = comparison_result_type();
+                break;
+            }
+            if (lhs_ty && rhs_ty &&
+                lhs_kind == TypeKind::MemberPointer &&
+                rhs_kind == TypeKind::MemberPointer) {
+                if (ordered) {
+                    report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                    node->ctype = comparison_result_type();
+                    break;
+                }
+                auto rhs_to_lhs = analyze_member_pointer_conversion(rhs_ty, lhs_ty);
+                auto lhs_to_rhs = analyze_member_pointer_conversion(lhs_ty, rhs_ty);
+                if (!rhs_to_lhs.viable && !lhs_to_rhs.viable) {
+                    report_warning("comparison of distinct member pointer types", loc);
+                }
+                if (!lhs_ty->equals(*rhs_ty.get_shared())) {
+                    if (rhs_to_lhs.viable) {
+                        node->right = cast_if_needed(std::move(node->right), lhs_ty);
+                    } else if (lhs_to_rhs.viable) {
+                        node->left = cast_if_needed(std::move(node->left), rhs_ty);
+                    }
+                }
+                node->ctype = comparison_result_type();
+                break;
+            }
+            if (lhs_ty && rhs_ty &&
+                ((lhs_kind == TypeKind::MemberPointer && rhs_ty->isInteger()) ||
+                 (rhs_kind == TypeKind::MemberPointer && lhs_ty->isInteger()))) {
+                if (ordered) {
+                    report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                    node->ctype = comparison_result_type();
+                    break;
+                }
+                if (lhs_kind == TypeKind::MemberPointer) {
+                    if (!is_null_pointer_constant_expr(node->right.get())) {
+                        report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                    }
+                    node->right = cast_if_needed(std::move(node->right), lhs_ty);
+                } else {
+                    if (!is_null_pointer_constant_expr(node->left.get())) {
+                        report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                    }
+                    node->left = cast_if_needed(std::move(node->left), rhs_ty);
+                }
+                node->ctype = comparison_result_type();
+                break;
+            }
+            if (lhs_ty && rhs_ty &&
+                lhs_kind == TypeKind::BlockPointer &&
+                rhs_kind == TypeKind::BlockPointer) {
+                if (ordered) {
+                    report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                    node->ctype = comparison_result_type();
+                    break;
+                }
+                if (!lhs_ty->equals(*rhs_ty.get_shared())) {
+                    report_warning("comparison of distinct block pointer types", loc);
+                    node->right = cast_if_needed(std::move(node->right), lhs_ty);
+                }
+                node->ctype = comparison_result_type();
+                break;
+            }
+            if (lhs_ty && rhs_ty &&
+                ((lhs_kind == TypeKind::BlockPointer && rhs_ty->isInteger()) ||
+                 (rhs_kind == TypeKind::BlockPointer && lhs_ty->isInteger()))) {
+                if (ordered) {
+                    report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                    node->ctype = comparison_result_type();
+                    break;
+                }
+                if (lhs_kind == TypeKind::BlockPointer) {
+                    if (!is_null_pointer_constant_expr(node->right.get())) {
+                        report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                    }
+                    node->right = cast_if_needed(std::move(node->right), lhs_ty);
+                } else {
+                    if (!is_null_pointer_constant_expr(node->left.get())) {
+                        report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                    }
+                    node->left = cast_if_needed(std::move(node->left), rhs_ty);
+                }
+                node->ctype = comparison_result_type();
+                break;
+            }
+            if (lhs_ty && rhs_ty &&
+                lhs_kind == TypeKind::Pointer &&
+                rhs_kind == TypeKind::Pointer) {
+                auto lhs_ptr = desugar_type(lhs_ty).as_shared<PointerType>();
+                auto rhs_ptr = desugar_type(rhs_ty).as_shared<PointerType>();
+                bool lhs_void = lhs_ptr && lhs_ptr->pointed_type && lhs_ptr->pointed_type->isVoid();
+                bool rhs_void = rhs_ptr && rhs_ptr->pointed_type && rhs_ptr->pointed_type->isVoid();
+                if (!lhs_void && !rhs_void && !pointers_to_compatible_types(lhs_ty, rhs_ty)) {
+                    report_warning("comparison of distinct pointer types", loc);
+                }
+                if (!lhs_ty->equals(*rhs_ty.get_shared())) {
+                    node->right = collect_make<ImplicitCast>(
+                        ImplicitCastTypes::RAW_CAST, std::move(node->right), lhs_ty);
+                }
+                node->ctype = comparison_result_type();
+                break;
+            }
+            if (lhs_ty && rhs_ty &&
+                ((lhs_kind == TypeKind::Pointer && rhs_ty->isInteger()) ||
+                    (rhs_kind == TypeKind::Pointer && lhs_ty->isInteger()))) {
+                if (ordered) {
+                    report_warning("ordered comparison between pointer and integer", loc);
+                }
+                if (lhs_ty->isInteger()) {
+                    node->left = cast_if_needed(std::move(node->left), rhs_ty);
+                } else {
+                    node->right = cast_if_needed(std::move(node->right), lhs_ty);
+                }
+                node->ctype = comparison_result_type();
+                break;
+            }
+            if ((lhs_ty && !lhs_ty->isArithmetic()) || (rhs_ty && !rhs_ty->isArithmetic())) {
+                report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+            } else {
+                auto common = ensure_arithmetic_common();
+                if (!common) {
+                    report_error("invalid operands to binary expression", loc);
+                }
+            }
+            node->ctype = comparison_result_type();
+            break;
+        }
+        // --- Comma ---
+        case BinOpTypes::COMMA:
+            node->ctype = rhs_ty ? rhs_ty : lhs_ty;
+            break;
+        // --- Shift operators ---
+        case BinOpTypes::SHIFT_LEFT:
+        case BinOpTypes::SHIFT_RIGHT: {
+            if ((lhs_ty && !lhs_ty->isInteger()) || (rhs_ty && !rhs_ty->isInteger())) {
+                report_invalid_binary_operands("binary shift", lhs_ty, rhs_ty, loc);
+            }
+            bool lhs_vector = lhs_kind == TypeKind::Vector;
+            bool rhs_vector = rhs_kind == TypeKind::Vector;
+            if (lhs_vector || rhs_vector) {
+                auto common = ensure_arithmetic_common();
+                node->ctype = common ? common : (lhs_vector ? lhs_ty : rhs_ty);
+                break;
+            }
+            auto lhs_promoted = integer_promotion_type(lhs_ty);
+            auto rhs_promoted = integer_promotion_type(rhs_ty);
+            node->left = cast_if_needed(std::move(node->left), lhs_promoted);
+            node->right = cast_if_needed(std::move(node->right), rhs_promoted);
+            node->ctype = lhs_promoted ? lhs_promoted : QualType(get_builtin_int());
+            break;
+        }
+        // --- Additive operators (pointer arithmetic + arithmetic) ---
+        case BinOpTypes::ADD:
+        case BinOpTypes::SUB: {
+            bool lhs_ptr = lhs_kind == TypeKind::Pointer;
+            bool rhs_ptr = rhs_kind == TypeKind::Pointer;
+            if (lhs_ptr && rhs_ty && rhs_ty->isInteger()) {
+                node->ctype = lhs_ty;
+                break;
+            }
+            if (bop == BinOpTypes::ADD && rhs_ptr && lhs_ty && lhs_ty->isInteger()) {
+                node->ctype = rhs_ty;
+                break;
+            }
+            if (bop == BinOpTypes::SUB && lhs_ptr && rhs_ptr) {
+                if (!pointers_to_compatible_types(lhs_ty, rhs_ty)) {
+                    report_error("pointer subtraction with different types", loc);
+                }
+                node->ctype = QualType(get_builtin_long());
+                break;
+            }
+            if ((lhs_ptr || rhs_ptr) && !(lhs_ptr && rhs_ptr && bop == BinOpTypes::SUB)) {
+                report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                node->ctype = lhs_ptr ? lhs_ty : rhs_ty;
+                break;
+            }
+            if ((lhs_ty && !lhs_ty->isArithmetic()) || (rhs_ty && !rhs_ty->isArithmetic())) {
+                report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                node->ctype = QualType(get_builtin_int());
+                break;
+            }
+            auto common = ensure_arithmetic_common();
+            node->ctype = common ? common : QualType(get_builtin_int());
+            break;
+        }
+        // --- Integer-only operators ---
+        case BinOpTypes::MOD:
+        case BinOpTypes::BITWISE_AND:
+        case BinOpTypes::BITWISE_XOR:
+        case BinOpTypes::BITWISE_OR: {
+            if ((lhs_ty && !lhs_ty->isInteger()) || (rhs_ty && !rhs_ty->isInteger())) {
+                report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+            }
+            auto common = ensure_arithmetic_common();
+            node->ctype = common ? common : QualType(get_builtin_int());
+            break;
+        }
+        // --- Multiplicative operators ---
+        case BinOpTypes::MULT:
+        case BinOpTypes::DIV: {
+            if ((lhs_ty && !lhs_ty->isArithmetic()) || (rhs_ty && !rhs_ty->isArithmetic())) {
+                report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+            }
+            auto common = ensure_arithmetic_common();
+            node->ctype = common ? common : QualType(get_builtin_int());
+            break;
+        }
+        default:
+            node->ctype = usual_arithmetic_conversion_type(lhs_ty, rhs_ty);
+            if (!node->ctype) {
+                node->ctype = QualType(get_builtin_int());
+            }
+            break;
+    }
+    return node;
+}
+
+std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
+    std::unique_ptr<Expr>& lhs,
+    std::unique_ptr<Expr>& rhs,
+    BinOpTypes bop,
+    SrcLoc loc) const {
+    if (!lang_opts_.is_cxx_mode() ||
+        !lhs ||
+        !rhs ||
+        (!type_can_participate_in_cpp_operator_overload(
+             lhs->get_type(),
+             ast_ctx_.get()) &&
+         !type_can_participate_in_cpp_operator_overload(
+             rhs->get_type(),
+             ast_ctx_.get()))) {
+        return nullptr;
+    }
+
+    std::string_view op_suffix = binary_operator_function_suffix(bop);
+    if (op_suffix.empty()) {
+        return nullptr;
+    }
+
+    std::string op_name = "operator";
+    op_name += op_suffix;
+
+    bool had_member_match = false;
+    bool saw_private_method = false;
+    bool saw_protected_method = false;
+    std::vector<OverloadCallCandidate> overload_candidates;
+
+    auto lhs_record =
+        remove_reference_and_desugar(
+            lhs->get_type(),
+            ast_ctx_.get())
+            .as_shared<ObjectType>();
+    if (auto candidate_error = append_member_overload_candidates(
+            lhs_record.get(),
+            op_name,
+            lhs.get(),
+            OverloadImplicitObjectArgKind::Regular,
+            overload_candidates,
+            had_member_match,
+            saw_private_method,
+            saw_protected_method,
+            loc)) {
+        return candidate_error;
+    }
+    append_unqualified_overload_candidates(
+        op_name, OverloadImplicitObjectArgKind::Regular, overload_candidates);
+
+    if (overload_candidates.empty()) {
+        if (had_member_match) {
+            return report_inaccessible_member(
+                op_name, saw_private_method, saw_protected_method, loc);
+        }
+        return nullptr;
+    }
+
+    std::vector<std::unique_ptr<Expr>> explicit_args;
+    explicit_args.push_back(std::move(rhs));
+
+    std::shared_ptr<Symbol> selected_symbol = nullptr;
+    OverloadImplicitObjectArgKind selected_implicit_object_arg_kind =
+        OverloadImplicitObjectArgKind::None;
+    if (auto overload_error = select_overload_candidate(
+            op_name,
+            overload_candidates,
+            explicit_args,
+            lhs.get(),
+            loc,
+            selected_symbol,
+            selected_implicit_object_arg_kind)) {
+        return overload_error;
+    }
+    if (!selected_symbol) {
+        return nullptr;
+    }
+
+    auto implicit_object_arg = build_overload_implicit_object_arg(
+        selected_implicit_object_arg_kind,
+        std::move(lhs),
+        /*object_expr_is_pointer=*/false,
+        loc);
+
+    if (selected_implicit_object_arg_kind != OverloadImplicitObjectArgKind::None &&
+        implicit_object_arg) {
+        explicit_args.insert(explicit_args.begin(), std::move(implicit_object_arg));
+    }
+
+    auto callee_expr = make_hidden_overload_callee(std::move(selected_symbol), loc);
+    return collect_function_call(std::move(callee_expr), std::move(explicit_args), loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_compound_assign_operation(std::unique_ptr<Expr> lhs, std::unique_ptr<Expr> rhs, BinOpTypes bop, SrcLoc loc) const {
+
+    rhs = collect_apply_standard_conversions(std::move(rhs), ExprUseContext::RValue);
+    if (!is_modifiable_lvalue(lhs.get())) {
+        auto lhs_type = lhs ? lhs->get_type() : QualType();
+        if (is_const_qualified_lvalue(lhs.get())) {
+            report_error("cannot assign to variable of type '" + lhs_type.to_string() + "'", loc);
+        } else {
+            report_error("expression is not assignable", loc);
+        }
+    }
+    auto lhs_ty = lhs ? lhs->get_type() : QualType();
+    auto rhs_ty = rhs ? rhs->get_type() : QualType();
+    QualType op_type = lhs_ty;
+    bool lhs_ptr = canonical_type_kind(lhs_ty) == TypeKind::Pointer;
+    switch (bop) {
+        case BinOpTypes::ASSIGN_ADD:
+        case BinOpTypes::ASSIGN_SUB:
+            if (lhs_ptr) {
+                if (!(rhs_ty && rhs_ty->isInteger())) {
+                    report_invalid_compound_assign_operands("", lhs_ty, rhs_ty, loc);
+                }
+                break;
+            }
+            [[fallthrough]];
+        case BinOpTypes::ASSIGN_MUL:
+        case BinOpTypes::ASSIGN_DIV: {
+            if ((lhs_ty && !lhs_ty->isArithmetic()) || (rhs_ty && !rhs_ty->isArithmetic())) {
+                report_invalid_compound_assign_operands("", lhs_ty, rhs_ty, loc);
+            }
+            auto common = usual_arithmetic_conversion_type(lhs_ty, rhs_ty);
+            if (common) {
+                op_type = common;
+            }
+            break;
+        }
+        case BinOpTypes::ASSIGN_MOD:
+        case BinOpTypes::ASSIGN_AND:
+        case BinOpTypes::ASSIGN_OR:
+        case BinOpTypes::ASSIGN_XOR: {
+            if ((lhs_ty && !lhs_ty->isInteger()) || (rhs_ty && !rhs_ty->isInteger())) {
+                report_invalid_compound_assign_operands("", lhs_ty, rhs_ty, loc);
+            }
+            auto common = usual_arithmetic_conversion_type(lhs_ty, rhs_ty);
+            if (common) {
+                op_type = common;
+            }
+            break;
+        }
+        case BinOpTypes::ASSIGN_LSHIFT:
+        case BinOpTypes::ASSIGN_RSHIFT: {
+            if ((lhs_ty && !lhs_ty->isInteger()) || (rhs_ty && !rhs_ty->isInteger())) {
+                report_invalid_compound_assign_operands("", lhs_ty, rhs_ty, loc);
+            }
+            auto rhs_promoted = integer_promotion_type(rhs_ty);
+            rhs = cast_if_needed(std::move(rhs), rhs_promoted);
+            op_type = integer_promotion_type(lhs_ty);
+            if (!op_type) {
+                op_type = lhs_ty;
+            }
+            break;
+        }
+        default: {
+            auto common = usual_arithmetic_conversion_type(lhs_ty, rhs_ty);
+            if (common) {
+                op_type = common;
+            }
+            break;
+        }
+    }
+    if (!op_type) {
+        op_type = lhs_ty ? lhs_ty : QualType(get_builtin_int());
+    }
+    return make_ast<CompoundAssignOperation>(*ast_ctx_, std::move(lhs), std::move(rhs), bop, op_type, loc);
+}
+
+
+std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Expr> cond, std::unique_ptr<Expr> true_expr, std::unique_ptr<Expr> false_expr, QualType forced_type, SrcLoc loc) const {
+
+    cond = collect_apply_standard_conversions(std::move(cond), ExprUseContext::Condition);
+    bool preserve_cpp_conditional_operands = lang_opts_.is_cxx_mode();
+    if (true_expr && !preserve_cpp_conditional_operands) {
+        true_expr = collect_apply_standard_conversions(std::move(true_expr), ExprUseContext::ConditionalOperand);
+    }
+    if (!preserve_cpp_conditional_operands) {
+        false_expr = collect_apply_standard_conversions(std::move(false_expr), ExprUseContext::ConditionalOperand);
+    }
+    if (cond) {
+        auto cond_ty = cond->get_type();
+        bool cond_is_dependent =
+            lang_opts_.is_cxx_mode() &&
+            expression_depends_on_template_parameters(cond.get());
+        if (!cond_is_dependent && cond_ty && !cond_ty->isScalar()) {
+            report_error("statement requires expression of scalar type ('" +
+                cond_ty.to_string() + "' invalid)", loc);
+        }
+    }
+
+    QualType result_type = forced_type;
+    if (!result_type) {
+        auto true_ty = true_expr ? true_expr->get_type() : (cond ? cond->get_type() : QualType());
+        auto false_ty = false_expr ? false_expr->get_type() : QualType();
+        auto true_kind = canonical_type_kind(true_ty);
+        auto false_kind = canonical_type_kind(false_ty);
+        if (true_ty && false_ty && true_ty.equals_qualified(false_ty)) {
+            result_type = true_ty;
+        } else if (true_ty && false_ty &&
+                   is_nullptr_type(true_ty, ast_ctx_.get()) &&
+                   is_nullptr_type(false_ty, ast_ctx_.get())) {
+            result_type = true_ty;
+        } else if ((true_ty && true_ty->isVoid()) || (false_ty && false_ty->isVoid())) {
+            result_type = QualType(get_builtin_void());
+        } else if (true_ty && false_ty &&
+                   ((true_ty->isArithmetic() && false_ty->isArithmetic()) ||
+                    true_ty->isComplex() || false_ty->isComplex())) {
+            result_type = usual_arithmetic_conversion_type(true_ty, false_ty);
+        } else if (true_ty && false_ty &&
+                   true_kind == TypeKind::Pointer &&
+                   false_kind == TypeKind::Pointer) {
+            auto true_ptr = desugar_type(true_ty).as_shared<PointerType>();
+            auto false_ptr = desugar_type(false_ty).as_shared<PointerType>();
+            bool true_void = true_ptr && true_ptr->pointed_type && true_ptr->pointed_type->isVoid();
+            bool false_void = false_ptr && false_ptr->pointed_type && false_ptr->pointed_type->isVoid();
+            if (!(pointers_to_compatible_types(true_ty, false_ty) || true_void || false_void)) {
+                report_error("incompatible pointer types in conditional expression ('" +
+                    true_ty.to_string() + "' and '" + false_ty.to_string() + "')", loc);
+                result_type = true_ty;
+            } else {
+                QualType base = true_void ? false_ptr->pointed_type : true_ptr->pointed_type;
+                if (!base) {
+                    base = false_ptr ? false_ptr->pointed_type : QualType();
+                }
+                if (!base) {
+                    base = QualType(get_builtin_void());
+                }
+                uint8_t merged_quals = QUAL_NONE;
+                if (true_ptr) merged_quals |= true_ptr->pointed_type.get_qualifiers();
+                if (false_ptr) merged_quals |= false_ptr->pointed_type.get_qualifiers();
+                base = base.with_qualifiers(merged_quals);
+                result_type = QualType(std::make_shared<PointerType>(base));
+            }
+        } else if (true_ty && false_ty &&
+                   is_nullptr_type(true_ty, ast_ctx_.get()) &&
+                   (false_kind == TypeKind::Pointer ||
+                    false_kind == TypeKind::MemberPointer ||
+                    false_kind == TypeKind::BlockPointer)) {
+            result_type = false_ty;
+        } else if (true_ty && false_ty &&
+                   is_nullptr_type(false_ty, ast_ctx_.get()) &&
+                   (true_kind == TypeKind::Pointer ||
+                    true_kind == TypeKind::MemberPointer ||
+                    true_kind == TypeKind::BlockPointer)) {
+            result_type = true_ty;
+        } else if (true_ty && true_kind == TypeKind::Pointer &&
+                   false_ty && false_ty->isInteger() &&
+                   is_null_pointer_constant_expr(false_expr.get())) {
+            result_type = true_ty;
+        } else if (true_ty && true_kind == TypeKind::BlockPointer &&
+                   false_ty && false_ty->isInteger() &&
+                   is_null_pointer_constant_expr(false_expr.get())) {
+            result_type = true_ty;
+        } else if (false_ty && false_kind == TypeKind::Pointer &&
+                   true_ty && true_ty->isInteger() &&
+                   is_null_pointer_constant_expr(true_expr.get())) {
+            result_type = false_ty;
+        } else if (false_ty && false_kind == TypeKind::BlockPointer &&
+                   true_ty && true_ty->isInteger() &&
+                   is_null_pointer_constant_expr(true_expr.get())) {
+            result_type = false_ty;
+        } else {
+            result_type = pick_common_type(true_ty, false_ty);
+        }
+        if (!result_type) {
+            report_error("incompatible operand types in conditional expression", loc);
+            result_type = QualType(get_builtin_int());
+        }
+    }
+    if (result_type && !result_type->isVoid() && true_expr) {
+        true_expr = cast_if_needed(std::move(true_expr), result_type);
+    }
+    if (result_type && !result_type->isVoid()) {
+        false_expr = cast_if_needed(std::move(false_expr), result_type);
+    }
+    auto node = make_ast<CondExpr>(*ast_ctx_, std::move(cond), std::move(true_expr), std::move(false_expr), result_type);
+    node->location = loc;
+    return node;
+}
+
+
+std::unique_ptr<Expr> Collect::collect_generic_expression(std::unique_ptr<Expr> controlling, std::vector<GenericAssociation> associations, SrcLoc loc) const {
+
+    // C11 6.5.1.1: the controlling expression is unevaluated.
+    {
+        UnevaluatedContextScope unevaluated_scope(this, "_Generic selector");
+        controlling = collect_apply_standard_conversions(std::move(controlling), ExprUseContext::ConditionalOperand);
+    }
+    auto controlling_type = controlling ? controlling->get_type() : QualType();
+    if (!controlling_type) {
+        report_error("_Generic controlling expression has no type", loc);
+        return collect_make<ErrorExpr>("_Generic controlling expression has no type", loc);
+    }
+
+    int default_index = -1;
+    int match_index = -1;
+
+    for (size_t i = 0; i < associations.size(); ++i) {
+        const auto& assoc = associations[i];
+        if (assoc.is_default) {
+            if (default_index >= 0) {
+                report_error("duplicate 'default' in _Generic", assoc.loc);
+                return collect_make<ErrorExpr>("duplicate 'default' in _Generic", assoc.loc);
+            }
+            default_index = static_cast<int>(i);
+            continue;
+        }
+        if (!assoc.type) {
+            continue;
+        }
+        if (controlling_type.equals_unqualified(assoc.type)) {
+            if (match_index >= 0) {
+                // GNU-family behavior: after lvalue conversion strips qualifiers
+                // from the controlling expression, multiple qualified variants
+                // (e.g. int/const int/volatile int) may all be compatible.
+                // Keep the first matching association.
+                continue;
+            }
+            match_index = static_cast<int>(i);
+        }
+    }
+
+    int selected = (match_index >= 0) ? match_index : default_index;
+    if (selected < 0) {
+        report_error("_Generic selector of type '" + controlling_type.to_string() +
+            "' is not compatible with any association", loc);
+        return collect_make<ErrorExpr>("_Generic selector is not compatible with any association", loc);
+    }
+    // Preserve _Generic semantics by materializing only the selected association
+    // expression into the final AST.
+    auto selected_expr = std::move(associations[selected].expr);
+    if (!selected_expr) {
+        report_error("_Generic selected association has no expression", loc);
+        return collect_make<ErrorExpr>("_Generic selected association has no expression", loc);
+    }
+    // Preserve selected-expression value category (lvalue/function designator/rvalue).
+    return selected_expr;
+}
+
+
+std::unique_ptr<Expr> Collect::builtin_call_expression_special_cases(
+    BuiltinKind kind,
+    std::vector<std::unique_ptr<Expr>>& args,
+    SrcLoc loc) const {
+    auto int_type = QualType(get_builtin_int());
+    auto void_type = QualType(get_builtin_void());
+    auto void_ptr = QualType(std::make_shared<PointerType>(void_type));
+    auto double_type = QualType(get_builtin_double());
+    auto complex_double_type =
+        QualType(ast_ctx_->type_ctx->get_complex(BuiltinTypes::Double));
+
+    switch (kind) {
+        case BuiltinKind::EXPECT:
+        case BuiltinKind::EXPECT_WITH_PROBABILITY: {
+            QualType result_type = args.empty() ? int_type : args[0]->get_type();
+            if (!result_type) {
+                result_type = int_type;
+            }
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), result_type, loc);
+        }
+        case BuiltinKind::CONSTANT_P: {
+            bool is_const = false;
+            if (!args.empty() && args[0]) {
+                ConstEvalResult eval = evaluate_with_consteval_compat(
+                    args[0].get(), ConstEvalMode::builtin_query());
+                is_const = eval.status == ConstEvalStatus::Constant;
+            }
+            auto node = collect_make<BuiltinCallExpr>(kind, std::move(args), int_type, loc);
+            node->const_value = is_const ? 1 : 0;
+            return node;
+        }
+        case BuiltinKind::SHUFFLEVECTOR: {
+            QualType ret = int_type;
+            if (!args.empty() && args[0] && args[0]->get_type() &&
+                canonical_type_kind(args[0]->get_type()) == TypeKind::Vector) {
+                ret = args[0]->get_type();
+            } else if (args.size() > 1 && args[1] && args[1]->get_type() &&
+                canonical_type_kind(args[1]->get_type()) == TypeKind::Vector) {
+                ret = args[1]->get_type();
+            }
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), ret, loc);
+        }
+        case BuiltinKind::EXIT:
+            if (args.size() != 1) {
+                report_error("__builtin_exit requires exactly 1 argument", loc);
+            }
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), void_type, loc);
+        case BuiltinKind::COMPLEX: {
+            QualType element_type = double_type;
+            if (args.size() >= 2 && args[0] && args[1]) {
+                auto lhs = args[0]->get_type();
+                auto rhs = args[1]->get_type();
+                auto common = pick_common_type(lhs, rhs);
+                auto common_builtin = common.as_shared<BuiltinType>();
+                if (common_builtin && common_builtin->isArithmetic()) {
+                    element_type = common;
+                } else if (lhs && lhs->isArithmetic()) {
+                    element_type = lhs;
+                } else if (rhs && rhs->isArithmetic()) {
+                    element_type = rhs;
+                }
+            }
+            auto element_builtin = element_type.as_shared<BuiltinType>();
+            if (!element_builtin) {
+                element_builtin = ast_ctx_->type_ctx->get_builtin(BuiltinTypes::Double);
+            }
+            auto complex_type = QualType(
+                ast_ctx_->type_ctx->get_complex(element_builtin->builtin_kind));
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), complex_type, loc);
+        }
+        case BuiltinKind::CPOW: {
+            QualType ret = complex_double_type;
+            if (!args.empty() && args[0] && args[0]->get_type()) {
+                ret = args[0]->get_type();
+            }
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), ret, loc);
+        }
+        case BuiltinKind::ASSUME_ALIGNED: {
+            QualType ret = args.empty() ? void_ptr : args[0]->get_type();
+            if (!ret) {
+                ret = void_ptr;
+            }
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), ret, loc);
+        }
+        case BuiltinKind::CLASSIFY_TYPE: {
+            QualType arg_type = args.empty() ? QualType() : args[0]->get_type();
+            auto node = collect_make<BuiltinCallExpr>(kind, std::move(args), int_type, loc);
+            node->const_value = classify_type(arg_type);
+            return node;
+        }
+        case BuiltinKind::BUILTIN_LINE: {
+            auto node = collect_make<BuiltinCallExpr>(kind, std::move(args), int_type, loc);
+            node->const_value = 0;
+            return node;
+        }
+        case BuiltinKind::ATOMIC_LOAD_N: {
+            if (args.size() == 3) {
+                // Generic __atomic_load(ptr, out_ptr, order) stores through out_ptr.
+                return collect_make<BuiltinCallExpr>(kind, std::move(args), void_type, loc);
+            }
+            QualType ret = int_type;
+            if (!args.empty()) {
+                auto arg_type = args[0] ? args[0]->get_type() : QualType();
+                auto ptr = arg_type.as_shared<PointerType>();
+                if (ptr) {
+                    ret = ptr->pointed_type;
+                }
+            }
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), ret, loc);
+        }
+        case BuiltinKind::ATOMIC_EXCHANGE_N: {
+            if (args.size() == 4) {
+                // Generic __atomic_exchange(ptr, value_ptr, out_ptr, order) has void result.
+                return collect_make<BuiltinCallExpr>(kind, std::move(args), void_type, loc);
+            }
+            QualType ret = int_type;
+            if (!args.empty()) {
+                auto arg_type = args[0] ? args[0]->get_type() : QualType();
+                auto ptr = arg_type.as_shared<PointerType>();
+                if (ptr) {
+                    ret = ptr->pointed_type;
+                }
+            }
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), ret, loc);
+        }
+        default:
+            return nullptr;
+    }
+}
+
+std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
+    BuiltinKind kind,
+    std::vector<std::unique_ptr<Expr>>& args,
+    SrcLoc loc) const {
+    auto int_type = QualType(get_builtin_int());
+    auto uint_type = QualType(get_builtin_uint());
+    auto ulong_type = QualType(get_builtin_ulong());
+    auto long_type = QualType(get_builtin_long());
+    auto longlong_type = QualType(get_builtin_longlong());
+    auto void_type = QualType(get_builtin_void());
+    auto double_type = QualType(get_builtin_double());
+    auto float_type = QualType(get_builtin_float());
+    auto long_double_type = QualType(get_builtin_long_double());
+    auto complex_float_type =
+        QualType(ast_ctx_->type_ctx->get_complex(BuiltinTypes::Float));
+    auto complex_double_type =
+        QualType(ast_ctx_->type_ctx->get_complex(BuiltinTypes::Double));
+    auto void_ptr = QualType(std::make_shared<PointerType>(void_type));
+    auto char_ptr = QualType(std::make_shared<PointerType>(QualType(get_builtin_char())));
+
+    switch (kind) {
+        case BuiltinKind::UNREACHABLE:
+        case BuiltinKind::TRAP:
+        case BuiltinKind::ABORT:
+        case BuiltinKind::FREE:
+        case BuiltinKind::CLEAR_CACHE:
+        case BuiltinKind::CLEAR_PADDING:
+        case BuiltinKind::PREFETCH:
+        case BuiltinKind::ATOMIC_STORE_N:
+        case BuiltinKind::C11_ATOMIC_INIT:
+        case BuiltinKind::ATOMIC_THREAD_FENCE:
+        case BuiltinKind::ATOMIC_SIGNAL_FENCE:
+        case BuiltinKind::ATOMIC_CLEAR:
+        case BuiltinKind::SYNC_SYNCHRONIZE:
+        case BuiltinKind::SYNC_LOCK_RELEASE:
+        case BuiltinKind::STACK_RESTORE:
+        case BuiltinKind::BCOPY:
+        case BuiltinKind::BZERO:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), void_type, loc);
+        case BuiltinKind::MALLOC:
+        case BuiltinKind::REALLOC:
+        case BuiltinKind::CALLOC:
+        case BuiltinKind::MEMCPY:
+        case BuiltinKind::MEMMOVE:
+        case BuiltinKind::MEMSET:
+        case BuiltinKind::MEMPCPY:
+        case BuiltinKind::MEMCPY_CHK:
+        case BuiltinKind::MEMMOVE_CHK:
+        case BuiltinKind::MEMSET_CHK:
+        case BuiltinKind::MEMCHR:
+        case BuiltinKind::RETURN_ADDRESS:
+        case BuiltinKind::FRAME_ADDRESS:
+        case BuiltinKind::EXTRACT_RETURN_ADDR:
+        case BuiltinKind::ALLOCA:
+        case BuiltinKind::STACK_SAVE:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), void_ptr, loc);
+        case BuiltinKind::TYPES_COMPATIBLE_P:
+        case BuiltinKind::AVAILABLE:
+        case BuiltinKind::ADD_OVERFLOW:
+        case BuiltinKind::SUB_OVERFLOW:
+        case BuiltinKind::MUL_OVERFLOW:
+        case BuiltinKind::ADD_OVERFLOW_P:
+        case BuiltinKind::SUB_OVERFLOW_P:
+        case BuiltinKind::CLZ:
+        case BuiltinKind::CLZL:
+        case BuiltinKind::CLZLL:
+        case BuiltinKind::CTZ:
+        case BuiltinKind::CTZL:
+        case BuiltinKind::CTZLL:
+        case BuiltinKind::FFS:
+        case BuiltinKind::FFSL:
+        case BuiltinKind::FFSLL:
+        case BuiltinKind::POPCOUNT:
+        case BuiltinKind::POPCOUNTL:
+        case BuiltinKind::POPCOUNTLL:
+        case BuiltinKind::PRINTF:
+        case BuiltinKind::PUTS:
+        case BuiltinKind::PUTCHAR:
+        case BuiltinKind::FPRINTF:
+        case BuiltinKind::SPRINTF:
+        case BuiltinKind::SNPRINTF:
+        case BuiltinKind::SPRINTF_CHK:
+        case BuiltinKind::SNPRINTF_CHK:
+        case BuiltinKind::VSPRINTF_CHK:
+        case BuiltinKind::VSNPRINTF_CHK:
+        case BuiltinKind::ISNAN:
+        case BuiltinKind::ISINF:
+        case BuiltinKind::ISINF_SIGN:
+        case BuiltinKind::ISFINITE:
+        case BuiltinKind::ISNORMAL:
+        case BuiltinKind::ISEQSIG:
+        case BuiltinKind::ISUNORDERED:
+        case BuiltinKind::ISLESS:
+        case BuiltinKind::ISLESSEQUAL:
+        case BuiltinKind::ISGREATER:
+        case BuiltinKind::ISGREATEREQUAL:
+        case BuiltinKind::ISLESSGREATER:
+        case BuiltinKind::SIGNBIT:
+        case BuiltinKind::SIGNBITF:
+        case BuiltinKind::SIGNBITL:
+        case BuiltinKind::CLRSB:
+        case BuiltinKind::CLRSBL:
+        case BuiltinKind::CLRSBLL:
+        case BuiltinKind::PARITY:
+        case BuiltinKind::PARITYL:
+        case BuiltinKind::PARITYLL:
+        case BuiltinKind::ILOGB:
+        case BuiltinKind::VA_ARG_PACK:
+        case BuiltinKind::STRCMP:
+        case BuiltinKind::STRNCMP:
+        case BuiltinKind::STRNCASECMP:
+        case BuiltinKind::MEMCMP:
+        case BuiltinKind::MEMCMP_EQ:
+        case BuiltinKind::ABS:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), int_type, loc);
+        case BuiltinKind::OBJECT_SIZE:
+        case BuiltinKind::DYNAMIC_OBJECT_SIZE:
+        case BuiltinKind::STRLEN:
+        case BuiltinKind::STRCSPN:
+        case BuiltinKind::STRSPN:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), ulong_type, loc);
+        case BuiltinKind::BSWAP16:
+            return collect_make<BuiltinCallExpr>(
+                kind,
+                std::move(args),
+                QualType(ast_ctx_->type_ctx->get_builtin(BuiltinTypes::UShort)),
+                loc);
+        case BuiltinKind::BSWAP32:
+        case BuiltinKind::IA32_BZHI_SI:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), uint_type, loc);
+        case BuiltinKind::BSWAP64:
+            return collect_make<BuiltinCallExpr>(
+                kind,
+                std::move(args),
+                QualType(ast_ctx_->type_ctx->get_builtin(BuiltinTypes::ULongLong)),
+                loc);
+        case BuiltinKind::STRCHR:
+        case BuiltinKind::STRRCHR:
+        case BuiltinKind::STRSTR:
+        case BuiltinKind::STRDUP:
+        case BuiltinKind::STPNCPY:
+        case BuiltinKind::STRNDUP:
+        case BuiltinKind::STRCPY:
+        case BuiltinKind::STRNCPY:
+        case BuiltinKind::STRCAT:
+        case BuiltinKind::STRNCAT:
+        case BuiltinKind::STPCPY:
+        case BuiltinKind::STRCPY_CHK:
+        case BuiltinKind::STPCPY_CHK:
+        case BuiltinKind::STRNCPY_CHK:
+        case BuiltinKind::STRCAT_CHK:
+        case BuiltinKind::STRNCAT_CHK:
+        case BuiltinKind::BUILTIN_FILE:
+        case BuiltinKind::BUILTIN_FUNCTION:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), char_ptr, loc);
+        case BuiltinKind::BUILTIN_HUGE_VAL:
+        case BuiltinKind::INF:
+        case BuiltinKind::NAN_BUILTIN:
+        case BuiltinKind::FABS:
+        case BuiltinKind::POW:
+        case BuiltinKind::SQRT:
+        case BuiltinKind::SIN:
+        case BuiltinKind::COS:
+        case BuiltinKind::LOG:
+        case BuiltinKind::LOG2:
+        case BuiltinKind::LOG10:
+        case BuiltinKind::EXP:
+        case BuiltinKind::EXP2:
+        case BuiltinKind::CEIL:
+        case BuiltinKind::FLOOR:
+        case BuiltinKind::ROUND:
+        case BuiltinKind::COPYSIGN:
+        case BuiltinKind::FMIN:
+        case BuiltinKind::FMAX:
+        case BuiltinKind::MODF:
+        case BuiltinKind::TRUNC:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), double_type, loc);
+        case BuiltinKind::BUILTIN_HUGE_VALF:
+        case BuiltinKind::INFF:
+        case BuiltinKind::NANF:
+        case BuiltinKind::FABSF:
+        case BuiltinKind::POWF:
+        case BuiltinKind::SQRTF:
+        case BuiltinKind::SINF:
+        case BuiltinKind::COSF:
+        case BuiltinKind::LOGF:
+        case BuiltinKind::LOG2F:
+        case BuiltinKind::LOG10F:
+        case BuiltinKind::EXPF:
+        case BuiltinKind::EXP2F:
+        case BuiltinKind::CEILF:
+        case BuiltinKind::FLOORF:
+        case BuiltinKind::ROUNDF:
+        case BuiltinKind::COPYSIGNF:
+        case BuiltinKind::FMINF:
+        case BuiltinKind::FMAXF:
+        case BuiltinKind::MODFF:
+        case BuiltinKind::TRUNCF:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), float_type, loc);
+        case BuiltinKind::CONJF:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), complex_float_type, loc);
+        case BuiltinKind::BUILTIN_HUGE_VALL:
+        case BuiltinKind::INFL:
+        case BuiltinKind::NANL:
+        case BuiltinKind::FABSL:
+        case BuiltinKind::POWL:
+        case BuiltinKind::SQRTL:
+        case BuiltinKind::COPYSIGNL:
+        case BuiltinKind::MODFL:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), long_double_type, loc);
+        case BuiltinKind::CEXPI:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), complex_double_type, loc);
+        case BuiltinKind::LABS:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), long_type, loc);
+        case BuiltinKind::LLABS:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), longlong_type, loc);
+        default:
+            return nullptr;
+    }
+}
+
+std::unique_ptr<Expr> Collect::builtin_call_expression_atomic_cases(
+    BuiltinKind kind,
+    std::vector<std::unique_ptr<Expr>>& args,
+    SrcLoc loc) const {
+    auto int_type = QualType(get_builtin_int());
+    auto bool_type = QualType(get_builtin_bool());
+
+    switch (kind) {
+        case BuiltinKind::ATOMIC_IS_LOCK_FREE:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), int_type, loc);
+        case BuiltinKind::ATOMIC_FETCH_ADD:
+        case BuiltinKind::ATOMIC_FETCH_SUB:
+        case BuiltinKind::ATOMIC_FETCH_AND:
+        case BuiltinKind::ATOMIC_FETCH_OR:
+        case BuiltinKind::ATOMIC_FETCH_XOR:
+        case BuiltinKind::ATOMIC_FETCH_NAND:
+        case BuiltinKind::ATOMIC_ADD_FETCH:
+        case BuiltinKind::ATOMIC_SUB_FETCH:
+        case BuiltinKind::ATOMIC_AND_FETCH:
+        case BuiltinKind::ATOMIC_OR_FETCH:
+        case BuiltinKind::ATOMIC_XOR_FETCH:
+        case BuiltinKind::ATOMIC_NAND_FETCH:
+        case BuiltinKind::SYNC_FETCH_AND_ADD:
+        case BuiltinKind::SYNC_FETCH_AND_SUB:
+        case BuiltinKind::SYNC_FETCH_AND_OR:
+        case BuiltinKind::SYNC_FETCH_AND_AND:
+        case BuiltinKind::SYNC_FETCH_AND_XOR:
+        case BuiltinKind::SYNC_FETCH_AND_NAND:
+        case BuiltinKind::SYNC_ADD_AND_FETCH:
+        case BuiltinKind::SYNC_SUB_AND_FETCH:
+        case BuiltinKind::SYNC_OR_AND_FETCH:
+        case BuiltinKind::SYNC_AND_AND_FETCH:
+        case BuiltinKind::SYNC_XOR_AND_FETCH:
+        case BuiltinKind::SYNC_NAND_AND_FETCH:
+        case BuiltinKind::SYNC_LOCK_TEST_AND_SET:
+        case BuiltinKind::SYNC_VAL_COMPARE_AND_SWAP: {
+            QualType ret = int_type;
+            if (!args.empty()) {
+                auto arg_type = args[0] ? args[0]->get_type() : QualType();
+                auto ptr = arg_type.as_shared<PointerType>();
+                if (ptr) {
+                    ret = ptr->pointed_type;
+                }
+            }
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), ret, loc);
+        }
+        case BuiltinKind::ATOMIC_COMPARE_EXCHANGE_N:
+        case BuiltinKind::ATOMIC_TEST_AND_SET:
+        case BuiltinKind::SYNC_BOOL_COMPARE_AND_SWAP:
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), bool_type, loc);
+        default:
+            return nullptr;
+    }
+}
+
+std::unique_ptr<Expr> Collect::builtin_call_expression(
+    BuiltinKind kind,
+    std::vector<std::unique_ptr<Expr>> args,
+    SrcLoc loc) const {
+    if (auto special = builtin_call_expression_special_cases(kind, args, loc)) {
+        return special;
+    }
+    if (auto fixed = builtin_call_expression_fixed_cases(kind, args, loc)) {
+        return fixed;
+    }
+    if (auto atomic = builtin_call_expression_atomic_cases(kind, args, loc)) {
+        return atomic;
+    }
+
+    auto int_type = QualType(get_builtin_int());
+    report_error("unhandled builtin in collect semantic action", loc);
+    return collect_make<BuiltinCallExpr>(kind, std::move(args), int_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::prepare_unevaluated_operand(std::unique_ptr<Expr> expr,
+                                                                    const char* reason) const {
+
+    UnevaluatedContextScope unevaluated_scope(this, reason);
+    return collect_apply_standard_conversions(std::move(expr), ExprUseContext::Unevaluated);
+}
+
+
+Collect::ValueCategory Collect::classify_value_category(Expr* expr) const {
+
+    if (!expr) {
+        return ValueCategory::Unknown;
+    }
+
+    if (!lang_opts_.is_cxx_mode()) {
+        if (expr->isLValue()) {
+            return ValueCategory::LValue;
+        }
+        return ValueCategory::PRValue;
+    }
+
+    if (auto* cast = dyn_cast<ImplicitCast>(expr)) {
+        switch (cast->kind) {
+            case ImplicitCastTypes::UNKNOWN:
+                return classify_value_category(cast->expr.get());
+            case ImplicitCastTypes::LVALUE_TO_RVALUE:
+            case ImplicitCastTypes::ARITH_CAST:
+            case ImplicitCastTypes::RAW_CAST:
+            case ImplicitCastTypes::ARRAY_TO_POINTER:
+            case ImplicitCastTypes::FUNCTION_TO_POINTER:
+            case ImplicitCastTypes::LAMBDA_TO_FUNCTION_POINTER:
+            case ImplicitCastTypes::VECTOR_SPLAT:
+            case ImplicitCastTypes::REAL_TO_COMPLEX:
+            case ImplicitCastTypes::COMPLEX_TO_REAL:
+            case ImplicitCastTypes::COMPLEX_TO_COMPLEX:
+                if (auto ref = desugar_type(cast->ctype).as_shared<ReferenceType>()) {
+                    return ref->isRValueReference() ? ValueCategory::XValue
+                                                    : ValueCategory::LValue;
+                }
+                return ValueCategory::PRValue;
+        }
+    }
+
+    if (auto* call = dyn_cast<FuncCall>(expr)) {
+        auto call_type = desugar_type(call->get_type());
+        if (auto ref = call_type.as_shared<ReferenceType>()) {
+            return ref->isRValueReference() ? ValueCategory::XValue : ValueCategory::LValue;
+        }
+        return ValueCategory::PRValue;
+    }
+
+    if (auto* call = dyn_cast<CppMemberCallExpr>(expr)) {
+        auto call_type = desugar_type(call->get_type());
+        if (auto ref = call_type.as_shared<ReferenceType>()) {
+            return ref->isRValueReference() ? ValueCategory::XValue : ValueCategory::LValue;
+        }
+        return ValueCategory::PRValue;
+    }
+
+    if (auto* dynamic_cast_expr = dyn_cast<CppDynamicCastExpr>(expr)) {
+        auto cast_type = desugar_type(dynamic_cast_expr->get_type());
+        if (auto ref = cast_type.as_shared<ReferenceType>()) {
+            return ref->isRValueReference() ? ValueCategory::XValue : ValueCategory::LValue;
+        }
+        return ValueCategory::PRValue;
+    }
+
+    if (auto* unary = dyn_cast<UnaryOperation>(expr)) {
+        switch (unary->uop) {
+            case UnaryOpTypes::INCREMENT_PREFIX:
+            case UnaryOpTypes::DECREMENT_PREFIX:
+            case UnaryOpTypes::DEREFERENCE:
+                return ValueCategory::LValue;
+            case UnaryOpTypes::REAL_PART:
+            case UnaryOpTypes::IMAG_PART: {
+                auto operand_category = classify_value_category(unary->exp.get());
+                if (operand_category == ValueCategory::LValue ||
+                    operand_category == ValueCategory::XValue) {
+                    return operand_category;
+                }
+                return ValueCategory::PRValue;
+            }
+            default:
+                return ValueCategory::PRValue;
+        }
+    }
+
+    if (auto* unary = dyn_cast<DependentUnaryExpr>(expr)) {
+        switch (unary->uop) {
+            case UnaryOpTypes::DEREFERENCE:
+                return ValueCategory::LValue;
+            default:
+                return ValueCategory::PRValue;
+        }
+    }
+
+    if (auto* binary = dyn_cast<DependentBinaryExpr>(expr)) {
+        if (binary->bop == BinOpTypes::COMMA) {
+            return classify_value_category(binary->right.get());
+        }
+        return ValueCategory::PRValue;
+    }
+
+    if (auto* member = dyn_cast<MemberExpr>(expr)) {
+        if (!member->isArrow) {
+            auto base_category = classify_value_category(member->base.get());
+            if (base_category == ValueCategory::XValue) {
+                return ValueCategory::XValue;
+            }
+            if (base_category == ValueCategory::PRValue) {
+                return ValueCategory::XValue;
+            }
+        }
+        return ValueCategory::LValue;
+    }
+
+    if (auto* member_ptr = dyn_cast<MemberPointerAccessExpr>(expr)) {
+        if (member_ptr->is_function_member) {
+            return ValueCategory::PRValue;
+        }
+        if (!member_ptr->is_arrow) {
+            auto base_category = classify_value_category(member_ptr->base.get());
+            if (base_category == ValueCategory::XValue ||
+                base_category == ValueCategory::PRValue) {
+                return ValueCategory::XValue;
+            }
+        }
+        return ValueCategory::LValue;
+    }
+
+    if (isa<DependentMemberPointerAccessExpr>(expr)) {
+        return ValueCategory::LValue;
+    }
+
+    if (auto* binary = dyn_cast<BinaryOperation>(expr)) {
+        if (binary->bop == BinOpTypes::COMMA) {
+            return classify_value_category(binary->right.get());
+        }
+        return ValueCategory::PRValue;
+    }
+
+    if (dyn_cast<CompoundAssignOperation>(expr)) {
+        return ValueCategory::PRValue;
+    }
+
+    if (auto* cond = dyn_cast<CondExpr>(expr)) {
+        Expr* true_operand = cond->true_expr ? cond->true_expr.get() : cond->condition.get();
+        auto true_category = classify_value_category(true_operand);
+        auto false_category = classify_value_category(cond->false_expr.get());
+
+        bool true_is_glvalue =
+            true_category == ValueCategory::LValue || true_category == ValueCategory::XValue;
+        bool false_is_glvalue =
+            false_category == ValueCategory::LValue || false_category == ValueCategory::XValue;
+        if (!true_is_glvalue || !false_is_glvalue) {
+            return ValueCategory::PRValue;
+        }
+        if (true_category != false_category) {
+            return ValueCategory::PRValue;
+        }
+
+        auto true_type = true_operand ? true_operand->get_type() : QualType();
+        auto false_type = cond->false_expr ? cond->false_expr->get_type() : QualType();
+        if (!true_type || !false_type) {
+            return ValueCategory::PRValue;
+        }
+        if (!true_type.equals_unqualified(false_type)) {
+            return ValueCategory::PRValue;
+        }
+        return true_category;
+    }
+
+    if (auto* error = dyn_cast<ErrorExpr>(expr)) {
+        (void)error;
+        return ValueCategory::Unknown;
+    }
+
+    if (expr->isLValue()) {
+        return ValueCategory::LValue;
+    }
+    return ValueCategory::PRValue;
+}
+
+
+Collect::ImplicitConversionSequence Collect::build_implicit_conversion_sequence(QualType from,
+                                                                                 QualType to,
+                                                                                 ExprUseContext context) const {
+
+    ImplicitConversionSequence seq;
+    seq.from = from;
+    seq.to = to;
+
+    if (!from || !to) {
+        seq.kind = ConversionSequenceKind::Failed;
+        seq.rank = ConversionSequenceRank::NoMatch;
+        seq.viable = false;
+        seq.note = "missing source or destination type";
+        return seq;
+    }
+
+    if (from.equals_qualified(to)) {
+        seq.kind = ConversionSequenceKind::Identity;
+        seq.rank = ConversionSequenceRank::ExactMatch;
+        return seq;
+    }
+
+    if (from.equals_unqualified(to)) {
+        seq.kind = ConversionSequenceKind::Qualification;
+        seq.rank = ConversionSequenceRank::ExactMatch;
+        return seq;
+    }
+
+    auto from_canonical = desugar_type(from, ast_ctx_.get());
+    auto to_canonical = desugar_type(to, ast_ctx_.get());
+    auto from_kind = from_canonical ? from_canonical->kind : TypeKind::Other;
+    auto to_kind = to_canonical ? to_canonical->kind : TypeKind::Other;
+    bool from_is_nullptr = is_nullptr_type(from, ast_ctx_.get());
+    bool to_is_nullptr = is_nullptr_type(to, ast_ctx_.get());
+
+    if (auto to_record = to_canonical.as_shared<ObjectType>();
+        to_record && to_record->is_union && to_record->is_transparent_union) {
+        for (const auto& field :
+             get_record_fields_for_type_matching(to_record.get())) {
+            QualType member_type = decay_parameter_type(field.type);
+            auto member_seq =
+                build_implicit_conversion_sequence(from, member_type, context);
+            if (!member_seq.viable) {
+                continue;
+            }
+            seq.kind = member_seq.kind;
+            seq.rank = member_seq.rank;
+            seq.exact_subrank = member_seq.exact_subrank;
+            seq.note = member_seq.note;
+            return seq;
+        }
+    }
+
+    if (from_kind == TypeKind::Array && to_kind == TypeKind::Pointer) {
+        auto from_arr = from_canonical.as_shared<ArrayType>();
+        auto to_ptr = to_canonical.as_shared<PointerType>();
+        if (from_arr && to_ptr && from_arr->element_type.equals_unqualified(to_ptr->pointed_type)) {
+            seq.kind = ConversionSequenceKind::ArrayToPointer;
+            seq.rank = ConversionSequenceRank::Conversion;
+            return seq;
+        }
+    }
+
+    if (from_kind == TypeKind::Function && to_kind == TypeKind::Pointer) {
+        auto to_ptr = to_canonical.as_shared<PointerType>();
+        if (to_ptr && to_ptr->pointed_type.equals_unqualified(from_canonical)) {
+            seq.kind = ConversionSequenceKind::FunctionToPointer;
+            seq.rank = ConversionSequenceRank::Conversion;
+            return seq;
+        }
+    }
+
+    if ((from->isArithmetic() && to->isArithmetic()) || from->isComplex() || to->isComplex()) {
+        auto promoted = integer_promotion_type(from);
+        seq.kind = ConversionSequenceKind::Numeric;
+        seq.rank = promoted.equals_qualified(to)
+            ? ConversionSequenceRank::Promotion
+            : ConversionSequenceRank::Conversion;
+        return seq;
+    }
+
+    if (from_is_nullptr && is_null_pointer_like_type(to, ast_ctx_.get()) && !to_is_nullptr) {
+        seq.kind = ConversionSequenceKind::Pointer;
+        seq.rank = ConversionSequenceRank::Conversion;
+        return seq;
+    }
+
+    if (from_kind == TypeKind::Pointer && to_kind == TypeKind::Pointer) {
+        auto from_ptr = from_canonical.as_shared<PointerType>();
+        auto to_ptr = to_canonical.as_shared<PointerType>();
+        bool to_void = to_ptr && to_ptr->pointed_type && to_ptr->pointed_type->isVoid();
+        bool from_void = from_ptr && from_ptr->pointed_type && from_ptr->pointed_type->isVoid();
+        bool derived_to_base =
+            from_ptr && to_ptr &&
+            can_convert_derived_to_base_object(
+                from_ptr->pointed_type, to_ptr->pointed_type);
+        if (to_void || from_void || pointers_to_compatible_types(from_canonical, to_canonical)) {
+            seq.kind = ConversionSequenceKind::Pointer;
+            seq.rank = ConversionSequenceRank::Conversion;
+            return seq;
+        }
+        if (derived_to_base) {
+            seq.kind = ConversionSequenceKind::Pointer;
+            seq.rank = ConversionSequenceRank::Conversion;
+            return seq;
+        }
+    }
+
+    if (from_kind == TypeKind::MemberPointer && to_kind == TypeKind::MemberPointer) {
+        if (from.equals_qualified(to)) {
+            seq.kind = ConversionSequenceKind::Identity;
+            seq.rank = ConversionSequenceRank::ExactMatch;
+            return seq;
+        }
+        if (member_pointer_convertible_to(from_canonical, to_canonical)) {
+            seq.kind = from.equals_unqualified(to)
+                ? ConversionSequenceKind::Qualification
+                : ConversionSequenceKind::Pointer;
+            seq.rank = ConversionSequenceRank::Conversion;
+            return seq;
+        }
+    }
+
+    if (context == ExprUseContext::Condition && from->isScalar()) {
+        seq.kind = ConversionSequenceKind::Numeric;
+        seq.rank = ConversionSequenceRank::Conversion;
+        return seq;
+    }
+
+    seq.kind = ConversionSequenceKind::Failed;
+    seq.rank = ConversionSequenceRank::NoMatch;
+    seq.viable = false;
+    seq.note = "no implicit conversion sequence";
+    return seq;
+}
+
+Collect::ImplicitConversionSequence Collect::build_cpp_overload_conversion_sequence(Expr* arg,
+                                                                                     QualType to,
+                                                                                     bool allow_user_defined) const {
+
+    ImplicitConversionSequence seq;
+    seq.to = to;
+    if (!arg || !to) {
+        seq.kind = ConversionSequenceKind::Failed;
+        seq.rank = ConversionSequenceRank::NoMatch;
+        seq.viable = false;
+        seq.note = "missing argument expression or destination type";
+        return seq;
+    }
+
+    auto to_canonical = desugar_type(to, ast_ctx_.get());
+    auto to_kind = to_canonical ? to_canonical->kind : TypeKind::Other;
+    if (to_kind != TypeKind::Reference) {
+        ImplicitConversionSequence braced_init_seq;
+        if (probe_cpp_braced_init_argument_conversion(
+                arg, to, arg->location, braced_init_seq)) {
+            return braced_init_seq;
+        }
+    }
+
+    QualType from = arg->get_type();
+    seq.from = from;
+    if (!from) {
+        seq.kind = ConversionSequenceKind::Failed;
+        seq.rank = ConversionSequenceRank::NoMatch;
+        seq.viable = false;
+        seq.note = "argument expression has no type";
+        return seq;
+    }
+
+    if (to_kind == TypeKind::Reference) {
+        return build_cpp_overload_reference_conversion_sequence(
+            arg, from, to, allow_user_defined);
+    }
+
+    return build_cpp_overload_nonreference_conversion_sequence(
+        arg, from, to, allow_user_defined);
+}
+
+Collect::ImplicitConversionSequence
+Collect::build_cpp_overload_reference_conversion_sequence(
+    Expr* arg,
+    QualType from,
+    QualType to,
+    bool allow_user_defined) const {
+    ImplicitConversionSequence seq;
+    seq.to = to;
+
+    auto to_ref = desugar_type(to, ast_ctx_.get()).as_shared<ReferenceType>();
+    if (!to_ref || !to_ref->referred_type) {
+        seq.kind = ConversionSequenceKind::Failed;
+        seq.rank = ConversionSequenceRank::NoMatch;
+        seq.viable = false;
+        seq.note = "reference parameter has invalid referred type";
+        return seq;
+    }
+
+    QualType source_type = remove_reference(from);
+    QualType target_type = to_ref->referred_type;
+    seq.from = source_type;
+    QualType canonical_source_type = desugar_type(source_type, ast_ctx_.get());
+    QualType canonical_target_type = desugar_type(target_type, ast_ctx_.get());
+    auto arg_category = classify_value_category(strip_implicit_casts(arg));
+
+    auto fail_binding = [&](const std::string& reason) {
+        seq.kind = ConversionSequenceKind::Failed;
+        seq.rank = ConversionSequenceRank::NoMatch;
+        seq.viable = false;
+        seq.note = reason;
+        return seq;
+    };
+
+    auto try_direct_binding = [&](int identity_subrank,
+                                  int qualification_subrank) -> bool {
+        bool same_qualified_type =
+            source_type.equals_qualified(target_type) ||
+            (canonical_source_type &&
+             canonical_target_type &&
+             canonical_source_type.equals_qualified(canonical_target_type));
+        if (same_qualified_type) {
+            seq.kind = ConversionSequenceKind::Identity;
+            seq.rank = ConversionSequenceRank::ExactMatch;
+            seq.exact_subrank = identity_subrank;
+            return true;
+        }
+        bool same_unqualified_type =
+            source_type.equals_unqualified(target_type) ||
+            (canonical_source_type &&
+             canonical_target_type &&
+             canonical_source_type.equals_unqualified(canonical_target_type));
+        if (same_unqualified_type &&
+            target_type.has_all_qualifiers_of(source_type)) {
+            seq.kind = ConversionSequenceKind::Qualification;
+            seq.rank = ConversionSequenceRank::ExactMatch;
+            seq.exact_subrank = qualification_subrank;
+            return true;
+        }
+        if (can_convert_derived_to_base_object(source_type, target_type)) {
+            seq.kind = ConversionSequenceKind::Pointer;
+            seq.rank = ConversionSequenceRank::Conversion;
+            seq.exact_subrank = -1;
+            return true;
+        }
+        return false;
+    };
+
+    auto try_temporary_conversion = [&]() -> bool {
+        auto converted = build_implicit_conversion_sequence(
+            source_type,
+            target_type,
+            ExprUseContext::CallArgument);
+        if (!converted.viable) {
+            return false;
+        }
+        seq.kind = converted.kind;
+        seq.rank = converted.rank;
+        seq.note = converted.note;
+        return true;
+    };
+
+    auto try_user_defined_conversion = [&]() -> bool {
+        if (!allow_user_defined) {
+            return false;
+        }
+        auto conversion_match = select_cpp_user_defined_conversion(
+            arg, target_type, /*allow_explicit_constructors=*/false);
+        if (!conversion_match.has_value()) {
+            return false;
+        }
+        seq.kind = ConversionSequenceKind::UserDefined;
+        seq.rank = ConversionSequenceRank::Conversion;
+        seq.exact_subrank = -1;
+        seq.note = "user-defined conversion sequence";
+        return true;
+    };
+
+    if (to_ref->isLValueReference()) {
+        if (arg_category == ValueCategory::LValue) {
+            if (try_direct_binding(/*identity*/0, /*qualification*/1)) {
+                return seq;
+            }
+            if (!target_type.is_const()) {
+                return fail_binding(
+                    "lvalue reference requires directly bindable lvalue");
+            }
+            if (!try_temporary_conversion()) {
+                if (try_user_defined_conversion()) {
+                    return seq;
+                }
+                return fail_binding(
+                    "const lvalue reference cannot bind to argument");
+            }
+            if (seq.rank == ConversionSequenceRank::ExactMatch) {
+                seq.exact_subrank = 2;
+            }
+            return seq;
+        }
+
+        if (!target_type.is_const()) {
+            return fail_binding("non-const lvalue reference cannot bind to temporary");
+        }
+
+        if (try_direct_binding(/*identity*/2, /*qualification*/2)) {
+            return seq;
+        }
+        if (!try_temporary_conversion()) {
+            if (try_user_defined_conversion()) {
+                return seq;
+            }
+            return fail_binding("const lvalue reference cannot bind to argument");
+        }
+        if (seq.rank == ConversionSequenceRank::ExactMatch) {
+            seq.exact_subrank = 2;
+        }
+        return seq;
+    }
+
+    if (arg_category == ValueCategory::LValue) {
+        return fail_binding("rvalue reference cannot bind to lvalue");
+    }
+
+    if (try_direct_binding(/*identity*/0, /*qualification*/1)) {
+        return seq;
+    }
+    if (!try_temporary_conversion()) {
+        if (try_user_defined_conversion()) {
+            return seq;
+        }
+        return fail_binding("rvalue reference cannot bind to argument");
+    }
+    return seq;
+}
+
+Collect::ImplicitConversionSequence
+Collect::build_cpp_overload_nonreference_conversion_sequence(
+    Expr* arg,
+    QualType from,
+    QualType to,
+    bool allow_user_defined) const {
+    ImplicitConversionSequence seq;
+    seq.to = to;
+
+    QualType from_for_conversion = remove_reference(from);
+    seq.from = from_for_conversion;
+    if (!from_for_conversion) {
+        seq.kind = ConversionSequenceKind::Failed;
+        seq.rank = ConversionSequenceRank::NoMatch;
+        seq.viable = false;
+        seq.note = "argument expression has invalid source type";
+        return seq;
+    }
+
+    auto from_canonical = desugar_type(from_for_conversion, ast_ctx_.get());
+    auto to_canonical = desugar_type(to, ast_ctx_.get());
+    auto from_kind = from_canonical ? from_canonical->kind : TypeKind::Other;
+    auto to_kind = to_canonical ? to_canonical->kind : TypeKind::Other;
+    bool from_is_nullptr = is_nullptr_type(from_for_conversion, ast_ctx_.get());
+    bool to_is_nullptr = is_nullptr_type(to, ast_ctx_.get());
+
+    bool same_qualified_type =
+        from_for_conversion.equals_qualified(to) ||
+        (from_canonical &&
+         to_canonical &&
+         from_canonical.equals_qualified(to_canonical));
+    if (same_qualified_type) {
+        seq.kind = ConversionSequenceKind::Identity;
+        seq.rank = ConversionSequenceRank::ExactMatch;
+        return seq;
+    }
+    bool same_unqualified_type =
+        from_for_conversion.equals_unqualified(to) ||
+        (from_canonical &&
+         to_canonical &&
+         from_canonical.equals_unqualified(to_canonical));
+    if (same_unqualified_type) {
+        seq.kind = ConversionSequenceKind::Qualification;
+        seq.rank = ConversionSequenceRank::ExactMatch;
+        return seq;
+    }
+
+    if (from_kind == TypeKind::Array && to_kind == TypeKind::Pointer) {
+        auto from_arr = from_canonical.as_shared<ArrayType>();
+        auto to_ptr = to_canonical.as_shared<PointerType>();
+        if (from_arr && to_ptr &&
+            from_arr->element_type.equals_unqualified(to_ptr->pointed_type)) {
+            seq.kind = ConversionSequenceKind::ArrayToPointer;
+            seq.rank = ConversionSequenceRank::ExactMatch;
+            return seq;
+        }
+    }
+
+    if (from_kind == TypeKind::Function && to_kind == TypeKind::Pointer) {
+        auto to_ptr = to_canonical.as_shared<PointerType>();
+        if (to_ptr && to_ptr->pointed_type.equals_unqualified(from_canonical)) {
+            seq.kind = ConversionSequenceKind::FunctionToPointer;
+            seq.rank = ConversionSequenceRank::ExactMatch;
+            return seq;
+        }
+    }
+
+    auto to_builtin = to.as_shared<BuiltinType>();
+    if (to_builtin &&
+        to_builtin->builtin_kind == BuiltinTypes::Bool &&
+        from_for_conversion->isScalar()) {
+        seq.kind = ConversionSequenceKind::Numeric;
+        seq.rank = ConversionSequenceRank::Conversion;
+        return seq;
+    }
+
+    if (from_is_nullptr && is_null_pointer_like_type(to, ast_ctx_.get()) && !to_is_nullptr) {
+        seq.kind = ConversionSequenceKind::Pointer;
+        seq.rank = ConversionSequenceRank::Conversion;
+        return seq;
+    }
+    if (to_is_nullptr && is_null_pointer_constant_expr(arg)) {
+        seq.kind = ConversionSequenceKind::Pointer;
+        seq.rank = ConversionSequenceRank::Conversion;
+        return seq;
+    }
+
+    if (to_kind == TypeKind::Pointer && is_null_pointer_constant_expr(arg)) {
+        seq.kind = ConversionSequenceKind::Pointer;
+        seq.rank = ConversionSequenceRank::Conversion;
+        return seq;
+    }
+    if (to_kind == TypeKind::MemberPointer && is_null_pointer_constant_expr(arg)) {
+        seq.kind = ConversionSequenceKind::Pointer;
+        seq.rank = ConversionSequenceRank::Conversion;
+        return seq;
+    }
+    if (to_kind == TypeKind::BlockPointer && is_null_pointer_constant_expr(arg)) {
+        seq.kind = ConversionSequenceKind::Pointer;
+        seq.rank = ConversionSequenceRank::Conversion;
+        return seq;
+    }
+
+    if (from_kind == TypeKind::Pointer && to_kind == TypeKind::Pointer) {
+        auto from_ptr = from_canonical.as_shared<PointerType>();
+        auto to_ptr = to_canonical.as_shared<PointerType>();
+        if (from_ptr && to_ptr) {
+            if (has_qualification_preserving_match(
+                    from_ptr->pointed_type, to_ptr->pointed_type)) {
+                seq.kind = from_ptr->pointed_type.equals_qualified(to_ptr->pointed_type)
+                    ? ConversionSequenceKind::Identity
+                    : ConversionSequenceKind::Qualification;
+                seq.rank = ConversionSequenceRank::ExactMatch;
+                return seq;
+            }
+            bool to_void = to_ptr->pointed_type && to_ptr->pointed_type->isVoid();
+            bool from_object_pointer = from_ptr->pointed_type &&
+                from_ptr->pointed_type->kind != TypeKind::Function;
+            if (to_void &&
+                from_object_pointer &&
+                to_ptr->pointed_type.has_all_qualifiers_of(from_ptr->pointed_type)) {
+                seq.kind = ConversionSequenceKind::Pointer;
+                seq.rank = ConversionSequenceRank::Conversion;
+                return seq;
+            }
+            if (can_convert_derived_to_base_object(
+                    from_ptr->pointed_type, to_ptr->pointed_type)) {
+                seq.kind = ConversionSequenceKind::Pointer;
+                seq.rank = ConversionSequenceRank::Conversion;
+                return seq;
+            }
+        }
+    }
+
+    if (from_kind == TypeKind::BlockPointer && to_kind == TypeKind::BlockPointer) {
+        auto from_block = from_canonical.as_shared<BlockPointerType>();
+        auto to_block = to_canonical.as_shared<BlockPointerType>();
+        if (from_block && to_block &&
+            has_qualification_preserving_match(
+                from_block->pointed_type, to_block->pointed_type)) {
+            seq.kind = from_block->pointed_type.equals_qualified(to_block->pointed_type)
+                ? ConversionSequenceKind::Identity
+                : ConversionSequenceKind::Qualification;
+            seq.rank = ConversionSequenceRank::ExactMatch;
+            return seq;
+        }
+    }
+
+    if (from_kind == TypeKind::MemberPointer && to_kind == TypeKind::MemberPointer) {
+        if (from_for_conversion.equals_qualified(to)) {
+            seq.kind = ConversionSequenceKind::Identity;
+            seq.rank = ConversionSequenceRank::ExactMatch;
+            return seq;
+        }
+        if (member_pointer_convertible_to(from_for_conversion, to)) {
+            seq.kind = from_for_conversion.equals_unqualified(to)
+                ? ConversionSequenceKind::Qualification
+                : ConversionSequenceKind::Pointer;
+            seq.rank = ConversionSequenceRank::Conversion;
+            return seq;
+        }
+    }
+
+    if ((from_for_conversion->isArithmetic() && to->isArithmetic()) ||
+        from_for_conversion->isComplex() || to->isComplex()) {
+        bool is_promotion = false;
+        auto from_builtin = from_for_conversion.as_shared<BuiltinType>();
+        if (from_builtin && to_builtin &&
+            from_builtin->builtin_kind == BuiltinTypes::Float &&
+            to_builtin->builtin_kind == BuiltinTypes::Double) {
+            is_promotion = true;
+        } else if (from_for_conversion->isInteger()) {
+            auto promoted = integer_promotion_type(from_for_conversion);
+            is_promotion = promoted.equals_qualified(to);
+        }
+        seq.kind = ConversionSequenceKind::Numeric;
+        seq.rank = is_promotion
+            ? ConversionSequenceRank::Promotion
+            : ConversionSequenceRank::Conversion;
+        return seq;
+    }
+
+    if (allow_user_defined) {
+        auto conversion_match = select_cpp_user_defined_conversion(
+            arg, to, /*allow_explicit_constructors=*/false);
+        if (conversion_match.has_value()) {
+            seq.kind = ConversionSequenceKind::UserDefined;
+            seq.rank = ConversionSequenceRank::Conversion;
+            seq.note = "user-defined conversion sequence";
+            return seq;
+        }
+    }
+
+    seq.kind = ConversionSequenceKind::Failed;
+    seq.rank = ConversionSequenceRank::NoMatch;
+    seq.viable = false;
+    seq.note = "no C++ overload conversion sequence";
+    return seq;
+}

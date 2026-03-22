@@ -1,0 +1,318 @@
+#include "builtin_registry.h"
+
+BuiltinRegistry& BuiltinRegistry::instance() {
+    static BuiltinRegistry reg;
+    return reg;
+}
+
+const BuiltinInfo* BuiltinRegistry::lookup(std::string_view name) const {
+    auto it = builtins.find(name);
+    if (it != builtins.end()) return &it->second;
+    return nullptr;
+}
+
+bool BuiltinRegistry::is_builtin(std::string_view name) const {
+    return builtins.count(name) > 0;
+}
+
+void BuiltinRegistry::register_builtin(BuiltinInfo info) {
+    builtins[info.name] = info;
+}
+
+BuiltinRegistry::BuiltinRegistry() {
+    // Tier 1: Critical kernel builtins
+    register_builtin({"__builtin_expect", BuiltinKind::EXPECT, 2, 2, false, false});
+    register_builtin({"__builtin_constant_p", BuiltinKind::CONSTANT_P, 1, 1, false, true});
+    register_builtin({"__builtin_unreachable", BuiltinKind::UNREACHABLE, 0, 0, false, false});
+    register_builtin({"__builtin_trap", BuiltinKind::TRAP, 0, 0, false, false});
+    register_builtin({"__builtin_types_compatible_p", BuiltinKind::TYPES_COMPATIBLE_P, 2, 2, true, true});
+    register_builtin({"__builtin_choose_expr", BuiltinKind::CHOOSE_EXPR, 3, 3, true, false});
+    register_builtin({"__builtin_object_size", BuiltinKind::OBJECT_SIZE, 2, 2, false, false});
+    register_builtin({"__builtin_dynamic_object_size", BuiltinKind::DYNAMIC_OBJECT_SIZE, 2, 2, false, false});
+    register_builtin({"__builtin_available", BuiltinKind::AVAILABLE, 1, -1, false, false});
+
+    // Tier 2: Overflow builtins
+    register_builtin({"__builtin_add_overflow", BuiltinKind::ADD_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_sub_overflow", BuiltinKind::SUB_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_mul_overflow", BuiltinKind::MUL_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_sadd_overflow", BuiltinKind::ADD_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_uadd_overflow", BuiltinKind::ADD_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_saddl_overflow", BuiltinKind::ADD_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_uaddl_overflow", BuiltinKind::ADD_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_saddll_overflow", BuiltinKind::ADD_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_uaddll_overflow", BuiltinKind::ADD_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_ssub_overflow", BuiltinKind::SUB_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_usub_overflow", BuiltinKind::SUB_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_ssubl_overflow", BuiltinKind::SUB_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_usubl_overflow", BuiltinKind::SUB_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_ssubll_overflow", BuiltinKind::SUB_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_usubll_overflow", BuiltinKind::SUB_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_smul_overflow", BuiltinKind::MUL_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_umul_overflow", BuiltinKind::MUL_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_smull_overflow", BuiltinKind::MUL_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_umull_overflow", BuiltinKind::MUL_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_smulll_overflow", BuiltinKind::MUL_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_umulll_overflow", BuiltinKind::MUL_OVERFLOW, 3, 3, false, false});
+    register_builtin({"__builtin_add_overflow_p", BuiltinKind::ADD_OVERFLOW_P, 3, 3, false, false});
+    register_builtin({"__builtin_sub_overflow_p", BuiltinKind::SUB_OVERFLOW_P, 3, 3, false, false});
+
+    // Tier 2: Bit manipulation
+    register_builtin({"__builtin_clz", BuiltinKind::CLZ, 1, 1, false, false});
+    register_builtin({"__builtin_clzl", BuiltinKind::CLZL, 1, 1, false, false});
+    register_builtin({"__builtin_clzll", BuiltinKind::CLZLL, 1, 1, false, false});
+    register_builtin({"__builtin_ctz", BuiltinKind::CTZ, 1, 1, false, false});
+    register_builtin({"__builtin_ctzl", BuiltinKind::CTZL, 1, 1, false, false});
+    register_builtin({"__builtin_ctzll", BuiltinKind::CTZLL, 1, 1, false, false});
+    register_builtin({"__builtin_ffs", BuiltinKind::FFS, 1, 1, false, false});
+    register_builtin({"__builtin_ffsl", BuiltinKind::FFSL, 1, 1, false, false});
+    register_builtin({"__builtin_ffsll", BuiltinKind::FFSLL, 1, 1, false, false});
+    register_builtin({"__builtin_popcount", BuiltinKind::POPCOUNT, 1, 1, false, false});
+    register_builtin({"__builtin_popcountl", BuiltinKind::POPCOUNTL, 1, 1, false, false});
+    register_builtin({"__builtin_popcountll", BuiltinKind::POPCOUNTLL, 1, 1, false, false});
+    register_builtin({"__builtin_bswap16", BuiltinKind::BSWAP16, 1, 1, false, false});
+    register_builtin({"__builtin_bswap32", BuiltinKind::BSWAP32, 1, 1, false, false});
+    register_builtin({"__builtin_bswap64", BuiltinKind::BSWAP64, 1, 1, false, false});
+    register_builtin({"__builtin_ia32_bzhi_si", BuiltinKind::IA32_BZHI_SI, 2, 2, false, false});
+
+    // Tier 2: Memory/string builtins
+    register_builtin({"__builtin_memcpy", BuiltinKind::MEMCPY, 3, 3, false, false});
+    register_builtin({"__builtin_memmove", BuiltinKind::MEMMOVE, 3, 3, false, false});
+    register_builtin({"__builtin_memset", BuiltinKind::MEMSET, 3, 3, false, false});
+    register_builtin({"__builtin_memcmp", BuiltinKind::MEMCMP, 3, 3, false, false});
+    register_builtin({"__builtin_memcmp_eq", BuiltinKind::MEMCMP_EQ, 3, 3, false, false});
+    register_builtin({"__builtin_bcmp", BuiltinKind::MEMCMP, 3, 3, false, false});
+    register_builtin({"__builtin_bcopy", BuiltinKind::BCOPY, 3, 3, false, false});
+    register_builtin({"__builtin_bzero", BuiltinKind::BZERO, 2, 2, false, false});
+    register_builtin({"__builtin_memchr", BuiltinKind::MEMCHR, 3, 3, false, false});
+    register_builtin({"__builtin_strlen", BuiltinKind::STRLEN, 1, 1, false, false});
+    register_builtin({"__builtin_strcpy", BuiltinKind::STRCPY, 2, 2, false, false});
+    register_builtin({"__builtin_strncpy", BuiltinKind::STRNCPY, 3, 3, false, false});
+    register_builtin({"__builtin_strcat", BuiltinKind::STRCAT, 2, 2, false, false});
+    register_builtin({"__builtin_strncat", BuiltinKind::STRNCAT, 3, 3, false, false});
+    register_builtin({"__builtin_strcspn", BuiltinKind::STRCSPN, 2, 2, false, false});
+    register_builtin({"__builtin_strspn", BuiltinKind::STRSPN, 2, 2, false, false});
+    register_builtin({"__builtin_strchr", BuiltinKind::STRCHR, 2, 2, false, false});
+    register_builtin({"__builtin_strrchr", BuiltinKind::STRRCHR, 2, 2, false, false});
+    register_builtin({"__builtin_strstr", BuiltinKind::STRSTR, 2, 2, false, false});
+    register_builtin({"__builtin_strdup", BuiltinKind::STRDUP, 1, 1, false, false});
+    register_builtin({"__builtin_stpncpy", BuiltinKind::STPNCPY, 3, 3, false, false});
+    register_builtin({"__builtin_strndup", BuiltinKind::STRNDUP, 2, 2, false, false});
+    register_builtin({"__builtin_strncasecmp", BuiltinKind::STRNCASECMP, 3, 3, false, false});
+    register_builtin({"__builtin_strcmp", BuiltinKind::STRCMP, 2, 2, false, false});
+    register_builtin({"__builtin_strncmp", BuiltinKind::STRNCMP, 3, 3, false, false});
+    register_builtin({"__builtin_stpcpy", BuiltinKind::STPCPY, 2, 2, false, false});
+    register_builtin({"__builtin_mempcpy", BuiltinKind::MEMPCPY, 3, 3, false, false});
+
+    // Fortified (_chk) variants — 4 args: dest, val/src, len, object_size
+    register_builtin({"__builtin___memcpy_chk", BuiltinKind::MEMCPY_CHK, 4, 4, false, false});
+    register_builtin({"__builtin___memmove_chk", BuiltinKind::MEMMOVE_CHK, 4, 4, false, false});
+    register_builtin({"__builtin___memset_chk", BuiltinKind::MEMSET_CHK, 4, 4, false, false});
+    register_builtin({"__builtin___strncpy_chk", BuiltinKind::STRNCPY_CHK, 4, 4, false, false});
+    register_builtin({"__builtin___strcpy_chk", BuiltinKind::STRCPY_CHK, 3, 3, false, false});
+    register_builtin({"__builtin___stpcpy_chk", BuiltinKind::STPCPY_CHK, 3, 3, false, false});
+    register_builtin({"__builtin___strcat_chk", BuiltinKind::STRCAT_CHK, 3, 3, false, false});
+    register_builtin({"__builtin___strncat_chk", BuiltinKind::STRNCAT_CHK, 4, 4, false, false});
+
+    // Fortified stdio (_chk) variants — call through to real libc functions, ignore flag/object_size
+    // __builtin___sprintf_chk(str, flag, os, fmt, ...) → sprintf(str, fmt, ...)
+    register_builtin({"__builtin___sprintf_chk", BuiltinKind::SPRINTF_CHK, 4, -1, false, false});
+    // __builtin___snprintf_chk(str, maxlen, flag, os, fmt, ...) → snprintf(str, maxlen, fmt, ...)
+    register_builtin({"__builtin___snprintf_chk", BuiltinKind::SNPRINTF_CHK, 5, -1, false, false});
+    // __builtin___vsprintf_chk(str, flag, os, fmt, ap) → vsprintf(str, fmt, ap)
+    register_builtin({"__builtin___vsprintf_chk", BuiltinKind::VSPRINTF_CHK, 5, 5, false, false});
+    // __builtin___vsnprintf_chk(str, maxlen, flag, os, fmt, ap) → vsnprintf(str, maxlen, fmt, ap)
+    register_builtin({"__builtin___vsnprintf_chk", BuiltinKind::VSNPRINTF_CHK, 6, 6, false, false});
+
+    // Tier 2: Stack/cache
+    register_builtin({"__builtin___clear_cache", BuiltinKind::CLEAR_CACHE, 2, 2, false, false});
+    register_builtin({"__builtin_clear_padding", BuiltinKind::CLEAR_PADDING, 1, 1, false, false});
+    register_builtin({"__builtin_prefetch", BuiltinKind::PREFETCH, 1, 3, false, false});
+    register_builtin({"__builtin_return_address", BuiltinKind::RETURN_ADDRESS, 1, 1, false, false});
+    register_builtin({"__builtin_frame_address", BuiltinKind::FRAME_ADDRESS, 1, 1, false, false});
+    register_builtin({"__builtin_extract_return_addr", BuiltinKind::EXTRACT_RETURN_ADDR, 1, 1, false, false});
+    register_builtin({"__builtin_alloca", BuiltinKind::ALLOCA, 1, 1, false, false});
+    register_builtin({"alloca", BuiltinKind::ALLOCA, 1, 1, false, false});
+    register_builtin({"__builtin_stack_save", BuiltinKind::STACK_SAVE, 0, 0, false, false});
+    register_builtin({"__builtin_stack_restore", BuiltinKind::STACK_RESTORE, 1, 1, false, false});
+
+    // Tier 3: Float builtins
+    register_builtin({"__builtin_isnan", BuiltinKind::ISNAN, 1, 1, false, false});
+    register_builtin({"__builtin_isinf", BuiltinKind::ISINF, 1, 1, false, false});
+    register_builtin({"__builtin_isinf_sign", BuiltinKind::ISINF_SIGN, 1, 1, false, false});
+    register_builtin({"__builtin_isfinite", BuiltinKind::ISFINITE, 1, 1, false, false});
+    register_builtin({"__builtin_isnormal", BuiltinKind::ISNORMAL, 1, 1, false, false});
+    register_builtin({"__builtin_iseqsig", BuiltinKind::ISEQSIG, 2, 2, false, false});
+    register_builtin({"__builtin_huge_val", BuiltinKind::BUILTIN_HUGE_VAL, 0, 0, false, true});
+    register_builtin({"__builtin_huge_valf", BuiltinKind::BUILTIN_HUGE_VALF, 0, 0, false, true});
+    register_builtin({"__builtin_inf", BuiltinKind::INF, 0, 0, false, true});
+    register_builtin({"__builtin_inff", BuiltinKind::INFF, 0, 0, false, true});
+    register_builtin({"__builtin_infl", BuiltinKind::INFL, 0, 0, false, true});
+    register_builtin({"__builtin_huge_vall", BuiltinKind::BUILTIN_HUGE_VALL, 0, 0, false, true});
+    register_builtin({"__builtin_nan", BuiltinKind::NAN_BUILTIN, 1, 1, false, true});
+    register_builtin({"__builtin_nanf", BuiltinKind::NANF, 1, 1, false, true});
+    register_builtin({"__builtin_nanl", BuiltinKind::NANL, 1, 1, false, true});
+    register_builtin({"__builtin_abs", BuiltinKind::ABS, 1, 1, false, false});
+    register_builtin({"__builtin_labs", BuiltinKind::LABS, 1, 1, false, false});
+    register_builtin({"__builtin_llabs", BuiltinKind::LLABS, 1, 1, false, false});
+    register_builtin({"abs", BuiltinKind::ABS, 1, 1, false, false});
+    register_builtin({"labs", BuiltinKind::LABS, 1, 1, false, false});
+    register_builtin({"llabs", BuiltinKind::LLABS, 1, 1, false, false});
+    register_builtin({"__builtin_fabs", BuiltinKind::FABS, 1, 1, false, false});
+    register_builtin({"__builtin_fabsf", BuiltinKind::FABSF, 1, 1, false, false});
+    register_builtin({"__builtin_fabsl", BuiltinKind::FABSL, 1, 1, false, false});
+    register_builtin({"__builtin_complex", BuiltinKind::COMPLEX, 2, 2, false, false});
+    register_builtin({"__builtin_conjf", BuiltinKind::CONJF, 1, 1, false, false});
+    register_builtin({"__builtin_ilogb", BuiltinKind::ILOGB, 1, 1, false, false});
+
+    // Math builtins
+    register_builtin({"__builtin_pow", BuiltinKind::POW, 2, 2, false, false});
+    register_builtin({"__builtin_powf", BuiltinKind::POWF, 2, 2, false, false});
+    register_builtin({"__builtin_powl", BuiltinKind::POWL, 2, 2, false, false});
+    register_builtin({"__builtin_cpow", BuiltinKind::CPOW, 2, 2, false, false});
+    register_builtin({"__builtin_cexpi", BuiltinKind::CEXPI, 1, 1, false, false});
+    register_builtin({"__builtin_sqrt", BuiltinKind::SQRT, 1, 1, false, false});
+    register_builtin({"__builtin_sqrtf", BuiltinKind::SQRTF, 1, 1, false, false});
+    register_builtin({"__builtin_sqrtl", BuiltinKind::SQRTL, 1, 1, false, false});
+    register_builtin({"__builtin_sin", BuiltinKind::SIN, 1, 1, false, false});
+    register_builtin({"__builtin_sinf", BuiltinKind::SINF, 1, 1, false, false});
+    register_builtin({"__builtin_cos", BuiltinKind::COS, 1, 1, false, false});
+    register_builtin({"__builtin_cosf", BuiltinKind::COSF, 1, 1, false, false});
+    register_builtin({"__builtin_log", BuiltinKind::LOG, 1, 1, false, false});
+    register_builtin({"__builtin_logf", BuiltinKind::LOGF, 1, 1, false, false});
+    register_builtin({"__builtin_log2", BuiltinKind::LOG2, 1, 1, false, false});
+    register_builtin({"__builtin_log2f", BuiltinKind::LOG2F, 1, 1, false, false});
+    register_builtin({"__builtin_log10", BuiltinKind::LOG10, 1, 1, false, false});
+    register_builtin({"__builtin_log10f", BuiltinKind::LOG10F, 1, 1, false, false});
+    register_builtin({"__builtin_exp", BuiltinKind::EXP, 1, 1, false, false});
+    register_builtin({"__builtin_expf", BuiltinKind::EXPF, 1, 1, false, false});
+    register_builtin({"__builtin_exp2", BuiltinKind::EXP2, 1, 1, false, false});
+    register_builtin({"__builtin_exp2f", BuiltinKind::EXP2F, 1, 1, false, false});
+    register_builtin({"__builtin_ceil", BuiltinKind::CEIL, 1, 1, false, false});
+    register_builtin({"__builtin_ceilf", BuiltinKind::CEILF, 1, 1, false, false});
+    register_builtin({"__builtin_floor", BuiltinKind::FLOOR, 1, 1, false, false});
+    register_builtin({"__builtin_floorf", BuiltinKind::FLOORF, 1, 1, false, false});
+    register_builtin({"__builtin_round", BuiltinKind::ROUND, 1, 1, false, false});
+    register_builtin({"__builtin_roundf", BuiltinKind::ROUNDF, 1, 1, false, false});
+    register_builtin({"__builtin_copysign", BuiltinKind::COPYSIGN, 2, 2, false, false});
+    register_builtin({"__builtin_copysignf", BuiltinKind::COPYSIGNF, 2, 2, false, false});
+    register_builtin({"__builtin_copysignl", BuiltinKind::COPYSIGNL, 2, 2, false, false});
+    register_builtin({"__builtin_fmin", BuiltinKind::FMIN, 2, 2, false, false});
+    register_builtin({"__builtin_fminf", BuiltinKind::FMINF, 2, 2, false, false});
+    register_builtin({"__builtin_fmax", BuiltinKind::FMAX, 2, 2, false, false});
+    register_builtin({"__builtin_fmaxf", BuiltinKind::FMAXF, 2, 2, false, false});
+
+    register_builtin({"__builtin_modf", BuiltinKind::MODF, 2, 2, false, false});
+    register_builtin({"__builtin_modff", BuiltinKind::MODFF, 2, 2, false, false});
+    register_builtin({"__builtin_modfl", BuiltinKind::MODFL, 2, 2, false, false});
+    register_builtin({"__builtin_trunc", BuiltinKind::TRUNC, 1, 1, false, false});
+    register_builtin({"__builtin_truncf", BuiltinKind::TRUNCF, 1, 1, false, false});
+
+    register_builtin({"__builtin_signbit", BuiltinKind::SIGNBIT, 1, 1, false, false});
+    register_builtin({"__builtin_signbitf", BuiltinKind::SIGNBITF, 1, 1, false, false});
+    register_builtin({"__builtin_signbitl", BuiltinKind::SIGNBITL, 1, 1, false, false});
+
+    // Tier 3: Misc
+    register_builtin({"__builtin_assume_aligned", BuiltinKind::ASSUME_ALIGNED, 2, 3, false, false});
+    register_builtin({"__builtin_classify_type", BuiltinKind::CLASSIFY_TYPE, 1, 1, false, true});
+    register_builtin({"__builtin_expect_with_probability", BuiltinKind::EXPECT_WITH_PROBABILITY, 3, 3, false, false});
+    register_builtin({"__builtin_FILE", BuiltinKind::BUILTIN_FILE, 0, 0, false, true});
+    register_builtin({"__builtin_LINE", BuiltinKind::BUILTIN_LINE, 0, 0, false, true});
+    register_builtin({"__builtin_FUNCTION", BuiltinKind::BUILTIN_FUNCTION, 0, 0, false, true});
+    register_builtin({"__builtin_clrsb", BuiltinKind::CLRSB, 1, 1, false, false});
+    register_builtin({"__builtin_clrsbl", BuiltinKind::CLRSBL, 1, 1, false, false});
+    register_builtin({"__builtin_clrsbll", BuiltinKind::CLRSBLL, 1, 1, false, false});
+    register_builtin({"__builtin_parity", BuiltinKind::PARITY, 1, 1, false, false});
+    register_builtin({"__builtin_parityl", BuiltinKind::PARITYL, 1, 1, false, false});
+    register_builtin({"__builtin_parityll", BuiltinKind::PARITYLL, 1, 1, false, false});
+    register_builtin({"__builtin_convertvector", BuiltinKind::CONVERTVECTOR, 2, 2, true, false});
+    register_builtin({"__builtin_shufflevector", BuiltinKind::SHUFFLEVECTOR, 2, -1, false, false});
+    register_builtin({"__builtin_va_arg_pack", BuiltinKind::VA_ARG_PACK, 0, 0, false, false});
+
+    // Tier 4: Atomic builtins
+    register_builtin({"__atomic_load", BuiltinKind::ATOMIC_LOAD_N, 3, 3, false, false});
+    register_builtin({"__atomic_load_n", BuiltinKind::ATOMIC_LOAD_N, 2, 2, false, false});
+    register_builtin({"__atomic_store", BuiltinKind::ATOMIC_STORE_N, 3, 3, false, false});
+    register_builtin({"__atomic_store_n", BuiltinKind::ATOMIC_STORE_N, 3, 3, false, false});
+    register_builtin({"__atomic_exchange", BuiltinKind::ATOMIC_EXCHANGE_N, 4, 4, false, false});
+    register_builtin({"__atomic_exchange_n", BuiltinKind::ATOMIC_EXCHANGE_N, 3, 3, false, false});
+    register_builtin({"__atomic_compare_exchange", BuiltinKind::ATOMIC_COMPARE_EXCHANGE_N, 6, 6, false, false});
+    register_builtin({"__atomic_compare_exchange_n", BuiltinKind::ATOMIC_COMPARE_EXCHANGE_N, 6, 6, false, false});
+    register_builtin({"__atomic_is_lock_free", BuiltinKind::ATOMIC_IS_LOCK_FREE, 2, 2, false, false});
+    register_builtin({"__atomic_fetch_add", BuiltinKind::ATOMIC_FETCH_ADD, 3, 3, false, false});
+    register_builtin({"__atomic_fetch_sub", BuiltinKind::ATOMIC_FETCH_SUB, 3, 3, false, false});
+    register_builtin({"__atomic_fetch_and", BuiltinKind::ATOMIC_FETCH_AND, 3, 3, false, false});
+    register_builtin({"__atomic_fetch_or", BuiltinKind::ATOMIC_FETCH_OR, 3, 3, false, false});
+    register_builtin({"__atomic_fetch_xor", BuiltinKind::ATOMIC_FETCH_XOR, 3, 3, false, false});
+    register_builtin({"__atomic_fetch_nand", BuiltinKind::ATOMIC_FETCH_NAND, 3, 3, false, false});
+    register_builtin({"__atomic_add_fetch", BuiltinKind::ATOMIC_ADD_FETCH, 3, 3, false, false});
+    register_builtin({"__atomic_sub_fetch", BuiltinKind::ATOMIC_SUB_FETCH, 3, 3, false, false});
+    register_builtin({"__atomic_and_fetch", BuiltinKind::ATOMIC_AND_FETCH, 3, 3, false, false});
+    register_builtin({"__atomic_or_fetch", BuiltinKind::ATOMIC_OR_FETCH, 3, 3, false, false});
+    register_builtin({"__atomic_xor_fetch", BuiltinKind::ATOMIC_XOR_FETCH, 3, 3, false, false});
+    register_builtin({"__atomic_nand_fetch", BuiltinKind::ATOMIC_NAND_FETCH, 3, 3, false, false});
+    register_builtin({"__atomic_thread_fence", BuiltinKind::ATOMIC_THREAD_FENCE, 1, 1, false, false});
+    register_builtin({"__atomic_signal_fence", BuiltinKind::ATOMIC_SIGNAL_FENCE, 1, 1, false, false});
+    register_builtin({"__atomic_test_and_set", BuiltinKind::ATOMIC_TEST_AND_SET, 2, 2, false, false});
+    register_builtin({"__atomic_clear", BuiltinKind::ATOMIC_CLEAR, 2, 2, false, false});
+
+    // Clang/C11 atomic builtin spellings used by stdatomic.h on Apple platforms
+    register_builtin({"__c11_atomic_init", BuiltinKind::C11_ATOMIC_INIT, 2, 2, false, false});
+    register_builtin({"__c11_atomic_is_lock_free", BuiltinKind::ATOMIC_IS_LOCK_FREE, 1, 1, false, false});
+    register_builtin({"__c11_atomic_thread_fence", BuiltinKind::ATOMIC_THREAD_FENCE, 1, 1, false, false});
+    register_builtin({"__c11_atomic_signal_fence", BuiltinKind::ATOMIC_SIGNAL_FENCE, 1, 1, false, false});
+    register_builtin({"__c11_atomic_load", BuiltinKind::ATOMIC_LOAD_N, 2, 2, false, false});
+    register_builtin({"__c11_atomic_store", BuiltinKind::ATOMIC_STORE_N, 3, 3, false, false});
+    register_builtin({"__c11_atomic_exchange", BuiltinKind::ATOMIC_EXCHANGE_N, 3, 3, false, false});
+    register_builtin({"__c11_atomic_compare_exchange_strong", BuiltinKind::ATOMIC_COMPARE_EXCHANGE_N, 5, 5, false, false});
+    register_builtin({"__c11_atomic_compare_exchange_weak", BuiltinKind::ATOMIC_COMPARE_EXCHANGE_N, 5, 5, false, false});
+    register_builtin({"__c11_atomic_fetch_add", BuiltinKind::ATOMIC_FETCH_ADD, 3, 3, false, false});
+    register_builtin({"__c11_atomic_fetch_sub", BuiltinKind::ATOMIC_FETCH_SUB, 3, 3, false, false});
+    register_builtin({"__c11_atomic_fetch_or", BuiltinKind::ATOMIC_FETCH_OR, 3, 3, false, false});
+    register_builtin({"__c11_atomic_fetch_xor", BuiltinKind::ATOMIC_FETCH_XOR, 3, 3, false, false});
+    register_builtin({"__c11_atomic_fetch_and", BuiltinKind::ATOMIC_FETCH_AND, 3, 3, false, false});
+
+    // Legacy __sync_* builtins
+    register_builtin({"__sync_fetch_and_add", BuiltinKind::SYNC_FETCH_AND_ADD, 2, 2, false, false});
+    register_builtin({"__sync_fetch_and_sub", BuiltinKind::SYNC_FETCH_AND_SUB, 2, 2, false, false});
+    register_builtin({"__sync_fetch_and_or", BuiltinKind::SYNC_FETCH_AND_OR, 2, 2, false, false});
+    register_builtin({"__sync_fetch_and_and", BuiltinKind::SYNC_FETCH_AND_AND, 2, 2, false, false});
+    register_builtin({"__sync_fetch_and_xor", BuiltinKind::SYNC_FETCH_AND_XOR, 2, 2, false, false});
+    register_builtin({"__sync_fetch_and_nand", BuiltinKind::SYNC_FETCH_AND_NAND, 2, 2, false, false});
+    register_builtin({"__sync_add_and_fetch", BuiltinKind::SYNC_ADD_AND_FETCH, 2, 2, false, false});
+    register_builtin({"__sync_sub_and_fetch", BuiltinKind::SYNC_SUB_AND_FETCH, 2, 2, false, false});
+    register_builtin({"__sync_or_and_fetch", BuiltinKind::SYNC_OR_AND_FETCH, 2, 2, false, false});
+    register_builtin({"__sync_and_and_fetch", BuiltinKind::SYNC_AND_AND_FETCH, 2, 2, false, false});
+    register_builtin({"__sync_xor_and_fetch", BuiltinKind::SYNC_XOR_AND_FETCH, 2, 2, false, false});
+    register_builtin({"__sync_nand_and_fetch", BuiltinKind::SYNC_NAND_AND_FETCH, 2, 2, false, false});
+    register_builtin({"__sync_bool_compare_and_swap", BuiltinKind::SYNC_BOOL_COMPARE_AND_SWAP, 3, 3, false, false});
+    register_builtin({"__sync_val_compare_and_swap", BuiltinKind::SYNC_VAL_COMPARE_AND_SWAP, 3, 3, false, false});
+    register_builtin({"__sync_synchronize", BuiltinKind::SYNC_SYNCHRONIZE, 0, 0, false, false});
+    register_builtin({"__sync_lock_test_and_set", BuiltinKind::SYNC_LOCK_TEST_AND_SET, 2, -1, false, false});
+    register_builtin({"__sync_lock_release", BuiltinKind::SYNC_LOCK_RELEASE, 1, -1, false, false});
+
+    // I/O builtins
+    register_builtin({"__builtin_printf", BuiltinKind::PRINTF, 1, -1, false, false});
+    register_builtin({"__builtin_puts", BuiltinKind::PUTS, 1, 1, false, false});
+    register_builtin({"__builtin_putchar", BuiltinKind::PUTCHAR, 1, 1, false, false});
+    register_builtin({"__builtin_fprintf", BuiltinKind::FPRINTF, 2, -1, false, false});
+    register_builtin({"__builtin_sprintf", BuiltinKind::SPRINTF, 2, -1, false, false});
+    register_builtin({"__builtin_snprintf", BuiltinKind::SNPRINTF, 3, -1, false, false});
+
+    // Floating-point comparison builtins (all take 2 args, return int)
+    register_builtin({"__builtin_isunordered", BuiltinKind::ISUNORDERED, 2, 2, false, false});
+    register_builtin({"__builtin_isless", BuiltinKind::ISLESS, 2, 2, false, false});
+    register_builtin({"__builtin_islessequal", BuiltinKind::ISLESSEQUAL, 2, 2, false, false});
+    register_builtin({"__builtin_isgreater", BuiltinKind::ISGREATER, 2, 2, false, false});
+    register_builtin({"__builtin_isgreaterequal", BuiltinKind::ISGREATEREQUAL, 2, 2, false, false});
+    register_builtin({"__builtin_islessgreater", BuiltinKind::ISLESSGREATER, 2, 2, false, false});
+
+    // Memory allocation
+    register_builtin({"__builtin_malloc", BuiltinKind::MALLOC, 1, 1, false, false});
+    register_builtin({"__builtin_calloc", BuiltinKind::CALLOC, 2, 2, false, false});
+    register_builtin({"__builtin_realloc", BuiltinKind::REALLOC, 2, 2, false, false});
+    register_builtin({"__builtin_free", BuiltinKind::FREE, 1, 1, false, false});
+
+    // Process control
+    register_builtin({"__builtin_abort", BuiltinKind::ABORT, 0, 0, false, false});
+    register_builtin({"__builtin_exit", BuiltinKind::EXIT, 1, 1, false, false});
+}

@@ -1,0 +1,93 @@
+name: Bug Report
+description: Report a compiler crash, miscompile, build failure, or diagnostic issue.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please include a small repro case whenever possible.
+
+  - type: input
+    id: aburi_version
+    attributes:
+      label: Aburiscript Version
+      description: Output of `aburi --version`
+      placeholder: "Aburiscript version 0.1.0-dev"
+    validations:
+      required: true
+
+  - type: input
+    id: llvm_version
+    attributes:
+      label: LLVM Version
+      description: The LLVM version used to build Aburiscript
+      placeholder: "18.1.8"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, architecture, and compiler host environment
+      placeholder: "macOS 15 arm64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: issue_kind
+    attributes:
+      label: What kind of issue is this?
+      options:
+        - Compiler crash
+        - Miscompile / wrong runtime behavior
+        - Build failure
+        - Bad diagnostic
+        - Performance problem
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal Reproduction
+      description: Paste the smallest source file or command sequence that reproduces the issue.
+      placeholder: |
+        // source file
+        int main() { return 67; }
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact Command
+      description: Include the exact `aburi` command line and any build-system command that triggers the bug.
+      placeholder: |
+        aburi repro.c -o repro
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: Include the error text, stack trace, wrong output, or other observed result.
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Links, reduced repo, notes about whether Clang/GCC behave differently, etc.

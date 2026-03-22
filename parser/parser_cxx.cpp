@@ -1,0 +1,7200 @@
+#include "parser.h"
+#include "cpp_out_of_line_match.h"
+#include "tentative_syntax_probe.h"
+#include "../ast/ast_clone.h"
+#include "../collect/lookup_engine.h"
+#include "../collect/collect_templates_internal.h"
+#include "../helpers/casting.h"
+#include "../ast/special_members.h"
+#include "../numeric_utils.h"
+#include "../helpers/qualified_name_utils.h"
+#include "../helpers/auto_type_utils.h"
+
+// C++-only parser entrypoints and helpers belong here.
+// Keep shared C/C++ parsing logic in parser.cpp.
+
+#include <cstdint>
+#include <limits>
+
+namespace {
+Token make_template_split_token(const Token& source,
+                                TokenType type,
+                                std::string value,
+                                uint32_t offset_adjust = 0) {
+    Token split = source;
+    split.type = type;
+    split.value = std::move(value);
+    if (!split.loc.isInvalid()) {
+        split.loc.offset += offset_adjust;
+    }
+    return split;
+}
+
+std::optional<std::string> namespace_prefix_from_member_qualifier(
+    const std::string* qualifier_prefix) {
+    if (!qualifier_prefix || qualifier_prefix->empty()) {
+        return std::nullopt;
+    }
+    size_t pos = qualifier_prefix->rfind("::");
+    if (pos == std::string::npos || pos == 0) {
+        return std::nullopt;
+    }
+    return qualifier_prefix->substr(0, pos);
+}
+
+void adopt_out_of_line_member_qualifier_prefix(const FuncDecl* target_decl,
+                                               const FuncDecl* parsed_decl) {
+    if (!target_decl) {
+        return;
+    }
+    auto namespace_prefix = namespace_prefix_from_member_qualifier(
+        parsed_decl ? get_func_decl_cxx_qualifier_prefix(parsed_decl) : nullptr);
+    if (namespace_prefix.has_value()) {
+        set_func_decl_cxx_qualifier_prefix(target_decl, *namespace_prefix);
+    } else {
+        set_func_decl_cxx_qualifier_prefix(target_decl, std::nullopt);
+    }
+}
+
+void merge_out_of_line_constructor_definition(
+    CppConstructorDecl* matched_ctor_decl,
+    CppConstructorDecl* parsed_ctor,
+    const RecordSemanticState::Constructor* matched_ctor_state,
+    const std::shared_ptr<Symbol>& matched_symbol,
+    const std::shared_ptr<ASTContext>& ast_ctx,
+    const ObjectDecl* owner_record_decl) {
+    if (!matched_ctor_decl || !parsed_ctor || !matched_ctor_state || !owner_record_decl) {
+        return;
+    }
+
+    matched_ctor_decl->parameters = std::move(parsed_ctor->parameters);
+    matched_ctor_decl->type = parsed_ctor->type;
+    matched_ctor_decl->body = std::move(parsed_ctor->body);
+    matched_ctor_decl->scope = parsed_ctor->scope;
+    matched_ctor_decl->stmt_labels = std::move(parsed_ctor->stmt_labels);
+    matched_ctor_decl->ctor_initializers = std::move(parsed_ctor->ctor_initializers);
+    matched_ctor_decl->is_explicit = parsed_ctor->is_explicit;
+    matched_ctor_decl->is_deleted = parsed_ctor->is_deleted;
+    matched_ctor_decl->is_defaulted = parsed_ctor->is_defaulted;
+    matched_ctor_decl->is_constexpr = parsed_ctor->is_constexpr;
+    matched_ctor_decl->set_language_linkage(parsed_ctor->get_language_linkage());
+    if (parsed_ctor->asm_label) {
+        matched_ctor_decl->set_asm_label(*parsed_ctor->asm_label);
+    } else {
+        matched_ctor_decl->clear_asm_label();
+    }
+    matched_ctor_decl->clear_deferred_inline_body_token_range();
+
+    adopt_out_of_line_member_qualifier_prefix(matched_ctor_decl, parsed_ctor);
+
+    if (ast_ctx) {
+        const auto& parsed_attrs = ast_ctx->get_attrs(parsed_ctor->node_id).attrs;
+        if (!parsed_attrs.empty()) {
+            auto& dst_attrs = ast_ctx->get_attrs_mut(matched_ctor_decl->node_id).attrs;
+            dst_attrs.insert(dst_attrs.end(), parsed_attrs.begin(), parsed_attrs.end());
+        }
+    }
+
+    if (matched_symbol) {
+        matched_symbol->is_defined = true;
+        matched_symbol->type = QualType(matched_ctor_decl->type);
+        matched_symbol->function_definition = matched_ctor_decl;
+    }
+
+    if (const RecordSemanticState* owner_state =
+            record_semantics_cache_lookup(owner_record_decl)) {
+        RecordSemanticState updated_state = *owner_state;
+        for (auto& ctor : updated_state.constructors) {
+            if (ctor.decl != matched_ctor_state->decl) {
+                continue;
+            }
+            ctor.decl = matched_ctor_decl;
+            ctor.type = QualType(matched_ctor_decl->type);
+            ctor.is_deleted = matched_ctor_decl->is_deleted;
+            if (matched_symbol) {
+                ctor.symbol = matched_symbol;
+            }
+            break;
+        }
+        cpp_recompute_default_constructor_traits(
+            updated_state.definition_data,
+            updated_state.constructors);
+        record_semantics_cache_set(owner_record_decl, std::move(updated_state));
+    }
+}
+} // namespace
+
+bool Parser::is_cxx_mode_active() const {
+    return lang_opts.is_cxx_mode();
+}
+
+bool Parser::can_parse_namespace_scope_template_declaration() const {
+    if (!is_cxx_mode_active() || !collect_) {
+        return false;
+    }
+    if (is_parsing_cpp_record_body()) {
+        return false;
+    }
+    auto scope = collect_->collect_current_scope();
+    while (scope &&
+           scope_flags_contains(scope->flags, ScopeFlags::TemplateParameterScope)) {
+        scope = scope->parent;
+    }
+    if (!scope) {
+        return false;
+    }
+    if (scope_flags_contains(scope->flags, ScopeFlags::FunctionScope) ||
+        scope_flags_contains(scope->flags, ScopeFlags::BlockScope) ||
+        scope_flags_contains(scope->flags, ScopeFlags::PrototypeScope)) {
+        return false;
+    }
+    return scope_flags_contains(scope->flags, ScopeFlags::FileScope) ||
+           scope_flags_contains(scope->flags, ScopeFlags::NamespaceScope);
+}
+
+bool Parser::is_in_template_pattern_context() const {
+    return template_pattern_depth_ > 0;
+}
+
+std::string Parser::make_cpp_unsupported_message(std::string_view feature) const {
+    return "C++ parser unsupported syntax: " + std::string(feature);
+}
+
+void Parser::fail_cpp_unsupported(std::string_view feature, SrcLoc loc) {
+    error_custloc(make_cpp_unsupported_message(feature), loc);
+}
+
+bool Parser::is_cpp_operator_function_name(std::string_view name) const {
+    return name.rfind("operator", 0) == 0;
+}
+
+bool Parser::is_cpp_member_only_operator_name(std::string_view name) const {
+    return name == "operator=" ||
+           name == "operator[]" ||
+           name == "operator()" ||
+           name == "operator->";
+}
+
+void Parser::validate_cpp_operator_function_declaration(
+    std::string_view name,
+    bool in_class_member_context,
+    bool is_static_member,
+    SrcLoc loc) {
+    if (!is_cxx_mode_active() || !is_cpp_operator_function_name(name)) {
+        return;
+    }
+    if (is_cpp_member_only_operator_name(name) &&
+        (!in_class_member_context || is_static_member)) {
+        error_custloc(
+            "overloaded '" + std::string(name) +
+                "' must be a non-static member function",
+            loc);
+    }
+}
+
+bool Parser::is_cpp_scope_resolution_here() {
+    if (gentle_check(TokenType::SCOPE_RESOLUTION)) {
+        return true;
+    }
+    return gentle_check(TokenType::COLON) && peek_token().type == TokenType::COLON;
+}
+
+bool Parser::consume_cpp_scope_resolution() {
+    if (gentle_check(TokenType::SCOPE_RESOLUTION)) {
+        advance();
+        return true;
+    }
+    if (gentle_check(TokenType::COLON) && peek_token().type == TokenType::COLON) {
+        advance();
+        advance();
+        return true;
+    }
+    return false;
+}
+
+bool Parser::is_parsing_cpp_record_body() const {
+    return !cxx_record_parse_stack_.empty();
+}
+
+std::string Parser::current_cpp_record_qualifier_prefix() const {
+    std::string qualifier;
+    for (const auto& frame : cxx_record_parse_stack_) {
+        std::string component =
+            frame.semantic_owner ? frame.semantic_owner->tag : frame.name;
+        if (component.empty()) {
+            continue;
+        }
+        if (!qualifier.empty()) {
+            qualifier += "::";
+        }
+        qualifier += component;
+    }
+    return qualifier;
+}
+
+const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
+    CppRecordKind record_kind,
+    const std::string& name,
+    const std::vector<TemplateArgument>& specialization_arguments,
+    SrcLoc loc,
+    const ClassTemplateDecl* primary_class_template) {
+    if (!collect_ ||
+        name.empty() ||
+        specialization_arguments.empty()) {
+        return nullptr;
+    }
+
+    for (const auto& argument : specialization_arguments) {
+        switch (argument.kind) {
+            case TemplateArgumentKind::Type:
+                if (!argument.type ||
+                    type_depends_on_template_parameters(
+                        argument.type,
+                        ast_ctx.get())) {
+                    return nullptr;
+                }
+                break;
+            case TemplateArgumentKind::Value:
+                if (!argument.value_type ||
+                    type_depends_on_template_parameters(
+                        argument.value_type,
+                        ast_ctx.get())) {
+                    return nullptr;
+                }
+                break;
+            case TemplateArgumentKind::Template:
+                if (!argument.template_decl) {
+                    return nullptr;
+                }
+                break;
+        }
+    }
+
+    std::string specialization_name(name);
+    specialization_name += "<";
+    for (size_t idx = 0; idx < specialization_arguments.size(); ++idx) {
+        if (idx != 0) {
+            specialization_name += ", ";
+        }
+        specialization_name += specialization_arguments[idx].to_string();
+    }
+    specialization_name += ">";
+
+    if (auto* existing_tag_decl =
+            collect_->collect_lookup_tag_decl(specialization_name, false)) {
+        auto* existing_owner = dyn_cast<ObjectDecl>(existing_tag_decl);
+        if (!existing_owner) {
+            error_custloc(
+                "tag '" + specialization_name +
+                    "' was previously declared with a different kind",
+                loc);
+        }
+        return existing_owner;
+    }
+
+    const ClassTemplateDecl* resolved_primary = primary_class_template;
+    if (!resolved_primary) {
+        auto lookup_scope = collect_->collect_current_scope();
+        while (lookup_scope &&
+               scope_flags_contains(
+                   lookup_scope->flags,
+                   ScopeFlags::TemplateParameterScope)) {
+            lookup_scope = lookup_scope->parent;
+        }
+        const DeclBinding* template_binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                name,
+                lookup_scope ? lookup_scope : collect_->collect_current_scope(),
+                true,
+                LookupNamespace::Tag);
+        const Decl* primary_template_decl = nullptr;
+        if (template_binding) {
+            primary_template_decl = template_binding->template_decl;
+            if (!primary_template_decl &&
+                template_binding->template_overload_candidates.size() == 1) {
+                primary_template_decl =
+                    template_binding->template_overload_candidates.front();
+            }
+        }
+        resolved_primary =
+            dyn_cast<ClassTemplateDecl>(primary_template_decl);
+    }
+
+    bool is_union = record_kind == CppRecordKind::Union;
+    auto specialization_type = std::make_shared<ObjectType>(
+        specialization_name,
+        is_union,
+        true);
+    if (resolved_primary) {
+        specialization_type->set_class_template_specialization_info(
+            resolved_primary,
+            specialization_arguments);
+    }
+
+    auto placeholder_decl = collect_->collect_record_declaration(
+        specialization_name,
+        specialization_type,
+        is_union,
+        loc);
+    if (!placeholder_decl) {
+        return nullptr;
+    }
+
+    record_semantics_cache_set(placeholder_decl.get(), RecordSemanticState{});
+    collect_->collect_add_tag_decl(specialization_name, placeholder_decl.get());
+    collect_->collect_add_tag_type(specialization_name, specialization_type);
+    auto* semantic_owner = placeholder_decl.get();
+    cpp_transient_semantic_decls_.push_back(std::move(placeholder_decl));
+    return semantic_owner;
+}
+
+QualType Parser::resolve_cpp_unqualified_type_component(
+    const std::string& component_name,
+    const std::vector<TemplateArgument>& component_arguments,
+    bool component_has_template_argument_list,
+    SrcLoc component_loc) {
+    if (!component_has_template_argument_list) {
+        if (auto typedef_symbol =
+                collect_->collect_lookup_typedef_symbol(component_name, true)) {
+            return typedef_symbol->type;
+        }
+        if (auto tag_type =
+                collect_->collect_lookup_tag_type(component_name, true)) {
+            return QualType(tag_type);
+        }
+        return collect_->collect_lookup_type_name(component_name, true, true);
+    }
+
+    auto current_scope = collect_->collect_current_scope();
+    if (!current_scope) {
+        return QualType();
+    }
+
+    const DeclBinding* ordinary_template_binding =
+        LookupEngine::lookup_unqualified_template_binding(
+            component_name,
+            current_scope,
+            true,
+            LookupNamespace::Ordinary);
+    const DeclBinding* tag_template_binding =
+        LookupEngine::lookup_unqualified_template_binding(
+            component_name,
+            current_scope,
+            true,
+            LookupNamespace::Tag);
+    const Decl* primary_template = nullptr;
+    if (ordinary_template_binding) {
+        primary_template = ordinary_template_binding->template_decl;
+        if (!primary_template &&
+            ordinary_template_binding->template_overload_candidates.size() == 1) {
+            primary_template =
+                ordinary_template_binding->template_overload_candidates.front();
+        }
+    }
+    if (!isa<AliasTemplateDecl>(primary_template) &&
+        !isa<TemplateTemplateParmDecl>(primary_template)) {
+        primary_template = nullptr;
+        if (tag_template_binding) {
+            primary_template = tag_template_binding->template_decl;
+            if (!primary_template &&
+                tag_template_binding->template_overload_candidates.size() == 1) {
+                primary_template =
+                    tag_template_binding->template_overload_candidates.front();
+            }
+        }
+    }
+    if (!isa<AliasTemplateDecl>(primary_template) &&
+        !isa<ClassTemplateDecl>(primary_template) &&
+        !isa<TemplateTemplateParmDecl>(primary_template)) {
+        return QualType();
+    }
+
+    bool is_dependent = isa<TemplateTemplateParmDecl>(primary_template);
+    for (const auto& argument : component_arguments) {
+        if (template_argument_depends_on_template_parameters(
+                argument,
+                ast_ctx.get())) {
+            is_dependent = true;
+            break;
+        }
+    }
+
+    QualType specialization_type =
+        QualType(std::make_shared<TemplateSpecializationType>(
+            component_name,
+            primary_template,
+            component_arguments,
+            is_dependent));
+    if (is_dependent) {
+        return specialization_type;
+    }
+    return collect_->collect_try_realize_deferred_semantic_type(
+        specialization_type);
+}
+
+std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
+    if (!collect_) {
+        return std::nullopt;
+    }
+
+    auto current_scope = collect_->collect_current_scope();
+    auto current_context = collect_->get_current_decl_context();
+    if (!current_scope || !current_context) {
+        return std::nullopt;
+    }
+
+    RevertingTentativeParsingAction tentative(*this);
+    bool has_global_qualifier = consume_cpp_scope_resolution();
+    if (!gentle_check(TokenType::IDENTIFIER)) {
+        return std::nullopt;
+    }
+
+    std::vector<std::string> qualifiers;
+    std::string terminal_name = current_token().value;
+    advance();
+    while (is_cpp_scope_resolution_here()) {
+        consume_cpp_scope_resolution();
+        qualifiers.push_back(terminal_name);
+        if (gentle_check(TokenType::TEMPLATE)) {
+            return std::nullopt;
+        }
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            return std::nullopt;
+        }
+        terminal_name = current_token().value;
+        advance();
+    }
+
+    if (!is_cpp_template_argument_boundary_here() &&
+        !gentle_check(TokenType::ELLIPSIS)) {
+        return std::nullopt;
+    }
+
+    auto resolve_single_template = [](const DeclBinding* binding) -> const Decl* {
+        if (!binding) {
+            return nullptr;
+        }
+        if (binding->template_decl) {
+            return binding->template_decl;
+        }
+        if (binding->template_overload_candidates.size() == 1) {
+            return binding->template_overload_candidates.front();
+        }
+        return nullptr;
+    };
+
+    const Decl* resolved_template = nullptr;
+    if (!has_global_qualifier && qualifiers.empty()) {
+        resolved_template = resolve_single_template(
+            LookupEngine::lookup_unqualified_template_binding(
+                terminal_name,
+                current_scope,
+                true,
+                LookupNamespace::Ordinary));
+        if (!resolved_template) {
+            resolved_template = resolve_single_template(
+                LookupEngine::lookup_unqualified_template_binding(
+                    terminal_name,
+                    current_scope,
+                    true,
+                    LookupNamespace::Tag));
+        }
+    } else {
+        LookupEngine::QualifiedNameSpec name_spec;
+        name_spec.has_global_qualifier = has_global_qualifier;
+        name_spec.qualifiers = qualifiers;
+        name_spec.terminal_name = terminal_name;
+
+        auto ordinary_lookup = LookupEngine::lookup_qualified_name(
+            name_spec,
+            current_context.get(),
+            LookupNamespace::Ordinary);
+        resolved_template = resolve_single_template(ordinary_lookup.binding);
+        if (!resolved_template) {
+            auto tag_lookup = LookupEngine::lookup_qualified_name(
+                name_spec,
+                current_context.get(),
+                LookupNamespace::Tag);
+            resolved_template = resolve_single_template(tag_lookup.binding);
+        }
+    }
+
+    if (!resolved_template) {
+        return std::nullopt;
+    }
+
+    std::string template_name = qualified_name_utils::format_cpp_qualified_name(
+        has_global_qualifier,
+        qualifiers,
+        terminal_name);
+    tentative.Commit();
+
+    if (auto* template_parameter = dyn_cast<TemplateTemplateParmDecl>(
+            const_cast<Decl*>(resolved_template))) {
+        return TemplateArgument::dependent_template_argument(
+            template_name,
+            template_parameter);
+    }
+    const TemplateDecl* template_decl = nullptr;
+    switch (resolved_template->get_kind()) {
+        case DeclKind::AliasTemplateDecl:
+        case DeclKind::FunctionTemplateDecl:
+        case DeclKind::ClassTemplateDecl:
+        case DeclKind::ClassTemplatePartialSpecializationDecl:
+            template_decl =
+                static_cast<const TemplateDecl*>(resolved_template);
+            break;
+        default:
+            break;
+    }
+    if (template_decl) {
+        return TemplateArgument::template_argument(template_decl, template_name);
+    }
+    return std::nullopt;
+}
+
+std::optional<Parser::CppDependentOwnerAnalysis>
+Parser::analyze_cpp_qualified_type_owner(
+    std::string_view qualifier_name,
+    const std::vector<TemplateArgument>& qualifier_arguments,
+    bool qualifier_has_template_argument_list,
+    SrcLoc qualifier_loc) {
+    QualType qualifier_type =
+        resolve_cpp_unqualified_type_component(
+            std::string(qualifier_name),
+            qualifier_arguments,
+            qualifier_has_template_argument_list,
+            qualifier_loc);
+    if (!qualifier_type) {
+        return std::nullopt;
+    }
+
+    CppDependentOwnerAnalysis analysis;
+    analysis.owner_type = qualifier_type;
+    analysis.is_current_instantiation =
+        cpp_qualifier_is_current_instantiation(
+            qualifier_name,
+            qualifier_type);
+    analysis.is_dependent =
+        type_depends_on_template_parameters(
+            qualifier_type,
+            ast_ctx.get());
+    return analysis;
+}
+
+Parser::CppQualifiedOwnerChainResolution
+Parser::resolve_cpp_qualified_owner_chain(
+    const std::vector<CppQualifiedNameComponent>& qualifiers,
+    bool has_global_qualifier,
+    SrcLoc start_loc,
+    bool diagnose_dependent_names) {
+    CppQualifiedOwnerChainResolution resolution;
+
+    auto current_scope = collect_->collect_current_scope();
+    auto tu_context = collect_->get_translation_unit_decl_context();
+    auto current_context = collect_->get_current_decl_context();
+    if (!current_scope || !tu_context || !current_context) {
+        if (diagnose_dependent_names) {
+            error_custloc(
+                "internal error: missing scope context for qualified lookup",
+                start_loc);
+        }
+        resolution.lookup_failed = true;
+        return resolution;
+    }
+
+    auto global_scope = current_scope;
+    while (global_scope && global_scope->parent) {
+        global_scope = global_scope->parent;
+    }
+    if (!global_scope) {
+        if (diagnose_dependent_names) {
+            error_custloc("internal error: missing global scope", start_loc);
+        }
+        resolution.lookup_failed = true;
+        return resolution;
+    }
+
+    resolution.lookup_scope = has_global_qualifier ? global_scope : current_scope;
+    resolution.lookup_context =
+        has_global_qualifier ? tu_context.get() : current_context.get();
+
+    auto template_arguments_are_dependent =
+        [&](const std::vector<TemplateArgument>& arguments) {
+            for (const auto& argument : arguments) {
+                if (template_argument_depends_on_template_parameters(
+                        argument,
+                        ast_ctx.get())) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+    auto lookup_type_in_scope =
+        [&](const std::shared_ptr<Scope>& scope,
+            bool allow_enclosing_lookup,
+            const std::string& name) -> QualType {
+            auto typedef_symbol =
+                LookupEngine::lookup_unqualified_ordinary(
+                    name,
+                    scope,
+                    allow_enclosing_lookup,
+                    LookupEngine::OrdinaryFilter::TypedefOnly);
+            if (typedef_symbol && typedef_symbol->kind == SymbolKind::TYPE) {
+                return typedef_symbol->type;
+            }
+            if (auto tag_type = LookupEngine::lookup_tag_type(
+                    name,
+                    scope,
+                    allow_enclosing_lookup)) {
+                return QualType(tag_type);
+            }
+            return QualType();
+        };
+
+    auto lookup_record_type_in_context =
+        [&](const DeclContext* start_context,
+            const std::string& name,
+            bool allow_enclosing_lookup) -> QualType {
+            if (!start_context || name.empty()) {
+                return QualType();
+            }
+            auto try_ctx = [&](const DeclContext* ctx) -> QualType {
+                if (!ctx) {
+                    return QualType();
+                }
+                auto* tag_binding = ctx->lookup_local(name, LookupNamespace::Tag);
+                if (!tag_binding) {
+                    return QualType();
+                }
+                return tag_binding->type;
+            };
+
+            if (!allow_enclosing_lookup) {
+                return try_ctx(start_context);
+            }
+            for (auto* ctx = start_context; ctx; ctx = ctx->semantic_parent()) {
+                if (auto record_type = try_ctx(ctx)) {
+                    return record_type;
+                }
+            }
+            return QualType();
+        };
+
+    auto lookup_type_template_in_scope =
+        [&](const std::shared_ptr<Scope>& scope,
+            bool allow_enclosing_lookup,
+            const std::string& name) -> const Decl* {
+            const DeclBinding* ordinary_template_binding =
+                LookupEngine::lookup_unqualified_template_binding(
+                    name,
+                    scope,
+                    allow_enclosing_lookup,
+                    LookupNamespace::Ordinary);
+            const Decl* ordinary_template = nullptr;
+            if (ordinary_template_binding) {
+                ordinary_template = ordinary_template_binding->template_decl;
+                if (!ordinary_template &&
+                    ordinary_template_binding->template_overload_candidates.size() == 1) {
+                    ordinary_template =
+                        ordinary_template_binding->template_overload_candidates.front();
+                }
+            }
+            if (isa<AliasTemplateDecl>(ordinary_template) ||
+                isa<TemplateTemplateParmDecl>(ordinary_template)) {
+                return ordinary_template;
+            }
+
+            const DeclBinding* tag_template_binding =
+                LookupEngine::lookup_unqualified_template_binding(
+                    name,
+                    scope,
+                    allow_enclosing_lookup,
+                    LookupNamespace::Tag);
+            const Decl* tag_template = nullptr;
+            if (tag_template_binding) {
+                tag_template = tag_template_binding->template_decl;
+                if (!tag_template &&
+                    tag_template_binding->template_overload_candidates.size() == 1) {
+                    tag_template =
+                        tag_template_binding->template_overload_candidates.front();
+                }
+            }
+            if (isa<ClassTemplateDecl>(tag_template)) {
+                return tag_template;
+            }
+            return nullptr;
+        };
+
+    auto build_current_instantiation_arguments =
+        [&](const ClassTemplateDecl* class_template)
+            -> std::optional<std::vector<TemplateArgument>> {
+            if (!class_template) {
+                return std::nullopt;
+            }
+
+            const std::vector<const TemplateParameterDecl*>* active_parameters =
+                nullptr;
+            for (auto stack_it = active_template_parameter_stack_.rbegin();
+                 stack_it != active_template_parameter_stack_.rend();
+                 ++stack_it) {
+                if (stack_it->size() != class_template->parameters.size()) {
+                    continue;
+                }
+                bool compatible = true;
+                for (size_t idx = 0; idx < class_template->parameters.size(); ++idx) {
+                    const auto* active_parameter = (*stack_it)[idx];
+                    const auto* canonical_parameter =
+                        class_template->parameters[idx].get();
+                    if (!active_parameter || !canonical_parameter ||
+                        active_parameter->get_kind() != canonical_parameter->get_kind() ||
+                        active_parameter->name != canonical_parameter->name ||
+                        active_parameter->is_parameter_pack !=
+                            canonical_parameter->is_parameter_pack) {
+                        compatible = false;
+                        break;
+                    }
+                }
+                if (compatible) {
+                    active_parameters = &(*stack_it);
+                    break;
+                }
+            }
+            if (!active_parameters) {
+                return std::nullopt;
+            }
+
+            std::vector<TemplateArgument> arguments;
+            arguments.reserve(active_parameters->size());
+            for (const auto* active_parameter : *active_parameters) {
+                if (auto* type_parameter =
+                        dyn_cast<TemplateTypeParmDecl>(
+                            const_cast<TemplateParameterDecl*>(active_parameter))) {
+                    arguments.emplace_back(QualType(type_parameter->type));
+                    continue;
+                }
+                if (auto* non_type_parameter =
+                        dyn_cast<TemplateNonTypeParmDecl>(
+                            const_cast<TemplateParameterDecl*>(active_parameter))) {
+                    if (!non_type_parameter->sym) {
+                        return std::nullopt;
+                    }
+                    auto expr = collect_->collect_identifier_reference(
+                        non_type_parameter->name,
+                        non_type_parameter->sym,
+                        start_loc);
+                    std::shared_ptr<Expr> shared_expr(expr.release());
+                    arguments.push_back(
+                        TemplateArgument::dependent_value_argument(
+                            non_type_parameter->type,
+                            std::move(shared_expr),
+                            non_type_parameter->name,
+                            non_type_parameter));
+                    continue;
+                }
+                if (auto* template_parameter =
+                        dyn_cast<TemplateTemplateParmDecl>(
+                            const_cast<TemplateParameterDecl*>(active_parameter))) {
+                    arguments.push_back(
+                        TemplateArgument::dependent_template_argument(
+                            template_parameter->name,
+                            template_parameter));
+                    continue;
+                }
+                return std::nullopt;
+            }
+            return arguments;
+        };
+
+    auto current_record_owner_decl =
+        [&](std::string_view record_name) -> const ObjectDecl* {
+            if (!record_name.empty() &&
+                !cxx_record_parse_stack_.empty() &&
+                cxx_record_parse_stack_.back().name == record_name) {
+                return cxx_record_parse_stack_.back().semantic_owner;
+            }
+            for (const DeclContext* ctx = current_context.get();
+                 ctx;
+                 ctx = ctx->semantic_parent()) {
+                if (ctx->kind() != DeclContextKind::Record) {
+                    continue;
+                }
+                if (const auto* owner_decl = dyn_cast<ObjectDecl>(ctx->owner_decl())) {
+                    if (owner_decl->tag == record_name) {
+                        return owner_decl;
+                    }
+                }
+                if (ctx->lookup_name() == record_name) {
+                    return dyn_cast<ObjectDecl>(ctx->owner_decl());
+                }
+            }
+            return nullptr;
+        };
+
+    auto current_function_owner_type =
+        [&]() -> QualType {
+            auto fn_type = dyn_cast_shared<FunctionType>(func_type);
+            if (!fn_type || fn_type->parameters.empty()) {
+                return QualType();
+            }
+            auto this_ptr_type =
+                desugar_type(fn_type->parameters.front(), ast_ctx.get())
+                    .as_shared<PointerType>();
+            if (!this_ptr_type) {
+                return QualType();
+            }
+            return this_ptr_type->pointed_type;
+        };
+
+    auto current_record_matches =
+        [&](std::string_view record_name) -> bool {
+            if (!record_name.empty() &&
+                !cxx_record_parse_stack_.empty() &&
+                cxx_record_parse_stack_.back().name == record_name) {
+                return true;
+            }
+            for (const DeclContext* ctx = current_context.get();
+                 ctx;
+                 ctx = ctx->semantic_parent()) {
+                if (ctx->kind() != DeclContextKind::Record) {
+                    continue;
+                }
+                if (ctx->lookup_name() == record_name) {
+                    return true;
+                }
+                if (const auto* owner_decl = dyn_cast<ObjectDecl>(ctx->owner_decl())) {
+                    if (owner_decl->tag == record_name) {
+                        return true;
+                    }
+                }
+            }
+            QualType function_owner_type = current_function_owner_type();
+            if (function_owner_type) {
+                auto semantic_owner_type =
+                    desugar_type(function_owner_type, ast_ctx.get());
+                if (auto owner_record =
+                        semantic_owner_type.as_shared<ObjectType>()) {
+                    if (const auto* owner_decl =
+                            dyn_cast<ObjectDecl>(owner_record->get_decl())) {
+                        if (owner_decl->tag == record_name) {
+                            return true;
+                        }
+                    }
+                }
+                if (auto owner_specialization =
+                        semantic_owner_type.as<TemplateSpecializationType>()) {
+                    if (owner_specialization->template_name == record_name) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+
+    auto append_qualifier_component =
+        [&](const CppQualifiedNameComponent& component) {
+            std::string component_spelling = component.spelling();
+            resolution.qualifier_spellings.push_back(component_spelling);
+            if (resolution.qualifier_chain_spelling.empty()) {
+                resolution.qualifier_chain_spelling = component_spelling;
+            } else {
+                resolution.qualifier_chain_spelling += "::";
+                resolution.qualifier_chain_spelling += component_spelling;
+            }
+        };
+
+    auto fail_lookup =
+        [&](const CppQualifiedNameComponent& component) {
+            resolution.lookup_failed = true;
+            std::string component_spelling = component.spelling();
+            if (resolution.qualifier_chain_spelling.empty()) {
+                resolution.failed_prefix_spelling = component_spelling;
+            } else {
+                resolution.failed_prefix_spelling =
+                    resolution.qualifier_chain_spelling + "::" + component_spelling;
+            }
+        };
+
+    for (size_t idx = 0; idx < qualifiers.size(); ++idx) {
+        bool allow_enclosing_lookup = !has_global_qualifier && idx == 0;
+        const auto& component = qualifiers[idx];
+
+        if (component.preceded_by_template_keyword &&
+            !component.has_template_argument_list) {
+            if (diagnose_dependent_names) {
+                error_custloc(
+                    "expected template-id after 'template' keyword",
+                    component.loc);
+            }
+            resolution.lookup_failed = true;
+            return resolution;
+        }
+
+        if (!resolution.owner_type) {
+            if (!component.has_template_argument_list) {
+                auto namespace_scope = resolve_named_namespace_scope(
+                    resolution.lookup_context,
+                    component.name,
+                    allow_enclosing_lookup);
+                if (namespace_scope && namespace_scope->associated_decl_context) {
+                    resolution.lookup_scope = namespace_scope;
+                    resolution.lookup_context =
+                        namespace_scope->associated_decl_context;
+                    append_qualifier_component(component);
+                    continue;
+                }
+
+                resolution.owner_type = lookup_type_in_scope(
+                    resolution.lookup_scope,
+                    allow_enclosing_lookup,
+                    component.name);
+                if (!resolution.owner_type) {
+                    resolution.owner_type = lookup_record_type_in_context(
+                        resolution.lookup_context,
+                        component.name,
+                        allow_enclosing_lookup);
+                }
+                if (!resolution.owner_type) {
+                    QualType function_owner_type = current_function_owner_type();
+                    if (function_owner_type) {
+                        auto semantic_owner_type =
+                            desugar_type(function_owner_type, ast_ctx.get());
+                        bool owner_matches = false;
+                        if (auto owner_record =
+                                semantic_owner_type.as_shared<ObjectType>()) {
+                            if (const auto* owner_decl =
+                                    dyn_cast<ObjectDecl>(owner_record->get_decl())) {
+                                owner_matches = owner_decl->tag == component.name;
+                            }
+                        } else if (auto owner_specialization =
+                                       semantic_owner_type
+                                           .as<TemplateSpecializationType>()) {
+                            owner_matches =
+                                owner_specialization->template_name == component.name;
+                        }
+                        if (owner_matches) {
+                            resolution.owner_type = function_owner_type;
+                        }
+                    }
+                }
+                if (!resolution.owner_type &&
+                    current_record_matches(component.name)) {
+                    if (auto* current_class_template =
+                            dyn_cast<ClassTemplateDecl>(
+                                const_cast<Decl*>(
+                                    lookup_type_template_in_scope(
+                                        resolution.lookup_scope,
+                                        allow_enclosing_lookup,
+                                        component.name)))) {
+                        if (auto current_arguments =
+                                build_current_instantiation_arguments(
+                                    current_class_template)) {
+                            resolution.owner_type =
+                                QualType(std::make_shared<TemplateSpecializationType>(
+                                    component.name,
+                                    current_class_template,
+                                    *current_arguments,
+                                    /*is_dependent=*/true));
+                        }
+                    }
+                    if (!resolution.owner_type) {
+                        const auto* record_owner =
+                            current_record_owner_decl(component.name);
+                        QualType injected_owner_type =
+                            record_owner
+                                ? QualType(record_owner->get_record_type())
+                                : QualType();
+                        if (!injected_owner_type) {
+                            injected_owner_type = current_function_owner_type();
+                        }
+                        if (!injected_owner_type) {
+                            injected_owner_type =
+                                collect_->collect_lookup_tag_type(
+                                    component.name,
+                                    true);
+                        }
+                        if (injected_owner_type) {
+                            resolution.owner_type = injected_owner_type;
+                        }
+                    }
+                }
+                if (!resolution.owner_type) {
+                    fail_lookup(component);
+                    return resolution;
+                }
+                resolution.is_current_instantiation =
+                    cpp_qualifier_is_current_instantiation(
+                        component.name,
+                        resolution.owner_type);
+                if (resolution.is_current_instantiation) {
+                    auto* current_class_template =
+                        dyn_cast<ClassTemplateDecl>(
+                            const_cast<Decl*>(
+                                lookup_type_template_in_scope(
+                                    resolution.lookup_scope,
+                                    allow_enclosing_lookup,
+                                    component.name)));
+                    if (auto current_arguments =
+                            build_current_instantiation_arguments(
+                                current_class_template)) {
+                        resolution.owner_type =
+                            QualType(std::make_shared<TemplateSpecializationType>(
+                                component.name,
+                                current_class_template,
+                                *current_arguments,
+                                /*is_dependent=*/true));
+                    }
+                }
+                resolution.is_dependent =
+                    type_depends_on_template_parameters(
+                        resolution.owner_type,
+                        ast_ctx.get());
+                append_qualifier_component(component);
+                continue;
+            }
+
+            const Decl* primary_template = lookup_type_template_in_scope(
+                resolution.lookup_scope,
+                allow_enclosing_lookup,
+                component.name);
+            if (!primary_template) {
+                fail_lookup(component);
+                return resolution;
+            }
+
+            bool is_dependent =
+                isa<TemplateTemplateParmDecl>(primary_template) ||
+                template_arguments_are_dependent(component.template_arguments);
+            QualType specialization_type(
+                std::make_shared<TemplateSpecializationType>(
+                    qualified_name_utils::format_cpp_qualified_name(
+                        has_global_qualifier,
+                        resolution.qualifier_spellings,
+                        component.name),
+                    primary_template,
+                    component.template_arguments,
+                    is_dependent));
+            if (!is_dependent) {
+                auto concrete_specialization =
+                    collect_->collect_try_realize_deferred_semantic_type(
+                        specialization_type);
+                if (concrete_specialization &&
+                    !type_depends_on_template_parameters(
+                        concrete_specialization,
+                        ast_ctx.get())) {
+                    resolution.owner_type = concrete_specialization;
+                } else {
+                    resolution.owner_type = specialization_type;
+                    is_dependent = true;
+                }
+            } else {
+                resolution.owner_type = specialization_type;
+            }
+            resolution.is_current_instantiation =
+                cpp_qualifier_is_current_instantiation(
+                    component.name,
+                    resolution.owner_type);
+            resolution.is_dependent =
+                is_dependent ||
+                type_depends_on_template_parameters(
+                    resolution.owner_type,
+                    ast_ctx.get());
+            append_qualifier_component(component);
+            continue;
+        }
+
+        if (component.has_template_argument_list) {
+            if (resolution.requires_template_keyword() &&
+                !component.preceded_by_template_keyword &&
+                diagnose_dependent_names) {
+                diagnose_missing_cpp_template_keyword(
+                    resolution.qualifier_chain_spelling,
+                    component.name,
+                    component.loc);
+            }
+
+            if (resolution.is_dependent_context()) {
+                resolution.owner_type =
+                    QualType(std::make_shared<DependentNameType>(
+                        resolution.owner_type,
+                        component.name,
+                        component.template_arguments,
+                        resolution.is_current_instantiation,
+                        /*requires_typename=*/false,
+                        /*is_template_id=*/true));
+                resolution.is_dependent = true;
+                resolution.is_current_instantiation = false;
+            } else {
+                auto nested_template_type =
+                    collect_->collect_lookup_record_nested_template_type(
+                        resolution.owner_type,
+                        component.name,
+                        component.template_arguments,
+                        component.loc);
+                if (!nested_template_type) {
+                    fail_lookup(component);
+                    return resolution;
+                }
+                resolution.owner_type = nested_template_type;
+                resolution.is_dependent =
+                    type_depends_on_template_parameters(
+                        nested_template_type,
+                        ast_ctx.get());
+                resolution.is_current_instantiation = false;
+            }
+            append_qualifier_component(component);
+            continue;
+        }
+
+        if (resolution.is_dependent_context()) {
+            resolution.owner_type = QualType(std::make_shared<DependentNameType>(
+                resolution.owner_type,
+                component.name,
+                std::vector<TemplateArgument>{},
+                resolution.is_current_instantiation,
+                /*requires_typename=*/false,
+                /*is_template_id=*/false));
+            resolution.is_dependent = true;
+            resolution.is_current_instantiation = false;
+        } else {
+            auto nested_type =
+                collect_->collect_lookup_record_nested_type(
+                    resolution.owner_type,
+                    component.name);
+            if (!nested_type) {
+                fail_lookup(component);
+                return resolution;
+            }
+            resolution.owner_type = nested_type;
+            resolution.is_dependent =
+                type_depends_on_template_parameters(
+                    nested_type,
+                    ast_ctx.get());
+            resolution.is_current_instantiation = false;
+        }
+        append_qualifier_component(component);
+    }
+
+    return resolution;
+}
+
+Parser::CppDependentOwnerAnalysis Parser::analyze_cpp_member_access_base(
+    QualType base_type,
+    bool is_arrow) const {
+    CppDependentOwnerAnalysis analysis;
+    if (!base_type) {
+        return analysis;
+    }
+
+    QualType object_type = remove_reference(base_type, ast_ctx.get());
+    if (is_arrow) {
+        auto ptr_type = desugar_type(object_type, ast_ctx.get())
+            .as_shared<PointerType>();
+        if (!ptr_type) {
+            return analysis;
+        }
+        object_type = ptr_type->pointed_type;
+    }
+
+    analysis.owner_type = object_type;
+    analysis.is_dependent =
+        type_depends_on_template_parameters(object_type, ast_ctx.get());
+
+    if (is_in_template_pattern_context() && !cxx_record_parse_stack_.empty()) {
+        const std::string& current_record_name = cxx_record_parse_stack_.back().name;
+        auto object =
+            desugar_type(object_type, ast_ctx.get()).as_shared<ObjectType>();
+        auto* object_decl =
+            object ? dyn_cast<ObjectDecl>(object->get_decl()) : nullptr;
+        analysis.is_current_instantiation =
+            object_decl && object_decl->tag == current_record_name;
+    }
+
+    return analysis;
+}
+
+bool Parser::starts_with_cpp_dependent_qualified_call_expression() {
+    if (current_token().type != TokenType::IDENTIFIER &&
+        current_token().type != TokenType::SCOPE_RESOLUTION &&
+        !(current_token().type == TokenType::COLON &&
+          peek_token().type == TokenType::COLON)) {
+        return false;
+    }
+
+    RevertingTentativeParsingAction tentative(*this);
+    bool has_global_qualifier = consume_cpp_scope_resolution();
+    if (!gentle_check(TokenType::IDENTIFIER)) {
+        return false;
+    }
+
+    auto parse_component = [&](bool preceded_by_template_keyword)
+        -> CppQualifiedNameComponent {
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            return {};
+        }
+        CppQualifiedNameComponent component;
+        component.name = current_token().value;
+        component.loc = current_token().loc;
+        component.preceded_by_template_keyword = preceded_by_template_keyword;
+        advance();
+        if (gentle_check(TokenType::LESS_THAN)) {
+            RevertingTentativeParsingAction template_args(*this);
+            auto parsed_arguments = parse_cpp_template_argument_list();
+            if (is_cpp_scope_resolution_here()) {
+                template_args.Commit();
+                component.has_template_argument_list = true;
+                component.template_arguments = std::move(parsed_arguments);
+            }
+        }
+        return component;
+    };
+
+    std::vector<CppQualifiedNameComponent> components;
+    components.push_back(parse_component(false));
+    while (is_cpp_scope_resolution_here()) {
+        consume_cpp_scope_resolution();
+        bool preceded_by_template_keyword =
+            gentle_check_and_consume(TokenType::TEMPLATE);
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            return false;
+        }
+        components.push_back(parse_component(preceded_by_template_keyword));
+    }
+
+    if (components.size() < 2) {
+        return false;
+    }
+
+    std::vector<CppQualifiedNameComponent> qualifiers(
+        components.begin(),
+        components.end() - 1);
+    const auto& terminal_component = components.back();
+    auto owner_chain = resolve_cpp_qualified_owner_chain(
+        qualifiers,
+        has_global_qualifier,
+        current_token().loc,
+        /*diagnose_dependent_names=*/false);
+    if (!owner_chain.is_dependent_context()) {
+        return false;
+    }
+
+    if (terminal_component.preceded_by_template_keyword) {
+        if (!gentle_check(TokenType::LESS_THAN)) {
+            return false;
+        }
+        parse_cpp_template_argument_list();
+    } else if (gentle_check(TokenType::LESS_THAN)) {
+        if (owner_chain.requires_template_keyword()) {
+            return false;
+        }
+        parse_cpp_template_argument_list();
+    }
+
+    return gentle_check(TokenType::LEFT_PAREN);
+}
+
+std::string Parser::format_cpp_dependent_name_for_diagnostic(
+    std::string_view terminal_name,
+    std::string_view qualifier_name) const {
+    std::string name;
+    if (!qualifier_name.empty()) {
+        name += qualifier_name;
+        name += "::";
+    }
+    name += terminal_name;
+    return name;
+}
+
+void Parser::diagnose_missing_cpp_template_keyword(std::string_view terminal_name,
+                                                   SrcLoc loc) {
+    error_custloc(
+        "missing 'template' keyword prior to dependent template name '" +
+            format_cpp_dependent_name_for_diagnostic(terminal_name) + "'",
+        loc);
+}
+
+void Parser::diagnose_missing_cpp_template_keyword(
+    std::string_view qualifier_name,
+    std::string_view terminal_name,
+    SrcLoc loc) {
+    error_custloc(
+        "missing 'template' keyword prior to dependent template name '" +
+            format_cpp_dependent_name_for_diagnostic(
+                terminal_name,
+                qualifier_name) + "'",
+        loc);
+}
+
+void Parser::diagnose_missing_cpp_typename_keyword(
+    std::string_view qualifier_name,
+    std::string_view terminal_name,
+    SrcLoc loc) {
+    error_custloc(
+        "missing 'typename' prior to dependent type name '" +
+            format_cpp_dependent_name_for_diagnostic(
+                terminal_name,
+                qualifier_name) + "'",
+        loc);
+}
+
+bool Parser::cpp_qualifier_is_current_instantiation(
+    std::string_view qualifier_name,
+    QualType qualifier_type) const {
+    if (!is_in_template_pattern_context() || cxx_record_parse_stack_.empty()) {
+        return false;
+    }
+    const std::string& current_record_name = cxx_record_parse_stack_.back().name;
+    if (current_record_name.empty() || qualifier_name != current_record_name) {
+        return false;
+    }
+    if (qualifier_type.as<ObjectType>()) {
+        return true;
+    }
+    auto specialization = qualifier_type.as<TemplateSpecializationType>();
+    return specialization && specialization->template_name == current_record_name;
+}
+
+void Parser::consume_cpp_template_argument_list_close() {
+    if (gentle_check(TokenType::GREATER_THAN)) {
+        advance();
+        return;
+    }
+    if (gentle_check(TokenType::RIGHT_SHIFT)) {
+        Token tok = current_token();
+        tok_mgnt.replace_current_token_sequence({
+            make_template_split_token(tok, TokenType::GREATER_THAN, ">"),
+            make_template_split_token(tok, TokenType::GREATER_THAN, ">", 1)
+        });
+        advance();
+        return;
+    }
+    if (gentle_check(TokenType::ASSIGN_RSHIFT)) {
+        Token tok = current_token();
+        tok_mgnt.replace_current_token_sequence({
+            make_template_split_token(tok, TokenType::GREATER_THAN, ">"),
+            make_template_split_token(tok, TokenType::GREATER_THAN, ">", 1),
+            make_template_split_token(tok, TokenType::ASSIGN, "=", 2)
+        });
+        advance();
+        return;
+    }
+    error_custloc("expected '>' to close template argument list",
+                  current_token().loc);
+}
+
+bool Parser::is_cpp_template_argument_boundary_here() {
+    return gentle_check(TokenType::COMMA) ||
+           gentle_check(TokenType::GREATER_THAN) ||
+           gentle_check(TokenType::RIGHT_SHIFT) ||
+           gentle_check(TokenType::ASSIGN_RSHIFT);
+}
+
+const TemplateParameterDecl*
+Parser::find_active_template_parameter(std::string_view name) const {
+    if (name.empty()) {
+        return nullptr;
+    }
+    for (auto stack_it = active_template_parameter_stack_.rbegin();
+         stack_it != active_template_parameter_stack_.rend();
+         ++stack_it) {
+        for (auto param_it = stack_it->rbegin();
+             param_it != stack_it->rend();
+             ++param_it) {
+            const auto* parameter = *param_it;
+            if (!parameter || parameter->name != name) {
+                continue;
+            }
+            return parameter;
+        }
+    }
+    return nullptr;
+}
+
+const TemplateParameterDecl*
+Parser::find_active_template_parameter_pack(std::string_view name) const {
+    const auto* parameter = find_active_template_parameter(name);
+    if (!parameter || !parameter->is_parameter_pack) {
+        return nullptr;
+    }
+    return parameter;
+}
+
+const TemplateNonTypeParmDecl*
+Parser::find_active_non_type_template_parameter(const Symbol* sym) const {
+    if (!sym) {
+        return nullptr;
+    }
+    for (auto stack_it = active_template_parameter_stack_.rbegin();
+         stack_it != active_template_parameter_stack_.rend();
+         ++stack_it) {
+        for (auto param_it = stack_it->rbegin();
+             param_it != stack_it->rend();
+             ++param_it) {
+            auto* non_type_param =
+                dyn_cast<TemplateNonTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(*param_it));
+            if (non_type_param && non_type_param->sym.get() == sym) {
+                return non_type_param;
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool Parser::expr_depends_on_active_template_parameter(const Expr* expr) const {
+    if (!expr) {
+        return false;
+    }
+    if (auto* var_ref = dyn_cast<VarRef>(expr)) {
+        return find_active_non_type_template_parameter(var_ref->symref.get()) !=
+            nullptr;
+    }
+    if (type_depends_on_template_parameters(
+            const_cast<Expr*>(expr)->get_type(),
+            ast_ctx.get())) {
+        return true;
+    }
+    switch (expr->get_kind()) {
+        case StmtKind::UnaryOperation:
+            return expr_depends_on_active_template_parameter(
+                static_cast<const UnaryOperation*>(expr)->exp.get());
+        case StmtKind::BinaryOperation: {
+            const auto* binary = static_cast<const BinaryOperation*>(expr);
+            return expr_depends_on_active_template_parameter(binary->left.get()) ||
+                   expr_depends_on_active_template_parameter(binary->right.get());
+        }
+        case StmtKind::CondExpr: {
+            const auto* cond = static_cast<const CondExpr*>(expr);
+            return expr_depends_on_active_template_parameter(
+                       cond->condition.get()) ||
+                   expr_depends_on_active_template_parameter(
+                       cond->true_expr.get()) ||
+                   expr_depends_on_active_template_parameter(
+                       cond->false_expr.get());
+        }
+        case StmtKind::ImplicitCast:
+            return expr_depends_on_active_template_parameter(
+                static_cast<const ImplicitCast*>(expr)->expr.get());
+        case StmtKind::ExplicitCast:
+            return expr_depends_on_active_template_parameter(
+                static_cast<const ExplicitCast*>(expr)->expr.get());
+        case StmtKind::ArraySubscriptExpr: {
+            const auto* subscript =
+                static_cast<const ArraySubscriptExpr*>(expr);
+            return expr_depends_on_active_template_parameter(
+                       subscript->array.get()) ||
+                   expr_depends_on_active_template_parameter(
+                       subscript->index.get());
+        }
+        case StmtKind::MemberExpr:
+            return expr_depends_on_active_template_parameter(
+                static_cast<const MemberExpr*>(expr)->base.get());
+        case StmtKind::PackExpansionExpr:
+            return expr_depends_on_active_template_parameter(
+                static_cast<const PackExpansionExpr*>(expr)->pattern.get());
+        case StmtKind::FoldExpr: {
+            const auto* fold = static_cast<const FoldExpr*>(expr);
+            return expr_depends_on_active_template_parameter(
+                       fold->pattern.get()) ||
+                   expr_depends_on_active_template_parameter(
+                       fold->init.get());
+        }
+        case StmtKind::SizeOfPackExpr:
+            return static_cast<const SizeOfPackExpr*>(expr)->parameter_decl !=
+                nullptr;
+        case StmtKind::InitListExpr: {
+            const auto* init_list = static_cast<const InitListExpr*>(expr);
+            for (const auto& elem : init_list->elements) {
+                if (expr_depends_on_active_template_parameter(elem.value.get())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case StmtKind::CompoundLiteralExpr:
+            return expr_depends_on_active_template_parameter(
+                static_cast<const CompoundLiteralExpr*>(expr)->init.get());
+        case StmtKind::CppConstructExpr: {
+            const auto* construct = static_cast<const CppConstructExpr*>(expr);
+            for (const auto& arg : construct->args) {
+                if (expr_depends_on_active_template_parameter(arg.get())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        default:
+            return false;
+    }
+}
+
+std::unique_ptr<Expr> Parser::try_parse_cpp_typed_braced_template_argument_expr() {
+    RevertingTentativeParsingAction tentative(*this);
+    try {
+        DeclarationParser type_parser(this);
+        auto parsed_type = type_parser.parse_declaration();
+        if (!parsed_type || !type_parser.name.empty() ||
+            type_parser.str_class != StorageClass::NONE ||
+            !gentle_check(TokenType::LEFT_BRACE)) {
+            return nullptr;
+        }
+
+        tentative.Commit();
+        QualType target_type(parsed_type, type_parser.qualifiers);
+        SrcLoc literal_loc = current_token().loc;
+        auto initializer = parse_init_list();
+        return collect_->collect_compound_literal_expression(
+            target_type,
+            std::move(initializer),
+            literal_loc);
+    } catch (const ParseError&) {
+    } catch (const FatalErrorLimitReached&) {
+        throw;
+    }
+    return nullptr;
+}
+
+TemplateArgument Parser::parse_cpp_template_argument() {
+    auto finalize_template_argument =
+        [&](TemplateArgument argument) -> TemplateArgument {
+        if (gentle_check(TokenType::ELLIPSIS)) {
+            if (!is_in_template_pattern_context()) {
+                error_custloc(
+                    "pack expansion is only supported in template patterns",
+                    current_token().loc);
+            }
+            advance();
+            argument = argument.as_pack_expansion();
+        }
+        if (!is_cpp_template_argument_boundary_here()) {
+            error_custloc("expected template argument", current_token().loc);
+        }
+        return argument;
+    };
+
+    auto build_expression_argument =
+        [&](std::unique_ptr<Expr> parsed_expr) -> TemplateArgument {
+        if (!parsed_expr) {
+            error_custloc("expected template argument", current_token().loc);
+        }
+
+        QualType argument_type = parsed_expr->get_type();
+        if (!argument_type) {
+            error_custloc("template argument has invalid type",
+                          parsed_expr->location);
+        }
+
+        ConstEvalResult eval = evaluate_with_consteval_compat(
+            parsed_expr.get(),
+            ConstEvalMode::cpp_non_type_template_argument());
+        if (eval.status == ConstEvalStatus::Constant && eval.value.has_value()) {
+            std::shared_ptr<Expr> concrete_expr = nullptr;
+            if (eval.value->kind == ConstValueKind::Object) {
+                if (auto* var_ref =
+                        dyn_cast<VarRef>(Collect::strip_implicit_casts(parsed_expr.get()))) {
+                    concrete_expr =
+                        template_sema_internal::clone_constexpr_variable_initializer_expr(
+                            var_ref->symref.get(),
+                            ast_ctx.get());
+                }
+                if (!concrete_expr) {
+                    concrete_expr = std::shared_ptr<Expr>(parsed_expr.release());
+                }
+            }
+            return TemplateArgument::value_argument(
+                argument_type,
+                *eval.value,
+                {},
+                std::move(concrete_expr));
+        }
+        if (expr_depends_on_active_template_parameter(parsed_expr.get())) {
+            std::string argument_spelling;
+            const TemplateParameterDecl* referenced_parameter = nullptr;
+            if (auto* var_ref = dyn_cast<VarRef>(parsed_expr.get())) {
+                argument_spelling = var_ref->get_name();
+                if (const auto* non_type_parameter =
+                        find_active_non_type_template_parameter(
+                            var_ref->symref.get())) {
+                    referenced_parameter = non_type_parameter;
+                }
+            }
+            std::shared_ptr<Expr> shared_expr(parsed_expr.release());
+            return TemplateArgument::dependent_value_argument(
+                argument_type,
+                std::move(shared_expr),
+                std::move(argument_spelling),
+                referenced_parameter);
+        }
+
+        error_custloc(
+            "non-type template argument must be a constant expression",
+            parsed_expr->location);
+        return TemplateArgument();
+    };
+
+    if (auto template_argument = try_parse_cpp_template_name_argument()) {
+        return finalize_template_argument(std::move(*template_argument));
+    }
+
+    if (gentle_check(TokenType::NULLPTR_KW)) {
+        advance();
+        return finalize_template_argument(TemplateArgument::value_argument(
+            QualType(type_ctx->get_builtin(BuiltinTypes::NullPtr)),
+            ConstValue::null_pointer(),
+            "nullptr"));
+    }
+
+    bool parsed_type_argument = false;
+    QualType parsed_argument_type;
+    {
+        RevertingTentativeParsingAction tentative(*this);
+        try {
+            DeclarationParser type_parser(this);
+            auto parsed_type = type_parser.parse_declaration();
+            if (parsed_type &&
+                type_parser.name.empty() &&
+                type_parser.str_class == StorageClass::NONE &&
+                (is_cpp_template_argument_boundary_here() ||
+                 gentle_check(TokenType::ELLIPSIS))) {
+                tentative.Commit();
+                parsed_argument_type = QualType(parsed_type, type_parser.qualifiers);
+                parsed_type_argument = true;
+            }
+        } catch (const ParseError&) {
+        } catch (const FatalErrorLimitReached&) {
+            throw;
+        }
+    }
+
+    if (parsed_type_argument) {
+        return finalize_template_argument(TemplateArgument(parsed_argument_type));
+    }
+
+    if (auto typed_braced_expr =
+            try_parse_cpp_typed_braced_template_argument_expr()) {
+        return finalize_template_argument(
+            build_expression_argument(std::move(typed_braced_expr)));
+    }
+
+    struct TemplateArgumentExpressionGuard {
+        Parser& parser;
+
+        explicit TemplateArgumentExpressionGuard(Parser& parser)
+            : parser(parser) {
+            parser.enter_template_argument_expression();
+        }
+
+        ~TemplateArgumentExpressionGuard() {
+            parser.leave_template_argument_expression();
+        }
+    } expr_guard(*this);
+
+    return finalize_template_argument(
+        build_expression_argument(parse_assignment_expression()));
+}
+
+std::vector<TemplateArgument> Parser::parse_cpp_template_argument_list() {
+    std::vector<TemplateArgument> arguments;
+    check_and_consume(TokenType::LESS_THAN);
+    if (gentle_check(TokenType::GREATER_THAN)) {
+        consume_cpp_template_argument_list_close();
+        return arguments;
+    }
+
+    while (true) {
+        arguments.push_back(parse_cpp_template_argument());
+        if (!gentle_check_and_consume(TokenType::COMMA)) {
+            break;
+        }
+    }
+
+    consume_cpp_template_argument_list_close();
+    return arguments;
+}
+
+std::optional<Parser::ParsedCppTypeNameSpecifier>
+Parser::try_parse_cpp_named_type_specifier() {
+    if (!is_cxx_mode_active()) {
+        return std::nullopt;
+    }
+
+    Token start_tok = current_token();
+    if (!(start_tok.type == TokenType::TYPENAME ||
+          start_tok.type == TokenType::IDENTIFIER ||
+          start_tok.type == TokenType::SCOPE_RESOLUTION ||
+          (start_tok.type == TokenType::COLON &&
+           peek_token().type == TokenType::COLON))) {
+        return std::nullopt;
+    }
+
+    size_t saved_idx = get_token_idx();
+    auto saved_split_state = tok_mgnt.get_split_token_state();
+    auto restore = [&]() {
+        set_token_idx(saved_idx);
+        tok_mgnt.set_split_token_state(saved_split_state);
+    };
+
+    auto current_scope = collect_->collect_current_scope();
+    auto current_context = collect_->get_current_decl_context();
+    if (!current_scope || !current_context) {
+        error_custloc("internal error: missing C++ type-name lookup context",
+                      start_tok.loc);
+    }
+
+    auto try_parse_concrete_named_type = [&]() -> std::optional<ParsedCppTypeNameSpecifier> {
+        bool has_global_qualifier = consume_cpp_scope_resolution();
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            restore();
+            return std::nullopt;
+        }
+
+        auto parse_component = [&]() -> CppQualifiedNameComponent {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc("expected identifier after '::' in qualified type name",
+                              current_token().loc);
+            }
+            CppQualifiedNameComponent component;
+            component.name = current_token().value;
+            component.loc = current_token().loc;
+            advance();
+            if (gentle_check(TokenType::LESS_THAN)) {
+                component.has_template_argument_list = true;
+                component.template_arguments = parse_cpp_template_argument_list();
+            }
+            return component;
+        };
+
+        std::vector<CppQualifiedNameComponent> components;
+        components.push_back(parse_component());
+        while (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            components.push_back(parse_component());
+        }
+
+        auto tu_context = collect_->get_translation_unit_decl_context();
+        if (!tu_context) {
+            error_custloc("internal error: missing translation-unit declaration context",
+                          start_tok.loc);
+        }
+
+        auto global_scope = current_scope;
+        while (global_scope && global_scope->parent) {
+            global_scope = global_scope->parent;
+        }
+        if (!global_scope) {
+            error_custloc("internal error: missing global scope", start_tok.loc);
+        }
+
+        auto template_arguments_are_dependent =
+            [&](const std::vector<TemplateArgument>& arguments) {
+                for (const auto& argument : arguments) {
+                    if (template_argument_depends_on_template_parameters(
+                            argument,
+                            ast_ctx.get())) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+        auto lookup_type_in_scope =
+            [&](const std::shared_ptr<Scope>& scope,
+                bool allow_enclosing_lookup,
+                const std::string& name,
+                std::shared_ptr<Symbol>* typedef_symbol_out) -> QualType {
+                if (typedef_symbol_out) {
+                    *typedef_symbol_out = nullptr;
+                }
+                auto typedef_symbol =
+                    LookupEngine::lookup_unqualified_ordinary(
+                        name,
+                        scope,
+                        allow_enclosing_lookup,
+                        LookupEngine::OrdinaryFilter::TypedefOnly);
+                if (typedef_symbol && typedef_symbol->kind == SymbolKind::TYPE) {
+                    if (typedef_symbol_out) {
+                        *typedef_symbol_out = typedef_symbol;
+                    }
+                    return typedef_symbol->type;
+                }
+                if (auto tag_type = LookupEngine::lookup_tag_type(
+                        name, scope, allow_enclosing_lookup)) {
+                    return QualType(tag_type);
+                }
+                return QualType();
+            };
+
+        auto lookup_type_template_in_scope =
+            [&](const std::shared_ptr<Scope>& scope,
+                bool allow_enclosing_lookup,
+                const std::string& name) -> const Decl* {
+                const DeclBinding* ordinary_template_binding =
+                    LookupEngine::lookup_unqualified_template_binding(
+                        name,
+                        scope,
+                        allow_enclosing_lookup,
+                        LookupNamespace::Ordinary);
+                const Decl* ordinary_template = nullptr;
+                if (ordinary_template_binding) {
+                    ordinary_template = ordinary_template_binding->template_decl;
+                    if (!ordinary_template &&
+                        ordinary_template_binding->template_overload_candidates.size() == 1) {
+                        ordinary_template =
+                            ordinary_template_binding->template_overload_candidates.front();
+                    }
+                }
+                if (isa<AliasTemplateDecl>(ordinary_template) ||
+                    isa<TemplateTemplateParmDecl>(ordinary_template)) {
+                    return ordinary_template;
+                }
+
+                const DeclBinding* tag_template_binding =
+                    LookupEngine::lookup_unqualified_template_binding(
+                        name,
+                        scope,
+                        allow_enclosing_lookup,
+                        LookupNamespace::Tag);
+                const Decl* tag_template = nullptr;
+                if (tag_template_binding) {
+                    tag_template = tag_template_binding->template_decl;
+                    if (!tag_template &&
+                        tag_template_binding->template_overload_candidates.size() == 1) {
+                        tag_template =
+                            tag_template_binding->template_overload_candidates.front();
+                    }
+                }
+                if (isa<ClassTemplateDecl>(tag_template)) {
+                    return tag_template;
+                }
+                return nullptr;
+            };
+
+        std::shared_ptr<Scope> lookup_scope =
+            has_global_qualifier ? global_scope : current_scope;
+        const DeclContext* lookup_context =
+            has_global_qualifier ? tu_context.get() : current_context.get();
+        std::vector<std::string> resolved_prefix;
+        std::shared_ptr<Symbol> terminal_typedef_symbol = nullptr;
+        QualType resolved_type;
+
+        for (size_t idx = 0; idx < components.size(); ++idx) {
+            bool is_last_component = idx + 1 == components.size();
+            bool allow_enclosing_lookup = !has_global_qualifier && idx == 0;
+            const auto& component = components[idx];
+
+            if (!resolved_type) {
+                if (!component.has_template_argument_list) {
+                    auto namespace_scope = resolve_named_namespace_scope(
+                        lookup_context,
+                        component.name,
+                        allow_enclosing_lookup);
+                    if (namespace_scope && namespace_scope->associated_decl_context) {
+                        if (is_last_component) {
+                            restore();
+                            return std::nullopt;
+                        }
+                        lookup_scope = namespace_scope;
+                        lookup_context = namespace_scope->associated_decl_context;
+                        resolved_prefix.push_back(component.name);
+                        continue;
+                    }
+
+                    std::shared_ptr<Symbol> typedef_symbol = nullptr;
+                    resolved_type = lookup_type_in_scope(
+                        lookup_scope,
+                        allow_enclosing_lookup,
+                        component.name,
+                        &typedef_symbol);
+                    if (!resolved_type) {
+                        restore();
+                        return std::nullopt;
+                    }
+                    if (is_last_component) {
+                        terminal_typedef_symbol = typedef_symbol;
+                    }
+                } else {
+                    const Decl* primary_template = lookup_type_template_in_scope(
+                        lookup_scope,
+                        allow_enclosing_lookup,
+                        component.name);
+                    if (!primary_template) {
+                        restore();
+                        return std::nullopt;
+                    }
+
+                    bool is_dependent =
+                        isa<TemplateTemplateParmDecl>(primary_template) ||
+                        template_arguments_are_dependent(component.template_arguments);
+                    QualType specialization_type =
+                        QualType(std::make_shared<TemplateSpecializationType>(
+                            qualified_name_utils::format_cpp_qualified_name(
+                                has_global_qualifier,
+                                resolved_prefix,
+                                component.name),
+                            primary_template,
+                            component.template_arguments,
+                            is_dependent));
+                    if (is_last_component || is_dependent) {
+                        resolved_type = specialization_type;
+                    } else {
+                        auto concrete_specialization =
+                            collect_->collect_try_realize_deferred_semantic_type(
+                                specialization_type);
+                        if (!concrete_specialization ||
+                            type_depends_on_template_parameters(
+                                concrete_specialization,
+                                ast_ctx.get())) {
+                            restore();
+                            return std::nullopt;
+                        }
+                        resolved_type = concrete_specialization;
+                    }
+                }
+            } else {
+                if (component.has_template_argument_list) {
+                    bool matched_nested_template = false;
+                    resolved_type =
+                        collect_->collect_lookup_record_nested_template_type(
+                            resolved_type,
+                            component.name,
+                            component.template_arguments,
+                            component.loc,
+                            &matched_nested_template);
+                } else {
+                    resolved_type =
+                        collect_->collect_lookup_record_nested_type(
+                            resolved_type,
+                            component.name);
+                }
+                if (!resolved_type) {
+                    restore();
+                    return std::nullopt;
+                }
+            }
+
+            if (!is_last_component) {
+                if (type_depends_on_template_parameters(
+                        resolved_type,
+                        ast_ctx.get())) {
+                    restore();
+                    return std::nullopt;
+                }
+                resolved_prefix.push_back(component.spelling());
+            }
+        }
+
+        ParsedCppTypeNameSpecifier result;
+        result.typedef_symbol = terminal_typedef_symbol;
+        result.type = resolved_type;
+        return result;
+    };
+
+    if (start_tok.type != TokenType::TYPENAME) {
+        if (auto concrete = try_parse_concrete_named_type()) {
+            return concrete;
+        }
+        restore();
+    }
+
+    bool saw_typename_keyword = gentle_check_and_consume(TokenType::TYPENAME);
+    if (consume_cpp_scope_resolution()) {
+        if (saw_typename_keyword) {
+            error_custloc(
+                "'typename' is only allowed before qualified dependent type names",
+                start_tok.loc);
+        }
+        restore();
+        return std::nullopt;
+    }
+    if (!gentle_check(TokenType::IDENTIFIER)) {
+        restore();
+        return std::nullopt;
+    }
+
+    auto format_component_spelling =
+        [](std::string_view name,
+           const std::vector<TemplateArgument>& arguments,
+           bool has_template_argument_list) -> std::string {
+            std::string spelled(name);
+            if (!has_template_argument_list) {
+                return spelled;
+            }
+            spelled += "<";
+            for (size_t idx = 0; idx < arguments.size(); ++idx) {
+                if (idx > 0) {
+                    spelled += ", ";
+                }
+                spelled += arguments[idx].to_string();
+            }
+            spelled += ">";
+            return spelled;
+        };
+
+    struct DependentTypeLookupState {
+        QualType qualifier_type = nullptr;
+        bool is_dependent = false;
+        bool is_current_instantiation = false;
+
+        bool is_dependent_context() const {
+            return is_dependent || is_current_instantiation;
+        }
+
+        bool requires_template_keyword() const {
+            return is_dependent && !is_current_instantiation;
+        }
+
+        bool requires_typename_keyword() const {
+            return is_dependent && !is_current_instantiation;
+        }
+    };
+
+    std::string qualifier_name = current_token().value;
+    SrcLoc qualifier_loc = current_token().loc;
+    advance();
+
+    std::vector<TemplateArgument> qualifier_arguments;
+    bool qualifier_has_template_argument_list = false;
+    if (gentle_check(TokenType::LESS_THAN)) {
+        qualifier_has_template_argument_list = true;
+        qualifier_arguments = parse_cpp_template_argument_list();
+    }
+
+    if (!is_cpp_scope_resolution_here()) {
+        if (saw_typename_keyword) {
+            error_custloc("expected qualified type name after 'typename'",
+                          qualifier_loc);
+        }
+        restore();
+        return std::nullopt;
+    }
+
+    consume_cpp_scope_resolution();
+    bool saw_template_keyword = gentle_check_and_consume(TokenType::TEMPLATE);
+    if (!gentle_check(TokenType::IDENTIFIER)) {
+        error_custloc("expected identifier after '::' in qualified type name",
+                      current_token().loc);
+    }
+
+    std::string member_name = current_token().value;
+    SrcLoc member_loc = current_token().loc;
+    advance();
+
+    std::vector<TemplateArgument> member_arguments;
+    bool member_has_template_argument_list = false;
+    if (gentle_check(TokenType::LESS_THAN)) {
+        member_has_template_argument_list = true;
+        member_arguments = parse_cpp_template_argument_list();
+    }
+
+    auto qualifier_analysis = analyze_cpp_qualified_type_owner(
+        qualifier_name,
+        qualifier_arguments,
+        qualifier_has_template_argument_list,
+        qualifier_loc);
+    if (!qualifier_analysis || !qualifier_analysis->owner_type) {
+        restore();
+        return std::nullopt;
+    }
+    DependentTypeLookupState state;
+    state.qualifier_type = qualifier_analysis->owner_type;
+    state.is_dependent = qualifier_analysis->is_dependent;
+    state.is_current_instantiation =
+        qualifier_analysis->is_current_instantiation;
+
+    std::string current_qualifier_spelling = format_component_spelling(
+        qualifier_name,
+        qualifier_arguments,
+        qualifier_has_template_argument_list);
+
+    while (true) {
+        bool has_more_qualifiers = is_cpp_scope_resolution_here();
+
+        if (saw_template_keyword && !member_has_template_argument_list) {
+            error_custloc(
+                "expected template-id after 'template' keyword",
+                member_loc);
+        }
+
+        const bool is_terminal_component = !has_more_qualifiers;
+        if (!member_has_template_argument_list && is_terminal_component) {
+            if (saw_typename_keyword &&
+                !state.is_dependent &&
+                !state.is_current_instantiation) {
+                error_custloc(
+                    "'typename' is only allowed before qualified dependent type names",
+                    start_tok.loc);
+            }
+            if (!saw_typename_keyword &&
+                state.requires_typename_keyword() &&
+                gentle_check(TokenType::LEFT_PAREN)) {
+                restore();
+                return std::nullopt;
+            }
+            if (!saw_typename_keyword &&
+                state.requires_typename_keyword()) {
+                diagnose_missing_cpp_typename_keyword(
+                    current_qualifier_spelling,
+                    member_name,
+                    start_tok.loc);
+            }
+        }
+
+        std::string member_spelling = format_component_spelling(
+            member_name,
+            member_arguments,
+            member_has_template_argument_list);
+
+        if (member_has_template_argument_list) {
+            if (state.is_dependent_context()) {
+                if (!saw_template_keyword) {
+                    if (state.requires_template_keyword()) {
+                        diagnose_missing_cpp_template_keyword(
+                            current_qualifier_spelling,
+                            member_name,
+                            member_loc);
+                    }
+                }
+                state.qualifier_type = QualType(std::make_shared<DependentNameType>(
+                    state.qualifier_type,
+                    member_name,
+                    std::move(member_arguments),
+                    state.is_current_instantiation,
+                    is_terminal_component && saw_typename_keyword,
+                    true));
+                state.is_dependent = true;
+                state.is_current_instantiation = false;
+            } else {
+                auto nested_template_type =
+                    collect_->collect_lookup_record_nested_template_type(
+                        state.qualifier_type,
+                        member_name,
+                        member_arguments,
+                        member_loc);
+                if (!nested_template_type) {
+                    restore();
+                    return std::nullopt;
+                }
+                state.qualifier_type = nested_template_type;
+                state.is_dependent = type_depends_on_template_parameters(
+                    nested_template_type,
+                    ast_ctx.get());
+                state.is_current_instantiation = false;
+                if (is_terminal_component && saw_typename_keyword &&
+                    !state.is_dependent) {
+                    error_custloc(
+                        "'typename' is only allowed before qualified dependent type names",
+                        start_tok.loc);
+                }
+            }
+        } else {
+            if (state.is_dependent_context()) {
+                state.qualifier_type = QualType(std::make_shared<DependentNameType>(
+                    state.qualifier_type,
+                    member_name,
+                    std::vector<TemplateArgument>{},
+                    state.is_current_instantiation,
+                    is_terminal_component && saw_typename_keyword,
+                    false));
+                state.is_dependent = true;
+                state.is_current_instantiation = false;
+            } else {
+                auto nested_type =
+                    collect_->collect_lookup_record_nested_type(
+                        state.qualifier_type,
+                        member_name);
+                if (!nested_type) {
+                    restore();
+                    return std::nullopt;
+                }
+                state.qualifier_type = nested_type;
+                state.is_dependent = type_depends_on_template_parameters(
+                    nested_type,
+                    ast_ctx.get());
+                state.is_current_instantiation = false;
+            }
+        }
+
+        if (is_terminal_component) {
+            ParsedCppTypeNameSpecifier result;
+            result.type = state.qualifier_type;
+            return result;
+        }
+
+        current_qualifier_spelling += "::";
+        current_qualifier_spelling += member_spelling;
+
+        consume_cpp_scope_resolution();
+        saw_template_keyword = gentle_check_and_consume(TokenType::TEMPLATE);
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            error_custloc(
+                "expected identifier after '::' in qualified type name",
+                current_token().loc);
+        }
+
+        member_name = current_token().value;
+        member_loc = current_token().loc;
+        advance();
+
+        member_arguments.clear();
+        member_has_template_argument_list = false;
+        if (gentle_check(TokenType::LESS_THAN)) {
+            member_has_template_argument_list = true;
+            member_arguments = parse_cpp_template_argument_list();
+        }
+    }
+}
+
+std::vector<std::unique_ptr<Decl>>
+Parser::parse_cpp_explicit_specialization_declaration(
+    Token template_tok,
+    bool member_template_declaration,
+    bool angle_brackets_already_consumed) {
+    std::vector<std::unique_ptr<Decl>> explicit_decls;
+    pending_cpp_explicit_specialization_info_.reset();
+    if (!angle_brackets_already_consumed) {
+        check_and_consume(TokenType::LESS_THAN);
+        check_and_consume(TokenType::GREATER_THAN);
+    }
+
+    if (member_template_declaration) {
+        fail_cpp_future_work(
+            "explicit specialization",
+            "class-scope explicit specialization ownership",
+            template_tok.loc);
+    }
+
+    auto resolve_primary_class_template =
+        [&](const std::string& name,
+            SrcLoc loc) -> const ClassTemplateDecl* {
+        auto lookup_scope = collect_->collect_current_scope();
+        while (lookup_scope &&
+               scope_flags_contains(
+                   lookup_scope->flags,
+                   ScopeFlags::TemplateParameterScope)) {
+            lookup_scope = lookup_scope->parent;
+        }
+        const DeclBinding* template_binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                name,
+                lookup_scope ? lookup_scope : collect_->collect_current_scope(),
+                true,
+                LookupNamespace::Tag);
+        const Decl* primary_template = nullptr;
+        if (template_binding) {
+            primary_template = template_binding->template_decl;
+            if (!primary_template &&
+                template_binding->template_overload_candidates.size() == 1) {
+                primary_template =
+                    template_binding->template_overload_candidates.front();
+            }
+        }
+        auto* class_template = dyn_cast<ClassTemplateDecl>(primary_template);
+        if (!class_template) {
+            error_custloc(
+                "explicit specialization requires a prior primary template '" +
+                    name + "'",
+                loc);
+        }
+        const TemplateDecl* canonical =
+            get_template_decl_canonical_decl(class_template);
+        auto* canonical_class_template =
+            dyn_cast<ClassTemplateDecl>(const_cast<TemplateDecl*>(canonical));
+        return canonical_class_template ? canonical_class_template : class_template;
+    };
+
+    auto resolve_primary_function_template =
+        [&](const FuncDecl* specialized_function,
+            std::vector<TemplateArgument>& deduced_arguments_out)
+            -> const FunctionTemplateDecl* {
+        deduced_arguments_out.clear();
+        if (!specialized_function || specialized_function->name.empty()) {
+            error_custloc(
+                "explicit specialization requires a named function declaration",
+                specialized_function ? specialized_function->location : template_tok.loc);
+        }
+
+        auto lookup_scope = collect_->collect_current_scope();
+        while (lookup_scope &&
+               scope_flags_contains(
+                   lookup_scope->flags,
+                   ScopeFlags::TemplateParameterScope)) {
+            lookup_scope = lookup_scope->parent;
+        }
+        const DeclBinding* template_binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                specialized_function->name,
+                lookup_scope ? lookup_scope : collect_->collect_current_scope(),
+                true,
+                LookupNamespace::Ordinary);
+        if (!template_binding) {
+            error_custloc(
+                "explicit specialization requires a prior primary template '" +
+                    specialized_function->name + "'",
+                specialized_function->location);
+        }
+
+        std::vector<const FunctionTemplateDecl*> candidates;
+        auto append_candidate = [&](const Decl* candidate) {
+            auto* function_template = dyn_cast<FunctionTemplateDecl>(
+                const_cast<Decl*>(candidate));
+            if (!function_template) {
+                return;
+            }
+            for (const auto* existing : candidates) {
+                if (existing == function_template) {
+                    return;
+                }
+            }
+            candidates.push_back(function_template);
+        };
+        append_candidate(template_binding->template_decl);
+        for (const auto* candidate : template_binding->template_overload_candidates) {
+            append_candidate(candidate);
+        }
+
+        const FunctionTemplateDecl* matched_template = nullptr;
+        std::vector<TemplateArgument> matched_arguments;
+        for (const auto* candidate : candidates) {
+            std::vector<TemplateArgument> deduced_arguments;
+            if (!collect_->deduce_function_template_specialization_arguments(
+                    candidate,
+                    QualType(specialized_function->type),
+                    deduced_arguments)) {
+                continue;
+            }
+            if (matched_template && matched_template != candidate) {
+                error_custloc(
+                    "explicit specialization of function template '" +
+                        specialized_function->name +
+                        "' is ambiguous",
+                    specialized_function->location);
+            }
+            matched_template = candidate;
+            matched_arguments = std::move(deduced_arguments);
+        }
+
+        if (!matched_template) {
+            error_custloc(
+                "explicit specialization does not match any primary template '" +
+                    specialized_function->name + "'",
+                specialized_function->location);
+        }
+
+        const TemplateDecl* canonical =
+            get_template_decl_canonical_decl(matched_template);
+        auto* canonical_function_template =
+            dyn_cast<FunctionTemplateDecl>(const_cast<TemplateDecl*>(canonical));
+        deduced_arguments_out = std::move(matched_arguments);
+        return canonical_function_template ? canonical_function_template : matched_template;
+    };
+
+    auto explicit_specialization_primary_name =
+        [](const TemplateDecl* primary_template) -> std::string {
+        if (!primary_template) {
+            return "template";
+        }
+        if (const auto* class_template =
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<TemplateDecl*>(primary_template))) {
+            const auto* record_decl = class_template->record_decl();
+            if (record_decl && !record_decl->name.empty()) {
+                return record_decl->name;
+            }
+        }
+        if (const auto* function_template =
+                dyn_cast<FunctionTemplateDecl>(
+                    const_cast<TemplateDecl*>(primary_template))) {
+            const auto* function_decl = function_template->function_decl();
+            if (function_decl && !function_decl->name.empty()) {
+                return function_decl->name;
+            }
+        }
+        if (const auto* alias_template =
+                dyn_cast<AliasTemplateDecl>(
+                    const_cast<TemplateDecl*>(primary_template))) {
+            const auto* alias_decl = alias_template->alias_decl();
+            if (alias_decl && !alias_decl->name.empty()) {
+                return alias_decl->name;
+            }
+        }
+        return "template";
+    };
+
+    auto format_class_specialization_name =
+        [](std::string_view record_name,
+            const std::vector<TemplateArgument>& specialization_arguments)
+            -> std::string {
+            std::string out(record_name);
+            out += "<";
+            for (size_t idx = 0; idx < specialization_arguments.size(); ++idx) {
+                if (idx != 0) {
+                    out += ", ";
+                }
+                out += specialization_arguments[idx].to_string();
+            }
+            out += ">";
+            return out;
+        };
+
+    auto format_function_template_specialization_name =
+        [](std::string_view function_name,
+           const std::vector<TemplateArgument>& specialization_arguments)
+            -> std::string {
+            std::string out(function_name);
+            out += "<";
+            for (size_t idx = 0; idx < specialization_arguments.size(); ++idx) {
+                if (idx != 0) {
+                    out += ", ";
+                }
+                out += specialization_arguments[idx].to_string();
+            }
+            out += ">";
+            return out;
+        };
+
+    auto explicit_specialization_display_name =
+        [&](const TemplateDecl* primary_template,
+            const ClassTemplateDecl* owner_primary_template,
+            const TemplateExplicitSpecializationDecl* explicit_specialization)
+            -> std::string {
+            if (!explicit_specialization) {
+                return explicit_specialization_primary_name(primary_template);
+            }
+
+            if (const auto* specialized_record =
+                    dyn_cast<CppRecordDecl>(
+                        const_cast<Decl*>(
+                            explicit_specialization->get_specialized_decl()))) {
+                if (!explicit_specialization->specialization_arguments.empty()) {
+                    return format_class_specialization_name(
+                        specialized_record->name.empty()
+                            ? explicit_specialization_primary_name(primary_template)
+                            : specialized_record->name,
+                        explicit_specialization->specialization_arguments);
+                }
+                if (!specialized_record->name.empty()) {
+                    return specialized_record->name;
+                }
+            }
+
+            if (const auto* specialized_function =
+                    dyn_cast<FuncDecl>(
+                        const_cast<Decl*>(
+                            explicit_specialization->get_specialized_decl()))) {
+                std::string out;
+                if (const auto* qualifier_prefix =
+                        get_func_decl_cxx_qualifier_prefix(specialized_function);
+                    qualifier_prefix && !qualifier_prefix->empty()) {
+                    out += *qualifier_prefix;
+                    out += "::";
+                } else if (explicit_specialization->primary_member_decl &&
+                           owner_primary_template &&
+                           !explicit_specialization->owner_specialization_arguments.empty()) {
+                    out += format_class_specialization_name(
+                        explicit_specialization_primary_name(owner_primary_template),
+                        explicit_specialization->owner_specialization_arguments);
+                    out += "::";
+                }
+                std::string function_name =
+                    specialized_function->name.empty()
+                        ? explicit_specialization_primary_name(primary_template)
+                        : specialized_function->name;
+                if (isa<FunctionTemplateDecl>(
+                        const_cast<TemplateDecl*>(primary_template)) &&
+                    !explicit_specialization->specialization_arguments.empty()) {
+                    out += format_function_template_specialization_name(
+                        function_name,
+                        explicit_specialization->specialization_arguments);
+                } else {
+                    out += function_name;
+                }
+                return out;
+            }
+
+            return explicit_specialization_primary_name(primary_template);
+        };
+
+    auto find_late_explicit_specialization_first_required_loc =
+        [&](const TemplateDecl* primary_template,
+            const ClassTemplateDecl* owner_primary_template,
+            const TemplateExplicitSpecializationDecl* explicit_specialization)
+            -> SrcLoc {
+            if (!ast_ctx || !primary_template || !explicit_specialization) {
+                return SrcLoc();
+            }
+
+            if (const auto* class_template =
+                    dyn_cast<ClassTemplateDecl>(
+                        const_cast<TemplateDecl*>(primary_template))) {
+                std::string cache_key =
+                    template_sema_internal::make_class_template_specialization_cache_key(
+                        class_template,
+                        explicit_specialization->specialization_arguments);
+                const auto* entry =
+                    ast_ctx->lookup_class_template_specialization(cache_key);
+                if (!entry) {
+                    return SrcLoc();
+                }
+                if (explicit_specialization->primary_member_decl) {
+                    return entry->lookup_primary_member_first_required_loc(
+                        explicit_specialization->primary_member_decl);
+                }
+                return entry->first_required_loc;
+            }
+
+            const auto* function_template =
+                dyn_cast<FunctionTemplateDecl>(
+                    const_cast<TemplateDecl*>(primary_template));
+            if (!function_template) {
+                return SrcLoc();
+            }
+
+            const FunctionTemplateDecl* lookup_template = function_template;
+            if (owner_primary_template &&
+                explicit_specialization->primary_member_decl &&
+                !explicit_specialization->owner_specialization_arguments.empty()) {
+                std::string owner_cache_key =
+                    template_sema_internal::make_class_template_specialization_cache_key(
+                        owner_primary_template,
+                        explicit_specialization->owner_specialization_arguments);
+                const auto* owner_entry =
+                    ast_ctx->lookup_class_template_specialization(owner_cache_key);
+                if (!owner_entry) {
+                    return SrcLoc();
+                }
+                lookup_template =
+                    owner_entry->lookup_owner_specialized_member_template(
+                        explicit_specialization->primary_member_decl);
+                if (!lookup_template) {
+                    return SrcLoc();
+                }
+            }
+
+            std::string cache_key =
+                template_sema_internal::make_function_template_specialization_cache_key(
+                    lookup_template,
+                    explicit_specialization->specialization_arguments);
+            const auto* entry =
+                ast_ctx->lookup_function_template_specialization(cache_key);
+            return entry ? entry->first_required_loc : SrcLoc();
+        };
+
+    auto explicit_specialization_signature_matches =
+        [&](const TemplateExplicitSpecializationDecl* existing,
+            const TemplateExplicitSpecializationDecl* current) -> bool {
+            if (!existing || !current) {
+                return false;
+            }
+            const auto* existing_decl = existing->get_specialized_decl();
+            const auto* current_decl = current->get_specialized_decl();
+            if (!existing_decl || !current_decl ||
+                existing_decl->get_kind() != current_decl->get_kind()) {
+                return false;
+            }
+
+            if (const auto* existing_function =
+                    dyn_cast<FuncDecl>(const_cast<Decl*>(existing_decl))) {
+                const auto* current_function =
+                    dyn_cast<FuncDecl>(const_cast<Decl*>(current_decl));
+                return current_function &&
+                       cpp_out_of_line_type_matches(
+                           QualType(existing_function->type),
+                           QualType(current_function->type),
+                           true);
+            }
+            if (const auto* existing_record =
+                    dyn_cast<CppRecordDecl>(const_cast<Decl*>(existing_decl))) {
+                const auto* current_record =
+                    dyn_cast<CppRecordDecl>(const_cast<Decl*>(current_decl));
+                return current_record &&
+                       existing_record->record_kind == current_record->record_kind &&
+                       existing_record->name == current_record->name;
+            }
+            if (const auto* existing_variable =
+                    dyn_cast<VariableDecl>(const_cast<Decl*>(existing_decl))) {
+                const auto* current_variable =
+                    dyn_cast<VariableDecl>(const_cast<Decl*>(current_decl));
+                return current_variable &&
+                       existing_variable->name == current_variable->name &&
+                       cpp_out_of_line_type_matches(
+                           existing_variable->type,
+                           current_variable->type,
+                           false);
+            }
+            return true;
+        };
+
+    auto register_explicit_specialization =
+        [&](const TemplateDecl* primary_template,
+            const ClassTemplateDecl* owner_primary_template,
+            std::unique_ptr<TemplateExplicitSpecializationDecl> explicit_specialization) {
+            if (!primary_template || !explicit_specialization) {
+                return;
+            }
+
+            auto* primary_template_mutable =
+                const_cast<TemplateDecl*>(primary_template);
+            auto* existing = primary_template_mutable->find_explicit_specialization(
+                explicit_specialization->specialization_arguments,
+                explicit_specialization->owner_specialization_arguments,
+                explicit_specialization->primary_member_decl);
+            if (!existing) {
+                SrcLoc first_required_loc =
+                    find_late_explicit_specialization_first_required_loc(
+                        primary_template,
+                        owner_primary_template,
+                        explicit_specialization.get());
+                if (!first_required_loc.isInvalid()) {
+                    error_custloc(
+                        "explicit specialization of '" +
+                            explicit_specialization_display_name(
+                                primary_template,
+                                owner_primary_template,
+                                explicit_specialization.get()) +
+                            "' after instantiation",
+                        explicit_specialization->location);
+                    if (diag_engine) {
+                        diag_engine->report_note(
+                            "implicit instantiation first required here",
+                            first_required_loc);
+                    }
+                    explicit_decls.push_back(std::move(explicit_specialization));
+                    return;
+                }
+            }
+            if (existing) {
+                if (!explicit_specialization_signature_matches(
+                        existing,
+                        explicit_specialization.get())) {
+                    error_custloc(
+                        "explicit specialization of '" +
+                            explicit_specialization_primary_name(primary_template) +
+                            "' does not match the previous declaration",
+                        explicit_specialization->location);
+                }
+                if (explicit_specialization->is_definition()) {
+                    if (existing->is_definition()) {
+                        error_custloc(
+                            "redefinition of explicit specialization '" +
+                                explicit_specialization_primary_name(primary_template) +
+                                "'",
+                            explicit_specialization->location);
+                    }
+                    primary_template_mutable->replace_explicit_specialization(
+                        existing,
+                        explicit_specialization.get());
+                }
+            } else {
+                primary_template_mutable->add_explicit_specialization(
+                    explicit_specialization.get());
+            }
+            explicit_decls.push_back(std::move(explicit_specialization));
+        };
+
+    if (gentle_check(TokenType::CLASS) ||
+        gentle_check(TokenType::STRUCT) ||
+        gentle_check(TokenType::UNION)) {
+        std::vector<TemplateArgument> specialization_arguments;
+        auto specialized_record =
+            parse_cpp_record_specifier(
+                &specialization_arguments,
+                true);
+        check_and_consume(TokenType::SEMICOLON);
+
+        auto* record_decl = dyn_cast<CppRecordDecl>(specialized_record.get());
+        if (!record_decl) {
+            error_custloc(
+                "internal error: explicit specialization did not parse as a record declaration",
+                template_tok.loc);
+        }
+        if (record_decl->name.empty()) {
+            fail_cpp_unsupported(
+                "anonymous explicit specialization",
+                record_decl->location);
+        }
+        if (specialization_arguments.empty()) {
+            error_custloc(
+                "explicit specialization of class template '" +
+                    record_decl->name +
+                    "' requires a template-id",
+                record_decl->location);
+        }
+
+        const ClassTemplateDecl* primary_template =
+            resolve_primary_class_template(record_decl->name, record_decl->location);
+        std::unique_ptr<ObjectDecl> specialized_semantic_decl;
+        if (auto semantic_decl = build_cpp_record_semantic_decl(
+                *record_decl,
+                format_class_specialization_name(
+                    record_decl->name,
+                    specialization_arguments))) {
+            if (auto* semantic_record = dyn_cast<ObjectDecl>(semantic_decl.get())) {
+                specialized_semantic_decl = std::unique_ptr<ObjectDecl>(
+                    static_cast<ObjectDecl*>(semantic_decl.release()));
+                if (auto record_type =
+                        specialized_semantic_decl->get_record_type()) {
+                    record_type->set_class_template_specialization_info(
+                        primary_template,
+                        specialization_arguments);
+                }
+            }
+        }
+        auto explicit_specialization =
+            make_ast<TemplateExplicitSpecializationDecl>(
+                *ast_ctx,
+                primary_template,
+                std::move(specialized_record),
+                std::move(specialization_arguments),
+                std::vector<TemplateArgument>{},
+                nullptr,
+                false,
+                true,
+                template_tok.loc);
+        if (specialized_semantic_decl) {
+            explicit_specialization->set_specialized_record_semantic_decl(
+                std::move(specialized_semantic_decl));
+        }
+        register_explicit_specialization(
+            primary_template,
+            nullptr,
+            std::move(explicit_specialization));
+        return explicit_decls;
+    }
+
+    ++cpp_explicit_specialization_parse_depth_;
+    struct ExplicitSpecializationParseGuard {
+        uint32_t& depth;
+        std::optional<PendingCppExplicitSpecializationInfo>* pending = nullptr;
+        ~ExplicitSpecializationParseGuard() {
+            if (depth > 0) {
+                --depth;
+            }
+            if (pending) {
+                pending->reset();
+            }
+        }
+    } explicit_specialization_guard{
+        cpp_explicit_specialization_parse_depth_,
+        &pending_cpp_explicit_specialization_info_};
+
+    auto specialized_decls = parse_declaration();
+    if (specialized_decls.empty() ||
+        specialized_decls.size() != 1 ||
+        !specialized_decls.front()) {
+        fail_cpp_future_work(
+            "explicit specialization",
+            "function/member explicit specialization ownership",
+            template_tok.loc);
+    }
+
+    if (pending_cpp_explicit_specialization_info_.has_value()) {
+        const auto pending_info =
+            std::move(pending_cpp_explicit_specialization_info_.value());
+        const TemplateDecl* primary_template =
+            pending_info.primary_member_template
+                ? static_cast<const TemplateDecl*>(
+                      pending_info.primary_member_template)
+                : static_cast<const TemplateDecl*>(
+                      pending_info.owner_primary_template);
+        if (!primary_template) {
+            error_custloc(
+                "internal error: missing primary template for member explicit specialization",
+                specialized_decls.front()->location);
+        }
+        auto explicit_specialization =
+            make_ast<TemplateExplicitSpecializationDecl>(
+                *ast_ctx,
+                primary_template,
+                std::move(specialized_decls.front()),
+                pending_info.specialization_arguments,
+                pending_info.owner_specialization_arguments,
+                pending_info.primary_member_decl,
+                true,
+                false,
+                template_tok.loc);
+        register_explicit_specialization(
+            primary_template,
+            pending_info.owner_primary_template,
+            std::move(explicit_specialization));
+        return explicit_decls;
+    }
+
+    if (specialized_decls.size() == 1 &&
+        isa<TemplateExplicitSpecializationDecl>(specialized_decls.front().get())) {
+        return specialized_decls;
+    }
+
+    if (auto* specialized_function =
+            dyn_cast<FuncDecl>(specialized_decls.front().get())) {
+        if (const auto* qualifier_prefix =
+                get_func_decl_cxx_qualifier_prefix(specialized_function);
+            qualifier_prefix && !qualifier_prefix->empty()) {
+            fail_cpp_future_work(
+                "explicit specialization",
+                "qualified/member explicit specialization ownership",
+                specialized_function->location);
+        }
+
+        std::vector<TemplateArgument> deduced_arguments;
+        const FunctionTemplateDecl* primary_template =
+            resolve_primary_function_template(
+                specialized_function,
+                deduced_arguments);
+        std::vector<TemplateArgument> specialization_arguments =
+            deduced_arguments;
+        bool has_explicit_argument_list =
+            specialized_function->has_explicit_specialization_argument_list;
+        if (has_explicit_argument_list) {
+            const auto& explicit_arguments =
+                specialized_function->explicit_specialization_arguments;
+            if (explicit_arguments.size() != deduced_arguments.size()) {
+                error_custloc(
+                    "explicit specialization argument list does not match specialized function declaration",
+                    specialized_function->location);
+            }
+            for (size_t idx = 0; idx < explicit_arguments.size(); ++idx) {
+                if (!explicit_arguments[idx].equals(deduced_arguments[idx])) {
+                    error_custloc(
+                        "explicit specialization argument list does not match specialized function declaration",
+                        specialized_function->location);
+                }
+            }
+            specialization_arguments = explicit_arguments;
+        }
+        auto explicit_specialization =
+            make_ast<TemplateExplicitSpecializationDecl>(
+                *ast_ctx,
+                primary_template,
+                std::move(specialized_decls.front()),
+                std::move(specialization_arguments),
+                std::vector<TemplateArgument>{},
+                nullptr,
+                false,
+                has_explicit_argument_list,
+                template_tok.loc);
+        register_explicit_specialization(
+            primary_template,
+            nullptr,
+            std::move(explicit_specialization));
+        return explicit_decls;
+    }
+
+    fail_cpp_future_work(
+        "explicit specialization",
+        "function/member explicit specialization ownership",
+        specialized_decls.front()->location);
+    return explicit_decls;
+}
+
+TemplateParameterList
+Parser::parse_cpp_template_parameter_list(uint32_t depth) {
+    TemplateParameterList parameters;
+    check_and_consume(TokenType::LESS_THAN);
+    if (gentle_check(TokenType::GREATER_THAN)) {
+        advance();
+        return parameters;
+    }
+
+    while (true) {
+        Token param_tok = current_token();
+        if (param_tok.type == TokenType::TEMPLATE) {
+            advance();
+            TemplateParameterList nested_parameters;
+            {
+                collect_->collect_enter_scope(ScopeFlags::TemplateParameterScope);
+                struct NestedTemplateParameterScopeGuard {
+                    Collect* collect = nullptr;
+                    bool active = true;
+                    ~NestedTemplateParameterScopeGuard() {
+                        if (active && collect) {
+                            collect->collect_leave_scope();
+                        }
+                    }
+                } nested_scope_guard{collect_.get(), true};
+
+                active_template_parameter_stack_.push_back({});
+                struct NestedTemplateParameterStackGuard {
+                    std::vector<std::vector<const TemplateParameterDecl*>>& stack;
+                    bool active = true;
+                    ~NestedTemplateParameterStackGuard() {
+                        if (active) {
+                            stack.pop_back();
+                        }
+                    }
+                } nested_stack_guard{active_template_parameter_stack_, true};
+
+                nested_parameters =
+                    parse_cpp_template_parameter_list(depth + 1);
+            }
+            if (!(gentle_check(TokenType::TYPENAME) ||
+                  gentle_check(TokenType::CLASS))) {
+                error_custloc(
+                    "expected 'class' or 'typename' after template parameter list",
+                    current_token().loc);
+            }
+
+            bool uses_typename_keyword =
+                current_token().type == TokenType::TYPENAME;
+            Token kind_tok = current_token();
+            advance();
+
+            bool is_parameter_pack =
+                gentle_check_and_consume(TokenType::ELLIPSIS);
+
+            std::string param_name;
+            SrcLoc param_loc = kind_tok.loc;
+            if (gentle_check(TokenType::IDENTIFIER)) {
+                param_name = current_token().value;
+                param_loc = current_token().loc;
+                advance();
+                if (gentle_check_and_consume(TokenType::ELLIPSIS)) {
+                    if (is_parameter_pack) {
+                        error_custloc(
+                            "duplicate ellipsis in template-template parameter pack",
+                            current_token().loc);
+                    }
+                    is_parameter_pack = true;
+                }
+            }
+
+            std::optional<TemplateArgument> default_argument;
+            if (gentle_check(TokenType::ASSIGN)) {
+                if (is_parameter_pack) {
+                    fail_cpp_unsupported(
+                        "default template argument on template-template parameter pack",
+                        current_token().loc);
+                }
+                advance();
+                default_argument = parse_cpp_template_argument();
+            }
+
+            auto param_decl = make_ast<TemplateTemplateParmDecl>(
+                *ast_ctx,
+                std::move(nested_parameters),
+                param_name,
+                depth,
+                static_cast<uint32_t>(parameters.size()),
+                uses_typename_keyword,
+                is_parameter_pack,
+                param_loc);
+            if (default_argument.has_value()) {
+                if (default_argument->kind != TemplateArgumentKind::Template) {
+                    error_custloc(
+                        "template-template parameter default must be a template-name",
+                        param_loc);
+                }
+                set_template_parameter_default_argument(
+                    param_decl.get(),
+                    std::move(default_argument));
+            }
+            if (!param_name.empty()) {
+                collect_->collect_bind_template_decl(
+                    param_name,
+                    param_decl.get(),
+                    LookupNamespace::Ordinary);
+            }
+            parameters.push_back(std::move(param_decl));
+            if (!active_template_parameter_stack_.empty()) {
+                active_template_parameter_stack_.back().push_back(
+                    parameters.back().get());
+            }
+        } else if (param_tok.type == TokenType::TYPENAME ||
+            param_tok.type == TokenType::CLASS) {
+            advance();
+
+            bool is_parameter_pack =
+                gentle_check_and_consume(TokenType::ELLIPSIS);
+
+            std::string param_name;
+            SrcLoc param_loc = param_tok.loc;
+            if (gentle_check(TokenType::IDENTIFIER)) {
+                param_name = current_token().value;
+                param_loc = current_token().loc;
+                advance();
+                if (gentle_check(TokenType::ELLIPSIS)) {
+                    fail_cpp_unsupported("template parameter pack", current_token().loc);
+                }
+            }
+
+            std::optional<TemplateArgument> default_argument;
+            if (gentle_check(TokenType::ASSIGN)) {
+                if (is_parameter_pack) {
+                    fail_cpp_unsupported(
+                        "default template argument on template parameter pack",
+                        current_token().loc);
+                }
+                advance();
+                default_argument = parse_cpp_template_argument();
+            }
+
+            auto param_type = std::make_shared<TemplateTypeParmType>(
+                param_name,
+                depth,
+                static_cast<uint32_t>(parameters.size()),
+                is_parameter_pack);
+            auto param_decl = make_ast<TemplateTypeParmDecl>(
+                *ast_ctx,
+                param_name,
+                depth,
+                static_cast<uint32_t>(parameters.size()),
+                param_type,
+                is_parameter_pack,
+                param_loc);
+            param_type->parameter_decl = param_decl.get();
+            if (default_argument.has_value()) {
+                if (default_argument->kind != TemplateArgumentKind::Type) {
+                    error_custloc(
+                        "type template parameter default must be a type-id",
+                        param_loc);
+                }
+                set_template_parameter_default_argument(
+                    param_decl.get(),
+                    std::move(default_argument));
+            }
+            if (!param_name.empty()) {
+                collect_->collect_declare_type_name_symbol(
+                    param_name,
+                    QualType(param_type),
+                    param_loc);
+            }
+            parameters.push_back(std::move(param_decl));
+            if (!active_template_parameter_stack_.empty()) {
+                active_template_parameter_stack_.back().push_back(
+                    parameters.back().get());
+            }
+        } else {
+            DeclarationParser param_parser(this);
+            auto parsed_type = param_parser.parse_declaration();
+            if (!parsed_type) {
+                error_custloc(
+                    "expected non-type template parameter declaration",
+                    param_tok.loc);
+            }
+            if (param_parser.str_class != StorageClass::NONE) {
+                error_custloc(
+                    "storage class specifier is not allowed in template parameter",
+                    param_tok.loc);
+            }
+            bool is_parameter_pack = param_parser.is_parameter_pack;
+            if (gentle_check_and_consume(TokenType::ELLIPSIS)) {
+                if (is_parameter_pack) {
+                    error_custloc(
+                        "duplicate ellipsis in non-type template parameter pack",
+                        current_token().loc);
+                }
+                is_parameter_pack = true;
+                if (param_parser.name.empty() &&
+                    gentle_check(TokenType::IDENTIFIER)) {
+                    param_parser.name = current_token().value;
+                    if (param_parser.loc.isInvalid()) {
+                        param_parser.loc = current_token().loc;
+                    }
+                    advance();
+                }
+            }
+            std::optional<TemplateArgument> default_argument;
+            if (gentle_check(TokenType::ASSIGN)) {
+                if (is_parameter_pack) {
+                    fail_cpp_unsupported(
+                        "default template argument on non-type template parameter pack",
+                        current_token().loc);
+                }
+                advance();
+                default_argument = parse_cpp_template_argument();
+            }
+
+            SrcLoc param_loc = param_parser.loc.isInvalid()
+                ? param_tok.loc
+                : param_parser.loc;
+            QualType parameter_type(parsed_type, param_parser.qualifiers);
+            parameter_type =
+                collect_->collect_try_realize_deferred_semantic_type(
+                    parameter_type);
+            if (!is_supported_non_type_template_parameter_type(
+                    parameter_type,
+                    ast_ctx.get())) {
+                fail_cpp_unsupported("non-type template parameter type", param_loc);
+            }
+            if (auto_type_utils::has_cxx_auto_type(parameter_type.get_shared())) {
+                parameter_type = QualType(
+                    auto_type_utils::retag_cxx_auto_placeholders(
+                        parameter_type.get_shared(),
+                        AutoTypeFlavor::TemplateNonType),
+                    parameter_type.get_qualifiers());
+            }
+
+            std::shared_ptr<Symbol> parameter_symbol = nullptr;
+            if (!param_parser.name.empty()) {
+                parameter_symbol = collect_->collect_declare_variable_symbol(
+                    param_parser.name,
+                    parameter_type,
+                    StorageClass::NONE,
+                    true,
+                    param_loc);
+            }
+            auto param_decl = make_ast<TemplateNonTypeParmDecl>(
+                *ast_ctx,
+                param_parser.name,
+                depth,
+                static_cast<uint32_t>(parameters.size()),
+                parameter_type,
+                parameter_symbol,
+                is_parameter_pack,
+                param_loc);
+            if (default_argument.has_value()) {
+                if (default_argument->kind != TemplateArgumentKind::Value) {
+                    error_custloc(
+                        "non-type template parameter default must be a constant expression",
+                        param_loc);
+                }
+                set_template_parameter_default_argument(
+                    param_decl.get(),
+                    std::move(default_argument));
+            }
+            parameters.push_back(std::move(param_decl));
+            if (!active_template_parameter_stack_.empty()) {
+                active_template_parameter_stack_.back().push_back(
+                    parameters.back().get());
+            }
+        }
+
+        if (!gentle_check_and_consume(TokenType::COMMA)) {
+            break;
+        }
+    }
+
+    check_and_consume(TokenType::GREATER_THAN);
+    return parameters;
+}
+
+std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
+    Token template_tok = current_token();
+    bool member_template_declaration = is_parsing_cpp_record_body();
+    if (!is_cxx_mode_active()) {
+        fail_cpp_unsupported("template-declaration", template_tok.loc);
+    }
+    if (!can_parse_namespace_scope_template_declaration()) {
+        if (!member_template_declaration) {
+            fail_cpp_unsupported("block-scope template-declaration", template_tok.loc);
+        }
+    }
+    if (!collect_) {
+        error_custloc("internal error: missing collection state for template declaration",
+                      template_tok.loc);
+    }
+
+    advance(); // consume 'template'
+
+    const uint32_t parameter_depth = template_parameter_depth_;
+    ++template_parameter_depth_;
+    struct TemplateDepthGuard {
+        uint32_t& depth;
+        ~TemplateDepthGuard() { --depth; }
+    } template_depth_guard{template_parameter_depth_};
+
+    collect_->collect_enter_scope(ScopeFlags::TemplateParameterScope);
+    struct ScopeLeaveGuard {
+        Collect* collect = nullptr;
+        bool active = true;
+        ~ScopeLeaveGuard() {
+            if (active && collect) {
+                collect->collect_leave_scope();
+            }
+        }
+    } template_scope_guard{collect_.get(), true};
+
+    active_template_parameter_stack_.emplace_back();
+    struct ActiveTemplateParameterGuard {
+        std::vector<std::vector<const TemplateParameterDecl*>>* stack = nullptr;
+        ~ActiveTemplateParameterGuard() {
+            if (stack && !stack->empty()) {
+                stack->pop_back();
+            }
+        }
+    } active_template_parameter_guard{&active_template_parameter_stack_};
+
+    auto parameters = parse_cpp_template_parameter_list(parameter_depth);
+    if (parameters.empty()) {
+        collect_->collect_leave_scope();
+        template_scope_guard.active = false;
+        return parse_cpp_explicit_specialization_declaration(
+            template_tok,
+            member_template_declaration,
+            true);
+    }
+
+    collect_->collect_begin_tentative_parse();
+    struct TentativeCollectRollbackGuard {
+        Collect* collect = nullptr;
+        bool active = true;
+        ~TentativeCollectRollbackGuard() {
+            if (active && collect) {
+                collect->collect_rollback_tentative_parse();
+            }
+        }
+    } collect_rollback_guard{collect_.get(), true};
+
+    ++template_pattern_depth_;
+    struct TemplatePatternGuard {
+        uint32_t& depth;
+        ~TemplatePatternGuard() { --depth; }
+    } template_pattern_guard{template_pattern_depth_};
+
+    std::vector<std::unique_ptr<Decl>> templated_decls;
+    std::vector<TemplateArgument> record_specialization_arguments;
+    if (gentle_check(TokenType::CLASS) ||
+        gentle_check(TokenType::STRUCT) ||
+        gentle_check(TokenType::UNION)) {
+        auto record_decl =
+            parse_cpp_record_specifier(&record_specialization_arguments);
+        check_and_consume(TokenType::SEMICOLON);
+        templated_decls.push_back(std::move(record_decl));
+    } else if (member_template_declaration &&
+               gentle_check(TokenType::USING)) {
+        templated_decls = parse_cpp_using_alias_declaration();
+    } else if (member_template_declaration) {
+        templated_decls = parse_struct_declaration(false);
+    } else {
+        templated_decls = parse_declaration();
+    }
+
+    std::unique_ptr<ClassTemplateDecl> prepared_class_template;
+    std::unique_ptr<ClassTemplatePartialSpecializationDecl>
+        prepared_class_partial_specialization;
+    std::string prepared_class_template_name;
+    if (templated_decls.size() == 1 && templated_decls.front()) {
+        if (auto* record_decl = dyn_cast<CppRecordDecl>(templated_decls.front().get())) {
+            if (record_decl->name.empty()) {
+                fail_cpp_unsupported("anonymous class template", record_decl->location);
+            }
+            prepared_class_template_name = record_decl->name;
+            if (record_specialization_arguments.empty()) {
+                prepared_class_template = make_ast<ClassTemplateDecl>(
+                    *ast_ctx,
+                    std::move(parameters),
+                    std::move(templated_decls.front()),
+                    template_tok.loc);
+                if (!member_template_declaration) {
+                    collect_->collect_add_class_template_decl(
+                        prepared_class_template_name,
+                        prepared_class_template.get());
+                }
+                prepare_cpp_template_pattern_record(*prepared_class_template);
+            } else {
+                if (member_template_declaration) {
+                    fail_cpp_unsupported(
+                        "member class template partial specialization",
+                        record_decl->location);
+                }
+                auto lookup_scope = collect_->collect_current_scope();
+                while (lookup_scope &&
+                       scope_flags_contains(
+                           lookup_scope->flags,
+                           ScopeFlags::TemplateParameterScope)) {
+                    lookup_scope = lookup_scope->parent;
+                }
+                const DeclBinding* template_binding =
+                    LookupEngine::lookup_unqualified_template_binding(
+                        prepared_class_template_name,
+                        lookup_scope ? lookup_scope : collect_->collect_current_scope(),
+                        true,
+                        LookupNamespace::Tag);
+                const Decl* primary_template = nullptr;
+                if (template_binding) {
+                    primary_template = template_binding->template_decl;
+                    if (!primary_template &&
+                        template_binding->template_overload_candidates.size() == 1) {
+                        primary_template =
+                            template_binding->template_overload_candidates.front();
+                    }
+                }
+                auto* primary_class_template =
+                    dyn_cast<ClassTemplateDecl>(primary_template);
+                if (!primary_class_template) {
+                    error_custloc(
+                        "class template partial specialization requires a prior primary template '" +
+                            prepared_class_template_name + "'",
+                        record_decl->location);
+                }
+                prepared_class_partial_specialization =
+                    make_ast<ClassTemplatePartialSpecializationDecl>(
+                        *ast_ctx,
+                        primary_class_template,
+                        std::move(parameters),
+                        std::move(record_specialization_arguments),
+                        std::move(templated_decls.front()),
+                        template_tok.loc);
+                const_cast<ClassTemplateDecl*>(primary_class_template)
+                    ->add_partial_specialization(
+                    prepared_class_partial_specialization.get());
+                prepare_cpp_template_pattern_record(
+                    *prepared_class_partial_specialization);
+            }
+        }
+    }
+
+    collect_->collect_rollback_tentative_parse();
+    collect_rollback_guard.active = false;
+    collect_->collect_leave_scope();
+    template_scope_guard.active = false;
+
+    auto template_parameter_lists_match =
+        [](const TemplateParameterList& lhs,
+            const TemplateParameterList& rhs) -> bool {
+        if (lhs.size() != rhs.size()) {
+            return false;
+        }
+        for (size_t idx = 0; idx < lhs.size(); ++idx) {
+            const auto* lhs_param = lhs[idx].get();
+            const auto* rhs_param = rhs[idx].get();
+            if (!lhs_param || !rhs_param ||
+                lhs_param->get_kind() != rhs_param->get_kind() ||
+                lhs_param->is_parameter_pack != rhs_param->is_parameter_pack) {
+                return false;
+            }
+            if (auto* lhs_non_type = dyn_cast<TemplateNonTypeParmDecl>(lhs_param)) {
+                auto* rhs_non_type = dyn_cast<TemplateNonTypeParmDecl>(rhs_param);
+                if (!rhs_non_type ||
+                    !cpp_out_of_line_type_matches(
+                        lhs_non_type->type,
+                        rhs_non_type->type,
+                        false)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    auto template_decls_match_for_redeclaration =
+        [&](const TemplateDecl* existing,
+            const TemplateDecl* current) -> bool {
+        if (!existing || !current ||
+            existing->get_kind() != current->get_kind() ||
+            !template_parameter_lists_match(
+                existing->parameters,
+                current->parameters)) {
+            return false;
+        }
+
+        if (auto* existing_function =
+                dyn_cast<FunctionTemplateDecl>(const_cast<TemplateDecl*>(existing))) {
+            auto* current_function =
+                dyn_cast<FunctionTemplateDecl>(const_cast<TemplateDecl*>(current));
+            return current_function &&
+                   cpp_out_of_line_type_matches(
+                       QualType(existing_function->function_decl()->type),
+                       QualType(current_function->function_decl()->type),
+                       true);
+        }
+        if (auto* existing_class =
+                dyn_cast<ClassTemplateDecl>(const_cast<TemplateDecl*>(existing))) {
+            auto* current_class =
+                dyn_cast<ClassTemplateDecl>(const_cast<TemplateDecl*>(current));
+            return current_class &&
+                   existing_class->record_decl() &&
+                   current_class->record_decl() &&
+                   existing_class->record_decl()->name ==
+                       current_class->record_decl()->name;
+        }
+        if (auto* existing_alias =
+                dyn_cast<AliasTemplateDecl>(const_cast<TemplateDecl*>(existing))) {
+            auto* current_alias =
+                dyn_cast<AliasTemplateDecl>(const_cast<TemplateDecl*>(current));
+            return current_alias &&
+                   existing_alias->alias_decl() &&
+                   current_alias->alias_decl() &&
+                   cpp_out_of_line_type_matches(
+                       existing_alias->alias_decl()->type,
+                       current_alias->alias_decl()->type,
+                       false);
+        }
+        return false;
+    };
+
+    auto resolve_matching_primary_template_redeclaration =
+        [&](const std::string& template_name,
+            LookupNamespace lookup_namespace,
+            const TemplateDecl* current_template) -> const TemplateDecl* {
+        auto current_scope = collect_->collect_current_scope();
+        if (!current_scope || template_name.empty() || !current_template) {
+            return nullptr;
+        }
+        const DeclBinding* binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                template_name,
+                current_scope,
+                false,
+                lookup_namespace);
+        if (!binding) {
+            return nullptr;
+        }
+
+        std::vector<const Decl*> candidates;
+        auto append_candidate = [&](const Decl* candidate) {
+            if (!candidate) {
+                return;
+            }
+            for (const auto* existing : candidates) {
+                if (existing == candidate) {
+                    return;
+                }
+            }
+            candidates.push_back(candidate);
+        };
+        append_candidate(binding->template_decl);
+        for (const auto* candidate : binding->template_overload_candidates) {
+            append_candidate(candidate);
+        }
+
+        auto to_template_decl = [](const Decl* decl) -> const TemplateDecl* {
+            if (!decl) {
+                return nullptr;
+            }
+            switch (decl->get_kind()) {
+                case DeclKind::AliasTemplateDecl:
+                case DeclKind::FunctionTemplateDecl:
+                case DeclKind::ClassTemplateDecl:
+                case DeclKind::ClassTemplatePartialSpecializationDecl:
+                    return static_cast<const TemplateDecl*>(decl);
+                default:
+                    return nullptr;
+            }
+        };
+
+        for (const auto* candidate : candidates) {
+            const TemplateDecl* candidate_template = to_template_decl(candidate);
+            if (!candidate_template) {
+                continue;
+            }
+            if (!template_decls_match_for_redeclaration(
+                    candidate_template,
+                    current_template)) {
+                continue;
+            }
+            const TemplateDecl* canonical =
+                get_template_decl_canonical_decl(candidate_template);
+            return canonical ? canonical : candidate_template;
+        }
+        return nullptr;
+    };
+
+    auto validate_template_default_argument_rules =
+        [&](const TemplateDecl* template_decl) {
+        if (!template_decl) {
+            return;
+        }
+        bool require_trailing_defaults =
+            isa<ClassTemplateDecl>(template_decl) ||
+            isa<AliasTemplateDecl>(template_decl);
+        if (!require_trailing_defaults) {
+            return;
+        }
+
+        bool saw_default_argument = false;
+        for (const auto& parameter : template_decl->parameters) {
+            if (!parameter) {
+                continue;
+            }
+            bool has_default_argument =
+                get_template_parameter_default_argument(parameter.get()) !=
+                nullptr;
+            if (has_default_argument) {
+                saw_default_argument = true;
+                continue;
+            }
+            if (saw_default_argument && !parameter->is_parameter_pack) {
+                error_custloc(
+                    "template parameter without a default argument follows parameter with a default argument",
+                    parameter->location);
+            }
+        }
+    };
+
+    auto finalize_primary_template_decl =
+        [&](TemplateDecl* template_decl,
+            const std::string& template_name,
+            LookupNamespace lookup_namespace) {
+        if (!template_decl) {
+            return;
+        }
+        validate_template_default_argument_rules(template_decl);
+        const TemplateDecl* canonical_template =
+            resolve_matching_primary_template_redeclaration(
+                template_name,
+                lookup_namespace,
+                template_decl);
+        if (!canonical_template) {
+            canonical_template = template_decl;
+        }
+        set_template_decl_canonical_decl(template_decl, canonical_template);
+
+        size_t conflict_index = std::numeric_limits<size_t>::max();
+        if (merge_template_decl_default_arguments(
+                template_decl,
+                &conflict_index)) {
+            return;
+        }
+
+        SrcLoc conflict_loc = template_decl->location;
+        if (conflict_index < template_decl->parameters.size()) {
+            if (const auto* parameter =
+                    template_decl->parameters[conflict_index].get()) {
+                conflict_loc = parameter->location;
+            }
+        }
+        error_custloc(
+            "redefinition of default template argument",
+            conflict_loc);
+    };
+
+    if (!prepared_class_template &&
+        !prepared_class_partial_specialization &&
+        (templated_decls.size() != 1 || !templated_decls.front())) {
+        fail_cpp_unsupported("template-declaration form", template_tok.loc);
+    }
+
+    if (!prepared_class_template &&
+        !prepared_class_partial_specialization &&
+        templated_decls.size() == 1 &&
+        templated_decls.front()->get_kind() == DeclKind::NopDecl) {
+        return templated_decls;
+    }
+
+    std::vector<std::unique_ptr<Decl>> wrapped_decls;
+    if (prepared_class_template) {
+        finalize_primary_template_decl(
+            prepared_class_template.get(),
+            prepared_class_template_name,
+            LookupNamespace::Tag);
+        if (!member_template_declaration) {
+            collect_->collect_add_class_template_decl(
+                prepared_class_template_name,
+                prepared_class_template.get());
+        }
+        wrapped_decls.push_back(std::move(prepared_class_template));
+        return wrapped_decls;
+    }
+    if (prepared_class_partial_specialization) {
+        wrapped_decls.push_back(std::move(prepared_class_partial_specialization));
+        return wrapped_decls;
+    }
+
+    if (auto* function_decl = dyn_cast<FuncDecl>(templated_decls.front().get())) {
+        if (isa<CppDestructorDecl>(function_decl)) {
+            error_custloc(
+                "destructor cannot be a template",
+                function_decl->location);
+        }
+        if (function_decl->name.empty()) {
+            fail_cpp_unsupported("unnamed function template", function_decl->location);
+        }
+        std::string template_name = function_decl->name;
+        auto template_decl = make_ast<FunctionTemplateDecl>(
+            *ast_ctx,
+            std::move(parameters),
+            std::move(templated_decls.front()),
+            template_tok.loc);
+        finalize_primary_template_decl(
+            template_decl.get(),
+            template_name,
+            LookupNamespace::Ordinary);
+        if (!member_template_declaration) {
+            collect_->collect_add_function_template_decl(
+                template_name,
+                template_decl.get());
+        }
+        wrapped_decls.push_back(std::move(template_decl));
+        return wrapped_decls;
+    }
+
+    if (templated_decls.front()->get_kind() == DeclKind::TypedefDecl) {
+        auto* alias_decl =
+            static_cast<TypedefDecl*>(templated_decls.front().get());
+        if (alias_decl->name.empty()) {
+            fail_cpp_unsupported(
+                "unnamed alias template",
+                templated_decls.front()->location);
+        }
+        std::string template_name = alias_decl->name;
+        auto template_decl = make_ast<AliasTemplateDecl>(
+            *ast_ctx,
+            std::move(parameters),
+            std::move(templated_decls.front()),
+            template_tok.loc);
+        finalize_primary_template_decl(
+            template_decl.get(),
+            template_name,
+            LookupNamespace::Ordinary);
+        if (!member_template_declaration) {
+            collect_->collect_add_alias_template_decl(
+                template_name,
+                template_decl.get());
+        }
+        wrapped_decls.push_back(std::move(template_decl));
+        return wrapped_decls;
+    }
+    if (templated_decls.front()->get_kind() == DeclKind::VariableDecl) {
+        fail_cpp_unsupported("variable template", templated_decls.front()->location);
+    }
+    fail_cpp_unsupported("template-declaration form", templated_decls.front()->location);
+    return wrapped_decls;
+}
+
+bool Parser::is_cpp_qualified_id_start() {
+    if (!is_cxx_mode_active()) {
+        return false;
+    }
+    RevertingTentativeParsingAction tentative(*this);
+    try {
+        bool has_global_qualifier = consume_cpp_scope_resolution();
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            return false;
+        }
+        advance();
+        if (gentle_check(TokenType::LESS_THAN)) {
+            RevertingTentativeParsingAction template_args(*this);
+            parse_cpp_template_argument_list();
+            if (is_cpp_scope_resolution_here()) {
+                template_args.Commit();
+            }
+        }
+        return has_global_qualifier || is_cpp_scope_resolution_here();
+    } catch (const ParseError&) {
+        return false;
+    }
+}
+
+bool Parser::is_cpp_out_of_line_constructor_declaration_start() {
+    if (!is_cxx_mode_active()) {
+        return false;
+    }
+
+    RevertingTentativeParsingAction tentative(*this);
+    try {
+        consume_cpp_scope_resolution(); // Allow optional leading '::'.
+
+        std::vector<CppQualifiedNameComponent> components;
+        auto parse_component = [&]() -> CppQualifiedNameComponent {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected identifier in out-of-line constructor definition",
+                    current_token().loc);
+            }
+            CppQualifiedNameComponent component;
+            component.name = current_token().value;
+            advance();
+            if (gentle_check(TokenType::LESS_THAN)) {
+                component.has_template_argument_list = true;
+                component.template_arguments = parse_cpp_template_argument_list();
+            }
+            return component;
+        };
+
+        components.push_back(parse_component());
+        bool saw_scope_resolution = false;
+        while (is_cpp_scope_resolution_here()) {
+            saw_scope_resolution = true;
+            consume_cpp_scope_resolution();
+            components.push_back(parse_component());
+        }
+
+        if (!saw_scope_resolution || components.size() < 2) {
+            return false;
+        }
+        if (components.back().has_template_argument_list ||
+            gentle_check(TokenType::BITWISE_NOT) ||
+            !gentle_check(TokenType::LEFT_PAREN)) {
+            return false;
+        }
+
+        const auto& final_name = components.back().name;
+        const auto& owner_name = components[components.size() - 2].name;
+        return final_name == owner_name;
+    } catch (const ParseError&) {
+        return false;
+    }
+}
+
+bool Parser::is_cpp_out_of_line_destructor_declaration_start() {
+    if (!is_cxx_mode_active()) {
+        return false;
+    }
+
+    RevertingTentativeParsingAction tentative(*this);
+    try {
+        consume_cpp_scope_resolution(); // Allow optional leading '::'.
+
+        std::vector<CppQualifiedNameComponent> owner_components;
+        auto parse_component = [&]() -> CppQualifiedNameComponent {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected identifier in out-of-line destructor definition",
+                    current_token().loc);
+            }
+            CppQualifiedNameComponent component;
+            component.name = current_token().value;
+            advance();
+            if (gentle_check(TokenType::LESS_THAN)) {
+                component.has_template_argument_list = true;
+                component.template_arguments = parse_cpp_template_argument_list();
+            }
+            return component;
+        };
+
+        owner_components.push_back(parse_component());
+        bool saw_scope_resolution = false;
+        while (is_cpp_scope_resolution_here()) {
+            saw_scope_resolution = true;
+            consume_cpp_scope_resolution();
+            if (gentle_check(TokenType::BITWISE_NOT)) {
+                break;
+            }
+            owner_components.push_back(parse_component());
+        }
+
+        if (!saw_scope_resolution || owner_components.empty()) {
+            return false;
+        }
+        if (!gentle_check_and_consume(TokenType::BITWISE_NOT)) {
+            return false;
+        }
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            return false;
+        }
+        std::string destructor_name = current_token().value;
+        advance();
+        if (!gentle_check(TokenType::LEFT_PAREN)) {
+            return false;
+        }
+
+        const std::string& owner_name = owner_components.back().name;
+        return destructor_name == owner_name;
+    } catch (const ParseError&) {
+        return false;
+    }
+}
+
+std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_definition() {
+    std::vector<std::unique_ptr<Decl>> parsed_decls;
+    if (!is_cxx_mode_active() ||
+        !is_cpp_out_of_line_constructor_declaration_start()) {
+        return parsed_decls;
+    }
+
+    SrcLoc decl_loc = current_token().loc;
+    bool has_global_qualifier = consume_cpp_scope_resolution();
+    std::vector<CppQualifiedNameComponent> name_components;
+    std::vector<size_t> component_token_indices;
+
+    if (!gentle_check(TokenType::IDENTIFIER)) {
+        error_custloc("expected identifier in out-of-line constructor definition",
+                      current_token().loc);
+    }
+
+    auto parse_component =
+        [&]() -> CppQualifiedNameComponent {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected identifier after '::' in out-of-line constructor definition",
+                    current_token().loc);
+            }
+            CppQualifiedNameComponent component;
+            component.name = current_token().value;
+            advance();
+            if (gentle_check(TokenType::LESS_THAN)) {
+                component.has_template_argument_list = true;
+                component.template_arguments = parse_cpp_template_argument_list();
+            }
+            return component;
+        };
+
+    while (true) {
+        component_token_indices.push_back(get_token_idx());
+        name_components.push_back(parse_component());
+        if (!is_cpp_scope_resolution_here()) {
+            break;
+        }
+        consume_cpp_scope_resolution();
+    }
+
+    if (name_components.size() < 2 || component_token_indices.size() < 2) {
+        error_custloc("expected qualified constructor name", decl_loc);
+    }
+
+    const auto& constructor_component = name_components.back();
+    const auto& owner_component = name_components[name_components.size() - 2];
+    const std::string& constructor_name = constructor_component.name;
+    const std::string& owner_name = owner_component.name;
+    if (constructor_component.has_template_argument_list) {
+        error_custloc("expected constructor name '" + owner_name + "'", decl_loc);
+    }
+    if (constructor_name != owner_name) {
+        error_custloc("expected constructor name '" + owner_name + "'", decl_loc);
+    }
+
+    std::vector<std::string> namespace_qualifiers;
+    namespace_qualifiers.reserve(name_components.size() - 2);
+    for (size_t idx = 0; idx + 2 < name_components.size(); ++idx) {
+        if (name_components[idx].has_template_argument_list) {
+            fail_cpp_future_work(
+                "template-id nested-name specifier",
+                "template-id qualifier chains",
+                decl_loc);
+        }
+        namespace_qualifiers.push_back(name_components[idx].name);
+    }
+    const size_t constructor_token_idx = component_token_indices.back();
+    std::vector<std::string> qualified_owner_components = namespace_qualifiers;
+    qualified_owner_components.push_back(owner_component.spelling());
+    std::string qualified_owner_name = qualified_name_utils::format_cpp_qualified_name(
+        has_global_qualifier,
+        namespace_qualifiers,
+        owner_component.spelling());
+    std::string qualified_constructor_name = qualified_name_utils::format_cpp_qualified_name(
+        has_global_qualifier,
+        qualified_owner_components,
+        constructor_name);
+
+    auto current_scope = collect_->collect_current_scope();
+    auto translation_unit_context = collect_->get_translation_unit_decl_context();
+    auto current_context = collect_->get_current_decl_context();
+    if (!current_scope || !translation_unit_context || !current_context) {
+        error_custloc("internal error: missing scope context for constructor definition",
+                      decl_loc);
+    }
+    auto global_scope = current_scope;
+    while (global_scope && global_scope->parent) {
+        global_scope = global_scope->parent;
+    }
+    if (!global_scope) {
+        error_custloc("internal error: missing global scope for constructor definition",
+                      decl_loc);
+    }
+
+    auto owner_namespace_scope = has_global_qualifier ? global_scope : current_scope;
+    std::shared_ptr<DeclContext> owner_namespace_context =
+        has_global_qualifier ? translation_unit_context : current_context;
+    for (size_t idx = 0; idx < namespace_qualifiers.size(); ++idx) {
+        bool allow_enclosing_lookup = (!has_global_qualifier && idx == 0);
+        auto resolved = resolve_named_namespace_scope(
+            owner_namespace_context.get(),
+            namespace_qualifiers[idx],
+            allow_enclosing_lookup);
+        if (!resolved || !resolved->associated_decl_context) {
+            error_custloc(
+                "out-of-line declaration of '" +
+                    qualified_constructor_name +
+                    "' does not match any declaration in the target class",
+                decl_loc);
+        }
+        owner_namespace_scope = resolved;
+        owner_namespace_context = std::shared_ptr<DeclContext>(
+            owner_namespace_context,
+            resolved->associated_decl_context);
+    }
+
+    auto saved_scope = collect_->collect_current_scope();
+    auto saved_context = collect_->get_current_decl_context();
+    struct ScopeRestoreGuard {
+        Collect* collect = nullptr;
+        std::shared_ptr<Scope> scope;
+        std::shared_ptr<DeclContext> context;
+        ~ScopeRestoreGuard() {
+            if (!collect) {
+                return;
+            }
+            collect->collect_set_current_scope(scope);
+            collect->set_current_decl_context(context);
+        }
+    } scope_restore_guard{
+        collect_.get(),
+        saved_scope,
+        saved_context
+    };
+
+    const ObjectDecl* owner_record_decl = nullptr;
+    const ClassTemplateDecl* owner_class_template = nullptr;
+    bool allow_owner_enclosing_lookup =
+        !has_global_qualifier && namespace_qualifiers.empty();
+    if (owner_component.has_template_argument_list) {
+        const DeclBinding* template_binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                owner_component.name,
+                owner_namespace_scope,
+                allow_owner_enclosing_lookup,
+                LookupNamespace::Tag);
+        const Decl* primary_template = nullptr;
+        if (template_binding) {
+            primary_template = template_binding->template_decl;
+            if (!primary_template &&
+                template_binding->template_overload_candidates.size() == 1) {
+                primary_template =
+                    template_binding->template_overload_candidates.front();
+            }
+        }
+        auto* class_template = dyn_cast<ClassTemplateDecl>(primary_template);
+        if (!class_template ||
+            !cpp_primary_template_owner_matches(
+                class_template,
+                owner_component.template_arguments)) {
+            error_custloc(
+                "out-of-line declaration of '" +
+                    qualified_owner_name + "::" + constructor_name +
+                    "' does not match any declaration in the target class",
+                decl_loc);
+        }
+        owner_class_template = class_template;
+        owner_record_decl = class_template->pattern_semantic_decl();
+    } else {
+        auto* owner_tag_decl = LookupEngine::lookup_tag_decl(
+            owner_name,
+            owner_namespace_scope,
+            allow_owner_enclosing_lookup);
+        const ObjectDecl* owner_record = dyn_cast<ObjectDecl>(owner_tag_decl);
+        if (owner_record && owner_record->get_record_type()) {
+            if (auto* canonical_owner =
+                    dyn_cast<ObjectDecl>(
+                        owner_record->get_record_type()->get_decl())) {
+                owner_record = canonical_owner;
+            }
+        }
+        owner_record_decl = owner_record;
+    }
+    if (!owner_record_decl) {
+        error_custloc(
+            "out-of-line declaration of '" +
+                qualified_owner_name + "::" + constructor_name +
+                "' does not match any declaration in the target class",
+            decl_loc);
+    }
+    const RecordSemanticState* owner_state = record_semantics_cache_lookup(owner_record_decl);
+    if (!owner_state || owner_state->is_incomplete) {
+        error_custloc(
+            "incomplete type '" + qualified_owner_name +
+                "' named in nested name specifier",
+            decl_loc);
+    }
+
+    if (saved_scope &&
+        scope_flags_contains(saved_scope->flags, ScopeFlags::TemplateParameterScope) &&
+        saved_context) {
+        auto rebased_scope = std::make_shared<Scope>(*saved_scope);
+        rebased_scope->parent = owner_namespace_scope;
+        rebased_scope->associated_decl_context = saved_context.get();
+        collect_->collect_set_current_scope(std::move(rebased_scope));
+        collect_->set_current_decl_context(saved_context);
+    } else {
+        collect_->collect_set_current_scope(owner_namespace_scope);
+        collect_->set_current_decl_context(owner_namespace_context);
+    }
+
+    set_token_idx(constructor_token_idx);
+    cxx_record_parse_stack_.push_back(
+        CppRecordParseFrame{
+            owner_record_decl->is_union ? CppRecordKind::Union : CppRecordKind::Class,
+            owner_name,
+            owner_record_decl});
+    struct RecordParseScopeGuard {
+        std::vector<CppRecordParseFrame>* stack = nullptr;
+        ~RecordParseScopeGuard() {
+            if (stack && !stack->empty()) {
+                stack->pop_back();
+            }
+        }
+    } record_parse_scope_guard{&cxx_record_parse_stack_};
+
+    auto parsed_member = parse_cpp_constructor_member();
+    auto* parsed_ctor = dyn_cast<CppConstructorDecl>(parsed_member.get());
+    if (!parsed_ctor) {
+        error_custloc(
+            "internal error: failed to parse out-of-line constructor definition",
+            decl_loc);
+    }
+
+    if (owner_class_template && !active_template_parameter_stack_.empty()) {
+        const auto& active_parameters = active_template_parameter_stack_.back();
+        if (active_parameters.size() == owner_class_template->parameters.size()) {
+            ASTCloneContext clone_ctx;
+            clone_ctx.ast_ctx = ast_ctx.get();
+            std::unordered_map<const TemplateParameterDecl*,
+                               const TemplateParameterDecl*> parameter_rebinds;
+            parameter_rebinds.reserve(active_parameters.size());
+
+            for (size_t idx = 0; idx < active_parameters.size(); ++idx) {
+                const auto* active_parameter = active_parameters[idx];
+                const auto* canonical_parameter =
+                    owner_class_template->parameters[idx].get();
+                if (!active_parameter || !canonical_parameter ||
+                    active_parameter->get_kind() != canonical_parameter->get_kind()) {
+                    error_custloc(
+                        "internal error: out-of-line constructor template head is not structurally compatible with the owner template",
+                        decl_loc);
+                }
+                parameter_rebinds.emplace(active_parameter, canonical_parameter);
+                auto* active_non_type =
+                    dyn_cast<TemplateNonTypeParmDecl>(
+                        const_cast<TemplateParameterDecl*>(active_parameter));
+                auto* canonical_non_type =
+                    dyn_cast<TemplateNonTypeParmDecl>(
+                        const_cast<TemplateParameterDecl*>(canonical_parameter));
+                if (active_non_type && canonical_non_type &&
+                    active_non_type->sym && canonical_non_type->sym) {
+                    clone_ctx.symbol_remap.emplace(
+                        active_non_type->sym.get(),
+                        canonical_non_type->sym);
+                }
+            }
+
+            clone_ctx.rewrite_type =
+                [&](QualType type) -> QualType {
+                return template_sema_internal::remap_template_parameter_types_in_type(
+                    type,
+                    parameter_rebinds);
+            };
+            clone_ctx.rewrite_symbol =
+                [&](const std::shared_ptr<Symbol>& sym) -> std::shared_ptr<Symbol> {
+                if (!sym) {
+                    return nullptr;
+                }
+                if (auto it = clone_ctx.symbol_remap.find(sym.get());
+                    it != clone_ctx.symbol_remap.end()) {
+                    return it->second;
+                }
+                return sym;
+            };
+
+            parsed_ctor->type = clone_ctx.rewrite_type(QualType(parsed_ctor->type)).get_shared();
+
+            std::vector<std::unique_ptr<Decl>> remapped_parameters;
+            remapped_parameters.reserve(parsed_ctor->parameters.size());
+            for (const auto& parameter : parsed_ctor->parameters) {
+                std::string clone_error;
+                auto remapped_parameter =
+                    clone_decl_tree(parameter.get(), clone_ctx, &clone_error);
+                if (!remapped_parameter) {
+                    error_custloc(
+                        clone_error.empty()
+                            ? "failed to remap out-of-line constructor parameter"
+                            : clone_error,
+                        parameter ? parameter->location : decl_loc);
+                }
+                remapped_parameters.push_back(std::move(remapped_parameter));
+            }
+            parsed_ctor->parameters = std::move(remapped_parameters);
+
+            for (auto& initializer : parsed_ctor->ctor_initializers) {
+                if (initializer.member_expr) {
+                    std::string clone_error;
+                    auto remapped_member =
+                        clone_expr_with_substitution(
+                            initializer.member_expr.get(),
+                            clone_ctx,
+                            &clone_error);
+                    if (!remapped_member) {
+                        error_custloc(
+                            clone_error.empty()
+                                ? "failed to remap out-of-line constructor member initializer"
+                                : clone_error,
+                            initializer.location);
+                    }
+                    initializer.member_expr = std::move(remapped_member);
+                }
+                if (initializer.init_expr) {
+                    std::string clone_error;
+                    auto remapped_init =
+                        clone_expr_with_substitution(
+                            initializer.init_expr.get(),
+                            clone_ctx,
+                            &clone_error);
+                    if (!remapped_init) {
+                        error_custloc(
+                            clone_error.empty()
+                                ? "failed to remap out-of-line constructor initializer expression"
+                                : clone_error,
+                            initializer.location);
+                    }
+                    initializer.init_expr = std::move(remapped_init);
+                }
+            }
+
+            if (parsed_ctor->body) {
+                std::string clone_error;
+                auto remapped_body =
+                    clone_stmt_tree(parsed_ctor->body.get(), clone_ctx, &clone_error);
+                if (!remapped_body) {
+                    error_custloc(
+                        clone_error.empty()
+                            ? "failed to remap out-of-line constructor body"
+                            : clone_error,
+                        parsed_ctor->body->location);
+                }
+                parsed_ctor->body = std::move(remapped_body);
+            }
+        }
+    }
+
+    bool parsed_is_definition =
+        parsed_ctor->body != nullptr ||
+        parsed_ctor->has_deferred_inline_body() ||
+        parsed_ctor->is_deleted ||
+        parsed_ctor->is_defaulted;
+    if (!parsed_is_definition) {
+        error_custloc(
+            "out-of-line declaration of '" +
+                qualified_constructor_name +
+                "' must be a definition",
+            decl_loc);
+    }
+
+    const RecordSemanticState::Constructor* matched_ctor_state = nullptr;
+    // Out-of-line definition must match a previously declared constructor
+    // signature in the class; compare canonicalized parameter signatures.
+    QualType parsed_ctor_type = desugar_type(QualType(parsed_ctor->type));
+    for (const auto& ctor : owner_state->constructors) {
+        if (ctor.is_implicit || !ctor.type) {
+            continue;
+        }
+        QualType candidate_type = desugar_type(ctor.type);
+        if (!cpp_out_of_line_type_matches(candidate_type, parsed_ctor_type, true)) {
+            continue;
+        }
+        matched_ctor_state = &ctor;
+        break;
+    }
+    if (!matched_ctor_state || !matched_ctor_state->decl) {
+        error_custloc(
+            "out-of-line declaration of '" +
+                qualified_constructor_name +
+                "' does not match any declaration in the target class",
+            decl_loc);
+    }
+
+    auto* matched_ctor_decl =
+        const_cast<CppConstructorDecl*>(matched_ctor_state->decl);
+    if (!matched_ctor_decl ||
+        matched_ctor_decl->body != nullptr ||
+        matched_ctor_decl->has_deferred_inline_body() ||
+        (matched_ctor_state->symbol && matched_ctor_state->symbol->is_defined)) {
+        error_custloc(
+            "redefinition of '" +
+                qualified_constructor_name +
+                "'",
+            decl_loc);
+    }
+
+    register_function_default_arguments(
+        matched_ctor_state ? matched_ctor_state->symbol : nullptr,
+        parsed_ctor,
+        decl_loc);
+
+    auto owner_record_type = owner_record_decl->get_record_type();
+    auto parse_deferred_constructor_body_now =
+        [&](CppConstructorDecl* ctor_decl) {
+            if (!ctor_decl || !ctor_decl->has_deferred_inline_body() ||
+                ctor_decl->body) {
+                return;
+            }
+
+            size_t saved_token_idx = get_token_idx();
+            auto saved_func_type = func_type;
+            auto saved_decl_linkage = current_language_linkage_;
+            auto saved_seen_stmt_labels = seen_stmt_labels;
+            auto saved_stmt_labels = stmt_labels;
+            auto saved_local_label_scopes = local_label_scopes_;
+            uint64_t saved_local_label_unique_id = local_label_unique_id_;
+
+            seen_stmt_labels.clear();
+            stmt_labels.clear();
+            local_label_scopes_.clear();
+            local_label_unique_id_ = 0;
+
+            auto entered_scope = collect_->collect_enter_scope(ScopeFlags::FunctionScope);
+            auto function_scope = entered_scope.scope;
+
+            Collect::CppThisContext cpp_this_context;
+            cpp_this_context.is_member_function = true;
+            cpp_this_context.is_static_member_function = false;
+            auto ctor_fn_type = dyn_cast_shared<FunctionType>(ctor_decl->type);
+            if (ctor_fn_type && !ctor_fn_type->parameters.empty()) {
+                cpp_this_context.this_type = ctor_fn_type->parameters.front();
+            }
+            if (!cpp_this_context.this_type && owner_record_type) {
+                cpp_this_context.this_type = QualType(
+                    std::make_shared<PointerType>(QualType(owner_record_type)));
+            }
+
+            func_type = ctor_decl->type;
+            current_language_linkage_ = LanguageLinkage::None;
+            collect_->collect_start_function_definition(
+                ctor_decl->name, QualType(ctor_decl->type), cpp_this_context);
+
+            for (auto& param_decl_base : ctor_decl->parameters) {
+                auto* param_decl = dyn_cast<ParamDecl>(param_decl_base.get());
+                if (!param_decl || !param_decl->has_name() ||
+                    param_decl->get_name() == "this") {
+                    continue;
+                }
+                param_decl->sym = collect_->collect_declare_variable_symbol(
+                    param_decl->get_name(),
+                    param_decl->type,
+                    param_decl->storage_class,
+                    false,
+                    param_decl->location);
+            }
+
+            auto parse_deferred_constructor_member_initializers =
+                [&](CppConstructorDecl* ctor) {
+                if (!ctor) {
+                    return;
+                }
+                size_t saved_idx = get_token_idx();
+                struct BaseInitializerTarget {
+                    QualType type;
+                    bool is_virtual = false;
+                };
+                auto base_initializer_target_for_name =
+                    [&](const std::string& init_name)
+                    -> std::optional<BaseInitializerTarget> {
+                    for (const auto& base : owner_state->bases) {
+                        if (base.name == init_name) {
+                            BaseInitializerTarget target;
+                            target.type = base.type;
+                            target.is_virtual = base.is_virtual;
+                            return target;
+                        }
+                    }
+                    for (const auto& virtual_base : owner_state->virtual_bases) {
+                        if (virtual_base.name == init_name) {
+                            BaseInitializerTarget target;
+                            target.type = virtual_base.type;
+                            target.is_virtual = true;
+                            return target;
+                        }
+                    }
+                    return std::nullopt;
+                };
+                bool saw_base_initializer = false;
+                bool saw_delegating_initializer = false;
+                for (auto& mem_init : ctor->ctor_initializers) {
+                    mem_init.member_expr.reset();
+                    mem_init.init_expr.reset();
+                    mem_init.is_base_initializer = false;
+
+                    if (mem_init.is_delegating_initializer) {
+                        saw_delegating_initializer = true;
+                        if (!owner_record_type) {
+                            diag_engine->report_error(
+                                "delegating constructor target type is unavailable",
+                                mem_init.location);
+                            continue;
+                        }
+                        if (mem_init.deferred_init_end_token_idx <=
+                            mem_init.deferred_init_begin_token_idx) {
+                            continue;
+                        }
+
+                        set_token_idx(mem_init.deferred_init_begin_token_idx);
+                        std::unique_ptr<Expr> parsed_init;
+                        if (gentle_check(TokenType::LEFT_PAREN)) {
+                            advance(); // '('
+                            std::vector<std::unique_ptr<Expr>> args;
+                            if (!gentle_check(TokenType::RIGHT_PAREN)) {
+                                do {
+                                    args.push_back(
+                                        parse_assignment_expression_with_optional_pack_expansion());
+                                } while (gentle_check_and_consume(TokenType::COMMA));
+                            }
+                            check_and_consume(TokenType::RIGHT_PAREN);
+                            mem_init.init_expr =
+                                collect_->collect_member_initializer_expression(
+                                    std::move(args),
+                                    QualType(owner_record_type),
+                                    false,
+                                    mem_init.location,
+                                    true);
+                        } else if (gentle_check(TokenType::LEFT_BRACE)) {
+                            parsed_init = parse_init_list();
+                        } else {
+                            error("expected '(' or '{' in constructor member initializer");
+                        }
+
+                        set_token_idx(mem_init.deferred_init_end_token_idx);
+                        if (!mem_init.init_expr && parsed_init) {
+                            mem_init.init_expr =
+                                collect_->collect_member_initializer_expression(
+                                    std::move(parsed_init),
+                                    QualType(owner_record_type),
+                                    mem_init.location);
+                        }
+                        continue;
+                    }
+
+                    auto base_init_target =
+                        base_initializer_target_for_name(mem_init.member_name);
+                    if (base_init_target.has_value()) {
+                        saw_base_initializer = true;
+                        mem_init.is_base_initializer = true;
+                    }
+
+                    MemberExpr* member_expr = nullptr;
+                    if (!base_init_target) {
+                        auto this_expr = collect_->collect_cpp_this_expression(mem_init.location);
+                        mem_init.member_expr = collect_->collect_member_expression(
+                            std::move(this_expr),
+                            mem_init.member_name,
+                            true,
+                            mem_init.location);
+                        member_expr = dyn_cast<MemberExpr>(mem_init.member_expr.get());
+                        if (!member_expr || !member_expr->member_type) {
+                            continue;
+                        }
+                    }
+                    if (mem_init.deferred_init_end_token_idx <=
+                        mem_init.deferred_init_begin_token_idx) {
+                        continue;
+                    }
+
+                    set_token_idx(mem_init.deferred_init_begin_token_idx);
+                    std::unique_ptr<Expr> parsed_init;
+                    if (gentle_check(TokenType::LEFT_PAREN)) {
+                        advance(); // '('
+                        std::vector<std::unique_ptr<Expr>> args;
+                        if (!gentle_check(TokenType::RIGHT_PAREN)) {
+                            do {
+                                args.push_back(
+                                    parse_assignment_expression_with_optional_pack_expansion());
+                            } while (gentle_check_and_consume(TokenType::COMMA));
+                        }
+                        check_and_consume(TokenType::RIGHT_PAREN);
+
+                        if (base_init_target) {
+                            mem_init.init_expr =
+                                collect_->collect_member_initializer_expression(
+                                    std::move(args),
+                                    base_init_target->type,
+                                    false,
+                                    mem_init.location,
+                                    true);
+                        } else if (canonical_type_kind(member_expr->member_type) ==
+                            TypeKind::Object) {
+                            mem_init.init_expr =
+                                collect_->collect_member_initializer_expression(
+                                    std::move(args),
+                                    member_expr->member_type,
+                                    false,
+                                    mem_init.location);
+                        } else if (args.empty()) {
+                            diag_engine->report_error(
+                                "constructor member initializer for '" +
+                                    mem_init.member_name +
+                                    "' requires an initializer expression",
+                                mem_init.location);
+                        } else if (args.size() > 1) {
+                            diag_engine->report_error(
+                                "constructor member initializer for non-class member '" +
+                                    mem_init.member_name +
+                                    "' requires a single expression",
+                                mem_init.location);
+                        } else {
+                            parsed_init = std::move(args.front());
+                        }
+                    } else if (gentle_check(TokenType::LEFT_BRACE)) {
+                        parsed_init = parse_init_list();
+                    } else {
+                        error("expected '(' or '{' in constructor member initializer");
+                    }
+
+                    set_token_idx(mem_init.deferred_init_end_token_idx);
+                    if (mem_init.init_expr) {
+                        continue;
+                    }
+                    if (!parsed_init) {
+                        continue;
+                    }
+                    if (base_init_target) {
+                        mem_init.init_expr =
+                            collect_->collect_member_initializer_expression(
+                                std::move(parsed_init),
+                                base_init_target->type,
+                                mem_init.location);
+                    } else if (canonical_type_kind(member_expr->member_type) ==
+                        TypeKind::Reference) {
+                        mem_init.init_expr = std::move(parsed_init);
+                    } else {
+                        mem_init.init_expr = collect_->collect_member_initializer_expression(
+                            std::move(parsed_init),
+                            member_expr->member_type,
+                            mem_init.location);
+                    }
+                }
+
+                if (!saw_delegating_initializer &&
+                    !saw_base_initializer &&
+                    owner_state->bases.size() == 1) {
+                    const auto& direct_base = owner_state->bases.front();
+                    if (direct_base.type &&
+                        canonical_type_kind(direct_base.type) == TypeKind::Object) {
+                        CppCtorInitializer implicit_base_init;
+                        implicit_base_init.member_name = direct_base.name;
+                        implicit_base_init.is_base_initializer = true;
+                        implicit_base_init.location = ctor->location;
+                        std::vector<std::unique_ptr<Expr>> args;
+                        implicit_base_init.init_expr =
+                            collect_->collect_member_initializer_expression(
+                                std::move(args),
+                                direct_base.type,
+                                false,
+                                ctor->location,
+                                true);
+                        ctor->ctor_initializers.insert(
+                            ctor->ctor_initializers.begin(),
+                            std::move(implicit_base_init));
+                    }
+                }
+                set_token_idx(saved_idx);
+            };
+
+            cxx_record_parse_stack_.push_back(
+                CppRecordParseFrame{CppRecordKind::Class, owner_name});
+            struct NestedRecordParseScopeGuard {
+                std::vector<CppRecordParseFrame>* stack = nullptr;
+                ~NestedRecordParseScopeGuard() {
+                    if (stack && !stack->empty()) {
+                        stack->pop_back();
+                    }
+                }
+            } nested_record_parse_scope_guard{&cxx_record_parse_stack_};
+
+            try {
+                parse_deferred_constructor_member_initializers(ctor_decl);
+                set_token_idx(ctor_decl->deferred_inline_body_begin_token_idx);
+                if (gentle_check(TokenType::TRY_KW)) {
+                    auto try_stmt = parse_cpp_try_statement(
+                        function_scope, true);
+                    SrcLoc body_loc = try_stmt ? try_stmt->location : SrcLoc();
+                    std::vector<std::unique_ptr<Stmt>> stmts;
+                    stmts.push_back(std::move(try_stmt));
+                    ctor_decl->body = collect_->collect_compound_statement(
+                        std::move(stmts), function_scope, body_loc);
+                } else {
+                    ctor_decl->body = parse_compound_stmt(function_scope);
+                }
+                ctor_decl->scope = function_scope;
+                ctor_decl->stmt_labels.insert(
+                    stmt_labels.begin(), stmt_labels.end());
+                set_token_idx(ctor_decl->deferred_inline_body_end_token_idx);
+                ctor_decl->clear_deferred_inline_body_token_range();
+                collect_->collect_leave_scope();
+                collect_->collect_finish_function_definition(function_scope);
+            } catch (...) {
+                collect_->collect_abort_function_definition();
+                collect_->collect_leave_scope();
+                current_language_linkage_ = saved_decl_linkage;
+                func_type = saved_func_type;
+                set_token_idx(saved_token_idx);
+                seen_stmt_labels = std::move(saved_seen_stmt_labels);
+                stmt_labels = std::move(saved_stmt_labels);
+                local_label_scopes_ = std::move(saved_local_label_scopes);
+                local_label_unique_id_ = saved_local_label_unique_id;
+                throw;
+            }
+
+            current_language_linkage_ = saved_decl_linkage;
+            func_type = saved_func_type;
+            set_token_idx(saved_token_idx);
+            seen_stmt_labels = std::move(saved_seen_stmt_labels);
+            stmt_labels = std::move(saved_stmt_labels);
+            local_label_scopes_ = std::move(saved_local_label_scopes);
+            local_label_unique_id_ = saved_local_label_unique_id;
+        };
+
+    parse_deferred_constructor_body_now(parsed_ctor);
+    merge_out_of_line_constructor_definition(
+        matched_ctor_decl,
+        parsed_ctor,
+        matched_ctor_state,
+        matched_ctor_state->symbol,
+        ast_ctx,
+        owner_record_decl);
+
+    parsed_decls.push_back(collect_->collect_nop_declaration(decl_loc));
+    return parsed_decls;
+}
+
+std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_definition() {
+    std::vector<std::unique_ptr<Decl>> parsed_decls;
+    if (!is_cxx_mode_active() ||
+        !is_cpp_out_of_line_destructor_declaration_start()) {
+        return parsed_decls;
+    }
+
+    SrcLoc decl_loc = current_token().loc;
+    bool has_global_qualifier = consume_cpp_scope_resolution();
+    std::vector<CppQualifiedNameComponent> owner_components;
+
+    if (!gentle_check(TokenType::IDENTIFIER)) {
+        error_custloc("expected identifier in out-of-line destructor definition",
+                      current_token().loc);
+    }
+
+    auto parse_component =
+        [&]() -> CppQualifiedNameComponent {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected identifier after '::' in out-of-line destructor definition",
+                    current_token().loc);
+            }
+            CppQualifiedNameComponent component;
+            component.name = current_token().value;
+            advance();
+            if (gentle_check(TokenType::LESS_THAN)) {
+                component.has_template_argument_list = true;
+                component.template_arguments = parse_cpp_template_argument_list();
+            }
+            return component;
+        };
+
+    while (true) {
+        owner_components.push_back(parse_component());
+        if (!is_cpp_scope_resolution_here()) {
+            error_custloc(
+                "expected '::' in out-of-line destructor definition",
+                current_token().loc);
+        }
+        consume_cpp_scope_resolution();
+        if (gentle_check(TokenType::BITWISE_NOT)) {
+            break;
+        }
+    }
+
+    if (owner_components.empty()) {
+        error_custloc("expected qualified destructor name", decl_loc);
+    }
+    const auto& owner_component = owner_components.back();
+    const std::string& owner_name = owner_component.name;
+    std::vector<std::string> namespace_qualifiers;
+    namespace_qualifiers.reserve(owner_components.size() - 1);
+    for (size_t idx = 0; idx + 1 < owner_components.size(); ++idx) {
+        if (owner_components[idx].has_template_argument_list) {
+            fail_cpp_future_work(
+                "template-id nested-name specifier",
+                "template-id qualifier chains",
+                decl_loc);
+        }
+        namespace_qualifiers.push_back(owner_components[idx].name);
+    }
+    std::string qualified_owner_name = qualified_name_utils::format_cpp_qualified_name(
+        has_global_qualifier,
+        namespace_qualifiers,
+        owner_component.spelling());
+    std::vector<std::string> qualified_owner_components = namespace_qualifiers;
+    qualified_owner_components.push_back(owner_component.spelling());
+    std::string qualified_destructor_name = qualified_name_utils::format_cpp_qualified_name(
+        has_global_qualifier,
+        qualified_owner_components,
+        "~" + owner_name);
+
+    const size_t destructor_token_idx = get_token_idx();
+    if (!gentle_check(TokenType::BITWISE_NOT)) {
+        error_custloc("expected '~' in out-of-line destructor definition",
+                      current_token().loc);
+    }
+    advance(); // '~'
+    if (!gentle_check(TokenType::IDENTIFIER) ||
+        current_token().value != owner_name) {
+        error_custloc("expected destructor name '~" + owner_name + "'",
+                      current_token().loc);
+    }
+    auto current_scope = collect_->collect_current_scope();
+    auto translation_unit_context = collect_->get_translation_unit_decl_context();
+    auto current_context = collect_->get_current_decl_context();
+    if (!current_scope || !translation_unit_context || !current_context) {
+        error_custloc("internal error: missing scope context for destructor definition",
+                      decl_loc);
+    }
+    auto global_scope = current_scope;
+    while (global_scope && global_scope->parent) {
+        global_scope = global_scope->parent;
+    }
+    if (!global_scope) {
+        error_custloc("internal error: missing global scope for destructor definition",
+                      decl_loc);
+    }
+
+    auto owner_namespace_scope = has_global_qualifier ? global_scope : current_scope;
+    std::shared_ptr<DeclContext> owner_namespace_context =
+        has_global_qualifier ? translation_unit_context : current_context;
+    for (size_t idx = 0; idx < namespace_qualifiers.size(); ++idx) {
+        bool allow_enclosing_lookup = (!has_global_qualifier && idx == 0);
+        auto resolved = resolve_named_namespace_scope(
+            owner_namespace_context.get(),
+            namespace_qualifiers[idx],
+            allow_enclosing_lookup);
+        if (!resolved || !resolved->associated_decl_context) {
+            error_custloc(
+                "out-of-line declaration of '" +
+                    qualified_destructor_name +
+                    "' does not match any declaration in the target class",
+                decl_loc);
+        }
+        owner_namespace_scope = resolved;
+        owner_namespace_context = std::shared_ptr<DeclContext>(
+            owner_namespace_context,
+            resolved->associated_decl_context);
+    }
+
+    auto saved_scope = collect_->collect_current_scope();
+    auto saved_context = collect_->get_current_decl_context();
+    struct ScopeRestoreGuard {
+        Collect* collect = nullptr;
+        std::shared_ptr<Scope> scope;
+        std::shared_ptr<DeclContext> context;
+        ~ScopeRestoreGuard() {
+            if (!collect) {
+                return;
+            }
+            collect->collect_set_current_scope(scope);
+            collect->set_current_decl_context(context);
+        }
+    } scope_restore_guard{
+        collect_.get(),
+        saved_scope,
+        saved_context
+    };
+
+    const ObjectDecl* owner_record_decl = nullptr;
+    bool allow_owner_enclosing_lookup =
+        !has_global_qualifier && namespace_qualifiers.empty();
+    if (owner_component.has_template_argument_list) {
+        const DeclBinding* template_binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                owner_component.name,
+                owner_namespace_scope,
+                allow_owner_enclosing_lookup,
+                LookupNamespace::Tag);
+        const Decl* primary_template = nullptr;
+        if (template_binding) {
+            primary_template = template_binding->template_decl;
+            if (!primary_template &&
+                template_binding->template_overload_candidates.size() == 1) {
+                primary_template =
+                    template_binding->template_overload_candidates.front();
+            }
+        }
+        auto* class_template = dyn_cast<ClassTemplateDecl>(primary_template);
+        if (!class_template ||
+            !cpp_primary_template_owner_matches(
+                class_template,
+                owner_component.template_arguments)) {
+            error_custloc(
+                "out-of-line declaration of '" +
+                    qualified_destructor_name +
+                    "' does not match any declaration in the target class",
+                decl_loc);
+        }
+        owner_record_decl = class_template->pattern_semantic_decl();
+    } else {
+        auto* owner_tag_decl = LookupEngine::lookup_tag_decl(
+            owner_name,
+            owner_namespace_scope,
+            allow_owner_enclosing_lookup);
+        const ObjectDecl* owner_record = dyn_cast<ObjectDecl>(owner_tag_decl);
+        if (owner_record && owner_record->get_record_type()) {
+            if (auto* canonical_owner =
+                    dyn_cast<ObjectDecl>(
+                        owner_record->get_record_type()->get_decl())) {
+                owner_record = canonical_owner;
+            }
+        }
+        owner_record_decl = owner_record;
+    }
+    if (!owner_record_decl) {
+        error_custloc(
+            "out-of-line declaration of '" +
+                qualified_destructor_name +
+                "' does not match any declaration in the target class",
+            decl_loc);
+    }
+    const RecordSemanticState* owner_state = record_semantics_cache_lookup(owner_record_decl);
+    if (!owner_state || owner_state->is_incomplete) {
+        error_custloc(
+            "incomplete type '" + qualified_owner_name +
+                "' named in nested name specifier",
+            decl_loc);
+    }
+
+    if (saved_scope &&
+        scope_flags_contains(saved_scope->flags, ScopeFlags::TemplateParameterScope) &&
+        saved_context) {
+        auto rebased_scope = std::make_shared<Scope>(*saved_scope);
+        rebased_scope->parent = owner_namespace_scope;
+        rebased_scope->associated_decl_context = saved_context.get();
+        collect_->collect_set_current_scope(std::move(rebased_scope));
+        collect_->set_current_decl_context(saved_context);
+    } else {
+        collect_->collect_set_current_scope(owner_namespace_scope);
+        collect_->set_current_decl_context(owner_namespace_context);
+    }
+
+    set_token_idx(destructor_token_idx);
+    cxx_record_parse_stack_.push_back(
+        CppRecordParseFrame{
+            owner_record_decl->is_union ? CppRecordKind::Union : CppRecordKind::Class,
+            owner_name,
+            owner_record_decl});
+    struct RecordParseScopeGuard {
+        std::vector<CppRecordParseFrame>* stack = nullptr;
+        ~RecordParseScopeGuard() {
+            if (stack && !stack->empty()) {
+                stack->pop_back();
+            }
+        }
+    } record_parse_scope_guard{&cxx_record_parse_stack_};
+
+    auto parsed_member = parse_cpp_destructor_member();
+    auto* parsed_dtor = dyn_cast<CppDestructorDecl>(parsed_member.get());
+    if (!parsed_dtor) {
+        error_custloc(
+            "internal error: failed to parse out-of-line destructor definition",
+            decl_loc);
+    }
+    bool parsed_is_definition =
+        parsed_dtor->body != nullptr ||
+        parsed_dtor->has_deferred_inline_body() ||
+        parsed_dtor->is_deleted ||
+        parsed_dtor->is_defaulted;
+    if (!parsed_is_definition) {
+        error_custloc(
+            "out-of-line declaration of '" +
+                qualified_destructor_name +
+                "' must be a definition",
+            decl_loc);
+    }
+
+    const RecordSemanticState::Destructor* matched_dtor_state = nullptr;
+    QualType parsed_dtor_type = desugar_type(QualType(parsed_dtor->type));
+    for (const auto& dtor : owner_state->destructors) {
+        if (!dtor.type) {
+            continue;
+        }
+        QualType candidate_type = desugar_type(dtor.type);
+        if (!cpp_out_of_line_type_matches(candidate_type, parsed_dtor_type, true)) {
+            continue;
+        }
+        matched_dtor_state = &dtor;
+        break;
+    }
+    if (!matched_dtor_state || !matched_dtor_state->decl) {
+        error_custloc(
+            "out-of-line declaration of '" +
+                qualified_destructor_name +
+                "' does not match any declaration in the target class",
+            decl_loc);
+    }
+
+    auto* matched_dtor_decl =
+        const_cast<CppDestructorDecl*>(matched_dtor_state->decl);
+    if (!matched_dtor_decl ||
+        matched_dtor_decl->body != nullptr ||
+        matched_dtor_decl->has_deferred_inline_body() ||
+        (matched_dtor_state->symbol && matched_dtor_state->symbol->is_defined)) {
+        error_custloc(
+            "redefinition of '" +
+                qualified_destructor_name +
+                "'",
+            decl_loc);
+    }
+
+    auto owner_record_type = owner_record_decl->get_record_type();
+    auto parse_deferred_destructor_body_now =
+        [&](CppDestructorDecl* dtor_decl) {
+            if (!dtor_decl || !dtor_decl->has_deferred_inline_body() ||
+                dtor_decl->body) {
+                return;
+            }
+
+            size_t saved_token_idx = get_token_idx();
+            auto saved_func_type = func_type;
+            auto saved_decl_linkage = current_language_linkage_;
+            auto saved_seen_stmt_labels = seen_stmt_labels;
+            auto saved_stmt_labels = stmt_labels;
+            auto saved_local_label_scopes = local_label_scopes_;
+            uint64_t saved_local_label_unique_id = local_label_unique_id_;
+
+            seen_stmt_labels.clear();
+            stmt_labels.clear();
+            local_label_scopes_.clear();
+            local_label_unique_id_ = 0;
+
+            auto entered_scope = collect_->collect_enter_scope(ScopeFlags::FunctionScope);
+            auto function_scope = entered_scope.scope;
+
+            Collect::CppThisContext cpp_this_context;
+            cpp_this_context.is_member_function = true;
+            cpp_this_context.is_static_member_function = false;
+            auto dtor_fn_type = dyn_cast_shared<FunctionType>(dtor_decl->type);
+            if (dtor_fn_type && !dtor_fn_type->parameters.empty()) {
+                cpp_this_context.this_type = dtor_fn_type->parameters.front();
+            }
+            if (!cpp_this_context.this_type && owner_record_type) {
+                cpp_this_context.this_type = QualType(
+                    std::make_shared<PointerType>(QualType(owner_record_type)));
+            }
+
+            func_type = dtor_decl->type;
+            current_language_linkage_ = LanguageLinkage::None;
+            collect_->collect_start_function_definition(
+                dtor_decl->name, QualType(dtor_decl->type), cpp_this_context);
+
+            for (auto& param_decl_base : dtor_decl->parameters) {
+                auto* param_decl = dyn_cast<ParamDecl>(param_decl_base.get());
+                if (!param_decl || !param_decl->has_name() ||
+                    param_decl->get_name() == "this") {
+                    continue;
+                }
+                param_decl->sym = collect_->collect_declare_variable_symbol(
+                    param_decl->get_name(),
+                    param_decl->type,
+                    param_decl->storage_class,
+                    false,
+                    param_decl->location);
+            }
+
+            cxx_record_parse_stack_.push_back(
+                CppRecordParseFrame{CppRecordKind::Class, owner_name});
+            struct NestedRecordParseScopeGuard {
+                std::vector<CppRecordParseFrame>* stack = nullptr;
+                ~NestedRecordParseScopeGuard() {
+                    if (stack && !stack->empty()) {
+                        stack->pop_back();
+                    }
+                }
+            } nested_record_parse_scope_guard{&cxx_record_parse_stack_};
+
+            try {
+                set_token_idx(dtor_decl->deferred_inline_body_begin_token_idx);
+                if (gentle_check(TokenType::TRY_KW)) {
+                    auto try_stmt = parse_cpp_try_statement(function_scope);
+                    SrcLoc body_loc = try_stmt ? try_stmt->location : SrcLoc();
+                    std::vector<std::unique_ptr<Stmt>> stmts;
+                    stmts.push_back(std::move(try_stmt));
+                    dtor_decl->body = collect_->collect_compound_statement(
+                        std::move(stmts), function_scope, body_loc);
+                } else {
+                    dtor_decl->body = parse_compound_stmt(function_scope);
+                }
+                dtor_decl->scope = function_scope;
+                dtor_decl->stmt_labels.insert(
+                    stmt_labels.begin(), stmt_labels.end());
+                set_token_idx(dtor_decl->deferred_inline_body_end_token_idx);
+                dtor_decl->clear_deferred_inline_body_token_range();
+                collect_->collect_leave_scope();
+                collect_->collect_finish_function_definition(function_scope);
+            } catch (...) {
+                collect_->collect_abort_function_definition();
+                collect_->collect_leave_scope();
+                current_language_linkage_ = saved_decl_linkage;
+                func_type = saved_func_type;
+                set_token_idx(saved_token_idx);
+                seen_stmt_labels = std::move(saved_seen_stmt_labels);
+                stmt_labels = std::move(saved_stmt_labels);
+                local_label_scopes_ = std::move(saved_local_label_scopes);
+                local_label_unique_id_ = saved_local_label_unique_id;
+                throw;
+            }
+
+            current_language_linkage_ = saved_decl_linkage;
+            func_type = saved_func_type;
+            set_token_idx(saved_token_idx);
+            seen_stmt_labels = std::move(saved_seen_stmt_labels);
+            stmt_labels = std::move(saved_stmt_labels);
+            local_label_scopes_ = std::move(saved_local_label_scopes);
+            local_label_unique_id_ = saved_local_label_unique_id;
+        };
+
+    parse_deferred_destructor_body_now(parsed_dtor);
+
+    matched_dtor_decl->parameters = std::move(parsed_dtor->parameters);
+    matched_dtor_decl->type = parsed_dtor->type;
+    matched_dtor_decl->body = std::move(parsed_dtor->body);
+    matched_dtor_decl->scope = parsed_dtor->scope;
+    matched_dtor_decl->stmt_labels = std::move(parsed_dtor->stmt_labels);
+    matched_dtor_decl->is_deleted = parsed_dtor->is_deleted;
+    matched_dtor_decl->is_defaulted = parsed_dtor->is_defaulted;
+    matched_dtor_decl->is_override = parsed_dtor->is_override;
+    matched_dtor_decl->is_final = parsed_dtor->is_final;
+    matched_dtor_decl->is_pure = parsed_dtor->is_pure;
+    matched_dtor_decl->is_constexpr = parsed_dtor->is_constexpr;
+    matched_dtor_decl->set_language_linkage(parsed_dtor->get_language_linkage());
+    if (parsed_dtor->asm_label) {
+        matched_dtor_decl->set_asm_label(*parsed_dtor->asm_label);
+    } else {
+        matched_dtor_decl->clear_asm_label();
+    }
+    matched_dtor_decl->clear_deferred_inline_body_token_range();
+    adopt_out_of_line_member_qualifier_prefix(matched_dtor_decl, parsed_dtor);
+
+    const auto& parsed_attrs = ast_ctx->get_attrs(parsed_dtor->node_id).attrs;
+    if (!parsed_attrs.empty()) {
+        auto& dst_attrs = ast_ctx->get_attrs_mut(matched_dtor_decl->node_id).attrs;
+        dst_attrs.insert(dst_attrs.end(), parsed_attrs.begin(), parsed_attrs.end());
+    }
+
+    auto matched_symbol = matched_dtor_state->symbol;
+    if (matched_symbol) {
+        matched_symbol->is_defined = true;
+        matched_symbol->type = QualType(matched_dtor_decl->type);
+        matched_symbol->function_definition = matched_dtor_decl;
+    }
+
+    RecordSemanticState updated_state = *owner_state;
+    for (auto& dtor : updated_state.destructors) {
+        if (dtor.decl != matched_dtor_state->decl) {
+            continue;
+        }
+        dtor.decl = matched_dtor_decl;
+        dtor.type = QualType(matched_dtor_decl->type);
+        dtor.is_deleted = matched_dtor_decl->is_deleted;
+        dtor.is_override = matched_dtor_decl->is_override;
+        dtor.is_final = matched_dtor_decl->is_final;
+        dtor.is_pure = matched_dtor_decl->is_pure;
+        if (matched_symbol) {
+            dtor.symbol = matched_symbol;
+        }
+        break;
+    }
+    updated_state.definition_data.has_user_declared_destructor = true;
+    updated_state.definition_data.has_deleted_destructor = false;
+    for (const auto& dtor : updated_state.destructors) {
+        if (dtor.is_deleted) {
+            updated_state.definition_data.has_deleted_destructor = true;
+            break;
+        }
+    }
+    record_semantics_cache_set(owner_record_decl, std::move(updated_state));
+
+    parsed_decls.push_back(collect_->collect_nop_declaration(decl_loc));
+    return parsed_decls;
+}
+
+std::shared_ptr<Scope> Parser::resolve_named_namespace_scope(
+    const DeclContext* start_context,
+    const std::string& namespace_name,
+    bool allow_enclosing_lookup) const {
+    return qualified_name_utils::resolve_named_namespace_scope(
+        cxx_namespace_scope_cache_,
+        start_context,
+        namespace_name,
+        allow_enclosing_lookup);
+}
+
+std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
+    std::vector<std::unique_ptr<Decl>> parsed_decls;
+    if (!is_cxx_mode_active() || !gentle_check(TokenType::NAMESPACE)) {
+        return parsed_decls;
+    }
+
+    SrcLoc namespace_loc = current_token().loc;
+    if (!collect_->collect_is_file_scope()) {
+        error_custloc("namespace definition is only allowed at namespace scope",
+                      namespace_loc);
+    }
+    advance(); // consume namespace
+
+    std::vector<std::string> namespace_path;
+    bool is_anonymous_namespace = false;
+    if (gentle_check(TokenType::IDENTIFIER)) {
+        namespace_path.push_back(current_token().value);
+        advance();
+        while (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected namespace name after '::' in namespace definition",
+                    current_token().loc);
+            }
+            namespace_path.push_back(current_token().value);
+            advance();
+        }
+    } else if (gentle_check(TokenType::LEFT_BRACE)) {
+        is_anonymous_namespace = true;
+    } else {
+        error_custloc("expected namespace name or '{' after 'namespace'",
+                      current_token().loc);
+    }
+
+    auto current_scope = collect_->collect_current_scope();
+    auto current_context = collect_->get_current_decl_context();
+    auto translation_unit_context = collect_->get_translation_unit_decl_context();
+    if (!current_scope || !current_context || !translation_unit_context) {
+        error_custloc("internal error: missing namespace scope context",
+                      namespace_loc);
+    }
+    auto global_scope = current_scope;
+    while (global_scope && global_scope->parent) {
+        global_scope = global_scope->parent;
+    }
+    if (!global_scope) {
+        error_custloc("internal error: global namespace scope missing",
+                      namespace_loc);
+    }
+
+    if (gentle_check(TokenType::ASSIGN)) {
+        if (is_anonymous_namespace || namespace_path.empty()) {
+            error_custloc(
+                "namespace alias definition requires an identifier before '='",
+                namespace_loc);
+        }
+        if (namespace_path.size() != 1) {
+            error_custloc(
+                "namespace alias name must be a single identifier",
+                namespace_loc);
+        }
+
+        const std::string& alias_name = namespace_path.front();
+        if (current_context->lookup_local(alias_name, LookupNamespace::Ordinary) ||
+            current_context->lookup_local(alias_name, LookupNamespace::Tag)) {
+            error_custloc(
+                "redefinition of '" + alias_name + "' as namespace alias",
+                namespace_loc);
+        }
+
+        const std::string alias_key =
+            qualified_name_utils::make_cpp_namespace_reopen_key(current_context.get(), alias_name);
+        auto existing_alias_it = cxx_namespace_scope_cache_.find(alias_key);
+        bool existing_is_alias =
+            cxx_namespace_alias_cache_keys_.find(alias_key) !=
+            cxx_namespace_alias_cache_keys_.end();
+
+        advance(); // consume '='
+
+        bool rhs_has_global_qualifier = false;
+        if (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            rhs_has_global_qualifier = true;
+        }
+
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            error_custloc("expected namespace name in namespace alias definition",
+                          current_token().loc);
+        }
+
+        std::vector<std::string> rhs_components;
+        SrcLoc rhs_loc = current_token().loc;
+        rhs_components.push_back(current_token().value);
+        advance();
+        while (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected namespace name after '::' in namespace alias definition",
+                    current_token().loc);
+            }
+            rhs_components.push_back(current_token().value);
+            advance();
+        }
+
+        check_and_consume(TokenType::SEMICOLON);
+
+        const DeclContext* lookup_context =
+            rhs_has_global_qualifier ? translation_unit_context.get()
+                                     : current_context.get();
+        std::shared_ptr<Scope> target_scope = nullptr;
+
+        auto format_rhs_prefix = [&](size_t upto_index) {
+            std::string formatted;
+            if (rhs_has_global_qualifier) {
+                formatted += "::";
+            }
+            for (size_t idx = 0; idx <= upto_index; ++idx) {
+                if (idx > 0) {
+                    formatted += "::";
+                }
+                formatted += rhs_components[idx];
+            }
+            return formatted;
+        };
+
+        for (size_t idx = 0; idx < rhs_components.size(); ++idx) {
+            bool allow_enclosing_lookup =
+                (!rhs_has_global_qualifier && idx == 0);
+            auto namespace_scope = resolve_named_namespace_scope(
+                lookup_context, rhs_components[idx], allow_enclosing_lookup);
+            if (!namespace_scope || !namespace_scope->associated_decl_context) {
+                error_custloc(
+                    "namespace alias target '" + format_rhs_prefix(idx) +
+                        "' does not name a namespace",
+                    rhs_loc);
+            }
+            target_scope = namespace_scope;
+            lookup_context = namespace_scope->associated_decl_context;
+        }
+
+        if (!target_scope) {
+            error_custloc("namespace alias target does not name a namespace",
+                          rhs_loc);
+        }
+
+        if (existing_alias_it != cxx_namespace_scope_cache_.end()) {
+            if (!existing_is_alias) {
+                error_custloc(
+                    "redefinition of '" + alias_name + "' as namespace alias",
+                    namespace_loc);
+            }
+            if (existing_alias_it->second.get() != target_scope.get()) {
+                error_custloc(
+                    "redefinition of '" + alias_name +
+                        "' as an alias for a different namespace",
+                    namespace_loc);
+            }
+            std::vector<std::unique_ptr<Decl>> redecl_noop;
+            redecl_noop.push_back(
+                collect_->collect_nop_declaration(namespace_loc));
+            return redecl_noop;
+        }
+
+        cxx_namespace_scope_cache_[alias_key] = target_scope;
+        cxx_namespace_alias_cache_keys_.insert(alias_key);
+        std::vector<std::unique_ptr<Decl>> alias_noop;
+        alias_noop.push_back(collect_->collect_nop_declaration(namespace_loc));
+        return alias_noop;
+    }
+
+    if (!is_anonymous_namespace && !namespace_path.empty()) {
+        auto parent_context = collect_->get_current_decl_context();
+        const std::string& outer_name = namespace_path.front();
+        if (parent_context) {
+            std::string outer_key =
+                qualified_name_utils::make_cpp_namespace_reopen_key(parent_context.get(), outer_name);
+            if (cxx_namespace_alias_cache_keys_.find(outer_key) !=
+                cxx_namespace_alias_cache_keys_.end()) {
+                error_custloc(
+                    "redefinition of '" + outer_name + "' as namespace",
+                    namespace_loc);
+            }
+        }
+        if (parent_context &&
+            (parent_context->lookup_local(outer_name, LookupNamespace::Ordinary) ||
+             parent_context->lookup_local(outer_name, LookupNamespace::Tag))) {
+            error_custloc(
+                "redefinition of '" + outer_name + "' as namespace",
+                namespace_loc);
+        }
+    }
+
+    check_and_consume(TokenType::LEFT_BRACE);
+
+    size_t entered_namespace_depth = 0;
+    auto leave_entered_namespaces = [&]() {
+        while (entered_namespace_depth > 0) {
+            collect_->collect_leave_scope();
+            --entered_namespace_depth;
+        }
+    };
+
+    auto namespace_scope_flags = ScopeFlags::FileScope | ScopeFlags::NamespaceScope;
+    auto enter_named_namespace = [&](const std::string& name) {
+        auto parent_scope = collect_->collect_current_scope();
+        auto parent_context = collect_->get_current_decl_context();
+        if (!parent_scope || !parent_context) {
+            error_custloc("internal error: missing parent namespace context",
+                          namespace_loc);
+        }
+        if (parent_context->lookup_local(name, LookupNamespace::Ordinary) ||
+            parent_context->lookup_local(name, LookupNamespace::Tag)) {
+            error_custloc(
+                "redefinition of '" + name + "' as namespace",
+                namespace_loc);
+        }
+
+        std::string cache_key =
+            qualified_name_utils::make_cpp_namespace_reopen_key(parent_context.get(), name);
+        if (cxx_namespace_alias_cache_keys_.find(cache_key) !=
+            cxx_namespace_alias_cache_keys_.end()) {
+            error_custloc(
+                "redefinition of '" + name + "' as namespace",
+                namespace_loc);
+        }
+        std::vector<std::string> namespace_path =
+            parent_scope ? parent_scope->cxx_namespace_path : std::vector<std::string>{};
+        namespace_path.push_back(name);
+        auto existing_it = cxx_namespace_scope_cache_.find(cache_key);
+        if (existing_it != cxx_namespace_scope_cache_.end() &&
+            existing_it->second &&
+            existing_it->second->parent.get() == parent_scope.get()) {
+            existing_it->second->cxx_namespace_path = namespace_path;
+            collect_->collect_enter_scope(namespace_scope_flags,
+                                          existing_it->second);
+            if (auto current_context = collect_->get_current_decl_context()) {
+                current_context->set_lookup_name(name);
+            }
+            ++entered_namespace_depth;
+            return;
+        }
+
+        auto entered = collect_->collect_enter_scope(namespace_scope_flags);
+        if (entered.scope) {
+            entered.scope->cxx_namespace_path = namespace_path;
+            cxx_namespace_scope_cache_[cache_key] = entered.scope;
+        }
+        if (auto current_context = collect_->get_current_decl_context()) {
+            current_context->set_lookup_name(name);
+        }
+        ++entered_namespace_depth;
+    };
+
+    try {
+        if (is_anonymous_namespace) {
+            auto parent_scope = collect_->collect_current_scope();
+            auto entered = collect_->collect_enter_scope(namespace_scope_flags);
+            if (entered.scope && parent_scope) {
+                entered.scope->cxx_namespace_path = parent_scope->cxx_namespace_path;
+            }
+            ++entered_namespace_depth;
+        } else {
+            for (const auto& component : namespace_path) {
+                enter_named_namespace(component);
+            }
+        }
+
+        size_t last_recovery_idx = std::numeric_limits<size_t>::max();
+        while (!gentle_check(TokenType::RIGHT_BRACE) &&
+               !gentle_check(TokenType::Eof)) {
+            try {
+                auto decls = parse_declaration();
+                if (decls.empty()) {
+                    error("While parsing namespace definition, encountered a non-declaration");
+                    return {};
+                }
+                parsed_decls.insert(
+                    parsed_decls.end(),
+                    std::make_move_iterator(decls.begin()),
+                    std::make_move_iterator(decls.end()));
+                diag_engine->sync_point_reached();
+                last_recovery_idx = std::numeric_limits<size_t>::max();
+            } catch (ParseError& e) {
+                if (is_in_tentative_context()) {
+                    throw;
+                }
+                size_t recover_start_idx = get_token_idx();
+                skip_to_next_top_level_decl();
+                if (get_token_idx() == recover_start_idx &&
+                    recover_start_idx == last_recovery_idx &&
+                    !gentle_check(TokenType::Eof) &&
+                    !gentle_check(TokenType::RIGHT_BRACE)) {
+                    advance();
+                }
+                last_recovery_idx = get_token_idx();
+                diag_engine->sync_point_reached();
+                parsed_decls.push_back(
+                    collect_->collect_error_declaration(e.message, e.location));
+            }
+        }
+
+        check_and_consume(TokenType::RIGHT_BRACE);
+        gentle_check_and_consume(TokenType::SEMICOLON);
+        if (parsed_decls.empty()) {
+            parsed_decls.push_back(collect_->collect_nop_declaration(namespace_loc));
+        }
+        leave_entered_namespaces();
+        return parsed_decls;
+    } catch (...) {
+        leave_entered_namespaces();
+        throw;
+    }
+}
+
+std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
+    std::vector<std::unique_ptr<Decl>> parsed_decls;
+    if (!is_cxx_mode_active() || !gentle_check(TokenType::USING)) {
+        return parsed_decls;
+    }
+
+    Token using_tok = current_token();
+    advance(); // consume using
+
+    const bool in_class_scope = is_parsing_cpp_record_body();
+
+    auto current_scope = collect_->collect_current_scope();
+    auto current_context = collect_->get_current_decl_context();
+    auto translation_unit_context = collect_->get_translation_unit_decl_context();
+    if (!current_scope || !current_context || !translation_unit_context) {
+        error_custloc("internal error: missing namespace lookup context",
+                      using_tok.loc);
+    }
+    auto global_scope = current_scope;
+    while (global_scope && global_scope->parent) {
+        global_scope = global_scope->parent;
+    }
+    if (!global_scope) {
+        error_custloc("internal error: global namespace scope missing",
+                      using_tok.loc);
+    }
+
+    auto format_namespace_prefix =
+        [&](bool has_global_qualifier,
+            const std::vector<std::string>& components,
+            size_t upto_index) {
+        std::vector<std::string> prefix_components;
+        prefix_components.reserve(upto_index + 1);
+        for (size_t idx = 0; idx <= upto_index; ++idx) {
+            prefix_components.push_back(components[idx]);
+        }
+        if (prefix_components.empty()) {
+            return std::string(has_global_qualifier ? "::" : "");
+        }
+        std::string terminal = prefix_components.back();
+        prefix_components.pop_back();
+        return qualified_name_utils::format_cpp_qualified_name(
+            has_global_qualifier, prefix_components, terminal);
+    };
+
+    auto resolve_namespace_path =
+        [&](bool has_global_qualifier,
+            const std::vector<std::string>& components,
+            SrcLoc error_loc,
+            std::string_view target_kind) -> std::shared_ptr<Scope> {
+        if (components.empty()) {
+            error_custloc("expected namespace name after '" +
+                              std::string(target_kind) + "'",
+                          error_loc);
+        }
+        const DeclContext* lookup_context = has_global_qualifier
+            ? translation_unit_context.get()
+            : current_context.get();
+        std::shared_ptr<Scope> resolved_scope = has_global_qualifier
+            ? global_scope
+            : current_scope;
+
+        // Walk namespace components one-by-one so diagnostics can point at
+        // the first segment that fails to resolve.
+        for (size_t idx = 0; idx < components.size(); ++idx) {
+            bool allow_enclosing_lookup =
+                (!has_global_qualifier && idx == 0);
+            auto namespace_scope = resolve_named_namespace_scope(
+                lookup_context, components[idx], allow_enclosing_lookup);
+            if (!namespace_scope || !namespace_scope->associated_decl_context) {
+                error_custloc(
+                    std::string(target_kind) + " target '" +
+                        format_namespace_prefix(
+                            has_global_qualifier, components, idx) +
+                        "' does not name a namespace",
+                    error_loc);
+            }
+            resolved_scope = namespace_scope;
+            lookup_context = namespace_scope->associated_decl_context;
+        }
+        return resolved_scope;
+    };
+
+    if (gentle_check(TokenType::NAMESPACE)) {
+        if (in_class_scope) {
+            error_custloc("using-directive is not allowed in class scope",
+                          using_tok.loc);
+        }
+        advance(); // consume namespace
+
+        bool has_global_qualifier = false;
+        if (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            has_global_qualifier = true;
+        }
+
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            error_custloc("expected namespace name in using-directive",
+                          current_token().loc);
+        }
+
+        std::vector<std::string> namespace_components;
+        SrcLoc target_loc = current_token().loc;
+        namespace_components.push_back(current_token().value);
+        advance();
+        while (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected namespace name after '::' in using-directive",
+                    current_token().loc);
+            }
+            namespace_components.push_back(current_token().value);
+            advance();
+        }
+
+        check_and_consume(TokenType::SEMICOLON);
+
+        auto target_scope = resolve_namespace_path(
+            has_global_qualifier,
+            namespace_components,
+            target_loc,
+            "using-directive");
+        auto* target_context = target_scope
+            ? target_scope->associated_decl_context
+            : nullptr;
+        if (!target_context) {
+            error_custloc("internal error: using-directive target context missing",
+                          target_loc);
+        }
+
+        // using-directive imports declarations into unqualified lookup of the
+        // current context; keep tag and ordinary namespaces separate.
+        auto import_tag_binding = [&](const DeclBinding& binding) {
+            if (!lookup_namespace_contains(binding.lookup_namespace,
+                                           LookupNamespace::Tag) ||
+                binding.name.empty()) {
+                return;
+            }
+            if (current_context->lookup_local(binding.name, LookupNamespace::Tag)) {
+                return;
+            }
+            if (auto* tag_decl = dyn_cast<TagDecl>(binding.ast_decl)) {
+                collect_->collect_add_tag_decl(
+                    binding.name, const_cast<TagDecl*>(tag_decl));
+            }
+            if (binding.type) {
+                collect_->collect_add_tag_type(
+                    binding.name, binding.type.get_shared());
+            }
+        };
+
+        auto import_ordinary_binding = [&](const DeclBinding& binding) {
+            if (!lookup_namespace_contains(binding.lookup_namespace,
+                                           LookupNamespace::Ordinary) ||
+                binding.name.empty()) {
+                return;
+            }
+
+            const DeclBinding* existing = current_context->lookup_local(
+                binding.name, LookupNamespace::Ordinary);
+
+            auto import_function = [&](const std::shared_ptr<Symbol>& candidate) {
+                if (!candidate || candidate->kind != SymbolKind::FUNCTION) {
+                    return;
+                }
+                if (existing && existing->symbol_kind != SymbolKind::FUNCTION) {
+                    return;
+                }
+                collect_->collect_bind_symbol_in_current_scope(
+                    binding.name, candidate);
+            };
+
+            if (binding.has_overload_set()) {
+                for (const auto& candidate : binding.overload_candidates) {
+                    import_function(candidate);
+                }
+                return;
+            }
+
+            if (!binding.symbol) {
+                return;
+            }
+            if (binding.symbol->kind == SymbolKind::FUNCTION) {
+                import_function(binding.symbol);
+                return;
+            }
+            if (existing) {
+                return;
+            }
+            collect_->collect_bind_symbol_in_current_scope(
+                binding.name, binding.symbol);
+        };
+
+        for (const auto& binding : target_context->declarations()) {
+            import_tag_binding(binding);
+            import_ordinary_binding(binding);
+        }
+
+        parsed_decls.push_back(collect_->collect_nop_declaration(using_tok.loc));
+        return parsed_decls;
+    }
+
+    if (gentle_check(TokenType::TYPENAME)) {
+        fail_cpp_unsupported("using-declaration", using_tok.loc);
+    }
+
+    size_t payload_begin_idx = get_token_idx();
+    if (gentle_check(TokenType::IDENTIFIER)) {
+        std::string alias_name = current_token().value;
+        SrcLoc alias_name_loc = current_token().loc;
+        advance(); // alias identifier candidate
+
+        auto alias_name_attrs = try_parse_attributes();
+        if (gentle_check(TokenType::ASSIGN)) {
+            advance(); // consume '='
+
+            DeclarationParser alias_type_parser(this);
+            auto alias_type = alias_type_parser.parse_declaration();
+            if (!alias_type) {
+                error_custloc("expected type-id in alias declaration", alias_name_loc);
+            }
+            if (!alias_type_parser.name.empty()) {
+                error_custloc(
+                    "alias declaration requires a type-id (unexpected declarator identifier '" +
+                        alias_type_parser.name + "')",
+                    alias_type_parser.loc);
+            }
+            if (alias_type_parser.str_class != StorageClass::NONE) {
+                error_custloc(
+                    "storage class specifier is not allowed in alias declaration",
+                    alias_name_loc);
+            }
+            if (alias_type_parser.is_constexpr) {
+                error_custloc(
+                    "'constexpr' is not allowed in alias declaration",
+                    alias_name_loc);
+            }
+
+            if (gentle_check(TokenType::COMMA)) {
+                error_custloc("expected ';' after alias declaration", current_token().loc);
+            }
+            check_and_consume(TokenType::SEMICOLON);
+
+            auto alias_underlying =
+                QualType(alias_type, alias_type_parser.qualifiers);
+            auto td_sym = collect_->collect_declare_typedef_symbol(
+                alias_name, alias_underlying, using_tok.loc);
+            if (td_sym) {
+                for (const auto& attr : alias_type_parser.leading_attrs) {
+                    td_sym->sym_attrs.attrs.push_back(attr);
+                }
+                for (const auto& attr : alias_name_attrs) {
+                    td_sym->sym_attrs.attrs.push_back(attr);
+                }
+            }
+            auto alias_decl = collect_->collect_typedef_declaration(
+                alias_name,
+                td_sym ? td_sym->type : alias_underlying,
+                td_sym,
+                using_tok.loc);
+            if (td_sym && td_sym->type->kind == TypeKind::Typedef) {
+                auto ttype = td_sym->type.as<TypedefType>();
+                auto tdecl = dyn_cast<TypedefDecl>(alias_decl.get());
+                ttype->typedef_decl = tdecl;
+            }
+            parsed_decls.push_back(std::move(alias_decl));
+            return parsed_decls;
+        }
+
+        set_token_idx(payload_begin_idx);
+    }
+
+    struct ParsedUsingDeclarator {
+        bool has_global_qualifier = false;
+        std::vector<std::string> qualifiers;
+        std::string terminal_name;
+        SrcLoc terminal_loc;
+    };
+
+    auto parse_single_using_declarator =
+        [&](std::string_view unsupported_feature) -> ParsedUsingDeclarator {
+        ParsedUsingDeclarator declarator;
+        if (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            declarator.has_global_qualifier = true;
+        }
+
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            fail_cpp_unsupported(unsupported_feature, using_tok.loc);
+        }
+
+        declarator.terminal_name = current_token().value;
+        declarator.terminal_loc = current_token().loc;
+        advance();
+        while (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            declarator.qualifiers.push_back(std::move(declarator.terminal_name));
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected identifier after '::' in using-declaration",
+                    current_token().loc);
+            }
+            declarator.terminal_name = current_token().value;
+            declarator.terminal_loc = current_token().loc;
+            advance();
+        }
+
+        return declarator;
+    };
+
+    std::vector<ParsedUsingDeclarator> using_declarators;
+    std::string_view unsupported_feature =
+        in_class_scope
+            ? std::string_view("class-scope using-declaration")
+            : std::string_view("using-declaration");
+    while (true) {
+        using_declarators.push_back(
+            parse_single_using_declarator(unsupported_feature));
+        if (!gentle_check_and_consume(TokenType::COMMA)) {
+            break;
+        }
+    }
+    check_and_consume(TokenType::SEMICOLON);
+
+    if (in_class_scope) {
+        for (const auto& declarator : using_declarators) {
+            if (declarator.qualifiers.empty()) {
+                fail_cpp_unsupported("class-scope using-declaration",
+                                     declarator.terminal_loc);
+            }
+        }
+        parsed_decls.push_back(collect_->collect_nop_declaration(using_tok.loc));
+        return parsed_decls;
+    }
+
+    for (const auto& declarator : using_declarators) {
+        if (!declarator.has_global_qualifier && declarator.qualifiers.empty()) {
+            fail_cpp_unsupported("using-declaration", declarator.terminal_loc);
+        }
+
+        auto target_scope = resolve_namespace_path(
+            declarator.has_global_qualifier,
+            declarator.qualifiers,
+            declarator.terminal_loc,
+            "using-declaration");
+        auto* target_context = target_scope
+            ? target_scope->associated_decl_context
+            : nullptr;
+        if (!target_context) {
+            error_custloc("internal error: using-declaration target context missing",
+                          declarator.terminal_loc);
+        }
+
+        const DeclBinding* ordinary_binding = target_context->lookup_local(
+            declarator.terminal_name, LookupNamespace::Ordinary);
+        const DeclBinding* tag_binding = target_context->lookup_local(
+            declarator.terminal_name, LookupNamespace::Tag);
+        if (!ordinary_binding && !tag_binding) {
+            error_custloc(
+                "using-declaration target '" +
+                    qualified_name_utils::format_cpp_qualified_name(
+                        declarator.has_global_qualifier,
+                        declarator.qualifiers,
+                        declarator.terminal_name) +
+                    "' does not name a member",
+                declarator.terminal_loc);
+        }
+
+        if (tag_binding &&
+            !current_context->lookup_local(declarator.terminal_name,
+                                           LookupNamespace::Tag)) {
+            if (auto* tag_decl = dyn_cast<TagDecl>(tag_binding->ast_decl)) {
+                collect_->collect_add_tag_decl(
+                    declarator.terminal_name, const_cast<TagDecl*>(tag_decl));
+            }
+            if (tag_binding->type) {
+                collect_->collect_add_tag_type(
+                    declarator.terminal_name, tag_binding->type.get_shared());
+            }
+        }
+
+        auto import_ordinary_symbol = [&](const std::shared_ptr<Symbol>& symbol) {
+            if (!symbol) {
+                return;
+            }
+            collect_->collect_bind_symbol_in_current_scope(
+                declarator.terminal_name, symbol);
+        };
+
+        if (ordinary_binding) {
+            if (ordinary_binding->has_overload_set()) {
+                for (const auto& candidate : ordinary_binding->overload_candidates) {
+                    import_ordinary_symbol(candidate);
+                }
+            } else {
+                import_ordinary_symbol(ordinary_binding->symbol);
+            }
+        }
+    }
+
+    parsed_decls.push_back(collect_->collect_nop_declaration(using_tok.loc));
+    return parsed_decls;
+}
+
+std::string Parser::make_cpp_future_work_message(
+    std::string_view feature,
+    std::string_view future_work_item) const {
+    return "C++ parser TODO: " + std::string(feature) +
+           " (future work item: " + std::string(future_work_item) + ")";
+}
+
+void Parser::fail_cpp_future_work(std::string_view feature,
+                                  std::string_view future_work_item,
+                                  SrcLoc loc) {
+    error_custloc(make_cpp_future_work_message(feature, future_work_item), loc);
+}
+
+void Parser::parse_cpp_optional_noexcept_spec(FunctionType& function_type) {
+    if (!is_cxx_mode_active() || !gentle_check(TokenType::NOEXCEPT_KW)) {
+        return;
+    }
+
+    function_type.has_explicit_exception_spec = true;
+    function_type.exception_spec = FunctionExceptionSpecKind::PotentiallyThrowing;
+
+    advance(); // 'noexcept'
+    bool is_non_throwing = true;
+    if (gentle_check(TokenType::LEFT_PAREN)) {
+        SrcLoc lparen_loc = current_token().loc;
+        advance(); // '('
+
+        if (gentle_check(TokenType::RIGHT_PAREN)) {
+            error_custloc("noexcept expression must be an integer constant expression",
+                          lparen_loc);
+        } else {
+            auto noexcept_expr = parse_conditional_expression();
+            auto eval = try_evaluate_with_consteval_compat(
+                noexcept_expr.get(), ConstEvalMode::c_ice());
+            if (!eval.has_value()) {
+                SrcLoc diag_loc =
+                    noexcept_expr ? noexcept_expr->location : current_token().loc;
+                error_custloc("noexcept expression must be an integer constant expression",
+                              diag_loc);
+            } else {
+                is_non_throwing = *eval != 0;
+            }
+        }
+        check_and_consume(TokenType::RIGHT_PAREN);
+    }
+
+    function_type.exception_spec = is_non_throwing
+        ? FunctionExceptionSpecKind::NonThrowing
+        : FunctionExceptionSpecKind::PotentiallyThrowing;
+}
+
+std::unique_ptr<Expr> Parser::parse_cpp_throw_expression() {
+    if (!is_cxx_mode_active()) {
+        return nullptr;
+    }
+
+    Token throw_tok = current_token();
+    if (!lang_opts.exceptions_enabled) {
+        error_custloc("cannot use 'throw' with exceptions disabled", throw_tok.loc);
+    }
+    check_and_consume(TokenType::THROW_KW);
+
+    std::unique_ptr<Expr> thrown_expr = nullptr;
+    if (!gentle_check(TokenType::SEMICOLON) &&
+        !gentle_check(TokenType::COMMA) &&
+        !gentle_check(TokenType::COLON) &&
+        !gentle_check(TokenType::RIGHT_PAREN) &&
+        !gentle_check(TokenType::RIGHT_BRACKET) &&
+        !gentle_check(TokenType::RIGHT_BRACE) &&
+        !gentle_check(TokenType::Eof)) {
+        thrown_expr = parse_assignment_expression();
+    }
+
+    return collect_->collect_cpp_throw_expression(std::move(thrown_expr), throw_tok.loc);
+}
+
+std::unique_ptr<Expr> Parser::parse_cpp_new_expression(bool is_global_allocation) {
+    if (!is_cxx_mode_active()) {
+        return nullptr;
+    }
+
+    Token new_tok = current_token();
+    check_and_consume(TokenType::NEW);
+
+    std::vector<std::unique_ptr<Expr>> placement_args;
+    QualType allocated_type = nullptr;
+    bool parsed_type_id = false;
+
+    auto try_parse_parenthesized_type_id = [&](QualType& out_type) -> bool {
+        TentativeParsingAction tentative(*this);
+        try {
+            advance(); // '('
+            DeclarationParser type_parser(this);
+            auto parsed_type_raw = type_parser.parse_declaration();
+            if (!parsed_type_raw ||
+                !type_parser.name.empty() ||
+                type_parser.str_class != StorageClass::NONE ||
+                !gentle_check_and_consume(TokenType::RIGHT_PAREN)) {
+                return false;
+            }
+            out_type = QualType(parsed_type_raw, type_parser.qualifiers);
+            tentative.Commit();
+            return true;
+        } catch (const ParseError&) {
+            return false;
+        } catch (const FatalErrorLimitReached&) {
+            return false;
+        }
+    };
+
+    if (gentle_check(TokenType::LEFT_PAREN) &&
+        try_parse_parenthesized_type_id(allocated_type)) {
+        parsed_type_id = true;
+    }
+
+    if (!parsed_type_id && gentle_check(TokenType::LEFT_PAREN)) {
+        check_and_consume(TokenType::LEFT_PAREN);
+        if (gentle_check(TokenType::RIGHT_PAREN)) {
+            error_custloc("new placement arguments cannot be empty", current_token().loc);
+        }
+        do {
+            placement_args.push_back(
+                parse_assignment_expression_with_optional_pack_expansion());
+        } while (gentle_check_and_consume(TokenType::COMMA));
+        check_and_consume(TokenType::RIGHT_PAREN);
+    }
+
+    if (!parsed_type_id) {
+        if (gentle_check(TokenType::LEFT_PAREN)) {
+            check_and_consume(TokenType::LEFT_PAREN);
+            DeclarationParser type_parser(this);
+            auto parsed_type_raw = type_parser.parse_declaration();
+            if (!parsed_type_raw ||
+                !type_parser.name.empty() ||
+                type_parser.str_class != StorageClass::NONE) {
+                error_custloc("expected type-id in new-expression", new_tok.loc);
+            }
+            allocated_type = QualType(parsed_type_raw, type_parser.qualifiers);
+            check_and_consume(TokenType::RIGHT_PAREN);
+        } else {
+            if (!isTokenDeclarationSpec(current_token())) {
+                error_custloc("expected type-id in new-expression", current_token().loc);
+            }
+            DeclarationParser type_parser(this);
+            type_parser.parse_new_type_id_context = true;
+            auto parsed_type_raw = type_parser.parse_declaration();
+            if (!parsed_type_raw ||
+                !type_parser.name.empty() ||
+                type_parser.str_class != StorageClass::NONE) {
+                error_custloc("expected type-id in new-expression", new_tok.loc);
+            }
+            allocated_type = QualType(parsed_type_raw, type_parser.qualifiers);
+        }
+    }
+
+    std::unique_ptr<Expr> initializer = nullptr;
+    if (gentle_check(TokenType::LEFT_PAREN)) {
+        initializer = parse_paren_init_list();
+    } else if (gentle_check(TokenType::LEFT_BRACE)) {
+        initializer = parse_init_list();
+    }
+
+    return collect_->collect_cpp_new_expression(
+        allocated_type,
+        std::move(placement_args),
+        std::move(initializer),
+        is_global_allocation,
+        new_tok.loc);
+}
+
+std::unique_ptr<Expr> Parser::parse_cpp_delete_expression(bool is_global_delete) {
+    if (!is_cxx_mode_active()) {
+        return nullptr;
+    }
+
+    Token delete_tok = current_token();
+    check_and_consume(TokenType::DELETE);
+
+    bool is_array_form = false;
+    if (gentle_check(TokenType::LEFT_BRACKET) &&
+        peek_token().type == TokenType::RIGHT_BRACKET) {
+        advance(); // '['
+        advance(); // ']'
+        is_array_form = true;
+    }
+
+    auto operand = parse_cast_expression();
+    return collect_->collect_cpp_delete_expression(
+        std::move(operand),
+        is_array_form,
+        is_global_delete,
+        delete_tok.loc);
+}
+
+CppCatchClause Parser::parse_cpp_catch_clause() {
+    CppCatchClause clause;
+    Token catch_tok = current_token();
+    check_and_consume(TokenType::CATCH_KW);
+    clause.location = catch_tok.loc;
+
+    check_and_consume(TokenType::LEFT_PAREN);
+    if (gentle_check(TokenType::ELLIPSIS)) {
+        clause.is_catch_all = true;
+        advance();
+    } else {
+        DeclarationParser decl_parser(this);
+        auto exception_type = decl_parser.parse_declaration();
+        if (!exception_type) {
+            error_custloc("invalid catch parameter declaration", catch_tok.loc);
+        }
+        clause.exception_type = exception_type;
+        clause.exception_name = decl_parser.name;
+    }
+    check_and_consume(TokenType::RIGHT_PAREN);
+
+    if (!gentle_check(TokenType::LEFT_BRACE)) {
+        error_custloc("expected '{' to start catch handler", current_token().loc);
+    }
+
+    auto entered_scope = collect_->collect_enter_scope(ScopeFlags::BlockScope);
+    auto catch_scope = entered_scope.scope;
+    struct CatchScopeGuard {
+        Collect* collect = nullptr;
+        bool active = false;
+        ~CatchScopeGuard() {
+            if (active && collect) {
+                collect->collect_leave_scope();
+            }
+        }
+    } catch_scope_guard{collect_.get(), true};
+
+    if (!clause.is_catch_all && !clause.exception_name.empty() && clause.exception_type) {
+        clause.exception_symbol = collect_->collect_declare_variable_symbol(
+            clause.exception_name,
+            clause.exception_type,
+            StorageClass::NONE,
+            false,
+            catch_tok.loc);
+    }
+
+    clause.handler = parse_compound_stmt(catch_scope);
+
+    collect_->collect_leave_scope();
+    catch_scope_guard.active = false;
+    return clause;
+}
+
+void Parser::skip_balanced_token_sequence_tokens(
+    TokenType open_tok,
+    TokenType close_tok,
+    const std::string& missing_close_diag) {
+    if (!gentle_check(open_tok)) {
+        error("internal error: expected balanced token sequence start");
+    }
+
+    std::vector<TokenType> closer_stack;
+    closer_stack.push_back(close_tok);
+    advance(); // consume initial opener
+    while (!gentle_check(TokenType::Eof) && !closer_stack.empty()) {
+        TokenType tt = current_token().type;
+        if (tt == TokenType::LEFT_PAREN) {
+            closer_stack.push_back(TokenType::RIGHT_PAREN);
+            advance();
+            continue;
+        }
+        if (tt == TokenType::LEFT_BRACE) {
+            closer_stack.push_back(TokenType::RIGHT_BRACE);
+            advance();
+            continue;
+        }
+        if (tt == TokenType::LEFT_BRACKET) {
+            closer_stack.push_back(TokenType::RIGHT_BRACKET);
+            advance();
+            continue;
+        }
+
+        if (tt == closer_stack.back()) {
+            closer_stack.pop_back();
+            advance();
+            continue;
+        }
+        advance();
+    }
+    if (!closer_stack.empty()) {
+        error(missing_close_diag);
+    }
+}
+
+void Parser::skip_cpp_constructor_mem_initializer_list_tokens() {
+    if (!gentle_check(TokenType::COLON)) {
+        return;
+    }
+
+    advance(); // ':'
+    while (true) {
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            error("expected member name in constructor mem-initializer-list");
+        }
+        advance(); // member/base name
+
+        if (gentle_check(TokenType::LEFT_PAREN)) {
+            skip_balanced_token_sequence_tokens(
+                TokenType::LEFT_PAREN,
+                TokenType::RIGHT_PAREN,
+                "expected ')' to close constructor member initializer");
+        } else if (gentle_check(TokenType::LEFT_BRACE)) {
+            skip_balanced_token_sequence_tokens(
+                TokenType::LEFT_BRACE,
+                TokenType::RIGHT_BRACE,
+                "expected '}' to close constructor member initializer");
+        } else {
+            error("expected '(' or '{' after constructor mem-initializer");
+        }
+
+        if (!gentle_check_and_consume(TokenType::COMMA)) {
+            break;
+        }
+    }
+}
+
+void Parser::skip_cpp_function_try_block_tail_tokens() {
+    if (!gentle_check(TokenType::LEFT_BRACE)) {
+        error_custloc("expected '{' to start function-try-block body",
+                      current_token().loc);
+    }
+    skip_balanced_token_sequence_tokens(
+        TokenType::LEFT_BRACE,
+        TokenType::RIGHT_BRACE,
+        "expected '}' to close function-try-block body");
+
+    bool saw_handler = false;
+    while (gentle_check(TokenType::CATCH_KW)) {
+        saw_handler = true;
+        advance(); // catch
+        check_and_consume(TokenType::LEFT_PAREN);
+        if (gentle_check(TokenType::ELLIPSIS)) {
+            advance();
+        } else {
+            while (!gentle_check(TokenType::RIGHT_PAREN) &&
+                   !gentle_check(TokenType::Eof)) {
+                advance();
+            }
+        }
+        check_and_consume(TokenType::RIGHT_PAREN);
+        if (!gentle_check(TokenType::LEFT_BRACE)) {
+            error_custloc("expected '{' to start catch handler",
+                          current_token().loc);
+        }
+        skip_balanced_token_sequence_tokens(
+            TokenType::LEFT_BRACE,
+            TokenType::RIGHT_BRACE,
+            "expected '}' to close catch handler");
+    }
+    if (!saw_handler) {
+        error_custloc("expected at least one catch handler after try block",
+                      current_token().loc);
+    }
+}
+
+void Parser::skip_cpp_function_try_block_tokens(
+    bool allow_ctor_mem_initializer_after_try) {
+    check_and_consume(TokenType::TRY_KW);
+    if (allow_ctor_mem_initializer_after_try) {
+        skip_cpp_constructor_mem_initializer_list_tokens();
+    }
+    skip_cpp_function_try_block_tail_tokens();
+}
+
+std::unique_ptr<Stmt> Parser::parse_cpp_try_statement(
+    std::shared_ptr<Scope> try_scope,
+    bool allow_ctor_mem_initializer_after_try) {
+    if (!is_cxx_mode_active()) {
+        return nullptr;
+    }
+
+    Token try_tok = current_token();
+    if (!lang_opts.exceptions_enabled) {
+        error_custloc("cannot use 'try' with exceptions disabled", try_tok.loc);
+    }
+    check_and_consume(TokenType::TRY_KW);
+    if (allow_ctor_mem_initializer_after_try &&
+        gentle_check(TokenType::COLON)) {
+        skip_cpp_constructor_mem_initializer_list_tokens();
+    }
+    auto try_block = parse_compound_stmt(try_scope);
+
+    if (!gentle_check(TokenType::CATCH_KW)) {
+        error_custloc("expected at least one catch handler after try block",
+            current_token().loc);
+    }
+
+    std::vector<CppCatchClause> handlers;
+    while (gentle_check(TokenType::CATCH_KW)) {
+        handlers.push_back(parse_cpp_catch_clause());
+    }
+    return collect_->collect_cpp_try_statement(
+        std::move(try_block),
+        std::move(handlers),
+        try_tok.loc);
+}
+
+std::unique_ptr<Expr> Parser::parse_cpp_named_cast_expression() {
+    if (!is_cxx_mode_active()) {
+        return nullptr;
+    }
+
+    Token cast_tok = current_token();
+    if (cast_tok.type != TokenType::IDENTIFIER) {
+        return nullptr;
+    }
+
+    Collect::CppNamedCastKind cast_kind;
+    if (cast_tok.value == "static_cast") {
+        cast_kind = Collect::CppNamedCastKind::Static;
+    } else if (cast_tok.value == "const_cast") {
+        cast_kind = Collect::CppNamedCastKind::Const;
+    } else if (cast_tok.value == "reinterpret_cast") {
+        cast_kind = Collect::CppNamedCastKind::Reinterpret;
+    } else if (cast_tok.value == "dynamic_cast") {
+        cast_kind = Collect::CppNamedCastKind::Dynamic;
+    } else {
+        return nullptr;
+    }
+
+    advance(); // consume cast keyword
+    check_and_consume(TokenType::LESS_THAN);
+
+    DeclarationParser type_parser(this);
+    auto parsed_type = type_parser.parse_declaration();
+    if (!parsed_type || !type_parser.name.empty()) {
+        error_custloc("expected type-id in named cast", cast_tok.loc);
+    }
+    if (type_parser.str_class != StorageClass::NONE) {
+        error_custloc(
+            "storage class specifier is not allowed in named cast type-id",
+            cast_tok.loc);
+    }
+
+    check_and_consume(TokenType::GREATER_THAN);
+    check_and_consume(TokenType::LEFT_PAREN);
+    auto expr = parse_expression();
+    check_and_consume(TokenType::RIGHT_PAREN);
+
+    return collect_->collect_cpp_named_cast(
+        cast_kind,
+        std::move(expr),
+        QualType(parsed_type, type_parser.qualifiers),
+        cast_tok.loc);
+}
+
+std::unique_ptr<Expr> Parser::parse_cpp_typeid_expression() {
+    if (!is_cxx_mode_active()) {
+        return nullptr;
+    }
+
+    Token typeid_tok = current_token();
+    if (typeid_tok.type != TokenType::IDENTIFIER || typeid_tok.value != "typeid") {
+        return nullptr;
+    }
+
+    advance(); // consume 'typeid'
+    check_and_consume(TokenType::LEFT_PAREN);
+
+    {
+        TentativeParsingAction tentative(*this);
+        try {
+            DeclarationParser type_parser(this);
+            auto parsed_type = type_parser.parse_declaration();
+            if (parsed_type &&
+                type_parser.name.empty() &&
+                type_parser.str_class == StorageClass::NONE &&
+                gentle_check_and_consume(TokenType::RIGHT_PAREN)) {
+                tentative.Commit();
+                return collect_->collect_cpp_typeid_type(
+                    QualType(parsed_type, type_parser.qualifiers),
+                    typeid_tok.loc);
+            }
+        } catch (const FatalErrorLimitReached&) {
+        } catch (const ParseError&) {
+        }
+    }
+
+    auto expr = parse_expression();
+    check_and_consume(TokenType::RIGHT_PAREN);
+    return collect_->collect_cpp_typeid_expression(std::move(expr), typeid_tok.loc);
+}
+
+Parser::TPResult Parser::try_parse_cpp_qualified_id() {
+    if (!is_cpp_qualified_id_start()) {
+        return TPResult::False;
+    }
+    RevertingTentativeParsingAction tentative(*this);
+    try {
+        auto parse_component = [&]() -> bool {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                return false;
+            }
+            advance();
+            if (gentle_check(TokenType::LESS_THAN)) {
+                RevertingTentativeParsingAction template_args(*this);
+                parse_cpp_template_argument_list();
+                if (is_cpp_scope_resolution_here()) {
+                    template_args.Commit();
+                }
+            }
+            return true;
+        };
+
+        bool saw_scope = consume_cpp_scope_resolution();
+        if (!parse_component()) {
+            return TPResult::Error;
+        }
+
+        while (consume_cpp_scope_resolution()) {
+            saw_scope = true;
+            gentle_check_and_consume(TokenType::TEMPLATE);
+            if (!parse_component()) {
+                return TPResult::Error;
+            }
+        }
+
+        return saw_scope ? TPResult::True : TPResult::False;
+    } catch (const FatalErrorLimitReached&) {
+        return TPResult::Error;
+    } catch (const ParseError&) {
+        return TPResult::Error;
+    }
+}
+
+Parser::TPResult Parser::try_parse_cpp_qualified_declarator() {
+    if (!is_cxx_mode_active() || !isTokenDeclarationSpec(current_token())) {
+        return TPResult::False;
+    }
+    RevertingTentativeParsingAction tentative(*this);
+    size_t start_idx = tok_mgnt.get_token_idx();
+
+    tentative_syntax_probe::Config probe_cfg{
+        .cxx_mode = is_cxx_mode_active(),
+        .blocks_enabled = type_ctx && type_ctx->target &&
+            darwin_blocks::blocks_enabled_for_langopts(
+                lang_opts, *type_ctx->target)
+    };
+    tentative_syntax_probe::Result syntax_probe_result =
+        tentative_syntax_probe::probe_cpp_qualified_declarator(tok_mgnt, probe_cfg);
+    if (syntax_probe_result == tentative_syntax_probe::Result::Match) {
+        return TPResult::True;
+    }
+    if (syntax_probe_result == tentative_syntax_probe::Result::NoMatch) {
+        return TPResult::False;
+    }
+    if (syntax_probe_result == tentative_syntax_probe::Result::Error) {
+        return TPResult::Error;
+    }
+
+    tok_mgnt.set_token_idx(start_idx);
+    try {
+        DeclarationParser decl(this);
+        auto parsed_type = decl.parse_declaration();
+        if (!parsed_type) {
+            return TPResult::Error;
+        }
+        if (is_cpp_scope_resolution_here()) {
+            return TPResult::True;
+        }
+        return TPResult::False;
+    } catch (const FatalErrorLimitReached&) {
+        return TPResult::Error;
+    } catch (const ParseError&) {
+        return TPResult::Error;
+    }
+}
+
+namespace {
+bool is_cpp_record_key_token(TokenType tok) {
+    return tok == TokenType::CLASS ||
+           tok == TokenType::STRUCT ||
+           tok == TokenType::UNION;
+}
+
+bool is_access_specifier_token(TokenType tok) {
+    return tok == TokenType::PUBLIC_KW ||
+           tok == TokenType::PRIVATE_KW ||
+           tok == TokenType::PROTECTED_KW;
+}
+
+CppAccessSpecifier to_cpp_access_specifier(TokenType tok) {
+    switch (tok) {
+        case TokenType::PUBLIC_KW:
+            return CppAccessSpecifier::Public;
+        case TokenType::PRIVATE_KW:
+            return CppAccessSpecifier::Private;
+        case TokenType::PROTECTED_KW:
+            return CppAccessSpecifier::Protected;
+        default:
+            return CppAccessSpecifier::None;
+    }
+}
+} // namespace
+
+std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
+    if (!is_cxx_mode_active() || cxx_record_parse_stack_.empty()) {
+        error("internal error: constructor parser invoked outside C++ class scope");
+    }
+    const auto& record_frame = cxx_record_parse_stack_.back();
+    if (record_frame.kind == CppRecordKind::Union || record_frame.name.empty()) {
+        error("internal error: constructor parser requires a named class context");
+    }
+    const std::string& record_name = record_frame.name;
+
+    bool is_explicit = false;
+    if (gentle_check(TokenType::EXPLICIT_KW)) {
+        is_explicit = true;
+        advance();
+    }
+
+    Token ctor_name_tok = current_token();
+    if (!gentle_check(TokenType::IDENTIFIER) ||
+        current_token().value != record_name) {
+        error("expected constructor name '" + record_name + "'");
+    }
+    advance(); // consume constructor name
+
+    check_and_consume(TokenType::LEFT_PAREN);
+
+    std::vector<std::unique_ptr<Decl>> params;
+    std::vector<QualType> param_types;
+    bool is_variadic = false;
+    bool has_prototype = true;
+    bool saw_default_argument = false;
+    if (!gentle_check_and_consume(TokenType::RIGHT_PAREN)) {
+        while (true) {
+            if (gentle_check_and_consume(TokenType::ELLIPSIS)) {
+                is_variadic = true;
+                check_and_consume(TokenType::RIGHT_PAREN);
+                break;
+            }
+
+            DeclarationParser param_parser(this);
+            param_parser.in_function_parameter = true;
+            auto param_type_raw = param_parser.parse_declaration();
+            if (!param_type_raw) {
+                error("invalid constructor parameter declaration");
+            }
+            if (param_parser.is_constexpr) {
+                error("'constexpr' is not valid for function parameter declarations");
+            }
+
+            QualType param_type(param_type_raw, param_parser.qualifiers);
+            if (param_type && param_type->isVoid() && !param_parser.name.empty()) {
+                error("Argument cannot have 'void' type");
+            }
+
+            auto param_decl = collect_->collect_parameter_declaration(
+                param_type,
+                param_parser.name,
+                nullptr,
+                param_parser.str_class,
+                param_parser.begin_loc);
+            if (auto* typed_param = dyn_cast<ParamDecl>(param_decl.get())) {
+                typed_param->is_constexpr = param_parser.is_constexpr;
+                typed_param->is_parameter_pack = param_parser.is_parameter_pack;
+                set_param_decl_default_argument(
+                    typed_param,
+                    std::move(param_parser.default_argument));
+            }
+
+            params.push_back(std::move(param_decl));
+            param_types.push_back(param_type);
+
+            bool has_default_argument = false;
+            if (gentle_check(TokenType::ASSIGN)) {
+                advance(); // '='
+                if (params.empty()) {
+                    error("internal error: constructor parameter list state is inconsistent");
+                }
+                auto* typed_param = dyn_cast<ParamDecl>(params.back().get());
+                if (!typed_param) {
+                    error("internal error: constructor parameter was not parsed as ParamDecl");
+                }
+                auto default_argument = parse_assignment_expression();
+                if (!default_argument) {
+                    error("invalid default argument expression");
+                }
+                set_param_decl_default_argument(
+                    typed_param,
+                    std::move(default_argument));
+                has_default_argument = true;
+            }
+            if (has_default_argument) {
+                saw_default_argument = true;
+            } else if (saw_default_argument) {
+                error("parameter without a default argument follows parameter with a default argument");
+            }
+
+            if (gentle_check_and_consume(TokenType::COMMA)) {
+                continue;
+            }
+            check_and_consume(TokenType::RIGHT_PAREN);
+            break;
+        }
+    }
+
+    bool has_void_param = params.size() == 1 &&
+        isa<ParamDecl>(params.front().get()) &&
+        cast<ParamDecl>(params.front().get())->type &&
+        cast<ParamDecl>(params.front().get())->type->isVoid();
+    if (has_void_param && is_variadic) {
+        error("'void' parameter cannot be combined with '...'");
+    }
+
+    bool saw_invalid_cvref = false;
+    SrcLoc invalid_cvref_loc;
+    while (true) {
+        if (gentle_check(TokenType::CONST) || gentle_check(TokenType::VOLATILE)) {
+            if (!saw_invalid_cvref) {
+                invalid_cvref_loc = current_token().loc;
+            }
+            saw_invalid_cvref = true;
+            advance();
+            continue;
+        }
+        if (gentle_check(TokenType::BITWISE_AND)) {
+            if (!saw_invalid_cvref) {
+                invalid_cvref_loc = current_token().loc;
+            }
+            saw_invalid_cvref = true;
+            advance();
+            if (gentle_check(TokenType::BITWISE_AND)) {
+                advance();
+            }
+            continue;
+        }
+        break;
+    }
+    if (saw_invalid_cvref) {
+        error_custloc("constructor cannot have cv/ref qualifier", invalid_cvref_loc);
+    }
+
+    bool ctor_has_exception_spec = false;
+    FunctionExceptionSpecKind ctor_exception_spec =
+        FunctionExceptionSpecKind::PotentiallyThrowing;
+    if (gentle_check(TokenType::NOEXCEPT_KW)) {
+        FunctionType spec_probe;
+        parse_cpp_optional_noexcept_spec(spec_probe);
+        ctor_has_exception_spec = spec_probe.has_explicit_exception_spec;
+        ctor_exception_spec = spec_probe.exception_spec;
+    }
+
+    auto trailing_attrs = try_parse_attributes();
+    bool is_function_try_block = false;
+    size_t function_try_begin_token_idx = 0;
+    if (gentle_check(TokenType::TRY_KW)) {
+        is_function_try_block = true;
+        function_try_begin_token_idx = get_token_idx();
+        advance(); // 'try'
+    }
+
+    std::vector<CppCtorInitializer> parsed_ctor_initializers;
+    if (gentle_check(TokenType::COLON)) {
+        advance(); // ':'
+        std::unordered_set<std::string> seen_mem_inits;
+        bool saw_delegating_initializer = false;
+        bool saw_non_delegating_initializer = false;
+        while (true) {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error("expected member name in constructor mem-initializer-list");
+            }
+            Token member_tok = current_token();
+            std::string member_name = member_tok.value;
+            advance();
+
+            bool is_delegating_initializer = member_name == record_name;
+            if (is_delegating_initializer) {
+                if (saw_non_delegating_initializer) {
+                    error_custloc(
+                        "delegating constructor initializer must appear alone",
+                        member_tok.loc);
+                }
+                saw_delegating_initializer = true;
+            } else {
+                if (saw_delegating_initializer) {
+                    error_custloc(
+                        "delegating constructor initializer must appear alone",
+                        member_tok.loc);
+                }
+                saw_non_delegating_initializer = true;
+            }
+
+            if (!seen_mem_inits.insert(member_name).second) {
+                error_custloc(
+                    "constructor mem-initializer-list has duplicate member '" +
+                        member_name + "'",
+                    member_tok.loc);
+            }
+
+            CppCtorInitializer mem_init;
+            mem_init.member_name = member_name;
+            mem_init.is_delegating_initializer = is_delegating_initializer;
+            mem_init.location = member_tok.loc;
+
+            if (gentle_check(TokenType::LEFT_PAREN)) {
+                mem_init.is_list_init = false;
+                mem_init.deferred_init_begin_token_idx = get_token_idx();
+                skip_balanced_token_sequence_tokens(
+                    TokenType::LEFT_PAREN,
+                    TokenType::RIGHT_PAREN,
+                    "expected ')' to close constructor member initializer");
+                mem_init.deferred_init_end_token_idx = get_token_idx();
+            } else if (gentle_check(TokenType::LEFT_BRACE)) {
+                mem_init.is_list_init = true;
+                mem_init.deferred_init_begin_token_idx = get_token_idx();
+                skip_balanced_token_sequence_tokens(
+                    TokenType::LEFT_BRACE,
+                    TokenType::RIGHT_BRACE,
+                    "expected '}' to close constructor member initializer");
+                mem_init.deferred_init_end_token_idx = get_token_idx();
+            } else {
+                error("expected '(' or '{' after constructor mem-initializer '" +
+                      member_name + "'");
+            }
+
+            parsed_ctor_initializers.push_back(std::move(mem_init));
+
+            if (!gentle_check_and_consume(TokenType::COMMA)) {
+                break;
+            }
+        }
+    }
+
+    bool is_deleted = false;
+    bool is_defaulted = false;
+    if (gentle_check(TokenType::ASSIGN)) {
+        SrcLoc suffix_loc = current_token().loc;
+        advance(); // '='
+        if (gentle_check(TokenType::DEFAULT)) {
+            is_defaulted = true;
+            advance(); // 'default'
+        } else if (gentle_check(TokenType::DELETE)) {
+            is_deleted = true;
+            advance(); // 'delete'
+        } else {
+            fail_cpp_unsupported("constructor declaration suffix", suffix_loc);
+        }
+    }
+
+    auto ctor_fn_type = std::make_shared<FunctionType>();
+    ctor_fn_type->ret_type = QualType(type_ctx->get_builtin(BuiltinTypes::Void));
+    ctor_fn_type->parameters = param_types;
+    ctor_fn_type->is_variadic = is_variadic;
+    ctor_fn_type->has_prototype = has_prototype;
+    ctor_fn_type->has_explicit_exception_spec = ctor_has_exception_spec;
+    ctor_fn_type->exception_spec = ctor_exception_spec;
+
+    auto ctor_decl = make_ast<CppConstructorDecl>(
+        *ast_ctx,
+        record_name,
+        ctor_fn_type,
+        std::move(params),
+        nullptr,
+        std::unordered_set<std::string>{},
+        StorageClass::NONE,
+        false,
+        is_explicit,
+        ctor_name_tok.loc);
+    ctor_decl->type = ctor_fn_type;
+    ctor_decl->is_constexpr = false;
+    ctor_decl->is_deleted = is_deleted;
+    ctor_decl->is_defaulted = is_defaulted;
+    ctor_decl->set_language_linkage(current_decl_language_linkage());
+    ctor_decl->ctor_initializers = std::move(parsed_ctor_initializers);
+
+    std::string ctor_qualifier_prefix;
+    if (auto* existing_prefix = get_func_decl_cxx_qualifier_prefix(ctor_decl.get())) {
+        ctor_qualifier_prefix = *existing_prefix;
+    }
+    qualified_name_utils::ensure_namespace_qualifier_prefix_for_scope(
+        collect_->collect_current_scope(), ctor_qualifier_prefix);
+    std::string record_qualifier_prefix = current_cpp_record_qualifier_prefix();
+    if (!record_qualifier_prefix.empty()) {
+        if (!ctor_qualifier_prefix.empty()) {
+            ctor_qualifier_prefix += "::";
+        }
+        ctor_qualifier_prefix += record_qualifier_prefix;
+    }
+    if (!ctor_qualifier_prefix.empty()) {
+        set_func_decl_cxx_qualifier_prefix(ctor_decl.get(), ctor_qualifier_prefix);
+    }
+
+    auto owner_type =
+        record_frame.semantic_owner
+            ? record_frame.semantic_owner->get_record_type()
+            : nullptr;
+    if (!owner_type) {
+        auto owner_type_raw = collect_->collect_lookup_tag_type(record_name, false);
+        owner_type = dyn_cast_shared<ObjectType>(owner_type_raw);
+    }
+    if (owner_type) {
+        QualType this_type(
+            std::make_shared<PointerType>(QualType(owner_type)));
+        auto this_param = collect_->collect_parameter_declaration(
+            this_type, "this", nullptr, StorageClass::NONE, ctor_name_tok.loc);
+        ctor_decl->parameters.insert(
+            ctor_decl->parameters.begin(), std::move(this_param));
+        auto fn_type = dyn_cast_shared<FunctionType>(ctor_decl->type);
+        if (fn_type) {
+            fn_type->parameters.insert(fn_type->parameters.begin(), this_type);
+            fn_type->has_prototype = true;
+        }
+    }
+
+    if (is_deleted || is_defaulted) {
+        if (!ctor_decl->ctor_initializers.empty()) {
+            error("defaulted/deleted constructor cannot have a member initializer list");
+        }
+        if (is_defaulted) {
+            ctor_decl->body = make_ast<CompoundStmt>(
+                *ast_ctx,
+                std::vector<std::unique_ptr<Stmt>>{},
+                ctor_name_tok.loc);
+        }
+        check_and_consume(TokenType::SEMICOLON);
+        ast_ctx->append_attrs(ctor_decl->node_id, std::move(trailing_attrs));
+        return ctor_decl;
+    }
+
+    bool has_inline_body = gentle_check(TokenType::LEFT_BRACE);
+    if (is_function_try_block) {
+        if (!gentle_check(TokenType::LEFT_BRACE)) {
+            error("constructor function-try-block requires a function body");
+        }
+        size_t body_begin_token_idx = function_try_begin_token_idx;
+        skip_cpp_function_try_block_tail_tokens();
+        size_t body_end_token_idx = get_token_idx();
+        ctor_decl->set_deferred_inline_body_token_range(
+            body_begin_token_idx, body_end_token_idx);
+    } else if (has_inline_body) {
+        size_t body_begin_token_idx = get_token_idx();
+        skip_balanced_token_sequence_tokens(
+            TokenType::LEFT_BRACE,
+            TokenType::RIGHT_BRACE,
+            "expected '}' to close constructor body");
+        size_t body_end_token_idx = get_token_idx();
+        ctor_decl->set_deferred_inline_body_token_range(
+            body_begin_token_idx, body_end_token_idx);
+    } else {
+        if (!ctor_decl->ctor_initializers.empty()) {
+            error("constructor with mem-initializer-list requires a function body");
+        }
+        check_and_consume(TokenType::SEMICOLON);
+    }
+
+    ast_ctx->append_attrs(ctor_decl->node_id, std::move(trailing_attrs));
+    return ctor_decl;
+}
+
+std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
+    if (!is_cxx_mode_active() || cxx_record_parse_stack_.empty()) {
+        error("internal error: destructor parser invoked outside C++ class scope");
+    }
+    const auto& record_frame = cxx_record_parse_stack_.back();
+    if (record_frame.name.empty()) {
+        error("internal error: destructor parser requires a named class context");
+    }
+    const std::string& record_name = record_frame.name;
+
+    Token tilde_tok = current_token();
+    if (!gentle_check(TokenType::BITWISE_NOT)) {
+        error("expected '~' to begin destructor declaration");
+    }
+    advance(); // '~'
+
+    Token dtor_name_tok = current_token();
+    if (!gentle_check(TokenType::IDENTIFIER) ||
+        current_token().value != record_name) {
+        error("expected destructor name '~" + record_name + "'");
+    }
+    advance(); // consume destructor name
+
+    check_and_consume(TokenType::LEFT_PAREN);
+    if (!gentle_check_and_consume(TokenType::RIGHT_PAREN)) {
+        if (gentle_check(TokenType::VOID) &&
+            peek_token().type == TokenType::RIGHT_PAREN) {
+            advance(); // consume 'void'
+            check_and_consume(TokenType::RIGHT_PAREN);
+        } else {
+            SrcLoc invalid_param_loc = current_token().loc;
+            while (!gentle_check(TokenType::RIGHT_PAREN) &&
+                   !gentle_check(TokenType::Eof)) {
+                advance();
+            }
+            gentle_check_and_consume(TokenType::RIGHT_PAREN);
+            error_custloc("destructor cannot have parameters", invalid_param_loc);
+        }
+    }
+
+    bool saw_invalid_cvref = false;
+    SrcLoc invalid_cvref_loc;
+    while (true) {
+        if (gentle_check(TokenType::CONST) || gentle_check(TokenType::VOLATILE)) {
+            if (!saw_invalid_cvref) {
+                invalid_cvref_loc = current_token().loc;
+            }
+            saw_invalid_cvref = true;
+            advance();
+            continue;
+        }
+        if (gentle_check(TokenType::BITWISE_AND)) {
+            if (!saw_invalid_cvref) {
+                invalid_cvref_loc = current_token().loc;
+            }
+            saw_invalid_cvref = true;
+            advance();
+            if (gentle_check(TokenType::BITWISE_AND)) {
+                advance();
+            }
+            continue;
+        }
+        break;
+    }
+    if (saw_invalid_cvref) {
+        error_custloc("destructor cannot have cv/ref qualifier", invalid_cvref_loc);
+    }
+
+    bool dtor_has_exception_spec = false;
+    FunctionExceptionSpecKind dtor_exception_spec =
+        FunctionExceptionSpecKind::PotentiallyThrowing;
+    if (gentle_check(TokenType::NOEXCEPT_KW)) {
+        FunctionType spec_probe;
+        parse_cpp_optional_noexcept_spec(spec_probe);
+        dtor_has_exception_spec = spec_probe.has_explicit_exception_spec;
+        dtor_exception_spec = spec_probe.exception_spec;
+    }
+
+    bool is_override = false;
+    bool is_final = false;
+    while (gentle_check(TokenType::IDENTIFIER)) {
+        const std::string& spelling = current_token().value;
+        if (spelling == "override") {
+            if (is_override) {
+                error("duplicate 'override' specifier");
+            }
+            is_override = true;
+            advance();
+            continue;
+        }
+        if (spelling == "final") {
+            if (is_final) {
+                error("duplicate 'final' specifier");
+            }
+            is_final = true;
+            advance();
+            continue;
+        }
+        break;
+    }
+
+    auto trailing_attrs = try_parse_attributes();
+
+    bool is_deleted = false;
+    bool is_defaulted = false;
+    bool is_pure = false;
+    if (gentle_check(TokenType::ASSIGN)) {
+        SrcLoc suffix_loc = current_token().loc;
+        advance(); // '='
+        if (gentle_check(TokenType::DEFAULT)) {
+            is_defaulted = true;
+            advance(); // 'default'
+        } else if (gentle_check(TokenType::DELETE)) {
+            is_deleted = true;
+            advance(); // 'delete'
+        } else if (gentle_check(TokenType::INTEGER_CONST) &&
+                   current_token().value == "0") {
+            is_pure = true;
+            advance(); // '0'
+        } else {
+            fail_cpp_unsupported("destructor declaration suffix", suffix_loc);
+        }
+    }
+
+    auto dtor_fn_type = std::make_shared<FunctionType>();
+    dtor_fn_type->ret_type = QualType(type_ctx->get_builtin(BuiltinTypes::Void));
+    dtor_fn_type->is_variadic = false;
+    dtor_fn_type->has_prototype = true;
+    dtor_fn_type->has_explicit_exception_spec = dtor_has_exception_spec;
+    dtor_fn_type->exception_spec = dtor_exception_spec;
+
+    std::vector<std::unique_ptr<Decl>> params;
+    auto dtor_decl = make_ast<CppDestructorDecl>(
+        *ast_ctx,
+        "~" + record_name,
+        dtor_fn_type,
+        std::move(params),
+        nullptr,
+        std::unordered_set<std::string>{},
+        StorageClass::NONE,
+        false,
+        tilde_tok.loc);
+    dtor_decl->type = dtor_fn_type;
+    dtor_decl->is_constexpr = false;
+    dtor_decl->is_deleted = is_deleted;
+    dtor_decl->is_defaulted = is_defaulted;
+    dtor_decl->is_override = is_override;
+    dtor_decl->is_final = is_final;
+    dtor_decl->is_pure = is_pure;
+    dtor_decl->set_language_linkage(current_decl_language_linkage());
+
+    std::string dtor_qualifier_prefix;
+    if (auto* existing_prefix = get_func_decl_cxx_qualifier_prefix(dtor_decl.get())) {
+        dtor_qualifier_prefix = *existing_prefix;
+    }
+    qualified_name_utils::ensure_namespace_qualifier_prefix_for_scope(
+        collect_->collect_current_scope(), dtor_qualifier_prefix);
+    std::string record_qualifier_prefix = current_cpp_record_qualifier_prefix();
+    if (!record_qualifier_prefix.empty()) {
+        if (!dtor_qualifier_prefix.empty()) {
+            dtor_qualifier_prefix += "::";
+        }
+        dtor_qualifier_prefix += record_qualifier_prefix;
+    }
+    if (!dtor_qualifier_prefix.empty()) {
+        set_func_decl_cxx_qualifier_prefix(dtor_decl.get(), dtor_qualifier_prefix);
+    }
+
+    auto owner_type =
+        record_frame.semantic_owner
+            ? record_frame.semantic_owner->get_record_type()
+            : nullptr;
+    if (!owner_type) {
+        auto owner_type_raw = collect_->collect_lookup_tag_type(record_name, false);
+        owner_type = dyn_cast_shared<ObjectType>(owner_type_raw);
+    }
+    if (owner_type) {
+        QualType this_type(
+            std::make_shared<PointerType>(QualType(owner_type)));
+        auto this_param = collect_->collect_parameter_declaration(
+            this_type, "this", nullptr, StorageClass::NONE, dtor_name_tok.loc);
+        dtor_decl->parameters.insert(
+            dtor_decl->parameters.begin(), std::move(this_param));
+        auto fn_type = dyn_cast_shared<FunctionType>(dtor_decl->type);
+        if (fn_type) {
+            fn_type->parameters.insert(fn_type->parameters.begin(), this_type);
+            fn_type->has_prototype = true;
+        }
+    }
+
+    if (is_deleted || is_defaulted || is_pure) {
+        if (is_defaulted) {
+            dtor_decl->body = make_ast<CompoundStmt>(
+                *ast_ctx,
+                std::vector<std::unique_ptr<Stmt>>{},
+                tilde_tok.loc);
+        }
+        check_and_consume(TokenType::SEMICOLON);
+        ast_ctx->append_attrs(dtor_decl->node_id, std::move(trailing_attrs));
+        return dtor_decl;
+    }
+
+    bool has_function_try_block = gentle_check(TokenType::TRY_KW);
+    bool has_inline_body =
+        has_function_try_block || gentle_check(TokenType::LEFT_BRACE);
+    if (is_pure && has_inline_body) {
+        error("pure virtual destructor cannot have a function body");
+    }
+    if (has_function_try_block) {
+        size_t body_begin_token_idx = get_token_idx();
+        skip_cpp_function_try_block_tokens(false);
+        size_t body_end_token_idx = get_token_idx();
+        dtor_decl->set_deferred_inline_body_token_range(
+            body_begin_token_idx, body_end_token_idx);
+    } else if (has_inline_body) {
+        size_t body_begin_token_idx = get_token_idx();
+        skip_balanced_token_sequence_tokens(
+            TokenType::LEFT_BRACE,
+            TokenType::RIGHT_BRACE,
+            "expected '}' to close destructor body");
+        size_t body_end_token_idx = get_token_idx();
+        dtor_decl->set_deferred_inline_body_token_range(
+            body_begin_token_idx, body_end_token_idx);
+    } else {
+        check_and_consume(TokenType::SEMICOLON);
+    }
+
+    ast_ctx->append_attrs(dtor_decl->node_id, std::move(trailing_attrs));
+    return dtor_decl;
+}
+
+std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
+    std::vector<TemplateArgument>* specialization_arguments_out,
+    bool suppress_placeholder_type) {
+    Token key_tok = current_token();
+    CppRecordKind record_kind = CppRecordKind::Class;
+    switch (key_tok.type) {
+        case TokenType::CLASS:
+            record_kind = CppRecordKind::Class;
+            break;
+        case TokenType::STRUCT:
+            record_kind = CppRecordKind::Struct;
+            break;
+        case TokenType::UNION:
+            record_kind = CppRecordKind::Union;
+            break;
+        default:
+            fail_cpp_unsupported("record declaration key", key_tok.loc);
+    }
+    advance(); // consume class/struct/union key
+
+    std::string name;
+    if (gentle_check(TokenType::IDENTIFIER)) {
+        name = current_token().value;
+        advance();
+    }
+
+    if (specialization_arguments_out && gentle_check(TokenType::LESS_THAN)) {
+        *specialization_arguments_out = parse_cpp_template_argument_list();
+    }
+
+    std::vector<CppBaseSpecifier> bases;
+    if (gentle_check(TokenType::COLON)) {
+        if (record_kind == CppRecordKind::Union) {
+            error_custloc("union cannot have base classes", current_token().loc);
+        }
+        advance(); // ':'
+
+        auto parse_base_name = [&]() -> std::string {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error("expected base class name");
+            }
+            std::string base_name = current_token().value;
+            advance();
+            while (is_cpp_scope_resolution_here()) {
+                consume_cpp_scope_resolution();
+                if (!gentle_check(TokenType::IDENTIFIER)) {
+                    error("expected identifier after '::' in base-specifier");
+                }
+                base_name += "::";
+                base_name += current_token().value;
+                advance();
+            }
+            return base_name;
+        };
+
+        while (true) {
+            SrcLoc base_loc = current_token().loc;
+            bool is_virtual_base = false;
+            CppAccessSpecifier access = CppAccessSpecifier::None;
+
+            bool consumed_prefix = true;
+            while (consumed_prefix) {
+                consumed_prefix = false;
+                if (gentle_check(TokenType::VIRTUAL_KW) && !is_virtual_base) {
+                    is_virtual_base = true;
+                    advance();
+                    consumed_prefix = true;
+                    continue;
+                }
+                if (is_access_specifier_token(current_token().type) &&
+                    access == CppAccessSpecifier::None) {
+                    access = to_cpp_access_specifier(current_token().type);
+                    advance();
+                    consumed_prefix = true;
+                    continue;
+                }
+            }
+
+            std::string base_name = parse_base_name();
+            bool is_pack_expansion =
+                gentle_check_and_consume(TokenType::ELLIPSIS);
+            if (is_pack_expansion && !is_in_template_pattern_context()) {
+                error_custloc(
+                    "pack expansion is only supported in template patterns",
+                    current_token().loc);
+            }
+            if (access == CppAccessSpecifier::None) {
+                access = (record_kind == CppRecordKind::Class)
+                    ? CppAccessSpecifier::Private
+                    : CppAccessSpecifier::Public;
+            }
+            bases.emplace_back(
+                base_name,
+                access,
+                is_virtual_base,
+                is_pack_expansion,
+                base_loc);
+
+            if (!gentle_check_and_consume(TokenType::COMMA)) {
+                break;
+            }
+        }
+    }
+
+    if (record_kind != CppRecordKind::Union &&
+        !name.empty() &&
+        gentle_check(TokenType::LEFT_BRACE) &&
+        !suppress_placeholder_type) {
+        ensure_cpp_class_placeholder_type(name, key_tok.loc);
+    }
+
+    if (!gentle_check(TokenType::LEFT_BRACE)) {
+        if (!bases.empty()) {
+            error("base-clause requires a class definition");
+        }
+        auto record = make_ast<CppRecordDecl>(
+            *ast_ctx,
+            record_kind,
+            std::move(name),
+            std::move(bases),
+            false,
+            key_tok.loc);
+        return record;
+    }
+
+    check_and_consume(TokenType::LEFT_BRACE);
+
+    const ObjectDecl* semantic_owner = nullptr;
+    if (specialization_arguments_out && !specialization_arguments_out->empty()) {
+        semantic_owner =
+            ensure_cpp_specialized_record_semantic_owner(
+                record_kind,
+                name,
+                *specialization_arguments_out,
+                key_tok.loc);
+    }
+    cxx_record_parse_stack_.push_back(
+        CppRecordParseFrame{record_kind, name, semantic_owner});
+    struct CppRecordStackGuard {
+        std::vector<Parser::CppRecordParseFrame>* stack = nullptr;
+        ~CppRecordStackGuard() {
+            if (stack && !stack->empty()) {
+                stack->pop_back();
+            }
+        }
+    } record_stack_guard{&cxx_record_parse_stack_};
+
+    std::vector<std::unique_ptr<Decl>> members;
+    size_t last_recovery_idx = std::numeric_limits<size_t>::max();
+    while (!gentle_check(TokenType::RIGHT_BRACE) && !gentle_check(TokenType::Eof)) {
+        try {
+            bool member_leading_virtual = false;
+            if (gentle_check(TokenType::VIRTUAL_KW)) {
+                member_leading_virtual = true;
+                advance();
+            }
+
+            if (is_access_specifier_token(current_token().type) &&
+                peek_token().type == TokenType::COLON) {
+                if (member_leading_virtual) {
+                    error_custloc("expected member declaration after 'virtual'",
+                                  current_token().loc);
+                }
+                CppAccessSpecifier access = to_cpp_access_specifier(current_token().type);
+                SrcLoc access_loc = current_token().loc;
+                advance(); // public/private/protected
+                check_and_consume(TokenType::COLON);
+                members.push_back(make_ast<CppAccessSpecDecl>(*ast_ctx, access, access_loc));
+                diag_engine->sync_point_reached();
+                last_recovery_idx = std::numeric_limits<size_t>::max();
+                continue;
+            }
+
+            if (gentle_check(TokenType::TEMPLATE)) {
+                if (member_leading_virtual) {
+                    error_custloc("expected member declaration after 'virtual'",
+                                  current_token().loc);
+                }
+                auto templated_members = parse_cpp_template_declaration();
+                members.insert(
+                    members.end(),
+                    std::make_move_iterator(templated_members.begin()),
+                    std::make_move_iterator(templated_members.end()));
+                diag_engine->sync_point_reached();
+                last_recovery_idx = std::numeric_limits<size_t>::max();
+                continue;
+            }
+            if (gentle_check(TokenType::USING)) {
+                if (member_leading_virtual) {
+                    error_custloc("expected member declaration after 'virtual'",
+                                  current_token().loc);
+                }
+                auto using_members = parse_cpp_using_alias_declaration();
+                members.insert(
+                    members.end(),
+                    std::make_move_iterator(using_members.begin()),
+                    std::make_move_iterator(using_members.end()));
+                diag_engine->sync_point_reached();
+                last_recovery_idx = std::numeric_limits<size_t>::max();
+                continue;
+            }
+            if (gentle_check(TokenType::OPERATOR_KW)) {
+                fail_cpp_unsupported("operator-function declaration", current_token().loc);
+            }
+            if (!cxx_record_parse_stack_.empty() &&
+                !cxx_record_parse_stack_.back().name.empty()) {
+                const std::string& record_name = cxx_record_parse_stack_.back().name;
+                bool in_named_record =
+                    cxx_record_parse_stack_.back().kind != CppRecordKind::Union;
+                if (in_named_record) {
+                    bool looks_like_constructor =
+                        gentle_check(TokenType::IDENTIFIER) &&
+                        current_token().value == record_name &&
+                        peek_token().type == TokenType::LEFT_PAREN;
+                    bool looks_like_explicit_constructor =
+                        gentle_check(TokenType::EXPLICIT_KW) &&
+                        peek_token().type == TokenType::IDENTIFIER &&
+                        peek_token().value == record_name &&
+                        peek_token(2).type == TokenType::LEFT_PAREN;
+                    if (looks_like_constructor || looks_like_explicit_constructor) {
+                        if (member_leading_virtual) {
+                            error_custloc(
+                                "constructor cannot be declared 'virtual'",
+                                current_token().loc);
+                        }
+                        auto ctor_member = parse_cpp_constructor_member();
+                        if (ctor_member) {
+                            members.push_back(std::move(ctor_member));
+                            diag_engine->sync_point_reached();
+                            last_recovery_idx = std::numeric_limits<size_t>::max();
+                            continue;
+                        }
+                    }
+                }
+                if (gentle_check(TokenType::BITWISE_NOT) &&
+                    peek_token().type == TokenType::IDENTIFIER &&
+                    peek_token().value == record_name &&
+                    peek_token(2).type == TokenType::LEFT_PAREN) {
+                    auto dtor_member = parse_cpp_destructor_member();
+                    if (member_leading_virtual) {
+                        if (auto* dtor_decl = dyn_cast<CppDestructorDecl>(dtor_member.get())) {
+                            dtor_decl->is_virtual = true;
+                        }
+                    }
+                    if (dtor_member) {
+                        members.push_back(std::move(dtor_member));
+                        diag_engine->sync_point_reached();
+                        last_recovery_idx = std::numeric_limits<size_t>::max();
+                        continue;
+                    }
+                }
+            }
+
+            if (is_cxx_mode_active() && is_cpp_record_key_token(current_token().type)) {
+                if (member_leading_virtual) {
+                    error_custloc("record declarations cannot be declared 'virtual'",
+                                  current_token().loc);
+                }
+                auto nested = parse_cpp_record_specifier();
+                check_and_consume(TokenType::SEMICOLON);
+                members.push_back(std::move(nested));
+                diag_engine->sync_point_reached();
+                last_recovery_idx = std::numeric_limits<size_t>::max();
+                continue;
+            }
+
+            auto parsed_members = parse_struct_declaration(member_leading_virtual);
+            for (auto& member : parsed_members) {
+                members.push_back(std::move(member));
+            }
+            diag_engine->sync_point_reached();
+            last_recovery_idx = std::numeric_limits<size_t>::max();
+        } catch (ParseError& e) {
+            if (is_in_tentative_context()) {
+                throw;
+            }
+            size_t recover_start_idx = get_token_idx();
+            skip_to_field_sync_point();
+            if (get_token_idx() == recover_start_idx &&
+                recover_start_idx == last_recovery_idx &&
+                !gentle_check(TokenType::Eof)) {
+                advance();
+            }
+            last_recovery_idx = get_token_idx();
+            diag_engine->sync_point_reached();
+            members.push_back(collect_->collect_error_declaration(e.message, e.location));
+        }
+    }
+
+    check_and_consume(TokenType::RIGHT_BRACE);
+
+    auto record = make_ast<CppRecordDecl>(
+        *ast_ctx,
+        record_kind,
+        std::move(name),
+        std::move(bases),
+        std::move(members),
+        true,
+        key_tok.loc);
+    return record;
+}

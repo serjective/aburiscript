@@ -1,0 +1,33 @@
+name: Feature Request
+description: Propose a language feature, driver improvement, documentation gap, or release-related enhancement.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What would you like Aburiscript to support or improve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why does this matter? What real code, workflow, or user need does it unblock?
+    validations:
+      required: true
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Examples or Prior Art
+      description: Include sample code, references to Clang/GCC behavior, or links to projects that depend on this.
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Proposed Scope
+      description: If you have a concrete idea for a minimal first version, describe it here.

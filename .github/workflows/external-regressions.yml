@@ -1,0 +1,99 @@
+name: External Regressions
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "**/*.cpp"
+      - "**/*.h"
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "scripts/ci/**"
+      - ".github/workflows/external-regressions.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.cpp"
+      - "**/*.h"
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "scripts/ci/**"
+      - ".github/workflows/external-regressions.yml"
+
+jobs:
+  external-regressions:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: multimedia
+            script: real_world_multimedia.sh
+            project: ffmpeg
+            validation_root: /tmp/aburi-real-world-validation
+          - suite: multimedia
+            script: real_world_multimedia.sh
+            project: librempeg
+            validation_root: /tmp/aburi-real-world-validation
+          - suite: multimedia
+            script: real_world_multimedia.sh
+            project: libplacebo
+            validation_root: /tmp/aburi-real-world-validation
+          - suite: multimedia
+            script: real_world_multimedia.sh
+            project: ghostscript
+            validation_root: /tmp/aburi-real-world-validation
+          - suite: database
+            script: real_world_database.sh
+            project: sqlite
+            validation_root: /tmp/aburi-real-world-database-validation
+          - suite: database
+            script: real_world_database.sh
+            project: postgres
+            validation_root: /tmp/aburi-real-world-database-validation
+          - suite: database
+            script: real_world_database.sh
+            project: redis
+            validation_root: /tmp/aburi-real-world-database-validation
+          - suite: compilers
+            script: real_world_compilers.sh
+            project: chibicc
+            validation_root: /tmp/aburi-real-world-compilers-validation
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add Homebrew To PATH
+        run: echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
+      - name: Install macOS build dependencies
+        run: ./scripts/ci/install_macos_build_deps.sh
+
+      - name: Add LLVM To PATH
+        run: echo "$(brew --prefix llvm@18)/bin" >> "$GITHUB_PATH"
+
+      - name: Configure Aburiscript
+        run: >
+          cmake -S . -B cmake-build-debug
+          -DCMAKE_BUILD_TYPE=Release
+          -DABURI_BUILD_TESTS=OFF
+          -DLLVM_DIR="$(brew --prefix llvm@18)/lib/cmake/llvm"
+
+      - name: Build aburi
+        run: cmake --build cmake-build-debug --target aburi -j"$(sysctl -n hw.logicalcpu)"
+
+      - name: Validate ${{ matrix.project }}
+        env:
+          ABURI_BIN: ${{ github.workspace }}/cmake-build-debug/aburi
+          ABURI_VALIDATION_ROOT: ${{ matrix.validation_root }}
+        run: ./scripts/ci/${{ matrix.script }} "${{ matrix.project }}"
+
+      - name: Upload external validation logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-regressions-${{ matrix.suite }}-${{ matrix.project }}
+          path: ${{ matrix.validation_root }}/${{ matrix.project }}
+          if-no-files-found: warn

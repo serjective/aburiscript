@@ -1,0 +1,498 @@
+#include "collect.h"
+#include "collect_decl_internal.h"
+
+using namespace collect_decl_internal;
+
+namespace {
+
+bool should_defer_template_dependent_initializer_semantics(
+    const Collect& collect,
+    QualType target_type,
+    const Expr* init) {
+    if (!init) {
+        return false;
+    }
+    return collect.expression_depends_on_template_parameters(init) ||
+           type_depends_on_template_parameters(target_type);
+}
+
+bool any_initializer_argument_depends_on_template_parameters(
+    const Collect& collect,
+    const std::vector<std::unique_ptr<Expr>>& init_args) {
+    for (const auto& arg : init_args) {
+        if (arg && collect.expression_depends_on_template_parameters(arg.get())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+Collect::ArrayBoundResult Collect::collect_array_bound_expression(std::unique_ptr<Expr> expr) const {
+
+    ArrayBoundResult result{};
+    if (!expr) {
+        return result;
+    }
+
+    expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
+    if (!expr) {
+        return result;
+    }
+
+    auto eval_result = try_evaluate_with_consteval_compat(
+        expr.get(), ConstEvalMode::c_ice());
+    if (eval_result.has_value() && *eval_result >= 0) {
+        result.constant_size = static_cast<size_t>(*eval_result);
+        return result;
+    }
+    auto float_cast_eval = try_evaluate_float_cast_array_bound(expr.get());
+    if (float_cast_eval.has_value() && *float_cast_eval >= 0) {
+        result.constant_size = static_cast<size_t>(*float_cast_eval);
+        return result;
+    }
+
+    result.variable_size_expr = std::shared_ptr<Expr>(expr.release());
+    return result;
+}
+
+
+std::unique_ptr<Decl> Collect::collect_static_assert_declaration(std::unique_ptr<Expr> condition, std::string message, bool has_message, SrcLoc loc) const {
+
+    if (!condition) {
+        report_error("static assertion requires a constant expression", loc);
+        return collect_make<NopDecl>(loc);
+    }
+    condition = collect_apply_standard_conversions(std::move(condition), ExprUseContext::RValue);
+    auto val = try_evaluate_with_consteval_compat(
+        condition.get(), ConstEvalMode::c_ice());
+    if (!val.has_value()) {
+        report_error("static assertion expression is not an integer constant expression", loc);
+    } else if (*val == 0) {
+        std::string text = "static assertion failed";
+        if (has_message && !message.empty()) {
+            text += ": " + message;
+        }
+        report_error(text, loc);
+    }
+    // Static assertions are compile-time only and should not reach codegen.
+    return collect_make<NopDecl>(loc);
+}
+
+
+std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_type, const std::string& name, std::unique_ptr<Expr> init, std::shared_ptr<Symbol> sym, StorageClass storage_class, const VariableDeclFlags& flags, SrcLoc loc, LanguageLinkage language_linkage) const {
+
+    bool is_constexpr = flags.is_constexpr;
+    bool is_inline = flags.is_inline;
+    bool is_file_scope = flags.is_file_scope;
+    bool is_thread_local = flags.is_thread_local;
+    bool is_block_byref = flags.is_block_byref;
+    bool is_copy_initialization = flags.is_copy_initialization;
+    bool allow_abstract_object_type_instantiation = flags.allow_abstract_object_type_instantiation;
+
+    if (declared_type && contains_deferred_semantic_type(declared_type.get_shared())) {
+        declared_type = resolve_typeof_types(declared_type, loc);
+    }
+    if (is_constexpr && declared_type) {
+        declared_type = declared_type.with_const();
+    }
+    QualType written_declared_type = declared_type;
+    if (is_constexpr && storage_class == StorageClass::EXTERN) {
+        report_error("'constexpr' cannot be combined with 'extern'", loc);
+    }
+    if (is_constexpr && storage_class == StorageClass::AUTO) {
+        report_error("'constexpr' cannot be combined with 'auto'", loc);
+    }
+
+    resolve_auto_variable_type(declared_type, init, sym, name, loc);
+    // First reconcile: merge array bounds from a prior forward declaration
+    // (e.g., "extern int a[];" followed by "int a[3];") before the initializer
+    // is processed.  A second reconcile after initializer analysis (below)
+    // propagates bounds deduced from the init-list back to the symbol.
+    reconcile_array_declared_type_with_symbol(declared_type, sym);
+    validate_variable_declared_type(
+        declared_type,
+        name,
+        init,
+        storage_class,
+        is_inline,
+        is_file_scope,
+        loc);
+
+    if (is_constexpr && !init) {
+        report_error("constexpr variable requires an initializer", loc);
+    }
+
+    // --- Classify the variable declaration ---
+    // These derived flags determine which code paths (constructor selection,
+    // destructor binding, initializer processing) apply to this variable.
+    VariableInitializationSelection selection;
+    auto record_type =
+        declared_type
+            ? desugar_type(declared_type, ast_ctx_.get()).as_shared<ObjectType>()
+            : nullptr;
+    const TagDecl* tag_decl = record_type ? record_type->get_decl() : nullptr;
+    const ObjectDecl* record_decl =
+        (tag_decl && tag_decl->is_record_decl())
+            ? static_cast<const ObjectDecl*>(tag_decl)
+            : nullptr;
+    const RecordSemanticState* record_state =
+        record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
+
+    struct VarDeclAnalysis {
+        bool is_automatic_storage = false;
+        bool is_plain_extern_declaration = false;
+        bool is_abstract_object_type = false;
+        bool may_use_constructor_initialization = false;
+        bool should_use_constructor_overload = false;
+        bool supports_non_automatic_destructor_cleanup = false;
+    } analysis;
+
+    analysis.is_automatic_storage =
+        !is_file_scope &&
+        storage_class != StorageClass::STATIC &&
+        storage_class != StorageClass::EXTERN &&
+        !is_thread_local;
+    analysis.is_plain_extern_declaration =
+        storage_class == StorageClass::EXTERN && !init;
+    analysis.is_abstract_object_type =
+        lang_opts_.is_cxx_mode() &&
+        record_type &&
+        canonical_type_kind(declared_type, ast_ctx_.get()) == TypeKind::Object &&
+        record_state &&
+        record_state->is_abstract;
+
+    if (analysis.is_abstract_object_type &&
+        !allow_abstract_object_type_instantiation &&
+        !analysis.is_plain_extern_declaration) {
+        report_error(
+            "cannot instantiate abstract class type '" +
+                declared_type.to_string() + "'",
+            loc);
+    }
+
+    analysis.may_use_constructor_initialization =
+        lang_opts_.is_cxx_mode() &&
+        record_type &&
+        canonical_type_kind(declared_type, ast_ctx_.get()) == TypeKind::Object &&
+        (!analysis.is_abstract_object_type || allow_abstract_object_type_instantiation);
+    analysis.should_use_constructor_overload =
+        record_state &&
+        !record_state->constructors.empty() &&
+        record_state->definition_data.has_user_declared_constructor;
+
+    if (is_block_byref) {
+        if (!analysis.is_automatic_storage) {
+            report_error(
+                "'__block' is only supported on automatic local variables",
+                loc);
+        }
+        auto declared_kind = canonical_type_kind(declared_type, ast_ctx_.get());
+        if (declared_kind == TypeKind::Array) {
+            report_error(
+                "C parser unsupported syntax: '__block' array variables",
+                loc);
+        }
+        if (declared_kind == TypeKind::Reference) {
+            report_error(
+                "C++ parser unsupported syntax: '__block' reference variables",
+                loc);
+        }
+    }
+
+    // --- Constructor selection (C++ only) ---
+    if (analysis.may_use_constructor_initialization) {
+        if (!init) {
+            if (record_state && !record_state->constructors.empty()) {
+                std::vector<std::unique_ptr<Expr>> ctor_args;
+                selection.used_constructor_initialization = true;
+                if (!select_constructor_for_variable_initialization(
+                        record_type,
+                        std::move(ctor_args),
+                        false,
+                        false,
+                        declared_type,
+                        loc,
+                        selection)) {
+                    init = collect_make<ErrorExpr>("no matching constructor", loc);
+                }
+            }
+        } else if (analysis.should_use_constructor_overload) {
+            std::vector<std::unique_ptr<Expr>> ctor_args;
+            bool ctor_is_list_init = false;
+            selection.used_constructor_initialization = true;
+            if (auto* init_list = dyn_cast<InitListExpr>(init.get())) {
+                ctor_is_list_init = !init_list->is_paren_init;
+                auto owned_list = std::unique_ptr<InitListExpr>(
+                    static_cast<InitListExpr*>(init.release()));
+                for (auto& elem : owned_list->elements) {
+                    if (!elem.designators.empty()) {
+                        report_error(
+                            "designated initializers are not supported in constructor initialization",
+                            elem.loc);
+                    }
+                    if (!elem.value) {
+                        report_error(
+                            "missing initializer expression in constructor argument list",
+                            elem.loc);
+                        continue;
+                    }
+                    ctor_args.push_back(std::move(elem.value));
+                }
+            } else {
+                ctor_args.push_back(std::move(init));
+            }
+
+            if (select_constructor_for_variable_initialization(
+                    record_type,
+                    std::move(ctor_args),
+                    ctor_is_list_init,
+                    is_copy_initialization,
+                    declared_type,
+                    loc,
+                    selection)) {
+                if (selection.nonconstructor_init_expr) {
+                    selection.used_constructor_initialization = false;
+                    init = std::move(selection.nonconstructor_init_expr);
+                } else {
+                    selection.used_constructor_initialization = true;
+                    init.reset();
+                }
+            } else {
+                init = collect_make<ErrorExpr>("no matching constructor", loc);
+            }
+        }
+    }
+
+    analysis.supports_non_automatic_destructor_cleanup =
+        !is_thread_local &&
+        (is_file_scope || storage_class == StorageClass::STATIC);
+
+    // --- Destructor diagnostics and binding (C++ only) ---
+    if (lang_opts_.is_cxx_mode() &&
+        record_type &&
+        canonical_type_kind(declared_type, ast_ctx_.get()) == TypeKind::Object &&
+        !analysis.is_automatic_storage &&
+        !analysis.supports_non_automatic_destructor_cleanup &&
+        !analysis.is_plain_extern_declaration &&
+        record_state &&
+        record_state->definition_data.has_user_declared_destructor) {
+        if (is_thread_local) {
+            report_error(
+                "thread-local storage duration for variable '" + name +
+                    "' of type '" + declared_type.to_string() +
+                    "' with user-declared destructor is not supported yet",
+                loc);
+        } else {
+            report_error(
+                "non-automatic storage duration for variable '" + name +
+                    "' of type '" + declared_type.to_string() +
+                    "' with user-declared destructor is not supported yet",
+                loc);
+        }
+    }
+
+    if (lang_opts_.is_cxx_mode() &&
+        record_type &&
+        canonical_type_kind(declared_type, ast_ctx_.get()) == TypeKind::Object &&
+        (analysis.is_automatic_storage ||
+         (analysis.supports_non_automatic_destructor_cleanup &&
+          !analysis.is_plain_extern_declaration)) &&
+        record_state &&
+        !record_state->destructors.empty()) {
+        selection.destructor_symbol = select_destructor_for_variable(
+            name,
+            declared_type,
+            record_type,
+            loc);
+    }
+
+    // --- Initializer processing ---
+    if (init && !selection.used_constructor_initialization) {
+        bool defer_initializer_semantics =
+            should_defer_template_dependent_initializer_semantics(
+                *this,
+                declared_type,
+                init.get());
+        declared_type = clone_top_level_incomplete_array(declared_type);
+        init = process_initializer_for_type(std::move(init), declared_type, loc);
+        if (!defer_initializer_semantics &&
+            declared_type &&
+            canonical_type_kind(declared_type, ast_ctx_.get()) ==
+                TypeKind::Array) {
+            auto arr_type =
+                desugar_type(declared_type, ast_ctx_.get()).as_shared<ArrayType>();
+            if (arr_type && arr_type->size_kind == ArraySizeKind::Incomplete) {
+                if (auto* init_node = dyn_cast<InitListExpr>(init.get())) {
+                    arr_type->size_kind = ArraySizeKind::Constant;
+                    if (!init_node->mappings.empty()) {
+                        arr_type->size = init_node->mappings.rbegin()->first + 1;
+                    } else {
+                        arr_type->size = 0;
+                    }
+                } else if (auto* str_lit = dyn_cast<StringLiteral>(init.get())) {
+                    auto str_lit_type = str_lit->ctype.as_shared<ArrayType>();
+                    if (str_lit_type) {
+                        arr_type->size_kind = ArraySizeKind::Constant;
+                        arr_type->size = str_lit_type->size;
+                    }
+                }
+            }
+        }
+    }
+
+    if (is_constexpr && init) {
+        std::string constexpr_failure;
+        SrcLoc constexpr_failure_loc = loc;
+        if (!validate_constexpr_initializer_expr(
+                *this,
+                init.get(), constexpr_failure, constexpr_failure_loc)) {
+            report_error(
+                "constexpr initializer is not a constant expression: " + constexpr_failure,
+                constexpr_failure_loc);
+        }
+    }
+
+    // --- Finalize symbol and build declaration node ---
+    if (sym) {
+        // Second reconcile: propagate array bounds deduced from the initializer
+        // (e.g., "int a[] = {1,2,3};" yields size 3) back to the symbol type.
+        reconcile_array_declared_type_with_symbol(declared_type, sym);
+        sym->type = desugar_type(declared_type, ast_ctx_.get());
+        sym->is_constexpr = is_constexpr;
+        sym->is_block_byref = is_block_byref;
+    }
+
+    auto decl = collect_make<VariableDecl>(declared_type,
+        name,
+        std::move(init),
+        std::move(sym),
+        storage_class,
+        is_inline,
+        loc);
+    decl->original_type = written_declared_type;
+    if (selection.used_constructor_initialization && selection.constructor_symbol) {
+        decl->init = collect_make<CppConstructExpr>(
+            selection.constructor_symbol,
+            std::move(selection.constructor_args),
+            declared_type,
+            selection.constructor_is_list_init,
+            loc);
+    }
+    if (selection.destructor_symbol && ast_ctx_) {
+        ast_ctx_->set_cpp_variable_destructor_symbol(
+            decl->node_id,
+            selection.destructor_symbol);
+    }
+    decl->is_constexpr = is_constexpr;
+    decl->is_thread_local = is_thread_local;
+    decl->is_block_byref = is_block_byref;
+    decl->set_language_linkage(language_linkage);
+    if (decl->sym) {
+        decl->sym->variable_definition = decl.get();
+    }
+    return decl;
+}
+
+std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
+    std::unique_ptr<Expr> init,
+    QualType member_type,
+    SrcLoc loc) const {
+    if (isa<InitListExpr>(init.get()) &&
+        should_defer_template_dependent_initializer_semantics(
+            *this, member_type, init.get())) {
+        return init;
+    }
+    return process_initializer_for_type(std::move(init), member_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
+    std::vector<std::unique_ptr<Expr>> init_args,
+    QualType member_type,
+    bool is_list_init,
+    SrcLoc loc,
+    bool allow_abstract_object_type_instantiation) const {
+    if (!member_type) {
+        report_error("constructor member initializer has invalid member type", loc);
+        return collect_make<ErrorExpr>("invalid member type", loc);
+    }
+
+    if (canonical_type_kind(member_type, ast_ctx_.get()) != TypeKind::Object) {
+        if (init_args.size() != 1) {
+            report_error(
+                "constructor member initializer for non-class member requires a single expression",
+                loc);
+            return collect_make<ErrorExpr>("invalid member initializer", loc);
+        }
+        return collect_member_initializer_expression(std::move(init_args.front()),
+                                                     member_type,
+                                                     loc);
+    }
+
+    bool has_dependent_argument =
+        any_initializer_argument_depends_on_template_parameters(
+            *this, init_args);
+
+    auto init_list = collect_make<InitListExpr>(loc);
+    init_list->is_paren_init = !is_list_init;
+    init_list->elements.reserve(init_args.size());
+    for (auto& arg : init_args) {
+        InitElement elem;
+        elem.value = std::move(arg);
+        elem.loc = loc;
+        init_list->elements.push_back(std::move(elem));
+    }
+
+    if (type_depends_on_template_parameters(member_type) ||
+        has_dependent_argument) {
+        return init_list;
+    }
+
+    auto temp_decl = collect_variable_declaration(
+        member_type,
+        "__member_ctor_init_tmp",
+        std::move(init_list),
+        nullptr,
+        StorageClass::NONE,
+        {false, false, false, false, false, false,
+         allow_abstract_object_type_instantiation},
+        loc);
+    auto* temp_var = dyn_cast<VariableDecl>(temp_decl.get());
+    if (!temp_var) {
+        report_error("internal error: failed to build member constructor initializer", loc);
+        return collect_make<ErrorExpr>("invalid member initializer", loc);
+    }
+
+    return std::move(temp_var->init);
+}
+
+
+std::unique_ptr<Decl> Collect::collect_parameter_declaration(QualType type, const std::string& name, std::shared_ptr<Symbol> sym, StorageClass storage_class, SrcLoc loc) const {
+
+    QualType original_type = type;
+    if (type) {
+        if (contains_deferred_semantic_type(type.get_shared())) {
+            type = resolve_typeof_types(type, loc);
+            original_type = type;
+        }
+        type = decay_parameter_type(type);
+    }
+    if (storage_class != StorageClass::NONE && storage_class != StorageClass::REGISTER) {
+        report_error("invalid storage class for function parameter", loc);
+    }
+    if (type && type->isVoid() && !name.empty()) {
+        report_error("parameter '" + name + "' has incomplete type 'void'", loc);
+    }
+    if (type && type.is_restrict() &&
+        canonical_type_kind(type, ast_ctx_.get()) != TypeKind::Pointer &&
+        canonical_type_kind(type, ast_ctx_.get()) != TypeKind::Array) {
+        report_error("'restrict' qualifier can only be applied to pointer types", loc);
+    }
+    if (sym) {
+        sym->type = desugar_type(type, ast_ctx_.get());
+    }
+    auto decl = collect_make<ParamDecl>(type, name, std::move(sym), storage_class, loc);
+    decl->original_type = original_type.get_shared();
+    return decl;
+}

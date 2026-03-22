@@ -1,0 +1,40 @@
+#ifndef ABURI_SPECIAL_MEMBERS_H
+#define ABURI_SPECIAL_MEMBERS_H
+
+#include "types.h"
+#include <cstddef>
+#include <vector>
+
+struct CppConstructorUserParamInfo {
+    size_t user_param_start = 0;
+    size_t max_user_param_count = 0;
+    size_t required_user_param_count = 0;
+};
+
+bool cpp_access_allows_member(RecordMemberAccess access,
+                              bool allow_protected_access);
+
+CppConstructorUserParamInfo cpp_compute_constructor_user_param_info(
+    const RecordSemanticState::Constructor& ctor);
+
+bool cpp_constructor_is_viable_default_candidate(
+    const RecordSemanticState::Constructor& ctor,
+    bool allow_protected_access);
+
+bool cpp_destructor_is_viable_candidate(
+    const RecordSemanticState::Destructor& dtor,
+    bool allow_protected_access);
+
+bool cpp_record_has_viable_default_constructor(
+    const RecordSemanticState* state,
+    bool allow_protected_access);
+
+bool cpp_record_has_viable_destructor(
+    const RecordSemanticState* state,
+    bool allow_protected_access);
+
+void cpp_recompute_default_constructor_traits(
+    RecordSemanticState::DefinitionData& definition_data,
+    const std::vector<RecordSemanticState::Constructor>& constructors);
+
+#endif // ABURI_SPECIAL_MEMBERS_H
