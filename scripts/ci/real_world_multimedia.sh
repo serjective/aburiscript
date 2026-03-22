@@ -364,19 +364,33 @@ run_libplacebo() {
     local src_dir="$2"
     local logs_dir="$3"
     local build_dir="${project_root}/build"
+    local python_venv_dir="${project_root}/python-venv"
+    local native_file="${project_root}/libplacebo-native.ini"
     local meson_bin
     local ninja_bin
+    local python_bin
     local host_cxx
 
     meson_bin="$(find_tool meson)"
     ninja_bin="$(find_tool ninja)"
+    python_bin="$(find_tool python3)"
     host_cxx="$(find_host_cxx)"
 
+    log_step "Preparing libplacebo Python environment"
+    "${python_bin}" -m venv "${python_venv_dir}" >"${logs_dir}/python-deps.log" 2>&1
+    "${python_venv_dir}/bin/python3" -m pip install --disable-pip-version-check jinja2 >>"${logs_dir}/python-deps.log" 2>&1
+    cat > "${native_file}" <<EOF
+[binaries]
+python = '${python_venv_dir}/bin/python3'
+EOF
+
     log_step "Configuring libplacebo"
+    PATH="${python_venv_dir}/bin:${PATH}" \
     CC="${toolchain_dir}/clang" \
     CXX="${host_cxx}" \
         "${meson_bin}" setup "${build_dir}" "${src_dir}" \
             --backend=ninja \
+            --native-file "${native_file}" \
             --buildtype=debugoptimized \
             -Ddemos=false \
             -Dtests=false \
@@ -395,7 +409,8 @@ run_libplacebo() {
             >"${logs_dir}/configure.log" 2>&1
 
     log_step "Building libplacebo"
-    "${ninja_bin}" -C "${build_dir}" >"${logs_dir}/build.log" 2>&1
+    PATH="${python_venv_dir}/bin:${PATH}" \
+        "${ninja_bin}" -C "${build_dir}" >"${logs_dir}/build.log" 2>&1
 
     if ! find "${build_dir}/src" -maxdepth 1 -name 'libplacebo*.dylib' | grep -q .; then
         echo "libplacebo build did not produce a dylib" >&2
@@ -482,6 +497,7 @@ run_gstreamer() {
     local src_dir="$2"
     local logs_dir="$3"
     local build_dir="${project_root}/build"
+    local python_venv_dir="${project_root}/python-venv"
     local meson_bin
     local ninja_bin
     local host_cxx
@@ -515,6 +531,11 @@ run_gstreamer() {
     ln -sf "${host_clangxx}" "${runner_tool_dir}/clang++"
     runner_path="${runner_tool_dir}:/usr/bin:/bin:/usr/sbin:/sbin"
     native_file="${project_root}/gstreamer-native.ini"
+
+    log_step "Preparing gstreamer Python environment"
+    "${runner_tool_dir}/python3" -m venv "${python_venv_dir}" >"${logs_dir}/python-deps.log" 2>&1
+    "${python_venv_dir}/bin/python3" -m pip install --disable-pip-version-check jinja2 >>"${logs_dir}/python-deps.log" 2>&1
+
     write_meson_native_file \
         "${native_file}" \
         "${toolchain_dir}/clang" \
@@ -522,7 +543,7 @@ run_gstreamer() {
         "${host_clang}" \
         "${host_clangxx}" \
         "${runner_tool_dir}/pkg-config" \
-        "${runner_tool_dir}/python3" \
+        "${python_venv_dir}/bin/python3" \
         "${runner_tool_dir}/bison" \
         "${runner_tool_dir}/flex"
 
