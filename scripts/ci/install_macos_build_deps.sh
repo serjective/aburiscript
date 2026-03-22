@@ -12,13 +12,18 @@ export PATH="${brew_prefix}/bin:${PATH}"
 
 packages=(
     bison
+    ffmpeg
     flex
     glib
+    libass
+    libplacebo
     llvm@18
     meson
     ninja
     orc
     pkg-config
+    z3
+    zstd
 )
 
 for package in "${packages[@]}"; do
@@ -26,5 +31,3 @@ for package in "${packages[@]}"; do
         brew install "${package}"
     fi
 done
-
-python3 -m pip install --user --disable-pip-version-check jinja2
