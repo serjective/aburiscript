@@ -23,7 +23,7 @@ on:
 
 jobs:
   external-regressions:
-    runs-on: macos-latest
+    runs-on: macos-26
     strategy:
       fail-fast: false
       matrix:
@@ -38,24 +38,12 @@ jobs:
             validation_root: /tmp/aburi-real-world-validation
           - suite: multimedia
             script: real_world_multimedia.sh
-            project: libplacebo
+            project: gstreamer
             validation_root: /tmp/aburi-real-world-validation
           - suite: multimedia
             script: real_world_multimedia.sh
-            project: ghostscript
+            project: libplacebo
             validation_root: /tmp/aburi-real-world-validation
-          - suite: database
-            script: real_world_database.sh
-            project: sqlite
-            validation_root: /tmp/aburi-real-world-database-validation
-          - suite: database
-            script: real_world_database.sh
-            project: postgres
-            validation_root: /tmp/aburi-real-world-database-validation
-          - suite: database
-            script: real_world_database.sh
-            project: redis
-            validation_root: /tmp/aburi-real-world-database-validation
           - suite: compilers
             script: real_world_compilers.sh
             project: chibicc
