@@ -150,6 +150,7 @@ enum class DeclKind : uint8_t {
     TemplateNonTypeParmDecl,
     TemplateTemplateParmDecl,
     TranslationUnit,
+    NamespaceDecl,
     AliasTemplateDecl,
     FunctionTemplateDecl,
     ClassTemplateDecl,
@@ -389,6 +390,41 @@ struct TranslationUnit: Decl {
     : Decl(DeclKind::TranslationUnit, loc), declarations(std::move(declarations)) {};
 
     static bool classof(const Decl *d) { return d->get_kind() == DeclKind::TranslationUnit; }
+};
+
+struct NamespaceDecl : Decl {
+    std::string name;
+    std::vector<Decl*> members;
+    DeclContext* semantic_context = nullptr;
+    const NamespaceDecl* canonical_decl = nullptr;
+    const NamespaceDecl* previous_decl = nullptr;
+    bool is_anonymous = false;
+    bool is_inline = false;
+
+    NamespaceDecl(std::string name,
+                  std::vector<Decl*> members = {},
+                  DeclContext* semantic_context = nullptr,
+                  bool is_anonymous = false,
+                  bool is_inline = false,
+                  SrcLoc loc = SrcLoc())
+        : Decl(DeclKind::NamespaceDecl, loc),
+          name(std::move(name)),
+          members(std::move(members)),
+          semantic_context(semantic_context),
+          is_anonymous(is_anonymous),
+          is_inline(is_inline) {}
+
+    const NamespaceDecl* get_canonical_decl() const {
+        return canonical_decl ? canonical_decl : this;
+    }
+
+    bool is_canonical_decl() const {
+        return get_canonical_decl() == this;
+    }
+
+    static bool classof(const Decl *d) {
+        return d->get_kind() == DeclKind::NamespaceDecl;
+    }
 };
 
 struct TemplateParameterDecl : Decl {

@@ -103,6 +103,7 @@ constexpr auto kAllDeclKinds = std::to_array<DeclKind>({
     DeclKind::TemplateNonTypeParmDecl,
     DeclKind::TemplateTemplateParmDecl,
     DeclKind::TranslationUnit,
+    DeclKind::NamespaceDecl,
     DeclKind::AliasTemplateDecl,
     DeclKind::FunctionTemplateDecl,
     DeclKind::ClassTemplateDecl,
@@ -211,6 +212,7 @@ const char* decl_kind_name(DeclKind kind) {
         case DeclKind::TemplateNonTypeParmDecl: return "TemplateNonTypeParmDecl";
         case DeclKind::TemplateTemplateParmDecl: return "TemplateTemplateParmDecl";
         case DeclKind::TranslationUnit: return "TranslationUnit";
+        case DeclKind::NamespaceDecl: return "NamespaceDecl";
         case DeclKind::AliasTemplateDecl: return "AliasTemplateDecl";
         case DeclKind::FunctionTemplateDecl: return "FunctionTemplateDecl";
         case DeclKind::ClassTemplateDecl: return "ClassTemplateDecl";
@@ -489,6 +491,13 @@ private:
                 for (const auto& child : node->declarations) {
                     visit_decl(child.get());
                 }
+                return;
+            }
+            case DeclKind::NamespaceDecl: {
+                auto* node = static_cast<const NamespaceDecl*>(decl);
+                record_decl<NamespaceDecl>(DeclKind::NamespaceDecl);
+                add_ast_string(node->name);
+                ast_vector_backing_bytes_ += vector_backing_bytes(node->members);
                 return;
             }
             case DeclKind::AliasTemplateDecl: {

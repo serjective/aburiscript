@@ -1023,6 +1023,7 @@ bool rewrite_decl_tree_in_place_impl(std::unique_ptr<Decl>& decl,
 
     switch (decl->get_kind()) {
         case DeclKind::NopDecl:
+        case DeclKind::NamespaceDecl:
         case DeclKind::ErrorDecl:
             return true;
         case DeclKind::TypedefDecl: {
@@ -1611,6 +1612,19 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
     switch (decl->get_kind()) {
         case DeclKind::NopDecl: {
             auto result = std::make_unique<NopDecl>(decl->location);
+            assign_node_id(result.get(), ctx.ast_ctx);
+            return result;
+        }
+        case DeclKind::NamespaceDecl: {
+            const auto* namespace_decl = static_cast<const NamespaceDecl*>(decl);
+            auto result = std::make_unique<NamespaceDecl>(
+                namespace_decl->name,
+                std::vector<Decl*>{},
+                namespace_decl->semantic_context,
+                namespace_decl->is_anonymous,
+                namespace_decl->is_inline,
+                namespace_decl->location);
+            result->canonical_decl = result.get();
             assign_node_id(result.get(), ctx.ast_ctx);
             return result;
         }

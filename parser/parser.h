@@ -571,6 +571,10 @@ private:
     LanguageLinkage current_language_linkage_ = LanguageLinkage::None;
     std::unordered_map<std::string, std::shared_ptr<Scope>> cxx_namespace_scope_cache_;
     std::unordered_set<std::string> cxx_namespace_alias_cache_keys_;
+    std::unordered_map<const DeclContext*, NamespaceDecl*>
+        cxx_namespace_canonical_decl_cache_;
+    std::unordered_map<const DeclContext*, NamespaceDecl*>
+        cxx_namespace_latest_decl_cache_;
     uint32_t template_pattern_depth_ = 0;
     uint32_t template_parameter_depth_ = 0;
     uint32_t template_argument_expression_depth_ = 0;

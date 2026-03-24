@@ -1973,6 +1973,7 @@ void ASTToLLVM::convert_declaration(Decl *decl) {
         case DeclKind::ObjectDecl:
         case DeclKind::EnumDecl:
         case DeclKind::CppAccessSpecDecl:
+        case DeclKind::NamespaceDecl:
         case DeclKind::NopDecl:
             return;
         case DeclKind::TypedefDecl: {

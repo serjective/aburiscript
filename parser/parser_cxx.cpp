@@ -5040,6 +5040,14 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                       namespace_loc);
     }
 
+    struct NamespaceDeclBuildInfo {
+        std::string name;
+        SrcLoc loc;
+        DeclContext* semantic_context = nullptr;
+        bool is_anonymous = false;
+    };
+    std::vector<NamespaceDeclBuildInfo> namespace_decl_infos;
+
     if (gentle_check(TokenType::ASSIGN)) {
         if (is_anonymous_namespace || namespace_path.empty()) {
             error_custloc(
@@ -5228,6 +5236,12 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                                           existing_it->second);
             if (auto current_context = collect_->get_current_decl_context()) {
                 current_context->set_lookup_name(name);
+                namespace_decl_infos.push_back(
+                    NamespaceDeclBuildInfo{
+                        name,
+                        namespace_loc,
+                        current_context.get(),
+                        false});
             }
             ++entered_namespace_depth;
             return;
@@ -5240,6 +5254,12 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
         }
         if (auto current_context = collect_->get_current_decl_context()) {
             current_context->set_lookup_name(name);
+            namespace_decl_infos.push_back(
+                NamespaceDeclBuildInfo{
+                    name,
+                    namespace_loc,
+                    current_context.get(),
+                    false});
         }
         ++entered_namespace_depth;
     };
@@ -5250,6 +5270,14 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
             auto entered = collect_->collect_enter_scope(namespace_scope_flags);
             if (entered.scope && parent_scope) {
                 entered.scope->cxx_namespace_path = parent_scope->cxx_namespace_path;
+            }
+            if (auto current_context = collect_->get_current_decl_context()) {
+                namespace_decl_infos.push_back(
+                    NamespaceDeclBuildInfo{
+                        "",
+                        namespace_loc,
+                        current_context.get(),
+                        true});
             }
             ++entered_namespace_depth;
         } else {
@@ -5297,8 +5325,68 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
         if (parsed_decls.empty()) {
             parsed_decls.push_back(collect_->collect_nop_declaration(namespace_loc));
         }
+        std::vector<std::unique_ptr<Decl>> namespace_wrappers_reversed;
+        if (!namespace_decl_infos.empty()) {
+            std::vector<Decl*> current_members;
+            current_members.reserve(parsed_decls.size());
+            for (const auto& parsed_decl : parsed_decls) {
+                current_members.push_back(parsed_decl.get());
+            }
+
+            for (size_t idx = namespace_decl_infos.size(); idx > 0; --idx) {
+                const auto& info = namespace_decl_infos[idx - 1];
+                auto namespace_decl = std::make_unique<NamespaceDecl>(
+                    info.name,
+                    std::move(current_members),
+                    info.semantic_context,
+                    info.is_anonymous,
+                    false,
+                    info.loc);
+                auto* namespace_decl_ptr = namespace_decl.get();
+                const DeclContext* context_key = info.semantic_context;
+                if (context_key && context_key->primary_context()) {
+                    context_key = context_key->primary_context();
+                }
+                if (context_key) {
+                    auto canonical_it =
+                        cxx_namespace_canonical_decl_cache_.find(context_key);
+                    if (canonical_it == cxx_namespace_canonical_decl_cache_.end()) {
+                        namespace_decl_ptr->canonical_decl = namespace_decl_ptr;
+                        cxx_namespace_canonical_decl_cache_[context_key] =
+                            namespace_decl_ptr;
+                    } else {
+                        namespace_decl_ptr->canonical_decl = canonical_it->second;
+                    }
+
+                    auto latest_it =
+                        cxx_namespace_latest_decl_cache_.find(context_key);
+                    if (latest_it != cxx_namespace_latest_decl_cache_.end()) {
+                        namespace_decl_ptr->previous_decl = latest_it->second;
+                    }
+                    cxx_namespace_latest_decl_cache_[context_key] =
+                        namespace_decl_ptr;
+                } else {
+                    namespace_decl_ptr->canonical_decl = namespace_decl_ptr;
+                }
+
+                current_members.clear();
+                current_members.push_back(namespace_decl_ptr);
+                namespace_wrappers_reversed.push_back(std::move(namespace_decl));
+            }
+        }
         leave_entered_namespaces();
-        return parsed_decls;
+        std::vector<std::unique_ptr<Decl>> result;
+        result.reserve(
+            namespace_wrappers_reversed.size() + parsed_decls.size());
+        for (auto it = namespace_wrappers_reversed.rbegin();
+             it != namespace_wrappers_reversed.rend();
+             ++it) {
+            result.push_back(std::move(*it));
+        }
+        result.insert(result.end(),
+                      std::make_move_iterator(parsed_decls.begin()),
+                      std::make_move_iterator(parsed_decls.end()));
+        return result;
     } catch (...) {
         leave_entered_namespaces();
         throw;
