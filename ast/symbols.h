@@ -175,16 +175,9 @@ struct GlobalIdentTracker {
 
 };
 struct Scope {
-    struct TagBinding {
-        TagDecl* decl = nullptr;                // New canonical identity path
-        std::shared_ptr<CType> legacy_type;     // Compatibility path during migration
-    };
-
     // Separate namespace for struct/union/enum tags (C has separate namespaces).
-    // Canonical ownership is declaration-based; legacy CType storage is retained
-    // transiently so parser paths that register by type before decl creation keep
-    // working during migration.
-    std::unordered_map<std::string, TagBinding> tag_map;
+    // Canonical ownership is declaration-based.
+    std::unordered_map<std::string, TagDecl*> tag_map;
     std::shared_ptr<Scope> parent = nullptr;
     ScopeFlags flags = ScopeFlags::None;
     std::vector<std::string> cxx_namespace_path;
@@ -195,62 +188,7 @@ struct Scope {
         if (tag.empty() || !decl) {
             return;
         }
-        tag_map[tag].decl = decl;
-    }
-
-    // Compatibility helper for parser paths that still register by type.
-    void add_tag_type(const std::string& tag, std::shared_ptr<CType> type) {
-        if (tag.empty() || !type) {
-            return;
-        }
-        auto& binding = tag_map[tag];
-        binding.legacy_type = std::move(type);
-        if ((binding.legacy_type->kind == TypeKind::Object ||
-             binding.legacy_type->kind == TypeKind::Enum) &&
-            !binding.decl) {
-            auto tag_ty = std::static_pointer_cast<TagType>(binding.legacy_type);
-            if (tag_ty && tag_ty->get_decl()) {
-                binding.decl = const_cast<TagDecl*>(tag_ty->get_decl());
-            }
-        }
-    }
-    // TODO: remove once all callers use decl-based lookup directly.
-    TagDecl* look_tag_decl(const std::string& tag, bool lookParents = true) {
-        if (tag.empty()) return nullptr;
-        auto it = tag_map.find(tag);
-        if (it == tag_map.end()) {
-            if (!lookParents || parent == nullptr) {
-                return nullptr;
-            } else {
-                return parent->look_tag_decl(tag);
-            }
-        }
-        if (it->second.decl) {
-            return it->second.decl;
-        }
-        if (it->second.legacy_type &&
-            (it->second.legacy_type->kind == TypeKind::Object ||
-             it->second.legacy_type->kind == TypeKind::Enum)) {
-            auto tag_ty = std::static_pointer_cast<TagType>(it->second.legacy_type);
-            if (tag_ty && tag_ty->get_decl()) {
-                it->second.decl = const_cast<TagDecl*>(tag_ty->get_decl());
-                return it->second.decl;
-            }
-        }
-        return nullptr;
-    }
-
-    std::shared_ptr<CType> look_tag_type_legacy(const std::string& tag, bool lookParents = true) {
-        if (tag.empty()) return nullptr;
-        auto it = tag_map.find(tag);
-        if (it == tag_map.end()) {
-            if (!lookParents || parent == nullptr) {
-                return nullptr;
-            } else {
-                return parent->look_tag_type_legacy(tag);
-            }
-        }
-        return it->second.legacy_type;
+        tag_map[tag] = decl;
     }
 
     Scope(): tag_map(), parent(nullptr), flags(ScopeFlags::None),

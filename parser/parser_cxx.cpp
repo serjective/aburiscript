@@ -342,7 +342,6 @@ const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
 
     record_semantics_cache_set(placeholder_decl.get(), RecordSemanticState{});
     collect_->collect_add_tag_decl(specialization_name, placeholder_decl.get());
-    collect_->collect_add_tag_type(specialization_name, specialization_type);
     auto* semantic_owner = placeholder_decl.get();
     cpp_transient_semantic_decls_.push_back(std::move(placeholder_decl));
     return semantic_owner;
@@ -5452,10 +5451,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
                 collect_->collect_add_tag_decl(
                     binding.name, const_cast<TagDecl*>(tag_decl));
             }
-            if (binding.type) {
-                collect_->collect_add_tag_type(
-                    binding.name, binding.type.get_shared());
-            }
         };
 
         auto import_ordinary_binding = [&](const DeclBinding& binding) {
@@ -5681,10 +5676,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
             if (auto* tag_decl = dyn_cast<TagDecl>(tag_binding->ast_decl)) {
                 collect_->collect_add_tag_decl(
                     declarator.terminal_name, const_cast<TagDecl*>(tag_decl));
-            }
-            if (tag_binding->type) {
-                collect_->collect_add_tag_type(
-                    declarator.terminal_name, tag_binding->type.get_shared());
             }
         }
 

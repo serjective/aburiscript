@@ -284,8 +284,6 @@ public:
 
     void collect_add_tag_decl(const std::string& tag, TagDecl* decl) const ;
 
-    void collect_add_tag_type(const std::string& tag, std::shared_ptr<CType> type) const ;
-
     void collect_bind_symbol_in_current_scope(const std::string& name,
                                               std::shared_ptr<Symbol> sym) const ;
 
@@ -1810,9 +1808,6 @@ private:
     void bind_tag_decl_in_scope(const std::shared_ptr<Scope>& scope,
                                         const std::string& tag,
                                         TagDecl* decl) const ;
-    void bind_tag_type_in_scope(const std::shared_ptr<Scope>& scope,
-                                        const std::string& tag,
-                                        std::shared_ptr<CType> type) const ;
     void bind_label_in_scope(const std::shared_ptr<Scope>& scope,
                                      const std::string& label,
                                      SrcLoc loc) const ;

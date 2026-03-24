@@ -646,7 +646,6 @@ std::unique_ptr<Decl> Parser::build_cpp_record_semantic_decl(
 
     record_semantics_cache_set(semantic_decl.get(), std::move(semantic_state));
     collect_->collect_add_tag_decl(tag, semantic_decl.get());
-    collect_->collect_add_tag_type(tag, record_type);
     return semantic_decl;
 }
 
@@ -2651,7 +2650,6 @@ void Parser::ensure_cpp_class_placeholder_type(const std::string& name, SrcLoc l
     }
     record_semantics_cache_set(placeholder_decl.get(), RecordSemanticState{});
     collect_->collect_add_tag_decl(name, placeholder_decl.get());
-    collect_->collect_add_tag_type(name, placeholder_type);
     cpp_transient_semantic_decls_.push_back(std::move(placeholder_decl));
 }
 
@@ -6330,7 +6328,6 @@ std::unique_ptr<Decl> Parser::parse_struct_specifier() {
                 if (placeholder_decl) {
                     write_record_state(placeholder_decl.get(), RecordSemanticState{});
                     collect_->collect_add_tag_decl(tag, placeholder_decl.get());
-                    collect_->collect_add_tag_type(tag, placeholder_type);
                     // Keep parser-time placeholder tags alive for decl-context
                     // lookups until the completed definition replaces them.
                     cpp_transient_semantic_decls_.push_back(
@@ -6457,11 +6454,8 @@ std::unique_ptr<Decl> Parser::parse_struct_specifier() {
             struct_tok.loc);
         write_record_state(ret_obj.get(), std::move(record_state));
         record_type->set_decl(ret_obj.get());
-        // Register the declaration in tag scope; keep legacy type registration
-        // for compatibility while lookup transitions to decl-based ownership.
         if (has_tag) {
             collect_->collect_add_tag_decl(tag, ret_obj.get());
-            collect_->collect_add_tag_type(tag, record_type);
         }
         ast_ctx->append_attrs(ret_obj->node_id, std::move(pre_attrs));
         ast_ctx->append_attrs(ret_obj->node_id, std::move(post_attrs));
@@ -6499,7 +6493,6 @@ std::unique_ptr<Decl> Parser::parse_struct_specifier() {
                     write_record_state(ret_obj.get(), RecordSemanticState{});
                     shadow->set_decl(ret_obj.get());
                     collect_->collect_add_tag_decl(tag, ret_obj.get());
-                    collect_->collect_add_tag_type(tag, shadow);
                     return ret_obj;
                 }
                 auto ret_obj = collect_->collect_record_declaration(
@@ -6514,7 +6507,6 @@ std::unique_ptr<Decl> Parser::parse_struct_specifier() {
         write_record_state(ret_obj.get(), RecordSemanticState{});
         type->set_decl(ret_obj.get());
         collect_->collect_add_tag_decl(tag, ret_obj.get());
-        collect_->collect_add_tag_type(tag, type);
         return ret_obj;
 
     }
@@ -6775,7 +6767,6 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
         enum_type->set_decl(ret_enum.get());
         if (has_tag) {
             collect_->collect_add_tag_decl(tag, ret_enum.get());
-            collect_->collect_add_tag_type(tag, enum_type);
         }
         return ret_enum;
     } else {
@@ -6808,7 +6799,6 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
                 });
                 shadow->set_decl(ret_enum.get());
                 collect_->collect_add_tag_decl(tag, ret_enum.get());
-                collect_->collect_add_tag_type(tag, shadow);
                 return ret_enum;
             }
             reconcile_tag_decl(inherited_enum_decl, enum_tok.loc);
@@ -6829,7 +6819,6 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
         });
         enum_type->set_decl(ret_enum.get());
         collect_->collect_add_tag_decl(tag, ret_enum.get());
-        collect_->collect_add_tag_type(tag, enum_type);
         return ret_enum;
     }
 }

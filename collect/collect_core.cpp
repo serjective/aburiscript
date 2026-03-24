@@ -929,28 +929,6 @@ void Collect::bind_tag_decl_in_scope(const std::shared_ptr<Scope>& scope,
     context->add_declaration(std::move(binding));
 }
 
-void Collect::bind_tag_type_in_scope(const std::shared_ptr<Scope>& scope,
-                                             const std::string& tag,
-                                             std::shared_ptr<CType> type) const {
-
-    if (!scope || tag.empty() || !type) {
-        return;
-    }
-    materialize_tentative_snapshot_if_needed();
-    record_scope_mutation(scope);
-    if (auto tag_type = dyn_cast_shared<TagType>(type)) {
-        if (auto* decl = const_cast<TagDecl*>(tag_type->get_decl())) {
-            auto local_tag_decl = LookupEngine::lookup_tag_decl(tag, scope, false);
-            if (local_tag_decl != decl) {
-                bind_tag_decl_in_scope(scope, tag, decl);
-            } else {
-                scope->add_tag_decl(tag, decl);
-            }
-        }
-    }
-    scope->add_tag_type(tag, std::move(type));
-}
-
 void Collect::bind_label_in_scope(const std::shared_ptr<Scope>& scope,
                                           const std::string& label,
                                           SrcLoc loc) const {
@@ -1131,18 +1109,6 @@ TagDecl* Collect::collect_lookup_tag_decl(const std::string& tag, bool look_pare
     auto* trace_ptr = lookup_trace_enabled() ? &trace : nullptr;
     auto* lookup = LookupEngine::lookup_tag_decl(tag, current_scope_, look_parents, trace_ptr);
     emit_lookup_trace("tag", tag, trace, lookup != nullptr);
-#ifndef NDEBUG
-    auto* legacy = current_scope_->look_tag_decl(tag, look_parents);
-    auto* template_binding = LookupEngine::lookup_unqualified_template_binding(
-        tag, current_scope_, look_parents, LookupNamespace::Tag);
-    bool has_template_binding =
-        template_binding &&
-        (template_binding->template_decl != nullptr ||
-         template_binding->has_template_overload_set());
-    if (!has_template_binding) {
-        assert(lookup == legacy && "lookup mismatch: tag");
-    }
-#endif
     return lookup;
 }
 
@@ -1226,15 +1192,6 @@ void Collect::collect_add_tag_decl(const std::string& tag, TagDecl* decl) const 
         return;
     }
     bind_tag_decl_in_scope(current_scope_, tag, decl);
-}
-
-
-void Collect::collect_add_tag_type(const std::string& tag, std::shared_ptr<CType> type) const {
-
-    if (!current_scope_ || tag.empty() || !type) {
-        return;
-    }
-    bind_tag_type_in_scope(current_scope_, tag, std::move(type));
 }
 
 
