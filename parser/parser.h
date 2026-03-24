@@ -569,8 +569,6 @@ private:
     size_t next_tentative_context_id_ = 1;
     CxxTentativeDisambiguationState cxx_tentative_state_;
     LanguageLinkage current_language_linkage_ = LanguageLinkage::None;
-    std::unordered_map<std::string, std::shared_ptr<Scope>> cxx_namespace_scope_cache_;
-    std::unordered_set<std::string> cxx_namespace_alias_cache_keys_;
     std::unordered_map<const DeclContext*, NamespaceDecl*>
         cxx_namespace_canonical_decl_cache_;
     std::unordered_map<const DeclContext*, NamespaceDecl*>

@@ -2,40 +2,35 @@
 
 namespace qualified_name_utils {
 
-std::string make_cpp_namespace_reopen_key(
-    const DeclContext* semantic_parent,
-    std::string_view namespace_name) {
-    uint64_t parent_id = semantic_parent ? semantic_parent->stable_id() : 0;
-    return std::to_string(parent_id) + "#" + std::string(namespace_name);
-}
-
 std::shared_ptr<Scope> resolve_named_namespace_scope(
-    const NamespaceScopeCache& namespace_scope_cache,
     const DeclContext* start_context,
     std::string_view namespace_name,
     bool allow_enclosing_lookup) {
     if (namespace_name.empty()) {
         return nullptr;
     }
+
+    auto resolve_in_context =
+        [&](const DeclContext* candidate) -> std::shared_ptr<Scope> {
+            if (!candidate) {
+                return nullptr;
+            }
+            auto binding = candidate->lookup_local_namespace_binding(namespace_name);
+            if (!binding || !binding.entry) {
+                return nullptr;
+            }
+            return binding.entry->target_scope;
+        };
+
     if (allow_enclosing_lookup) {
         for (auto* ctx = start_context; ctx; ctx = ctx->semantic_parent()) {
-            auto it = namespace_scope_cache.find(
-                make_cpp_namespace_reopen_key(ctx, namespace_name));
-            if (it != namespace_scope_cache.end()) {
-                return it->second;
+            if (auto resolved = resolve_in_context(ctx)) {
+                return resolved;
             }
         }
         return nullptr;
     }
-    if (!start_context) {
-        return nullptr;
-    }
-    auto it = namespace_scope_cache.find(
-        make_cpp_namespace_reopen_key(start_context, namespace_name));
-    if (it == namespace_scope_cache.end()) {
-        return nullptr;
-    }
-    return it->second;
+    return resolve_in_context(start_context);
 }
 
 std::string format_cpp_qualified_name(

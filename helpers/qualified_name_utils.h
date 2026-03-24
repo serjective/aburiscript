@@ -8,19 +8,11 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 namespace qualified_name_utils {
 
-using NamespaceScopeCache = std::unordered_map<std::string, std::shared_ptr<Scope>>;
-
-std::string make_cpp_namespace_reopen_key(
-    const DeclContext* semantic_parent,
-    std::string_view namespace_name);
-
 std::shared_ptr<Scope> resolve_named_namespace_scope(
-    const NamespaceScopeCache& namespace_scope_cache,
     const DeclContext* start_context,
     std::string_view namespace_name,
     bool allow_enclosing_lookup);

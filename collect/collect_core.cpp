@@ -192,6 +192,8 @@ void Collect::record_decl_context_mutation(
         checkpoint.context = context;
         checkpoint.declaration_count = context->declaration_count();
         checkpoint.lexical_child_count = context->lexical_child_count();
+        checkpoint.namespace_binding_count = context->namespace_binding_count();
+        checkpoint.namespace_alias_count = context->namespace_alias_count();
         snapshot.decl_context_mutations.emplace(context_key, std::move(checkpoint));
     }
 }
@@ -276,6 +278,10 @@ void Collect::collect_rollback_tentative_parse() {
         }
         checkpoint.context->truncate_declarations(checkpoint.declaration_count);
         checkpoint.context->truncate_lexical_children(checkpoint.lexical_child_count);
+        checkpoint.context->truncate_namespace_bindings(
+            checkpoint.namespace_binding_count);
+        checkpoint.context->truncate_namespace_aliases(
+            checkpoint.namespace_alias_count);
     }
 
     current_scope_ = std::move(snapshot.current_scope);
@@ -590,6 +596,28 @@ std::shared_ptr<DeclContext> Collect::get_translation_unit_decl_context() const 
 std::shared_ptr<DeclContext> Collect::get_current_decl_context() const {
 
     return current_decl_context_;
+}
+
+void Collect::collect_register_namespace_binding(
+    const std::shared_ptr<DeclContext>& owner_context,
+    NamespaceBindingEntry binding) {
+
+    if (!owner_context) {
+        return;
+    }
+    record_decl_context_mutation(owner_context);
+    owner_context->add_namespace_binding(std::move(binding));
+}
+
+void Collect::collect_register_namespace_alias(
+    const std::shared_ptr<DeclContext>& owner_context,
+    NamespaceBindingEntry alias) {
+
+    if (!owner_context) {
+        return;
+    }
+    record_decl_context_mutation(owner_context);
+    owner_context->add_namespace_alias(std::move(alias));
 }
 
 CppThisContext Collect::collect_current_cpp_this_context() const {

@@ -163,6 +163,42 @@ void DeclContext::truncate_lexical_children(size_t count) {
     lexical_children_.resize(count);
 }
 
+void DeclContext::reindex_namespace_bindings() {
+    namespace_binding_indices_.clear();
+    for (size_t idx = 0; idx < namespace_bindings_.size(); ++idx) {
+        const auto& binding = namespace_bindings_[idx];
+        if (!binding.local_name.empty()) {
+            namespace_binding_indices_[binding.local_name] = idx;
+        }
+    }
+}
+
+void DeclContext::reindex_namespace_aliases() {
+    namespace_alias_indices_.clear();
+    for (size_t idx = 0; idx < namespace_aliases_.size(); ++idx) {
+        const auto& alias = namespace_aliases_[idx];
+        if (!alias.local_name.empty()) {
+            namespace_alias_indices_[alias.local_name] = idx;
+        }
+    }
+}
+
+void DeclContext::truncate_namespace_bindings(size_t count) {
+    if (count >= namespace_bindings_.size()) {
+        return;
+    }
+    namespace_bindings_.resize(count);
+    reindex_namespace_bindings();
+}
+
+void DeclContext::truncate_namespace_aliases(size_t count) {
+    if (count >= namespace_aliases_.size()) {
+        return;
+    }
+    namespace_aliases_.resize(count);
+    reindex_namespace_aliases();
+}
+
 const std::unordered_map<std::string, std::vector<size_t>>&
 DeclContext::map_for_namespace(LookupNamespace ns) const {
     switch (ns) {
@@ -256,4 +292,65 @@ std::vector<const DeclBinding*> DeclContext::lookup_local_all(const std::string&
         out.push_back(&declarations_[idx]);
     }
     return out;
+}
+
+const NamespaceBindingEntry* DeclContext::lookup_local_namespace(
+    std::string_view local_name) const {
+    if (local_name.empty()) {
+        return nullptr;
+    }
+    auto it = namespace_binding_indices_.find(std::string(local_name));
+    if (it == namespace_binding_indices_.end()) {
+        return nullptr;
+    }
+    return &namespace_bindings_[it->second];
+}
+
+const NamespaceBindingEntry* DeclContext::lookup_local_namespace_alias(
+    std::string_view local_name) const {
+    if (local_name.empty()) {
+        return nullptr;
+    }
+    auto it = namespace_alias_indices_.find(std::string(local_name));
+    if (it == namespace_alias_indices_.end()) {
+        return nullptr;
+    }
+    return &namespace_aliases_[it->second];
+}
+
+NamespaceBindingLookup DeclContext::lookup_local_namespace_binding(
+    std::string_view local_name) const {
+    if (const auto* binding = lookup_local_namespace(local_name)) {
+        return NamespaceBindingLookup{binding, false};
+    }
+    if (const auto* alias = lookup_local_namespace_alias(local_name)) {
+        return NamespaceBindingLookup{alias, true};
+    }
+    return NamespaceBindingLookup{};
+}
+
+void DeclContext::add_namespace_binding(NamespaceBindingEntry binding) {
+    if (binding.local_name.empty() || !binding.target_context || !binding.target_scope) {
+        return;
+    }
+    auto it = namespace_binding_indices_.find(binding.local_name);
+    if (it != namespace_binding_indices_.end()) {
+        namespace_bindings_[it->second] = std::move(binding);
+        return;
+    }
+    namespace_binding_indices_[binding.local_name] = namespace_bindings_.size();
+    namespace_bindings_.push_back(std::move(binding));
+}
+
+void DeclContext::add_namespace_alias(NamespaceBindingEntry alias) {
+    if (alias.local_name.empty() || !alias.target_context || !alias.target_scope) {
+        return;
+    }
+    auto it = namespace_alias_indices_.find(alias.local_name);
+    if (it != namespace_alias_indices_.end()) {
+        namespace_aliases_[it->second] = std::move(alias);
+        return;
+    }
+    namespace_alias_indices_[alias.local_name] = namespace_aliases_.size();
+    namespace_aliases_.push_back(std::move(alias));
 }

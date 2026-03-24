@@ -4586,11 +4586,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
             auto current_decl_context = collect_->get_current_decl_context();
             bool collides_with_namespace_name = false;
             if (current_decl_context && !decl_parser.name.empty()) {
-                std::string namespace_key = qualified_name_utils::make_cpp_namespace_reopen_key(
-                    current_decl_context.get(), decl_parser.name);
                 collides_with_namespace_name =
-                    cxx_namespace_scope_cache_.find(namespace_key) !=
-                    cxx_namespace_scope_cache_.end();
+                    static_cast<bool>(current_decl_context->lookup_local_namespace_binding(
+                        decl_parser.name));
             }
             if (collides_with_namespace_name) {
                 if (storage_class == StorageClass::TYPEDEF) {

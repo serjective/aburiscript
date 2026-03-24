@@ -181,6 +181,14 @@ public:
 
     std::shared_ptr<DeclContext> get_current_decl_context() const ;
 
+    void collect_register_namespace_binding(
+        const std::shared_ptr<DeclContext>& owner_context,
+        NamespaceBindingEntry binding);
+
+    void collect_register_namespace_alias(
+        const std::shared_ptr<DeclContext>& owner_context,
+        NamespaceBindingEntry alias);
+
     CppThisContext collect_current_cpp_this_context() const ;
 
     bool with_function_definition_state(
@@ -923,6 +931,8 @@ private:
             std::shared_ptr<DeclContext> context;
             size_t declaration_count = 0;
             size_t lexical_child_count = 0;
+            size_t namespace_binding_count = 0;
+            size_t namespace_alias_count = 0;
         };
 
         struct ScopeMutationCheckpoint {

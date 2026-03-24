@@ -90,6 +90,11 @@ const DeclContext* resolve_named_child_context(const DeclContext* context,
         if (!candidate) {
             return nullptr;
         }
+        auto binding = candidate->lookup_local_namespace_binding(component);
+        if (binding && binding.entry && binding.entry->target_context) {
+            auto* canonical = binding.entry->target_context->primary_context();
+            return canonical ? canonical : binding.entry->target_context.get();
+        }
         auto* child = candidate->find_named_lexical_child(component);
         if (!child) {
             return nullptr;

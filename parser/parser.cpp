@@ -1029,8 +1029,6 @@ std::shared_ptr<CType> getNumericTypeConstant(Token tok, TypeContext * type_ctx)
 
 std::unique_ptr<Decl> Parser::parse() {
     current_language_linkage_ = LanguageLinkage::None;
-    cxx_namespace_scope_cache_.clear();
-    cxx_namespace_alias_cache_keys_.clear();
     cxx_namespace_canonical_decl_cache_.clear();
     cxx_namespace_latest_decl_cache_.clear();
     cxx_record_parse_stack_.clear();

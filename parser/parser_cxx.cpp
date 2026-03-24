@@ -4983,7 +4983,6 @@ std::shared_ptr<Scope> Parser::resolve_named_namespace_scope(
     const std::string& namespace_name,
     bool allow_enclosing_lookup) const {
     return qualified_name_utils::resolve_named_namespace_scope(
-        cxx_namespace_scope_cache_,
         start_context,
         namespace_name,
         allow_enclosing_lookup);
@@ -5067,13 +5066,13 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                 "redefinition of '" + alias_name + "' as namespace alias",
                 namespace_loc);
         }
-
-        const std::string alias_key =
-            qualified_name_utils::make_cpp_namespace_reopen_key(current_context.get(), alias_name);
-        auto existing_alias_it = cxx_namespace_scope_cache_.find(alias_key);
-        bool existing_is_alias =
-            cxx_namespace_alias_cache_keys_.find(alias_key) !=
-            cxx_namespace_alias_cache_keys_.end();
+        if (current_context->lookup_local_namespace(alias_name)) {
+            error_custloc(
+                "redefinition of '" + alias_name + "' as namespace alias",
+                namespace_loc);
+        }
+        const auto* existing_alias =
+            current_context->lookup_local_namespace_alias(alias_name);
 
         advance(); // consume '='
 
@@ -5109,6 +5108,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
             rhs_has_global_qualifier ? translation_unit_context.get()
                                      : current_context.get();
         std::shared_ptr<Scope> target_scope = nullptr;
+        std::shared_ptr<DeclContext> target_context = nullptr;
 
         auto format_rhs_prefix = [&](size_t upto_index) {
             std::string formatted;
@@ -5136,21 +5136,20 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                     rhs_loc);
             }
             target_scope = namespace_scope;
+            target_context =
+                namespace_scope->associated_decl_context
+                    ? namespace_scope->associated_decl_context->shared_from_this()
+                    : nullptr;
             lookup_context = namespace_scope->associated_decl_context;
         }
 
-        if (!target_scope) {
+        if (!target_scope || !target_context) {
             error_custloc("namespace alias target does not name a namespace",
                           rhs_loc);
         }
 
-        if (existing_alias_it != cxx_namespace_scope_cache_.end()) {
-            if (!existing_is_alias) {
-                error_custloc(
-                    "redefinition of '" + alias_name + "' as namespace alias",
-                    namespace_loc);
-            }
-            if (existing_alias_it->second.get() != target_scope.get()) {
+        if (existing_alias) {
+            if (existing_alias->target_scope.get() != target_scope.get()) {
                 error_custloc(
                     "redefinition of '" + alias_name +
                         "' as an alias for a different namespace",
@@ -5162,8 +5161,12 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
             return redecl_noop;
         }
 
-        cxx_namespace_scope_cache_[alias_key] = target_scope;
-        cxx_namespace_alias_cache_keys_.insert(alias_key);
+        collect_->collect_register_namespace_alias(
+            current_context,
+            NamespaceBindingEntry{
+                alias_name,
+                target_context,
+                target_scope});
         std::vector<std::unique_ptr<Decl>> alias_noop;
         alias_noop.push_back(collect_->collect_nop_declaration(namespace_loc));
         return alias_noop;
@@ -5172,15 +5175,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
     if (!is_anonymous_namespace && !namespace_path.empty()) {
         auto parent_context = collect_->get_current_decl_context();
         const std::string& outer_name = namespace_path.front();
-        if (parent_context) {
-            std::string outer_key =
-                qualified_name_utils::make_cpp_namespace_reopen_key(parent_context.get(), outer_name);
-            if (cxx_namespace_alias_cache_keys_.find(outer_key) !=
-                cxx_namespace_alias_cache_keys_.end()) {
-                error_custloc(
-                    "redefinition of '" + outer_name + "' as namespace",
-                    namespace_loc);
-            }
+        if (parent_context && parent_context->lookup_local_namespace_alias(outer_name)) {
+            error_custloc(
+                "redefinition of '" + outer_name + "' as namespace",
+                namespace_loc);
         }
         if (parent_context &&
             (parent_context->lookup_local(outer_name, LookupNamespace::Ordinary) ||
@@ -5215,11 +5213,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                 "redefinition of '" + name + "' as namespace",
                 namespace_loc);
         }
-
-        std::string cache_key =
-            qualified_name_utils::make_cpp_namespace_reopen_key(parent_context.get(), name);
-        if (cxx_namespace_alias_cache_keys_.find(cache_key) !=
-            cxx_namespace_alias_cache_keys_.end()) {
+        if (parent_context->lookup_local_namespace_alias(name)) {
             error_custloc(
                 "redefinition of '" + name + "' as namespace",
                 namespace_loc);
@@ -5227,13 +5221,13 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
         std::vector<std::string> namespace_path =
             parent_scope ? parent_scope->cxx_namespace_path : std::vector<std::string>{};
         namespace_path.push_back(name);
-        auto existing_it = cxx_namespace_scope_cache_.find(cache_key);
-        if (existing_it != cxx_namespace_scope_cache_.end() &&
-            existing_it->second &&
-            existing_it->second->parent.get() == parent_scope.get()) {
-            existing_it->second->cxx_namespace_path = namespace_path;
+        const auto* existing_binding = parent_context->lookup_local_namespace(name);
+        if (existing_binding &&
+            existing_binding->target_scope &&
+            existing_binding->target_scope->parent.get() == parent_scope.get()) {
+            existing_binding->target_scope->cxx_namespace_path = namespace_path;
             collect_->collect_enter_scope(namespace_scope_flags,
-                                          existing_it->second);
+                                          existing_binding->target_scope);
             if (auto current_context = collect_->get_current_decl_context()) {
                 current_context->set_lookup_name(name);
                 namespace_decl_infos.push_back(
@@ -5250,10 +5244,15 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
         auto entered = collect_->collect_enter_scope(namespace_scope_flags);
         if (entered.scope) {
             entered.scope->cxx_namespace_path = namespace_path;
-            cxx_namespace_scope_cache_[cache_key] = entered.scope;
         }
         if (auto current_context = collect_->get_current_decl_context()) {
             current_context->set_lookup_name(name);
+            collect_->collect_register_namespace_binding(
+                parent_context,
+                NamespaceBindingEntry{
+                    name,
+                    current_context,
+                    entered.scope});
             namespace_decl_infos.push_back(
                 NamespaceDeclBuildInfo{
                     name,

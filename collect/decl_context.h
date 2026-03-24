@@ -11,6 +11,20 @@
 #include "../ast/types.h"
 
 struct Decl;
+class DeclContext;
+
+struct NamespaceBindingEntry {
+    std::string local_name;
+    std::shared_ptr<DeclContext> target_context = nullptr;
+    std::shared_ptr<Scope> target_scope = nullptr;
+};
+
+struct NamespaceBindingLookup {
+    const NamespaceBindingEntry* entry = nullptr;
+    bool is_alias = false;
+
+    explicit operator bool() const { return entry != nullptr; }
+};
 
 enum class DeclContextKind : uint8_t {
     TranslationUnit,
@@ -121,18 +135,32 @@ public:
     const std::vector<DeclBinding>& declarations() const { return declarations_; }
     size_t declaration_count() const { return declarations_.size(); }
     size_t lexical_child_count() const { return lexical_children_.size(); }
+    size_t namespace_binding_count() const { return namespace_bindings_.size(); }
+    size_t namespace_alias_count() const { return namespace_aliases_.size(); }
     void truncate_declarations(size_t count);
     void truncate_lexical_children(size_t count);
+    void truncate_namespace_bindings(size_t count);
+    void truncate_namespace_aliases(size_t count);
 
     const DeclBinding* lookup_local(const std::string& name,
                                     LookupNamespace ns) const;
     std::vector<const DeclBinding*> lookup_local_all(const std::string& name,
                                                      LookupNamespace ns) const;
+    const NamespaceBindingEntry* lookup_local_namespace(
+        std::string_view local_name) const;
+    const NamespaceBindingEntry* lookup_local_namespace_alias(
+        std::string_view local_name) const;
+    NamespaceBindingLookup lookup_local_namespace_binding(
+        std::string_view local_name) const;
+    void add_namespace_binding(NamespaceBindingEntry binding);
+    void add_namespace_alias(NamespaceBindingEntry alias);
 
 private:
     void index_lexical_child_name(DeclContext* child);
     void remove_lexical_child_name(DeclContext* child, std::string_view lookup_name);
     void index_binding(const DeclBinding& binding, size_t idx);
+    void reindex_namespace_bindings();
+    void reindex_namespace_aliases();
     const std::unordered_map<std::string, std::vector<size_t>>&
     map_for_namespace(LookupNamespace ns) const;
     std::unordered_map<std::string, std::vector<size_t>>&
@@ -149,6 +177,10 @@ private:
     std::vector<std::shared_ptr<DeclContext>> lexical_children_;
     std::unordered_map<std::string, std::vector<DeclContext*>> named_lexical_children_;
     std::vector<DeclBinding> declarations_;
+    std::vector<NamespaceBindingEntry> namespace_bindings_;
+    std::unordered_map<std::string, size_t> namespace_binding_indices_;
+    std::vector<NamespaceBindingEntry> namespace_aliases_;
+    std::unordered_map<std::string, size_t> namespace_alias_indices_;
 
     std::unordered_map<std::string, std::vector<size_t>> ordinary_lookup_;
     std::unordered_map<std::string, std::vector<size_t>> tag_lookup_;
