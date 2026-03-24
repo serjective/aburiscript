@@ -5,6 +5,29 @@
 #include "decl_context.h"
 
 namespace {
+enum class ContextLookupDisposition : uint8_t {
+    NotFound,
+    Found,
+    Blocked
+};
+
+struct OrdinaryContextLookupResult {
+    ContextLookupDisposition disposition = ContextLookupDisposition::NotFound;
+    std::shared_ptr<Symbol> symbol = nullptr;
+};
+
+struct FunctionContextLookupResult {
+    bool found = false;
+    bool blocked = false;
+    std::vector<std::shared_ptr<Symbol>> candidates;
+};
+
+struct TagContextLookupResult {
+    bool found = false;
+    const DeclBinding* binding = nullptr;
+    TagDecl* decl = nullptr;
+};
+
 bool symbol_matches_filter(const std::shared_ptr<Symbol>& sym,
                            LookupEngine::OrdinaryFilter filter) {
     if (!sym) {
@@ -174,6 +197,242 @@ void trace_named_step(LookupEngine::LookupTrace* trace,
     step += name;
     trace->add_step(std::move(step));
 }
+
+const DeclContext* canonical_decl_context(const DeclContext* context) {
+    if (!context) {
+        return nullptr;
+    }
+    return context->primary_context() ? context->primary_context() : context;
+}
+
+uint64_t effective_lookup_position(const DeclContext* context,
+                                   uint64_t lookup_position) {
+    if (!context) {
+        return 0;
+    }
+    uint64_t next_index = context->next_lookup_event_index();
+    if (lookup_position == 0 || lookup_position > next_index) {
+        return next_index;
+    }
+    return lookup_position;
+}
+
+bool nomination_is_visible(const NamespaceNominationRecord& nomination,
+                           uint64_t lookup_position) {
+    return nomination.point_of_declaration_index > 0 &&
+           nomination.point_of_declaration_index < lookup_position;
+}
+
+void append_unique_function_candidate(
+    std::vector<std::shared_ptr<Symbol>>& candidates,
+    const std::shared_ptr<Symbol>& candidate) {
+    if (!candidate || candidate->kind != SymbolKind::FUNCTION) {
+        return;
+    }
+    for (const auto& existing : candidates) {
+        if (existing == candidate) {
+            return;
+        }
+    }
+    candidates.push_back(candidate);
+}
+
+TagDecl* tag_decl_from_binding(const DeclBinding* binding) {
+    if (!binding) {
+        return nullptr;
+    }
+    if (binding->ast_decl) {
+        return const_cast<TagDecl*>(static_cast<const TagDecl*>(binding->ast_decl));
+    }
+    if (binding->type) {
+        auto tag_ty = dyn_cast_shared<TagType>(binding->type.get_shared());
+        if (tag_ty && tag_ty->get_decl()) {
+            return const_cast<TagDecl*>(tag_ty->get_decl());
+        }
+    }
+    return nullptr;
+}
+
+OrdinaryContextLookupResult lookup_ordinary_in_context_graph(
+    const std::string& name,
+    const DeclContext* context,
+    uint64_t lookup_position,
+    LookupEngine::OrdinaryFilter filter,
+    std::unordered_set<const DeclContext*>& visited_contexts,
+    LookupEngine::LookupTrace* trace) {
+    OrdinaryContextLookupResult result;
+    context = canonical_decl_context(context);
+    if (!context || !visited_contexts.insert(context).second) {
+        return result;
+    }
+
+    lookup_position = effective_lookup_position(context, lookup_position);
+    auto* binding = lookup_context_local(context, name, LookupNamespace::Ordinary);
+    if (binding) {
+        auto selected = select_binding_symbol(binding, filter);
+        if (selected) {
+            trace_named_step(trace, "hit decl-context ordinary: ", name);
+            result.disposition = ContextLookupDisposition::Found;
+            result.symbol = std::move(selected);
+            return result;
+        }
+        if (filter == LookupEngine::OrdinaryFilter::TypedefOnly) {
+            trace_named_step(
+                trace, "blocked by non-typedef ordinary binding: ", name);
+            result.disposition = ContextLookupDisposition::Blocked;
+            return result;
+        }
+    } else {
+        trace_named_step(trace, "miss decl-context ordinary: ", name);
+    }
+
+    for (const auto& nomination : context->namespace_nominations()) {
+        if (!nomination_is_visible(nomination, lookup_position) ||
+            !nomination.nominated_context) {
+            continue;
+        }
+        trace_named_step(trace, "follow namespace nomination ordinary: ", name);
+        auto nomination_result = lookup_ordinary_in_context_graph(
+            name,
+            nomination.nominated_context.get(),
+            nomination.nominated_context->next_lookup_event_index(),
+            filter,
+            visited_contexts,
+            trace);
+        if (nomination_result.disposition != ContextLookupDisposition::NotFound) {
+            return nomination_result;
+        }
+    }
+
+    return result;
+}
+
+FunctionContextLookupResult lookup_functions_in_context_graph(
+    const std::string& name,
+    const DeclContext* context,
+    uint64_t lookup_position,
+    std::unordered_set<const DeclContext*>& visited_contexts,
+    LookupEngine::LookupTrace* trace) {
+    FunctionContextLookupResult result;
+    context = canonical_decl_context(context);
+    if (!context || !visited_contexts.insert(context).second) {
+        return result;
+    }
+
+    lookup_position = effective_lookup_position(context, lookup_position);
+    auto* binding = lookup_context_local(context, name, LookupNamespace::Ordinary);
+    if (binding) {
+        auto local_candidates = extract_function_candidates(binding);
+        if (local_candidates.empty()) {
+            trace_named_step(
+                trace, "ordinary-name hit is not function overload set: ", name);
+            result.blocked = true;
+            return result;
+        }
+        trace_named_step(trace, "hit decl-context function candidates: ", name);
+        result.found = true;
+        for (const auto& candidate : local_candidates) {
+            append_unique_function_candidate(result.candidates, candidate);
+        }
+    } else {
+        trace_named_step(trace, "miss decl-context function candidates: ", name);
+    }
+
+    for (const auto& nomination : context->namespace_nominations()) {
+        if (!nomination_is_visible(nomination, lookup_position) ||
+            !nomination.nominated_context) {
+            continue;
+        }
+        trace_named_step(trace, "follow namespace nomination functions: ", name);
+        auto nomination_result = lookup_functions_in_context_graph(
+            name,
+            nomination.nominated_context.get(),
+            nomination.nominated_context->next_lookup_event_index(),
+            visited_contexts,
+            trace);
+        if (nomination_result.found) {
+            result.found = true;
+            for (const auto& candidate : nomination_result.candidates) {
+                append_unique_function_candidate(result.candidates, candidate);
+            }
+        }
+    }
+
+    return result;
+}
+
+TagContextLookupResult lookup_tag_in_context_graph(
+    const std::string& name,
+    const DeclContext* context,
+    uint64_t lookup_position,
+    std::unordered_set<const DeclContext*>& visited_contexts,
+    LookupEngine::LookupTrace* trace) {
+    TagContextLookupResult result;
+    context = canonical_decl_context(context);
+    if (!context || !visited_contexts.insert(context).second) {
+        return result;
+    }
+
+    lookup_position = effective_lookup_position(context, lookup_position);
+    auto* binding = lookup_context_local(context, name, LookupNamespace::Tag);
+    if (binding) {
+        trace_named_step(trace, "hit decl-context tag: ", name);
+        result.found = true;
+        result.binding = binding;
+        result.decl = tag_decl_from_binding(binding);
+        return result;
+    }
+    trace_named_step(trace, "miss decl-context tag: ", name);
+
+    for (const auto& nomination : context->namespace_nominations()) {
+        if (!nomination_is_visible(nomination, lookup_position) ||
+            !nomination.nominated_context) {
+            continue;
+        }
+        trace_named_step(trace, "follow namespace nomination tag: ", name);
+        auto nomination_result = lookup_tag_in_context_graph(
+            name,
+            nomination.nominated_context.get(),
+            nomination.nominated_context->next_lookup_event_index(),
+            visited_contexts,
+            trace);
+        if (nomination_result.found) {
+            return nomination_result;
+        }
+    }
+
+    return result;
+}
+}
+
+LookupEngine::LookupEnvironment LookupEngine::build_unqualified_environment(
+    const std::shared_ptr<Scope>& start_scope,
+    bool look_parents,
+    LookupTrace* trace) {
+    LookupEnvironment environment;
+    std::unordered_set<const DeclContext*> visited_contexts;
+    size_t depth = 0;
+    for (auto scope = start_scope;
+         scope;
+         scope = look_parents ? scope->parent : nullptr, ++depth) {
+        trace_scope_step(trace, depth, scope->flags);
+        auto* context = canonical_decl_context(scope->associated_decl_context);
+        if (!context || !visited_contexts.insert(context).second) {
+            if (!look_parents) {
+                break;
+            }
+            continue;
+        }
+        environment.frames.push_back(LookupEnvironmentFrame{
+            scope,
+            context,
+            context->next_lookup_event_index(),
+            depth});
+        if (!look_parents) {
+            break;
+        }
+    }
+    return environment;
 }
 
 std::shared_ptr<Symbol> LookupEngine::lookup_unqualified_ordinary(
@@ -182,32 +441,21 @@ std::shared_ptr<Symbol> LookupEngine::lookup_unqualified_ordinary(
     bool look_parents,
     OrdinaryFilter filter,
     LookupTrace* trace) {
-
-    std::unordered_set<const DeclContext*> visited_contexts;
-    size_t depth = 0;
-    for (auto scope = start_scope; scope; scope = look_parents ? scope->parent : nullptr, ++depth) {
-        trace_scope_step(trace, depth, scope->flags);
-        if (scope->associated_decl_context &&
-            visited_contexts.insert(scope->associated_decl_context).second) {
-            auto* binding = lookup_context_local(
-                scope->associated_decl_context, name, LookupNamespace::Ordinary);
-            if (binding) {
-                if (symbol_matches_filter(binding->symbol, filter)) {
-                    trace_named_step(trace, "hit decl-context ordinary: ", name);
-                    return binding->symbol;
-                }
-                if (filter == OrdinaryFilter::TypedefOnly) {
-                    // Ordinary identifiers in inner scope hide outer typedef names.
-                    trace_named_step(
-                        trace, "blocked by non-typedef ordinary binding: ", name);
-                    return nullptr;
-                }
-            }
-            trace_named_step(trace, "miss decl-context ordinary: ", name);
+    auto environment = build_unqualified_environment(start_scope, look_parents, trace);
+    for (const auto& frame : environment.frames) {
+        std::unordered_set<const DeclContext*> visited_contexts;
+        auto result = lookup_ordinary_in_context_graph(
+            name,
+            frame.decl_context,
+            frame.lookup_position,
+            filter,
+            visited_contexts,
+            trace);
+        if (result.disposition == ContextLookupDisposition::Found) {
+            return result.symbol;
         }
-
-        if (!look_parents) {
-            break;
+        if (result.disposition == ContextLookupDisposition::Blocked) {
+            return nullptr;
         }
     }
     trace_named_step(trace, "lookup miss: ", name);
@@ -312,31 +560,20 @@ std::vector<std::shared_ptr<Symbol>> LookupEngine::lookup_unqualified_function_c
     const std::shared_ptr<Scope>& start_scope,
     bool look_parents,
     LookupTrace* trace) {
-
-    std::unordered_set<const DeclContext*> visited_contexts;
-    size_t depth = 0;
-    for (auto scope = start_scope; scope; scope = look_parents ? scope->parent : nullptr, ++depth) {
-        trace_scope_step(trace, depth, scope->flags);
-        if (scope->associated_decl_context &&
-            visited_contexts.insert(scope->associated_decl_context).second) {
-            auto* binding = lookup_context_local(
-                scope->associated_decl_context, name, LookupNamespace::Ordinary);
-            if (binding) {
-                auto candidates = extract_function_candidates(binding);
-                if (!candidates.empty()) {
-                    trace_named_step(
-                        trace, "hit decl-context function candidates: ", name);
-                    return candidates;
-                }
-                trace_named_step(
-                    trace, "ordinary-name hit is not function overload set: ", name);
-                return {};
-            }
-            trace_named_step(trace, "miss decl-context function candidates: ", name);
+    auto environment = build_unqualified_environment(start_scope, look_parents, trace);
+    for (const auto& frame : environment.frames) {
+        std::unordered_set<const DeclContext*> visited_contexts;
+        auto result = lookup_functions_in_context_graph(
+            name,
+            frame.decl_context,
+            frame.lookup_position,
+            visited_contexts,
+            trace);
+        if (result.blocked) {
+            return {};
         }
-
-        if (!look_parents) {
-            break;
+        if (result.found) {
+            return result.candidates;
         }
     }
 
@@ -353,34 +590,25 @@ TagDecl* LookupEngine::lookup_tag_decl(const std::string& tag,
         return nullptr;
     }
 
-    std::unordered_set<const DeclContext*> visited_contexts;
-    size_t depth = 0;
-    for (auto scope = start_scope; scope; scope = look_parents ? scope->parent : nullptr, ++depth) {
-        trace_scope_step(trace, depth, scope->flags);
-        if (scope->associated_decl_context &&
-            visited_contexts.insert(scope->associated_decl_context).second) {
-            auto* binding = lookup_context_local(
-                scope->associated_decl_context, tag, LookupNamespace::Tag);
-            if (binding) {
-                if (binding->ast_decl) {
-                    trace_named_step(trace, "hit decl-context tag ast: ", tag);
-                    return const_cast<TagDecl*>(
-                        static_cast<const TagDecl*>(binding->ast_decl));
-                }
-                if (binding->type) {
-                    auto tag_ty = dyn_cast_shared<TagType>(binding->type.get_shared());
-                    if (tag_ty && tag_ty->get_decl()) {
-                        trace_named_step(trace, "hit decl-context tag type: ", tag);
-                        return const_cast<TagDecl*>(tag_ty->get_decl());
-                    }
-                }
-            }
-            trace_named_step(trace, "miss decl-context tag: ", tag);
+    auto environment = build_unqualified_environment(start_scope, look_parents, trace);
+    for (const auto& frame : environment.frames) {
+        std::unordered_set<const DeclContext*> visited_contexts;
+        auto result = lookup_tag_in_context_graph(
+            tag,
+            frame.decl_context,
+            frame.lookup_position,
+            visited_contexts,
+            trace);
+        if (!result.found) {
+            continue;
         }
-
-        if (!look_parents) {
-            break;
+        if (result.decl) {
+            return result.decl;
         }
+        if (result.binding && result.binding->type) {
+            return tag_decl_from_binding(result.binding);
+        }
+        return nullptr;
     }
     trace_named_step(trace, "lookup miss tag: ", tag);
     return nullptr;
@@ -400,24 +628,27 @@ std::shared_ptr<CType> LookupEngine::lookup_tag_type(const std::string& tag,
         return nullptr;
     }
 
-    std::unordered_set<const DeclContext*> visited_contexts;
-    size_t depth = 0;
-    for (auto scope = start_scope; scope; scope = look_parents ? scope->parent : nullptr, ++depth) {
-        trace_scope_step(trace, depth, scope->flags);
-        if (scope->associated_decl_context &&
-            visited_contexts.insert(scope->associated_decl_context).second) {
-            auto* binding = lookup_context_local(
-                scope->associated_decl_context, tag, LookupNamespace::Tag);
-            if (binding && binding->type) {
-                trace_named_step(trace, "hit decl-context tag type: ", tag);
-                return binding->type.get_shared();
-            }
-            trace_named_step(trace, "miss decl-context tag type: ", tag);
+    auto environment = build_unqualified_environment(start_scope, look_parents, trace);
+    for (const auto& frame : environment.frames) {
+        std::unordered_set<const DeclContext*> visited_contexts;
+        auto result = lookup_tag_in_context_graph(
+            tag,
+            frame.decl_context,
+            frame.lookup_position,
+            visited_contexts,
+            trace);
+        if (!result.found) {
+            continue;
         }
-
-        if (!look_parents) {
-            break;
+        if (result.binding && result.binding->type) {
+            trace_named_step(trace, "hit decl-context tag type: ", tag);
+            return result.binding->type.get_shared();
         }
+        if (result.decl) {
+            trace_named_step(trace, "tag-type from decl: ", tag);
+            return result.decl->get_tag_type();
+        }
+        return nullptr;
     }
     trace_named_step(trace, "lookup miss tag type: ", tag);
     return nullptr;

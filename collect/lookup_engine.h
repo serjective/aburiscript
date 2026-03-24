@@ -39,6 +39,24 @@ public:
         std::string terminal_name;
     };
 
+    struct LookupEnvironmentFrame {
+        std::shared_ptr<Scope> scope;
+        const DeclContext* decl_context = nullptr;
+        uint64_t lookup_position = 0;
+        size_t scope_depth = 0;
+    };
+
+    struct LookupEnvironment {
+        std::vector<LookupEnvironmentFrame> frames;
+
+        bool empty() const { return frames.empty(); }
+    };
+
+    static LookupEnvironment build_unqualified_environment(
+        const std::shared_ptr<Scope>& start_scope,
+        bool look_parents,
+        LookupTrace* trace = nullptr);
+
     static std::shared_ptr<Symbol> lookup_unqualified_ordinary(
         const std::string& name,
         const std::shared_ptr<Scope>& start_scope,
