@@ -2,6 +2,7 @@
 #include <unordered_set>
 #include "../ast/ast.h"
 #include "../helpers/casting.h"
+#include "../helpers/qualified_name_utils.h"
 #include "decl_context.h"
 
 namespace {
@@ -26,6 +27,11 @@ struct TagContextLookupResult {
     bool found = false;
     const DeclBinding* binding = nullptr;
     TagDecl* decl = nullptr;
+};
+
+struct OrdinaryBindingSetResult {
+    bool blocked = false;
+    std::vector<const DeclBinding*> bindings;
 };
 
 bool symbol_matches_filter(const std::shared_ptr<Symbol>& sym,
@@ -113,10 +119,14 @@ const DeclContext* resolve_named_child_context(const DeclContext* context,
         if (!candidate) {
             return nullptr;
         }
-        auto binding = candidate->lookup_local_namespace_binding(component);
-        if (binding && binding.entry && binding.entry->target_context) {
-            auto* canonical = binding.entry->target_context->primary_context();
-            return canonical ? canonical : binding.entry->target_context.get();
+        auto namespace_context =
+            qualified_name_utils::resolve_named_namespace_context(
+                candidate,
+                component,
+                /*allow_enclosing_lookup=*/false);
+        if (namespace_context) {
+            auto* canonical = namespace_context->primary_context();
+            return canonical ? canonical : namespace_context.get();
         }
         auto* child = candidate->find_named_lexical_child(component);
         if (!child) {
@@ -160,6 +170,129 @@ std::vector<std::shared_ptr<Symbol>> extract_function_candidates(const DeclBindi
         maybe_push(binding->symbol);
     }
     return out;
+}
+
+void append_unique_binding(std::vector<const DeclBinding*>& bindings,
+                           const DeclBinding* binding) {
+    if (!binding) {
+        return;
+    }
+    for (const auto* existing : bindings) {
+        if (existing == binding) {
+            return;
+        }
+    }
+    bindings.push_back(binding);
+}
+
+void append_unique_template_decl(std::vector<const Decl*>& decls,
+                                 const Decl* decl) {
+    if (!decl) {
+        return;
+    }
+    for (const auto* existing : decls) {
+        if (existing == decl) {
+            return;
+        }
+    }
+    decls.push_back(decl);
+}
+
+bool binding_has_non_function_ordinary_entity(const DeclBinding* binding) {
+    if (!binding) {
+        return false;
+    }
+    if (binding->symbol && binding->symbol->kind != SymbolKind::FUNCTION) {
+        return true;
+    }
+    if (binding->template_decl &&
+        !isa<FunctionTemplateDecl>(binding->template_decl)) {
+        return true;
+    }
+    for (const auto* decl : binding->template_overload_candidates) {
+        if (!isa<FunctionTemplateDecl>(decl)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool binding_has_function_family_entity(const DeclBinding* binding) {
+    if (!binding) {
+        return false;
+    }
+    if (binding->symbol && binding->symbol->kind == SymbolKind::FUNCTION) {
+        return true;
+    }
+    for (const auto& candidate : binding->overload_candidates) {
+        if (candidate && candidate->kind == SymbolKind::FUNCTION) {
+            return true;
+        }
+    }
+    if (binding->template_decl && isa<FunctionTemplateDecl>(binding->template_decl)) {
+        return true;
+    }
+    for (const auto* decl : binding->template_overload_candidates) {
+        if (isa<FunctionTemplateDecl>(decl)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::shared_ptr<DeclBinding> synthesize_merged_function_binding(
+    const std::string& name,
+    const std::vector<const DeclBinding*>& bindings,
+    LookupEngine::OrdinaryFilter filter) {
+    auto merged = std::make_shared<DeclBinding>();
+    merged->name = name;
+    merged->lookup_namespace = LookupNamespace::Ordinary;
+    merged->symbol_kind = SymbolKind::FUNCTION;
+
+    for (const auto* binding : bindings) {
+        if (!binding) {
+            continue;
+        }
+        if (!merged->symbol) {
+            merged->symbol = select_binding_symbol(binding, filter);
+            if (merged->symbol) {
+                merged->type = merged->symbol->type;
+            }
+        }
+        for (const auto& candidate : extract_function_candidates(binding)) {
+            bool seen = false;
+            for (const auto& existing : merged->overload_candidates) {
+                if (existing == candidate) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                merged->overload_candidates.push_back(candidate);
+            }
+        }
+        if (binding->template_decl) {
+            append_unique_template_decl(
+                merged->template_overload_candidates,
+                binding->template_decl);
+        }
+        for (const auto* decl : binding->template_overload_candidates) {
+            append_unique_template_decl(merged->template_overload_candidates, decl);
+        }
+    }
+
+    if (!merged->symbol && !merged->overload_candidates.empty()) {
+        merged->symbol = merged->overload_candidates.front();
+        merged->type = merged->symbol ? merged->symbol->type : QualType();
+    }
+    if (!merged->template_overload_candidates.empty()) {
+        merged->template_decl = merged->template_overload_candidates.front();
+    }
+    merged->ordinary_entry_kind =
+        merged->overload_candidates.size() > 1
+            ? OrdinaryEntryKind::OverloadSet
+            : OrdinaryEntryKind::SingleSymbol;
+    return merged;
 }
 
 std::string scope_flags_to_string(ScopeFlags flags) {
@@ -403,6 +536,58 @@ TagContextLookupResult lookup_tag_in_context_graph(
 
     return result;
 }
+
+OrdinaryBindingSetResult collect_ordinary_bindings_in_context_graph(
+    const std::string& name,
+    const DeclContext* context,
+    uint64_t lookup_position,
+    LookupEngine::OrdinaryFilter filter,
+    std::unordered_set<const DeclContext*>& visited_contexts,
+    LookupEngine::LookupTrace* trace) {
+    OrdinaryBindingSetResult result;
+    context = canonical_decl_context(context);
+    if (!context || !visited_contexts.insert(context).second) {
+        return result;
+    }
+
+    lookup_position = effective_lookup_position(context, lookup_position);
+    auto* binding = lookup_context_local(context, name, LookupNamespace::Ordinary);
+    if (binding) {
+        if (binding_matches_ordinary_filter(binding, filter)) {
+            trace_named_step(trace, "hit decl-context qualified ordinary: ", name);
+            append_unique_binding(result.bindings, binding);
+        } else {
+            trace_named_step(
+                trace,
+                "blocked by non-matching qualified ordinary binding: ",
+                name);
+            result.blocked = true;
+        }
+        return result;
+    }
+    trace_named_step(trace, "miss decl-context qualified ordinary: ", name);
+
+    for (const auto& nomination : context->namespace_nominations()) {
+        if (!nomination_is_visible(nomination, lookup_position) ||
+            !nomination.nominated_context) {
+            continue;
+        }
+        trace_named_step(trace, "follow namespace nomination qualified ordinary: ", name);
+        auto nomination_result = collect_ordinary_bindings_in_context_graph(
+            name,
+            nomination.nominated_context.get(),
+            nomination.nominated_context->next_lookup_event_index(),
+            filter,
+            visited_contexts,
+            trace);
+        for (const auto* candidate : nomination_result.bindings) {
+            append_unique_binding(result.bindings, candidate);
+        }
+        result.blocked = result.blocked || nomination_result.blocked;
+    }
+
+    return result;
+}
 }
 
 LookupEngine::LookupEnvironment LookupEngine::build_unqualified_environment(
@@ -504,6 +689,76 @@ LookupEngine::QualifiedLookupResult LookupEngine::lookup_qualified(
 
     QualifiedLookupResult result;
     if (!start_decl_context || name.empty()) {
+        return result;
+    }
+
+    start_decl_context = canonical_decl_context(start_decl_context);
+    bool use_namespace_graph =
+        start_decl_context &&
+        (start_decl_context->kind() == DeclContextKind::Namespace ||
+         start_decl_context->kind() == DeclContextKind::TranslationUnit);
+
+    if (use_namespace_graph &&
+        lookup_namespace_contains(lookup_namespace, LookupNamespace::Ordinary)) {
+        std::unordered_set<const DeclContext*> visited_contexts;
+        auto ordinary_results = collect_ordinary_bindings_in_context_graph(
+            name,
+            start_decl_context,
+            start_decl_context->next_lookup_event_index(),
+            filter,
+            visited_contexts,
+            nullptr);
+        if (ordinary_results.bindings.empty()) {
+            result.status = QualifiedLookupStatus::NotFound;
+            return result;
+        }
+        if (ordinary_results.bindings.size() == 1) {
+            result.status = QualifiedLookupStatus::Found;
+            result.binding = ordinary_results.bindings.front();
+            result.symbol = select_binding_symbol(result.binding, filter);
+            return result;
+        }
+
+        bool can_merge_functions = true;
+        for (const auto* binding : ordinary_results.bindings) {
+            if (binding_has_non_function_ordinary_entity(binding) ||
+                !binding_has_function_family_entity(binding)) {
+                can_merge_functions = false;
+                break;
+            }
+        }
+        if (!can_merge_functions) {
+            result.status = QualifiedLookupStatus::Unsupported;
+            result.unsupported_reason = "ambiguous qualified namespace lookup";
+            return result;
+        }
+
+        result.owned_binding = synthesize_merged_function_binding(
+            name,
+            ordinary_results.bindings,
+            filter);
+        result.binding = result.owned_binding.get();
+        result.symbol = select_binding_symbol(result.binding, filter);
+        result.status = QualifiedLookupStatus::Found;
+        return result;
+    }
+
+    if (use_namespace_graph &&
+        lookup_namespace == LookupNamespace::Tag) {
+        std::unordered_set<const DeclContext*> visited_contexts;
+        auto tag_result = lookup_tag_in_context_graph(
+            name,
+            start_decl_context,
+            start_decl_context->next_lookup_event_index(),
+            visited_contexts,
+            nullptr);
+        if (!tag_result.found || !tag_result.binding) {
+            result.status = QualifiedLookupStatus::NotFound;
+            return result;
+        }
+        result.status = QualifiedLookupStatus::Found;
+        result.binding = tag_result.binding;
+        result.symbol = select_binding_symbol(result.binding, filter);
         return result;
     }
 

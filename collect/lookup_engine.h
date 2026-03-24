@@ -30,6 +30,7 @@ public:
         QualifiedLookupStatus status = QualifiedLookupStatus::NotFound;
         const DeclBinding* binding = nullptr;
         std::shared_ptr<Symbol> symbol = nullptr;
+        std::shared_ptr<DeclBinding> owned_binding = nullptr;
         std::string unsupported_reason;
     };
 

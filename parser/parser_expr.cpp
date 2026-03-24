@@ -860,14 +860,22 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
 
     if (!qualifier_lookup_failed) {
         std::shared_ptr<Symbol> sym = nullptr;
-        if (lookup_scope && lookup_scope->associated_decl_context) {
-            auto* binding = lookup_scope->associated_decl_context->lookup_local(
-                terminal_name, LookupNamespace::Ordinary);
+        if (lookup_context) {
+            auto qualified_lookup = LookupEngine::lookup_qualified(
+                terminal_name,
+                lookup_context,
+                LookupNamespace::Ordinary);
+            auto* binding =
+                qualified_lookup.status == LookupEngine::QualifiedLookupStatus::Found
+                    ? qualified_lookup.binding
+                    : nullptr;
             if (binding) {
-                if (binding->symbol) {
+                sym = qualified_lookup.symbol;
+                if (!sym && binding->symbol) {
                     sym = binding->symbol;
-                } else if (binding->has_overload_set() &&
-                    !binding->overload_candidates.empty()) {
+                } else if (!sym &&
+                           binding->has_overload_set() &&
+                           !binding->overload_candidates.empty()) {
                     sym = binding->overload_candidates.front();
                 }
             }

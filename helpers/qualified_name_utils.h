@@ -12,6 +12,11 @@
 
 namespace qualified_name_utils {
 
+std::shared_ptr<DeclContext> resolve_named_namespace_context(
+    const DeclContext* start_context,
+    std::string_view namespace_name,
+    bool allow_enclosing_lookup);
+
 std::shared_ptr<Scope> resolve_named_namespace_scope(
     const DeclContext* start_context,
     std::string_view namespace_name,

@@ -56,8 +56,11 @@ enum class DeclContextKind : uint8_t {
 
 enum class LookupNamespace : uint32_t {
     None = 0,
+    // Variables, functions, typedefs, namespace aliases, and other ordinary names.
     Ordinary = 1u << 0,
+    // Struct/class/union/enum names that inhabit the tag namespace.
     Tag = 1u << 1,
+    // Function-local goto labels.
     Label = 1u << 2
 };
 
