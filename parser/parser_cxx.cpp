@@ -5524,7 +5524,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
         }
 
 
-        // This will be the future namespace discovery, but we keep the old path as we transition.
+        // Model using-directives as nomination relationships; unqualified lookup
+        // walks these dynamically instead of materializing copied bindings.
         collect_->collect_register_namespace_nomination(
             current_context,
             NamespaceNominationRecord{
@@ -5532,70 +5533,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
                 target_context->shared_from_this(),
                 using_tok.loc,
                 0});
-
-        // using-directive imports declarations into unqualified lookup of the
-        // current context; keep tag and ordinary namespaces separate.
-        auto import_tag_binding = [&](const DeclBinding& binding) {
-            if (!lookup_namespace_contains(binding.lookup_namespace,
-                                           LookupNamespace::Tag) ||
-                binding.name.empty()) {
-                return;
-            }
-            if (current_context->lookup_local(binding.name, LookupNamespace::Tag)) {
-                return;
-            }
-            if (auto* tag_decl = dyn_cast<TagDecl>(binding.ast_decl)) {
-                collect_->collect_add_tag_decl(
-                    binding.name, const_cast<TagDecl*>(tag_decl));
-            }
-        };
-
-        auto import_ordinary_binding = [&](const DeclBinding& binding) {
-            if (!lookup_namespace_contains(binding.lookup_namespace,
-                                           LookupNamespace::Ordinary) ||
-                binding.name.empty()) {
-                return;
-            }
-
-            const DeclBinding* existing = current_context->lookup_local(
-                binding.name, LookupNamespace::Ordinary);
-
-            auto import_function = [&](const std::shared_ptr<Symbol>& candidate) {
-                if (!candidate || candidate->kind != SymbolKind::FUNCTION) {
-                    return;
-                }
-                if (existing && existing->symbol_kind != SymbolKind::FUNCTION) {
-                    return;
-                }
-                collect_->collect_bind_symbol_in_current_scope(
-                    binding.name, candidate);
-            };
-
-            if (binding.has_overload_set()) {
-                for (const auto& candidate : binding.overload_candidates) {
-                    import_function(candidate);
-                }
-                return;
-            }
-
-            if (!binding.symbol) {
-                return;
-            }
-            if (binding.symbol->kind == SymbolKind::FUNCTION) {
-                import_function(binding.symbol);
-                return;
-            }
-            if (existing) {
-                return;
-            }
-            collect_->collect_bind_symbol_in_current_scope(
-                binding.name, binding.symbol);
-        };
-
-        for (const auto& binding : target_context->declarations()) {
-            import_tag_binding(binding);
-            import_ordinary_binding(binding);
-        }
 
         parsed_decls.push_back(collect_->collect_nop_declaration(using_tok.loc));
         return parsed_decls;
