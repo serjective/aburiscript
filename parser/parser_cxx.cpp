@@ -5523,6 +5523,16 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
                           target_loc);
         }
 
+
+        // This will be the future namespace discovery, but we keep the old path as we transition.
+        collect_->collect_register_namespace_nomination(
+            current_context,
+            NamespaceNominationRecord{
+                NamespaceNominationKind::UsingDirective,
+                target_context->shared_from_this(),
+                using_tok.loc,
+                0});
+
         // using-directive imports declarations into unqualified lookup of the
         // current context; keep tag and ordinary namespaces separate.
         auto import_tag_binding = [&](const DeclBinding& binding) {

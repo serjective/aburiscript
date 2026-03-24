@@ -189,6 +189,10 @@ public:
         const std::shared_ptr<DeclContext>& owner_context,
         NamespaceBindingEntry alias);
 
+    void collect_register_namespace_nomination(
+        const std::shared_ptr<DeclContext>& owner_context,
+        NamespaceNominationRecord nomination);
+
     CppThisContext collect_current_cpp_this_context() const ;
 
     bool with_function_definition_state(
@@ -933,6 +937,8 @@ private:
             size_t lexical_child_count = 0;
             size_t namespace_binding_count = 0;
             size_t namespace_alias_count = 0;
+            size_t namespace_nomination_count = 0;
+            uint64_t next_lookup_event_index = 1;
         };
 
         struct ScopeMutationCheckpoint {

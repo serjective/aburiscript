@@ -7,6 +7,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include "../source_mgnt.h"
 #include "../ast/symbols.h"
 #include "../ast/types.h"
 
@@ -24,6 +25,18 @@ struct NamespaceBindingLookup {
     bool is_alias = false;
 
     explicit operator bool() const { return entry != nullptr; }
+};
+
+enum class NamespaceNominationKind : uint8_t {
+    UsingDirective,
+    InlineImplicit
+};
+
+struct NamespaceNominationRecord {
+    NamespaceNominationKind kind = NamespaceNominationKind::UsingDirective;
+    std::shared_ptr<DeclContext> nominated_context = nullptr;
+    SrcLoc introducer_loc;
+    uint64_t point_of_declaration_index = 0;
 };
 
 enum class DeclContextKind : uint8_t {
@@ -137,10 +150,16 @@ public:
     size_t lexical_child_count() const { return lexical_children_.size(); }
     size_t namespace_binding_count() const { return namespace_bindings_.size(); }
     size_t namespace_alias_count() const { return namespace_aliases_.size(); }
+    size_t namespace_nomination_count() const { return namespace_nominations_.size(); }
+    uint64_t next_lookup_event_index() const { return next_lookup_event_index_; }
     void truncate_declarations(size_t count);
     void truncate_lexical_children(size_t count);
     void truncate_namespace_bindings(size_t count);
     void truncate_namespace_aliases(size_t count);
+    void truncate_namespace_nominations(size_t count);
+    void set_next_lookup_event_index(uint64_t index) {
+        next_lookup_event_index_ = index == 0 ? 1 : index;
+    }
 
     const DeclBinding* lookup_local(const std::string& name,
                                     LookupNamespace ns) const;
@@ -154,11 +173,16 @@ public:
         std::string_view local_name) const;
     void add_namespace_binding(NamespaceBindingEntry binding);
     void add_namespace_alias(NamespaceBindingEntry alias);
+    const std::vector<NamespaceNominationRecord>& namespace_nominations() const {
+        return namespace_nominations_;
+    }
+    void add_namespace_nomination(NamespaceNominationRecord nomination);
 
 private:
     void index_lexical_child_name(DeclContext* child);
     void remove_lexical_child_name(DeclContext* child, std::string_view lookup_name);
     void index_binding(const DeclBinding& binding, size_t idx);
+    uint64_t allocate_lookup_event_index() { return next_lookup_event_index_++; }
     void reindex_namespace_bindings();
     void reindex_namespace_aliases();
     const std::unordered_map<std::string, std::vector<size_t>>&
@@ -181,6 +205,8 @@ private:
     std::unordered_map<std::string, size_t> namespace_binding_indices_;
     std::vector<NamespaceBindingEntry> namespace_aliases_;
     std::unordered_map<std::string, size_t> namespace_alias_indices_;
+    std::vector<NamespaceNominationRecord> namespace_nominations_;
+    uint64_t next_lookup_event_index_ = 1;
 
     std::unordered_map<std::string, std::vector<size_t>> ordinary_lookup_;
     std::unordered_map<std::string, std::vector<size_t>> tag_lookup_;

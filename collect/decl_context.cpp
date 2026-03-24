@@ -115,6 +115,7 @@ void DeclContext::index_binding(const DeclBinding& binding, size_t idx) {
 }
 
 void DeclContext::add_declaration(DeclBinding binding) {
+    allocate_lookup_event_index();
     size_t idx = declarations_.size();
     declarations_.push_back(std::move(binding));
     index_binding(declarations_.back(), idx);
@@ -197,6 +198,13 @@ void DeclContext::truncate_namespace_aliases(size_t count) {
     }
     namespace_aliases_.resize(count);
     reindex_namespace_aliases();
+}
+
+void DeclContext::truncate_namespace_nominations(size_t count) {
+    if (count >= namespace_nominations_.size()) {
+        return;
+    }
+    namespace_nominations_.resize(count);
 }
 
 const std::unordered_map<std::string, std::vector<size_t>>&
@@ -353,4 +361,14 @@ void DeclContext::add_namespace_alias(NamespaceBindingEntry alias) {
     }
     namespace_alias_indices_[alias.local_name] = namespace_aliases_.size();
     namespace_aliases_.push_back(std::move(alias));
+}
+
+void DeclContext::add_namespace_nomination(NamespaceNominationRecord nomination) {
+    if (!nomination.nominated_context) {
+        return;
+    }
+    if (nomination.point_of_declaration_index == 0) {
+        nomination.point_of_declaration_index = allocate_lookup_event_index();
+    }
+    namespace_nominations_.push_back(std::move(nomination));
 }
