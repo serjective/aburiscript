@@ -196,6 +196,9 @@ void Collect::record_decl_context_mutation(
         checkpoint.namespace_alias_count = context->namespace_alias_count();
         checkpoint.namespace_nomination_count =
             context->namespace_nomination_count();
+        checkpoint.is_inline_namespace = context->is_inline_namespace();
+        checkpoint.inline_enclosing_namespace =
+            context->inline_enclosing_namespace();
         checkpoint.next_lookup_event_index = context->next_lookup_event_index();
         snapshot.decl_context_mutations.emplace(context_key, std::move(checkpoint));
     }
@@ -287,6 +290,9 @@ void Collect::collect_rollback_tentative_parse() {
             checkpoint.namespace_alias_count);
         checkpoint.context->truncate_namespace_nominations(
             checkpoint.namespace_nomination_count);
+        checkpoint.context->set_inline_namespace(
+            checkpoint.is_inline_namespace,
+            checkpoint.inline_enclosing_namespace);
         checkpoint.context->set_next_lookup_event_index(
             checkpoint.next_lookup_event_index);
     }
@@ -636,6 +642,31 @@ void Collect::collect_register_namespace_nomination(
     }
     record_decl_context_mutation(owner_context);
     owner_context->add_namespace_nomination(std::move(nomination));
+}
+
+void Collect::collect_set_namespace_inline_metadata(
+    const std::shared_ptr<DeclContext>& namespace_context,
+    bool is_inline,
+    DeclContext* enclosing_namespace) {
+
+    if (!namespace_context) {
+        return;
+    }
+
+    auto target_context = namespace_context;
+    if (target_context->primary_context() &&
+        target_context->primary_context() != target_context.get()) {
+        target_context = target_context->primary_context()->shared_from_this();
+    }
+
+    DeclContext* effective_enclosing = is_inline ? enclosing_namespace : nullptr;
+    if (target_context->is_inline_namespace() == is_inline &&
+        target_context->inline_enclosing_namespace() == effective_enclosing) {
+        return;
+    }
+
+    record_decl_context_mutation(target_context);
+    target_context->set_inline_namespace(is_inline, effective_enclosing);
 }
 
 CppThisContext Collect::collect_current_cpp_this_context() const {

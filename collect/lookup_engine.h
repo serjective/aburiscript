@@ -20,6 +20,12 @@ public:
         TypedefOnly
     };
 
+    enum class NamespaceReachability : uint8_t {
+        DirectOnly,
+        InlineVisible,
+        FullyVisible
+    };
+
     enum class QualifiedLookupStatus : uint8_t {
         Found,
         NotFound,
@@ -38,6 +44,12 @@ public:
         bool has_global_qualifier = false;
         std::vector<std::string> qualifiers;
         std::string terminal_name;
+    };
+
+    struct QualifiedOrdinaryBindingMatch {
+        const DeclBinding* binding = nullptr;
+        const DeclContext* owner_context = nullptr;
+        std::shared_ptr<Scope> owner_scope = nullptr;
     };
 
     struct LookupEnvironmentFrame {
@@ -71,6 +83,15 @@ public:
         bool look_parents,
         LookupNamespace lookup_namespace,
         LookupTrace* trace = nullptr);
+
+    static std::vector<QualifiedOrdinaryBindingMatch>
+    lookup_qualified_ordinary_bindings(
+        const std::string& name,
+        const DeclContext* start_decl_context,
+        const std::shared_ptr<Scope>& start_scope = nullptr,
+        OrdinaryFilter filter = OrdinaryFilter::Any,
+        NamespaceReachability reachability =
+            NamespaceReachability::FullyVisible);
 
     static QualifiedLookupResult lookup_qualified(
         const std::string& name,

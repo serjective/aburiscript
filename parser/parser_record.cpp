@@ -3654,7 +3654,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
         ret_vec.push_back(collect_->collect_nop_declaration(loc));
         return ret_vec;
     }
-    if (is_cxx_mode_active() && gentle_check(TokenType::NAMESPACE)) {
+    if (is_cxx_mode_active() &&
+        (gentle_check(TokenType::NAMESPACE) ||
+         (gentle_check(TokenType::INLINE) &&
+          peek_token().type == TokenType::NAMESPACE))) {
         return parse_cpp_namespace_definition();
     }
     if (is_cxx_mode_active() && gentle_check(TokenType::USING)) {
@@ -4073,6 +4076,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
         bool qualified_declarator_has_global_qualifier = false;
         std::vector<std::string> qualified_declarator_qualifiers;
         std::shared_ptr<DeclContext> qualified_declarator_target_context;
+        std::shared_ptr<Scope> qualified_declarator_target_scope;
         const ObjectDecl* qualified_declarator_owner_record_decl = nullptr;
         const ClassTemplateDecl* qualified_declarator_owner_class_template = nullptr;
         std::vector<TemplateArgument> qualified_declarator_owner_template_arguments;
@@ -4345,6 +4349,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
                 if (!qualified_declarator_owner_record_decl) {
                     qualified_declarator_target_context =
                         collect_->get_current_decl_context();
+                    qualified_declarator_target_scope =
+                        collect_->collect_current_scope();
                     if (!qualified_declarator_target_context) {
                         diag_engine->report_error(
                             "internal error: namespace declaration context missing",
@@ -4448,17 +4454,35 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
             return true;
         };
         if (qualified_declarator_target_context) {
-            const DeclBinding* prior_decl =
-                qualified_declarator_target_context->lookup_local(
-                    decl_parser.name, LookupNamespace::Ordinary);
-            bool has_prior_declaration = false;
+            auto prior_decls = LookupEngine::lookup_qualified_ordinary_bindings(
+                decl_parser.name,
+                qualified_declarator_target_context.get(),
+                qualified_declarator_target_scope,
+                LookupEngine::OrdinaryFilter::Any,
+                LookupEngine::NamespaceReachability::InlineVisible);
+            const LookupEngine::QualifiedOrdinaryBindingMatch* matched_prior_decl =
+                nullptr;
             if (canonical_type_kind(newer_type) == TypeKind::Function) {
-                has_prior_declaration = namespace_function_prior_match(
-                    prior_decl, desugar_type(QualType(newer_type)));
+                QualType declared_function_type = desugar_type(QualType(newer_type));
+                for (const auto& prior_decl : prior_decls) {
+                    if (!namespace_function_prior_match(
+                            prior_decl.binding,
+                            declared_function_type)) {
+                        continue;
+                    }
+                    matched_prior_decl = &prior_decl;
+                    break;
+                }
             } else {
-                has_prior_declaration = namespace_variable_prior_match(prior_decl);
+                for (const auto& prior_decl : prior_decls) {
+                    if (!namespace_variable_prior_match(prior_decl.binding)) {
+                        continue;
+                    }
+                    matched_prior_decl = &prior_decl;
+                    break;
+                }
             }
-            if (!has_prior_declaration) {
+            if (!matched_prior_decl) {
                 error_custloc(
                     "out-of-line declaration of '" +
                         qualified_name_utils::format_cpp_qualified_name(
@@ -4467,6 +4491,20 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
                             decl_parser.name) +
                         "' does not match any declaration in the target namespace",
                     qualified_declarator_loc);
+            }
+            if (matched_prior_decl->owner_context &&
+                matched_prior_decl->owner_context !=
+                    qualified_declarator_target_context.get()) {
+                if (!matched_prior_decl->owner_scope) {
+                    error_custloc(
+                        "internal error: missing owning scope for inline namespace member declaration",
+                        qualified_declarator_loc);
+                }
+                collect_->collect_set_current_scope(matched_prior_decl->owner_scope);
+                qualified_declarator_target_context =
+                    collect_->get_current_decl_context();
+                qualified_declarator_target_scope =
+                    collect_->collect_current_scope();
             }
         } else if (qualified_declarator_owner_record_decl) {
             const RecordSemanticState* owner_state =

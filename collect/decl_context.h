@@ -154,12 +154,17 @@ public:
     size_t namespace_binding_count() const { return namespace_bindings_.size(); }
     size_t namespace_alias_count() const { return namespace_aliases_.size(); }
     size_t namespace_nomination_count() const { return namespace_nominations_.size(); }
+    bool is_inline_namespace() const { return is_inline_namespace_; }
+    DeclContext* inline_enclosing_namespace() const {
+        return inline_enclosing_namespace_;
+    }
     uint64_t next_lookup_event_index() const { return next_lookup_event_index_; }
     void truncate_declarations(size_t count);
     void truncate_lexical_children(size_t count);
     void truncate_namespace_bindings(size_t count);
     void truncate_namespace_aliases(size_t count);
     void truncate_namespace_nominations(size_t count);
+    void set_inline_namespace(bool is_inline, DeclContext* enclosing_namespace);
     void set_next_lookup_event_index(uint64_t index) {
         next_lookup_event_index_ = index == 0 ? 1 : index;
     }
@@ -209,6 +214,8 @@ private:
     std::vector<NamespaceBindingEntry> namespace_aliases_;
     std::unordered_map<std::string, size_t> namespace_alias_indices_;
     std::vector<NamespaceNominationRecord> namespace_nominations_;
+    bool is_inline_namespace_ = false;
+    DeclContext* inline_enclosing_namespace_ = nullptr;
     uint64_t next_lookup_event_index_ = 1;
 
     std::unordered_map<std::string, std::vector<size_t>> ordinary_lookup_;

@@ -207,6 +207,12 @@ void DeclContext::truncate_namespace_nominations(size_t count) {
     namespace_nominations_.resize(count);
 }
 
+void DeclContext::set_inline_namespace(bool is_inline,
+                                       DeclContext* enclosing_namespace) {
+    is_inline_namespace_ = is_inline;
+    inline_enclosing_namespace_ = is_inline ? enclosing_namespace : nullptr;
+}
+
 const std::unordered_map<std::string, std::vector<size_t>>&
 DeclContext::map_for_namespace(LookupNamespace ns) const {
     switch (ns) {

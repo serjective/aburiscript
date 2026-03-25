@@ -31,7 +31,7 @@ struct TagContextLookupResult {
 
 struct OrdinaryBindingSetResult {
     bool blocked = false;
-    std::vector<const DeclBinding*> bindings;
+    std::vector<LookupEngine::QualifiedOrdinaryBindingMatch> bindings;
 };
 
 bool symbol_matches_filter(const std::shared_ptr<Symbol>& sym,
@@ -81,6 +81,8 @@ bool binding_matches_ordinary_filter(const DeclBinding* binding,
     }
     return false;
 }
+
+const DeclContext* canonical_decl_context(const DeclContext* context);
 
 std::shared_ptr<Symbol> select_binding_symbol(const DeclBinding* binding,
                                               LookupEngine::OrdinaryFilter filter) {
@@ -183,6 +185,55 @@ void append_unique_binding(std::vector<const DeclBinding*>& bindings,
         }
     }
     bindings.push_back(binding);
+}
+
+void append_unique_binding_match(
+    std::vector<LookupEngine::QualifiedOrdinaryBindingMatch>& bindings,
+    const DeclBinding* binding,
+    const DeclContext* owner_context,
+    const std::shared_ptr<Scope>& owner_scope) {
+    if (!binding) {
+        return;
+    }
+    owner_context = canonical_decl_context(owner_context);
+    for (const auto& existing : bindings) {
+        if (existing.binding == binding &&
+            canonical_decl_context(existing.owner_context) == owner_context) {
+            return;
+        }
+    }
+    bindings.push_back(
+        LookupEngine::QualifiedOrdinaryBindingMatch{
+            binding,
+            owner_context,
+            owner_scope});
+}
+
+std::shared_ptr<Scope> resolve_direct_child_namespace_scope(
+    const DeclContext* owner_context,
+    const DeclContext* child_context) {
+    owner_context = canonical_decl_context(owner_context);
+    child_context = canonical_decl_context(child_context);
+    if (!owner_context || !child_context) {
+        return nullptr;
+    }
+
+    const auto& child_name = child_context->lookup_name();
+    if (child_name.empty()) {
+        return nullptr;
+    }
+
+    const auto* direct_child = owner_context->lookup_local_namespace(child_name);
+    if (!direct_child || !direct_child->target_context) {
+        return nullptr;
+    }
+
+    const DeclContext* direct_child_context =
+        canonical_decl_context(direct_child->target_context.get());
+    if (direct_child_context != child_context) {
+        return nullptr;
+    }
+    return direct_child->target_scope;
 }
 
 void append_unique_template_decl(std::vector<const Decl*>& decls,
@@ -356,6 +407,39 @@ bool nomination_is_visible(const NamespaceNominationRecord& nomination,
            nomination.point_of_declaration_index < lookup_position;
 }
 
+bool namespace_reachability_includes_inline(
+    LookupEngine::NamespaceReachability reachability) {
+    return reachability == LookupEngine::NamespaceReachability::InlineVisible ||
+           reachability == LookupEngine::NamespaceReachability::FullyVisible;
+}
+
+bool namespace_reachability_includes_using(
+    LookupEngine::NamespaceReachability reachability) {
+    return reachability == LookupEngine::NamespaceReachability::FullyVisible;
+}
+
+template <typename Fn>
+bool visit_visible_namespace_nominations_of_kind(
+    const DeclContext* context,
+    uint64_t lookup_position,
+    NamespaceNominationKind kind,
+    const Fn& visitor) {
+    if (!context) {
+        return false;
+    }
+    for (const auto& nomination : context->namespace_nominations()) {
+        if (nomination.kind != kind ||
+            !nomination_is_visible(nomination, lookup_position) ||
+            !nomination.nominated_context) {
+            continue;
+        }
+        if (visitor(nomination)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void append_unique_function_candidate(
     std::vector<std::shared_ptr<Symbol>>& candidates,
     const std::shared_ptr<Symbol>& candidate) {
@@ -419,22 +503,46 @@ OrdinaryContextLookupResult lookup_ordinary_in_context_graph(
         trace_named_step(trace, "miss decl-context ordinary: ", name);
     }
 
-    for (const auto& nomination : context->namespace_nominations()) {
-        if (!nomination_is_visible(nomination, lookup_position) ||
-            !nomination.nominated_context) {
-            continue;
-        }
-        trace_named_step(trace, "follow namespace nomination ordinary: ", name);
-        auto nomination_result = lookup_ordinary_in_context_graph(
-            name,
-            nomination.nominated_context.get(),
-            nomination.nominated_context->next_lookup_event_index(),
-            filter,
-            visited_contexts,
-            trace);
-        if (nomination_result.disposition != ContextLookupDisposition::NotFound) {
-            return nomination_result;
-        }
+    auto search_nominations_of_kind =
+        [&](NamespaceNominationKind kind) -> OrdinaryContextLookupResult {
+            OrdinaryContextLookupResult nomination_match;
+            visit_visible_namespace_nominations_of_kind(
+                context,
+                lookup_position,
+                kind,
+                [&](const NamespaceNominationRecord& nomination) {
+                    trace_named_step(
+                        trace,
+                        kind == NamespaceNominationKind::InlineImplicit
+                            ? "follow inline namespace ordinary: "
+                            : "follow namespace nomination ordinary: ",
+                        name);
+                    auto nomination_result = lookup_ordinary_in_context_graph(
+                        name,
+                        nomination.nominated_context.get(),
+                        nomination.nominated_context->next_lookup_event_index(),
+                        filter,
+                        visited_contexts,
+                        trace);
+                    if (nomination_result.disposition !=
+                        ContextLookupDisposition::NotFound) {
+                        nomination_match = std::move(nomination_result);
+                        return true;
+                    }
+                    return false;
+                });
+            return nomination_match;
+        };
+
+    auto inline_result =
+        search_nominations_of_kind(NamespaceNominationKind::InlineImplicit);
+    if (inline_result.disposition != ContextLookupDisposition::NotFound) {
+        return inline_result;
+    }
+    auto nominated_result =
+        search_nominations_of_kind(NamespaceNominationKind::UsingDirective);
+    if (nominated_result.disposition != ContextLookupDisposition::NotFound) {
+        return nominated_result;
     }
 
     return result;
@@ -471,25 +579,36 @@ FunctionContextLookupResult lookup_functions_in_context_graph(
         trace_named_step(trace, "miss decl-context function candidates: ", name);
     }
 
-    for (const auto& nomination : context->namespace_nominations()) {
-        if (!nomination_is_visible(nomination, lookup_position) ||
-            !nomination.nominated_context) {
-            continue;
-        }
-        trace_named_step(trace, "follow namespace nomination functions: ", name);
-        auto nomination_result = lookup_functions_in_context_graph(
-            name,
-            nomination.nominated_context.get(),
-            nomination.nominated_context->next_lookup_event_index(),
-            visited_contexts,
-            trace);
-        if (nomination_result.found) {
-            result.found = true;
-            for (const auto& candidate : nomination_result.candidates) {
-                append_unique_function_candidate(result.candidates, candidate);
-            }
-        }
-    }
+    auto append_nominated_candidates = [&](NamespaceNominationKind kind) {
+        visit_visible_namespace_nominations_of_kind(
+            context,
+            lookup_position,
+            kind,
+            [&](const NamespaceNominationRecord& nomination) {
+                trace_named_step(
+                    trace,
+                    kind == NamespaceNominationKind::InlineImplicit
+                        ? "follow inline namespace functions: "
+                        : "follow namespace nomination functions: ",
+                    name);
+                auto nomination_result = lookup_functions_in_context_graph(
+                    name,
+                    nomination.nominated_context.get(),
+                    nomination.nominated_context->next_lookup_event_index(),
+                    visited_contexts,
+                    trace);
+                if (nomination_result.found) {
+                    result.found = true;
+                    for (const auto& candidate : nomination_result.candidates) {
+                        append_unique_function_candidate(result.candidates, candidate);
+                    }
+                }
+                return false;
+            });
+    };
+
+    append_nominated_candidates(NamespaceNominationKind::InlineImplicit);
+    append_nominated_candidates(NamespaceNominationKind::UsingDirective);
 
     return result;
 }
@@ -517,21 +636,44 @@ TagContextLookupResult lookup_tag_in_context_graph(
     }
     trace_named_step(trace, "miss decl-context tag: ", name);
 
-    for (const auto& nomination : context->namespace_nominations()) {
-        if (!nomination_is_visible(nomination, lookup_position) ||
-            !nomination.nominated_context) {
-            continue;
-        }
-        trace_named_step(trace, "follow namespace nomination tag: ", name);
-        auto nomination_result = lookup_tag_in_context_graph(
-            name,
-            nomination.nominated_context.get(),
-            nomination.nominated_context->next_lookup_event_index(),
-            visited_contexts,
-            trace);
-        if (nomination_result.found) {
-            return nomination_result;
-        }
+    auto search_nominated_tags =
+        [&](NamespaceNominationKind kind) -> TagContextLookupResult {
+            TagContextLookupResult nomination_match;
+            visit_visible_namespace_nominations_of_kind(
+                context,
+                lookup_position,
+                kind,
+                [&](const NamespaceNominationRecord& nomination) {
+                    trace_named_step(
+                        trace,
+                        kind == NamespaceNominationKind::InlineImplicit
+                            ? "follow inline namespace tag: "
+                            : "follow namespace nomination tag: ",
+                        name);
+                    auto nomination_result = lookup_tag_in_context_graph(
+                        name,
+                        nomination.nominated_context.get(),
+                        nomination.nominated_context->next_lookup_event_index(),
+                        visited_contexts,
+                        trace);
+                    if (nomination_result.found) {
+                        nomination_match = nomination_result;
+                        return true;
+                    }
+                    return false;
+                });
+            return nomination_match;
+        };
+
+    auto inline_result =
+        search_nominated_tags(NamespaceNominationKind::InlineImplicit);
+    if (inline_result.found) {
+        return inline_result;
+    }
+    auto nominated_result =
+        search_nominated_tags(NamespaceNominationKind::UsingDirective);
+    if (nominated_result.found) {
+        return nominated_result;
     }
 
     return result;
@@ -540,8 +682,10 @@ TagContextLookupResult lookup_tag_in_context_graph(
 OrdinaryBindingSetResult collect_ordinary_bindings_in_context_graph(
     const std::string& name,
     const DeclContext* context,
+    const std::shared_ptr<Scope>& context_scope,
     uint64_t lookup_position,
     LookupEngine::OrdinaryFilter filter,
+    LookupEngine::NamespaceReachability reachability,
     std::unordered_set<const DeclContext*>& visited_contexts,
     LookupEngine::LookupTrace* trace) {
     OrdinaryBindingSetResult result;
@@ -555,7 +699,11 @@ OrdinaryBindingSetResult collect_ordinary_bindings_in_context_graph(
     if (binding) {
         if (binding_matches_ordinary_filter(binding, filter)) {
             trace_named_step(trace, "hit decl-context qualified ordinary: ", name);
-            append_unique_binding(result.bindings, binding);
+            append_unique_binding_match(
+                result.bindings,
+                binding,
+                context,
+                context_scope);
         } else {
             trace_named_step(
                 trace,
@@ -567,26 +715,105 @@ OrdinaryBindingSetResult collect_ordinary_bindings_in_context_graph(
     }
     trace_named_step(trace, "miss decl-context qualified ordinary: ", name);
 
-    for (const auto& nomination : context->namespace_nominations()) {
-        if (!nomination_is_visible(nomination, lookup_position) ||
-            !nomination.nominated_context) {
-            continue;
-        }
-        trace_named_step(trace, "follow namespace nomination qualified ordinary: ", name);
-        auto nomination_result = collect_ordinary_bindings_in_context_graph(
-            name,
-            nomination.nominated_context.get(),
-            nomination.nominated_context->next_lookup_event_index(),
-            filter,
-            visited_contexts,
-            trace);
-        for (const auto* candidate : nomination_result.bindings) {
-            append_unique_binding(result.bindings, candidate);
-        }
-        result.blocked = result.blocked || nomination_result.blocked;
+    auto append_nominated_ordinary_bindings = [&](NamespaceNominationKind kind) {
+        visit_visible_namespace_nominations_of_kind(
+            context,
+            lookup_position,
+            kind,
+            [&](const NamespaceNominationRecord& nomination) {
+                trace_named_step(
+                    trace,
+                    kind == NamespaceNominationKind::InlineImplicit
+                        ? "follow inline namespace qualified ordinary: "
+                        : "follow namespace nomination qualified ordinary: ",
+                    name);
+                auto nomination_result = collect_ordinary_bindings_in_context_graph(
+                    name,
+                    nomination.nominated_context.get(),
+                    resolve_direct_child_namespace_scope(
+                        context,
+                        nomination.nominated_context.get()),
+                    nomination.nominated_context->next_lookup_event_index(),
+                    filter,
+                    reachability,
+                    visited_contexts,
+                    trace);
+                for (const auto& candidate : nomination_result.bindings) {
+                    append_unique_binding_match(
+                        result.bindings,
+                        candidate.binding,
+                        candidate.owner_context,
+                        candidate.owner_scope);
+                }
+                result.blocked = result.blocked || nomination_result.blocked;
+                return false;
+            });
+    };
+
+    if (namespace_reachability_includes_inline(reachability)) {
+        append_nominated_ordinary_bindings(NamespaceNominationKind::InlineImplicit);
+    }
+    if (namespace_reachability_includes_using(reachability)) {
+        append_nominated_ordinary_bindings(NamespaceNominationKind::UsingDirective);
     }
 
     return result;
+}
+
+const DeclBinding* lookup_template_binding_in_context_graph(
+    const std::string& name,
+    const DeclContext* context,
+    uint64_t lookup_position,
+    LookupNamespace lookup_namespace,
+    std::unordered_set<const DeclContext*>& visited_contexts,
+    LookupEngine::LookupTrace* trace) {
+    context = canonical_decl_context(context);
+    if (!context || !visited_contexts.insert(context).second) {
+        return nullptr;
+    }
+
+    lookup_position = effective_lookup_position(context, lookup_position);
+    auto* binding = lookup_context_local(context, name, lookup_namespace);
+    if (binding) {
+        if (binding_has_template_entity(binding)) {
+            trace_named_step(trace, "hit template binding: ", name);
+            return binding;
+        }
+        trace_named_step(trace, "blocked by non-template binding: ", name);
+        return nullptr;
+    }
+    trace_named_step(trace, "miss template binding: ", name);
+
+    const DeclBinding* found = nullptr;
+    auto search_nominations_of_kind = [&](NamespaceNominationKind kind) {
+        visit_visible_namespace_nominations_of_kind(
+            context,
+            lookup_position,
+            kind,
+            [&](const NamespaceNominationRecord& nomination) {
+                trace_named_step(
+                    trace,
+                    kind == NamespaceNominationKind::InlineImplicit
+                        ? "follow inline namespace template binding: "
+                        : "follow namespace nomination template binding: ",
+                    name);
+                found = lookup_template_binding_in_context_graph(
+                    name,
+                    nomination.nominated_context.get(),
+                    nomination.nominated_context->next_lookup_event_index(),
+                    lookup_namespace,
+                    visited_contexts,
+                    trace);
+                return found != nullptr;
+            });
+    };
+
+    search_nominations_of_kind(NamespaceNominationKind::InlineImplicit);
+    if (found) {
+        return found;
+    }
+    search_nominations_of_kind(NamespaceNominationKind::UsingDirective);
+    return found;
 }
 }
 
@@ -660,17 +887,35 @@ const DeclBinding* LookupEngine::lookup_unqualified_template_binding(
         trace_scope_step(trace, depth, scope->flags);
         if (scope->associated_decl_context &&
             visited_contexts.insert(scope->associated_decl_context).second) {
-            auto* binding = lookup_context_local(
-                scope->associated_decl_context, name, lookup_namespace);
-            if (binding) {
-                if (binding_has_template_entity(binding)) {
-                    trace_named_step(trace, "hit template binding: ", name);
-                    return binding;
+            const DeclContext* context =
+                canonical_decl_context(scope->associated_decl_context);
+            const DeclBinding* binding = nullptr;
+            if (context &&
+                (context->kind() == DeclContextKind::Namespace ||
+                 context->kind() == DeclContextKind::TranslationUnit)) {
+                std::unordered_set<const DeclContext*> visited_context_graph;
+                binding = lookup_template_binding_in_context_graph(
+                    name,
+                    context,
+                    context->next_lookup_event_index(),
+                    lookup_namespace,
+                    visited_context_graph,
+                    trace);
+            } else {
+                binding = lookup_context_local(context, name, lookup_namespace);
+                if (binding) {
+                    if (binding_has_template_entity(binding)) {
+                        trace_named_step(trace, "hit template binding: ", name);
+                        return binding;
+                    }
+                    trace_named_step(trace, "blocked by non-template binding: ", name);
+                    return nullptr;
                 }
-                trace_named_step(trace, "blocked by non-template binding: ", name);
-                return nullptr;
+                trace_named_step(trace, "miss template binding: ", name);
             }
-            trace_named_step(trace, "miss template binding: ", name);
+            if (binding) {
+                return binding;
+            }
         }
 
         if (!look_parents) {
@@ -679,6 +924,52 @@ const DeclBinding* LookupEngine::lookup_unqualified_template_binding(
     }
     trace_named_step(trace, "template lookup miss: ", name);
     return nullptr;
+}
+
+std::vector<LookupEngine::QualifiedOrdinaryBindingMatch>
+LookupEngine::lookup_qualified_ordinary_bindings(
+    const std::string& name,
+    const DeclContext* start_decl_context,
+    const std::shared_ptr<Scope>& start_scope,
+    OrdinaryFilter filter,
+    NamespaceReachability reachability) {
+
+    if (!start_decl_context || name.empty()) {
+        return {};
+    }
+
+    start_decl_context = canonical_decl_context(start_decl_context);
+    bool use_namespace_graph =
+        start_decl_context &&
+        (start_decl_context->kind() == DeclContextKind::Namespace ||
+         start_decl_context->kind() == DeclContextKind::TranslationUnit);
+
+    if (use_namespace_graph) {
+        std::unordered_set<const DeclContext*> visited_contexts;
+        auto ordinary_results = collect_ordinary_bindings_in_context_graph(
+            name,
+            start_decl_context,
+            start_scope,
+            start_decl_context->next_lookup_event_index(),
+            filter,
+            reachability,
+            visited_contexts,
+            nullptr);
+        return ordinary_results.bindings;
+    }
+
+    auto* binding = lookup_context_local(
+        start_decl_context,
+        name,
+        LookupNamespace::Ordinary);
+    if (!binding || !binding_matches_ordinary_filter(binding, filter)) {
+        return {};
+    }
+    return {
+        QualifiedOrdinaryBindingMatch{
+            binding,
+            start_decl_context,
+            start_scope}};
 }
 
 LookupEngine::QualifiedLookupResult LookupEngine::lookup_qualified(
@@ -704,8 +995,10 @@ LookupEngine::QualifiedLookupResult LookupEngine::lookup_qualified(
         auto ordinary_results = collect_ordinary_bindings_in_context_graph(
             name,
             start_decl_context,
+            nullptr,
             start_decl_context->next_lookup_event_index(),
             filter,
+            NamespaceReachability::FullyVisible,
             visited_contexts,
             nullptr);
         if (ordinary_results.bindings.empty()) {
@@ -714,13 +1007,17 @@ LookupEngine::QualifiedLookupResult LookupEngine::lookup_qualified(
         }
         if (ordinary_results.bindings.size() == 1) {
             result.status = QualifiedLookupStatus::Found;
-            result.binding = ordinary_results.bindings.front();
+            result.binding = ordinary_results.bindings.front().binding;
             result.symbol = select_binding_symbol(result.binding, filter);
             return result;
         }
 
         bool can_merge_functions = true;
-        for (const auto* binding : ordinary_results.bindings) {
+        std::vector<const DeclBinding*> ordinary_bindings;
+        ordinary_bindings.reserve(ordinary_results.bindings.size());
+        for (const auto& match : ordinary_results.bindings) {
+            const auto* binding = match.binding;
+            ordinary_bindings.push_back(binding);
             if (binding_has_non_function_ordinary_entity(binding) ||
                 !binding_has_function_family_entity(binding)) {
                 can_merge_functions = false;
@@ -735,7 +1032,7 @@ LookupEngine::QualifiedLookupResult LookupEngine::lookup_qualified(
 
         result.owned_binding = synthesize_merged_function_binding(
             name,
-            ordinary_results.bindings,
+            ordinary_bindings,
             filter);
         result.binding = result.owned_binding.get();
         result.symbol = select_binding_symbol(result.binding, filter);

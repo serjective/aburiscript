@@ -4990,7 +4990,19 @@ std::shared_ptr<Scope> Parser::resolve_named_namespace_scope(
 
 std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
     std::vector<std::unique_ptr<Decl>> parsed_decls;
-    if (!is_cxx_mode_active() || !gentle_check(TokenType::NAMESPACE)) {
+    if (!is_cxx_mode_active()) {
+        return parsed_decls;
+    }
+
+    bool leading_inline_namespace = false;
+    if (gentle_check(TokenType::INLINE)) {
+        if (peek_token().type != TokenType::NAMESPACE) {
+            return parsed_decls;
+        }
+        leading_inline_namespace = true;
+        advance(); // consume inline
+    }
+    if (!gentle_check(TokenType::NAMESPACE)) {
         return parsed_decls;
     }
 
@@ -5001,24 +5013,57 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
     }
     advance(); // consume namespace
 
-    std::vector<std::string> namespace_path;
+    struct NamespacePathComponent {
+        std::string name;
+        SrcLoc loc;
+        bool is_inline = false;
+    };
+
+    std::vector<NamespacePathComponent> namespace_path;
     bool is_anonymous_namespace = false;
     if (gentle_check(TokenType::IDENTIFIER)) {
-        namespace_path.push_back(current_token().value);
+        namespace_path.push_back(
+            NamespacePathComponent{
+                current_token().value,
+                current_token().loc,
+                leading_inline_namespace});
         advance();
         while (is_cpp_scope_resolution_here()) {
+            if (namespace_path.back().is_inline) {
+                error_custloc(
+                    "inline namespace specifier is only allowed on the final component of a nested namespace definition",
+                    namespace_path.back().loc);
+            }
             consume_cpp_scope_resolution();
+            bool component_is_inline = false;
+            if (gentle_check(TokenType::INLINE)) {
+                component_is_inline = true;
+                advance();
+            }
             if (!gentle_check(TokenType::IDENTIFIER)) {
                 error_custloc(
                     "expected namespace name after '::' in namespace definition",
                     current_token().loc);
             }
-            namespace_path.push_back(current_token().value);
+            namespace_path.push_back(
+                NamespacePathComponent{
+                    current_token().value,
+                    current_token().loc,
+                    component_is_inline});
             advance();
         }
     } else if (gentle_check(TokenType::LEFT_BRACE)) {
+        if (leading_inline_namespace) {
+            error_custloc(
+                "expected namespace name after 'inline'",
+                namespace_loc);
+        }
         is_anonymous_namespace = true;
     } else {
+        if (leading_inline_namespace) {
+            error_custloc("expected namespace name after 'inline'",
+                          current_token().loc);
+        }
         error_custloc("expected namespace name or '{' after 'namespace'",
                       current_token().loc);
     }
@@ -5044,6 +5089,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
         SrcLoc loc;
         DeclContext* semantic_context = nullptr;
         bool is_anonymous = false;
+        bool is_inline = false;
     };
     std::vector<NamespaceDeclBuildInfo> namespace_decl_infos;
 
@@ -5059,7 +5105,15 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                 namespace_loc);
         }
 
-        const std::string& alias_name = namespace_path.front();
+        for (const auto& component : namespace_path) {
+            if (component.is_inline) {
+                error_custloc(
+                    "namespace alias definition cannot declare an inline namespace",
+                    component.loc);
+            }
+        }
+
+        const std::string& alias_name = namespace_path.front().name;
         if (current_context->lookup_local(alias_name, LookupNamespace::Ordinary) ||
             current_context->lookup_local(alias_name, LookupNamespace::Tag)) {
             error_custloc(
@@ -5174,7 +5228,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
 
     if (!is_anonymous_namespace && !namespace_path.empty()) {
         auto parent_context = collect_->get_current_decl_context();
-        const std::string& outer_name = namespace_path.front();
+        const std::string& outer_name = namespace_path.front().name;
         if (parent_context && parent_context->lookup_local_namespace_alias(outer_name)) {
             error_custloc(
                 "redefinition of '" + outer_name + "' as namespace",
@@ -5200,42 +5254,117 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
     };
 
     auto namespace_scope_flags = ScopeFlags::FileScope | ScopeFlags::NamespaceScope;
-    auto enter_named_namespace = [&](const std::string& name) {
+    auto enter_named_namespace = [&](const NamespacePathComponent& component) {
+        const std::string& name = component.name;
         auto parent_scope = collect_->collect_current_scope();
         auto parent_context = collect_->get_current_decl_context();
         if (!parent_scope || !parent_context) {
             error_custloc("internal error: missing parent namespace context",
                           namespace_loc);
         }
+
+        auto canonical_parent_context = parent_context;
+        if (canonical_parent_context->primary_context() &&
+            canonical_parent_context->primary_context() !=
+                canonical_parent_context.get()) {
+            canonical_parent_context =
+                canonical_parent_context->primary_context()->shared_from_this();
+        }
+
         if (parent_context->lookup_local(name, LookupNamespace::Ordinary) ||
             parent_context->lookup_local(name, LookupNamespace::Tag)) {
             error_custloc(
                 "redefinition of '" + name + "' as namespace",
-                namespace_loc);
+                component.loc);
         }
         if (parent_context->lookup_local_namespace_alias(name)) {
             error_custloc(
                 "redefinition of '" + name + "' as namespace",
-                namespace_loc);
+                component.loc);
         }
-        std::vector<std::string> namespace_path =
+
+        auto ensure_inline_nomination =
+            [&](const std::shared_ptr<DeclContext>& owner_context,
+                const std::shared_ptr<DeclContext>& inline_context) {
+            if (!owner_context || !inline_context) {
+                return;
+            }
+            DeclContext* inline_primary =
+                inline_context->primary_context()
+                    ? inline_context->primary_context()
+                    : inline_context.get();
+            for (const auto& nomination : owner_context->namespace_nominations()) {
+                if (nomination.kind != NamespaceNominationKind::InlineImplicit ||
+                    !nomination.nominated_context) {
+                    continue;
+                }
+                DeclContext* nominated_primary =
+                    nomination.nominated_context->primary_context()
+                        ? nomination.nominated_context->primary_context()
+                        : nomination.nominated_context.get();
+                if (nominated_primary == inline_primary) {
+                    return;
+                }
+            }
+            collect_->collect_register_namespace_nomination(
+                owner_context,
+                NamespaceNominationRecord{
+                    NamespaceNominationKind::InlineImplicit,
+                    inline_context,
+                    component.loc,
+                    0});
+        };
+
+        std::vector<std::string> scope_namespace_path =
             parent_scope ? parent_scope->cxx_namespace_path : std::vector<std::string>{};
-        namespace_path.push_back(name);
+        scope_namespace_path.push_back(name);
         const auto* existing_binding = parent_context->lookup_local_namespace(name);
         if (existing_binding &&
             existing_binding->target_scope &&
             existing_binding->target_scope->parent.get() == parent_scope.get()) {
-            existing_binding->target_scope->cxx_namespace_path = namespace_path;
+            existing_binding->target_scope->cxx_namespace_path = scope_namespace_path;
             collect_->collect_enter_scope(namespace_scope_flags,
                                           existing_binding->target_scope);
             if (auto current_context = collect_->get_current_decl_context()) {
                 current_context->set_lookup_name(name);
+                auto canonical_namespace_context = current_context;
+                if (canonical_namespace_context->primary_context() &&
+                    canonical_namespace_context->primary_context() !=
+                        canonical_namespace_context.get()) {
+                    canonical_namespace_context =
+                        canonical_namespace_context->primary_context()->shared_from_this();
+                }
+                if (component.is_inline &&
+                    !canonical_namespace_context->is_inline_namespace()) {
+                    error_custloc(
+                        "extension of namespace '" + name +
+                            "' with 'inline' requires the original namespace definition to be inline",
+                        component.loc);
+                }
+                if (canonical_namespace_context->is_inline_namespace()) {
+                    collect_->collect_set_namespace_inline_metadata(
+                        canonical_namespace_context,
+                        true,
+                        canonical_parent_context.get());
+                    ensure_inline_nomination(
+                        canonical_parent_context,
+                        canonical_namespace_context);
+                } else if (component.is_inline) {
+                    collect_->collect_set_namespace_inline_metadata(
+                        canonical_namespace_context,
+                        true,
+                        canonical_parent_context.get());
+                    ensure_inline_nomination(
+                        canonical_parent_context,
+                        canonical_namespace_context);
+                }
                 namespace_decl_infos.push_back(
                     NamespaceDeclBuildInfo{
                         name,
-                        namespace_loc,
+                        component.loc,
                         current_context.get(),
-                        false});
+                        false,
+                        component.is_inline});
             }
             ++entered_namespace_depth;
             return;
@@ -5243,7 +5372,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
 
         auto entered = collect_->collect_enter_scope(namespace_scope_flags);
         if (entered.scope) {
-            entered.scope->cxx_namespace_path = namespace_path;
+            entered.scope->cxx_namespace_path = scope_namespace_path;
         }
         if (auto current_context = collect_->get_current_decl_context()) {
             current_context->set_lookup_name(name);
@@ -5253,12 +5382,22 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                     name,
                     current_context,
                     entered.scope});
+            if (component.is_inline) {
+                collect_->collect_set_namespace_inline_metadata(
+                    current_context,
+                    true,
+                    canonical_parent_context.get());
+                ensure_inline_nomination(
+                    canonical_parent_context,
+                    current_context);
+            }
             namespace_decl_infos.push_back(
                 NamespaceDeclBuildInfo{
                     name,
-                    namespace_loc,
+                    component.loc,
                     current_context.get(),
-                    false});
+                    false,
+                    component.is_inline});
         }
         ++entered_namespace_depth;
     };
@@ -5276,7 +5415,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                         "",
                         namespace_loc,
                         current_context.get(),
-                        true});
+                        true,
+                        false});
             }
             ++entered_namespace_depth;
         } else {
@@ -5339,7 +5479,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                     std::move(current_members),
                     info.semantic_context,
                     info.is_anonymous,
-                    false,
+                    info.is_inline,
                     info.loc);
                 auto* namespace_decl_ptr = namespace_decl.get();
                 const DeclContext* context_key = info.semantic_context;
@@ -5689,10 +5829,22 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
                           declarator.terminal_loc);
         }
 
-        const DeclBinding* ordinary_binding = target_context->lookup_local(
-            declarator.terminal_name, LookupNamespace::Ordinary);
-        const DeclBinding* tag_binding = target_context->lookup_local(
-            declarator.terminal_name, LookupNamespace::Tag);
+        auto ordinary_lookup = LookupEngine::lookup_qualified(
+            declarator.terminal_name,
+            target_context,
+            LookupNamespace::Ordinary);
+        auto tag_lookup = LookupEngine::lookup_qualified(
+            declarator.terminal_name,
+            target_context,
+            LookupNamespace::Tag);
+        const DeclBinding* ordinary_binding =
+            ordinary_lookup.status == LookupEngine::QualifiedLookupStatus::Found
+                ? ordinary_lookup.binding
+                : nullptr;
+        const DeclBinding* tag_binding =
+            tag_lookup.status == LookupEngine::QualifiedLookupStatus::Found
+                ? tag_lookup.binding
+                : nullptr;
         if (!ordinary_binding && !tag_binding) {
             error_custloc(
                 "using-declaration target '" +
@@ -5727,7 +5879,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
                     import_ordinary_symbol(candidate);
                 }
             } else {
-                import_ordinary_symbol(ordinary_binding->symbol);
+                import_ordinary_symbol(
+                    ordinary_lookup.symbol ? ordinary_lookup.symbol
+                                           : ordinary_binding->symbol);
             }
         }
     }

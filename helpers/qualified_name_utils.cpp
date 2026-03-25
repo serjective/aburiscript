@@ -69,19 +69,33 @@ NamespaceResolutionResult resolve_named_namespace_in_context_graph(
         return result;
     }
 
-    for (const auto& nomination : context->namespace_nominations()) {
-        if (!nomination.nominated_context ||
-            !nomination_is_visible(nomination, lookup_position)) {
-            continue;
-        }
-        auto nomination_result = resolve_named_namespace_in_context_graph(
-            nomination.nominated_context.get(),
-            namespace_name,
-            nomination.nominated_context->next_lookup_event_index(),
-            visited_contexts);
-        if (nomination_result) {
-            return nomination_result;
-        }
+    auto search_nominations_of_kind =
+        [&](NamespaceNominationKind kind) -> NamespaceResolutionResult {
+            for (const auto& nomination : context->namespace_nominations()) {
+                if (nomination.kind != kind ||
+                    !nomination.nominated_context ||
+                    !nomination_is_visible(nomination, lookup_position)) {
+                    continue;
+                }
+                auto nomination_result = resolve_named_namespace_in_context_graph(
+                    nomination.nominated_context.get(),
+                    namespace_name,
+                    nomination.nominated_context->next_lookup_event_index(),
+                    visited_contexts);
+                if (nomination_result) {
+                    return nomination_result;
+                }
+            }
+            return {};
+        };
+
+    if (auto inline_result =
+            search_nominations_of_kind(NamespaceNominationKind::InlineImplicit)) {
+        return inline_result;
+    }
+    if (auto nominated_result =
+            search_nominations_of_kind(NamespaceNominationKind::UsingDirective)) {
+        return nominated_result;
     }
 
     return result;

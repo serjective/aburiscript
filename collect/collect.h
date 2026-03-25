@@ -193,6 +193,11 @@ public:
         const std::shared_ptr<DeclContext>& owner_context,
         NamespaceNominationRecord nomination);
 
+    void collect_set_namespace_inline_metadata(
+        const std::shared_ptr<DeclContext>& namespace_context,
+        bool is_inline,
+        DeclContext* enclosing_namespace);
+
     CppThisContext collect_current_cpp_this_context() const ;
 
     bool with_function_definition_state(
@@ -938,6 +943,8 @@ private:
             size_t namespace_binding_count = 0;
             size_t namespace_alias_count = 0;
             size_t namespace_nomination_count = 0;
+            bool is_inline_namespace = false;
+            DeclContext* inline_enclosing_namespace = nullptr;
             uint64_t next_lookup_event_index = 1;
         };
 
