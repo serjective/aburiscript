@@ -359,6 +359,31 @@ private:
         std::vector<std::unique_ptr<Decl>>& ret_vec);
     QualifiedDeclaratorContext prepare_qualified_declarator_context(
         DeclarationParser& decl_parser);
+    bool qualified_variable_types_compatible(QualType declared_type,
+        QualType member_type);
+    bool record_method_signature_matches(
+        const RecordSemanticState::Method& method,
+        const std::shared_ptr<CType>& parsed_decl_type,
+        uint8_t parsed_trailing_cv_qualifiers);
+    bool active_template_parameter_list_matches(
+        const TemplateParameterList& parameters);
+    bool record_method_template_signature_matches(
+        const RecordSemanticState::MethodTemplate& method_template,
+        const std::shared_ptr<CType>& parsed_decl_type,
+        uint8_t parsed_trailing_cv_qualifiers);
+    bool record_method_template_explicit_specialization_matches(
+        const RecordSemanticState::MethodTemplate& method_template,
+        const std::shared_ptr<CType>& parsed_decl_type,
+        uint8_t parsed_trailing_cv_qualifiers,
+        const ClassTemplateDecl* owner_class_template,
+        const std::vector<TemplateArgument>& owner_template_arguments,
+        bool targets_template_pattern,
+        SrcLoc declarator_loc,
+        std::vector<TemplateArgument>& deduced_arguments_out);
+    void resolve_qualified_declarator_match(
+        QualifiedDeclaratorInfo& qualified_declarator,
+        const DeclarationParser& decl_parser,
+        const std::shared_ptr<CType>& parsed_decl_type);
     std::vector<std::unique_ptr<Decl>> parse_declaration();
 
     std::unique_ptr<Decl> parse_parameter_declaration();

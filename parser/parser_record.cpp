@@ -4059,6 +4059,376 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
     return context;
 }
 
+bool Parser::qualified_variable_types_compatible(QualType declared_type,
+                                                 QualType member_type) {
+    declared_type = desugar_type(declared_type);
+    member_type = desugar_type(member_type);
+    if (!declared_type || !member_type) {
+        return declared_type.get_shared() == member_type.get_shared();
+    }
+    if (declared_type.equals_qualified(member_type) ||
+        declared_type.equals_unqualified(member_type) ||
+        cpp_out_of_line_type_matches(declared_type, member_type, false)) {
+        return true;
+    }
+    auto declared_arr = declared_type.as_shared<ArrayType>();
+    auto member_arr = member_type.as_shared<ArrayType>();
+    if (!declared_arr || !member_arr) {
+        return false;
+    }
+    if (!declared_arr->element_type.equals_qualified(member_arr->element_type)) {
+        return false;
+    }
+    bool declared_complete =
+        declared_arr->size_kind == ArraySizeKind::Constant &&
+        declared_arr->size.has_value();
+    bool member_complete =
+        member_arr->size_kind == ArraySizeKind::Constant &&
+        member_arr->size.has_value();
+    if (declared_complete && member_complete) {
+        return declared_arr->size.value() == member_arr->size.value();
+    }
+    return true;
+}
+
+bool Parser::record_method_signature_matches(
+    const RecordSemanticState::Method& method,
+    const std::shared_ptr<CType>& parsed_decl_type,
+    uint8_t parsed_trailing_cv_qualifiers) {
+    auto parsed_fn_type =
+        desugar_type(QualType(parsed_decl_type)).as_shared<FunctionType>();
+    auto method_fn_type = desugar_type(method.type).as_shared<FunctionType>();
+    if (!parsed_fn_type || !method_fn_type) {
+        return false;
+    }
+    if (parsed_fn_type->is_variadic != method_fn_type->is_variadic) {
+        return false;
+    }
+    if (parsed_fn_type->has_explicit_exception_spec !=
+        method_fn_type->has_explicit_exception_spec) {
+        return false;
+    }
+    if (parsed_fn_type->exception_spec != method_fn_type->exception_spec) {
+        return false;
+    }
+    if (!cpp_out_of_line_type_matches(
+            parsed_fn_type->ret_type,
+            method_fn_type->ret_type,
+            true)) {
+        return false;
+    }
+
+    size_t method_user_param_start = method.is_static ? 0 : 1;
+    if (method_fn_type->parameters.size() < method_user_param_start) {
+        return false;
+    }
+    size_t method_user_param_count =
+        method_fn_type->parameters.size() - method_user_param_start;
+    if (parsed_fn_type->parameters.size() != method_user_param_count) {
+        return false;
+    }
+    for (size_t idx = 0; idx < parsed_fn_type->parameters.size(); ++idx) {
+        if (!cpp_out_of_line_type_matches(
+                parsed_fn_type->parameters[idx],
+                method_fn_type->parameters[method_user_param_start + idx],
+                true)) {
+            return false;
+        }
+    }
+
+    uint8_t parsed_cv =
+        parsed_trailing_cv_qualifiers &
+        static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE);
+    if (method.is_static) {
+        return parsed_cv == QUAL_NONE;
+    }
+
+    if (method_fn_type->parameters.empty()) {
+        return false;
+    }
+    auto this_ptr_type =
+        desugar_type(method_fn_type->parameters.front()).as_shared<PointerType>();
+    if (!this_ptr_type) {
+        return false;
+    }
+    uint8_t expected_cv =
+        this_ptr_type->pointed_type.get_qualifiers() &
+        static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE);
+    return parsed_cv == expected_cv;
+}
+
+bool Parser::active_template_parameter_list_matches(
+    const TemplateParameterList& parameters) {
+    if (active_template_parameter_stack_.empty()) {
+        return false;
+    }
+    const auto& active_parameters = active_template_parameter_stack_.back();
+    if (active_parameters.size() != parameters.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < parameters.size(); ++idx) {
+        const auto* active_parameter = active_parameters[idx];
+        const auto* existing_parameter = parameters[idx].get();
+        if (!active_parameter || !existing_parameter ||
+            active_parameter->get_kind() != existing_parameter->get_kind() ||
+            active_parameter->is_parameter_pack !=
+                existing_parameter->is_parameter_pack) {
+            return false;
+        }
+        if (auto* active_non_type =
+                dyn_cast<TemplateNonTypeParmDecl>(active_parameter)) {
+            auto* existing_non_type =
+                dyn_cast<TemplateNonTypeParmDecl>(existing_parameter);
+            if (!existing_non_type ||
+                !cpp_out_of_line_type_matches(
+                    active_non_type->type,
+                    existing_non_type->type,
+                    false)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool Parser::record_method_template_signature_matches(
+    const RecordSemanticState::MethodTemplate& method_template,
+    const std::shared_ptr<CType>& parsed_decl_type,
+    uint8_t parsed_trailing_cv_qualifiers) {
+    if (!method_template.decl || !method_template.decl->function_decl() ||
+        !active_template_parameter_list_matches(
+            method_template.decl->parameters)) {
+        return false;
+    }
+    RecordSemanticState::Method synthetic_method;
+    synthetic_method.type =
+        QualType(method_template.decl->function_decl()->type);
+    synthetic_method.is_static = method_template.is_static;
+    return record_method_signature_matches(
+        synthetic_method,
+        parsed_decl_type,
+        parsed_trailing_cv_qualifiers);
+}
+
+bool Parser::record_method_template_explicit_specialization_matches(
+    const RecordSemanticState::MethodTemplate& method_template,
+    const std::shared_ptr<CType>& parsed_decl_type,
+    uint8_t parsed_trailing_cv_qualifiers,
+    const ClassTemplateDecl* owner_class_template,
+    const std::vector<TemplateArgument>& owner_template_arguments,
+    bool targets_template_pattern,
+    SrcLoc declarator_loc,
+    std::vector<TemplateArgument>& deduced_arguments_out) {
+    deduced_arguments_out.clear();
+    if (!is_parsing_cpp_explicit_specialization() ||
+        !method_template.decl ||
+        !method_template.decl->function_decl() ||
+        !parsed_decl_type) {
+        return false;
+    }
+
+    QualType pattern_type(method_template.decl->function_decl()->type);
+    if (owner_class_template &&
+        !owner_template_arguments.empty() &&
+        !targets_template_pattern) {
+        pattern_type = collect_->collect_partially_substitute_template_type(
+            pattern_type,
+            owner_class_template->parameters,
+            owner_template_arguments,
+            declarator_loc);
+    }
+
+    return collect_->deduce_function_template_specialization_arguments_from_pattern(
+        pattern_type,
+        method_template.decl->parameters,
+        method_template.decl,
+        QualType(parsed_decl_type),
+        deduced_arguments_out,
+        nullptr,
+        parsed_trailing_cv_qualifiers,
+        method_template.is_static ? 0u : 1u);
+}
+
+void Parser::resolve_qualified_declarator_match(
+    QualifiedDeclaratorInfo& qualified_declarator,
+    const DeclarationParser& decl_parser,
+    const std::shared_ptr<CType>& parsed_decl_type) {
+    if (qualified_declarator.target_context) {
+        auto prior_decls = LookupEngine::lookup_qualified_ordinary_bindings(
+            decl_parser.name,
+            qualified_declarator.target_context.get(),
+            qualified_declarator.target_scope,
+            LookupEngine::OrdinaryFilter::Any,
+            LookupEngine::NamespaceReachability::InlineVisible);
+        const LookupEngine::QualifiedOrdinaryBindingMatch* matched_prior_decl =
+            nullptr;
+        if (canonical_type_kind(parsed_decl_type) == TypeKind::Function) {
+            QualType declared_function_type = desugar_type(QualType(parsed_decl_type));
+            for (const auto& prior_decl : prior_decls) {
+                if (!namespace_function_prior_match(
+                        prior_decl.binding,
+                        declared_function_type)) {
+                    continue;
+                }
+                matched_prior_decl = &prior_decl;
+                break;
+            }
+        } else {
+            for (const auto& prior_decl : prior_decls) {
+                if (!namespace_variable_prior_match(prior_decl.binding)) {
+                    continue;
+                }
+                matched_prior_decl = &prior_decl;
+                break;
+            }
+        }
+        if (!matched_prior_decl) {
+            error_custloc(
+                "out-of-line declaration of '" +
+                    qualified_name_utils::format_cpp_qualified_name(
+                        qualified_declarator.has_global_qualifier,
+                        qualified_declarator.qualifiers,
+                        decl_parser.name) +
+                    "' does not match any declaration in the target namespace",
+                qualified_declarator.loc);
+        }
+        if (matched_prior_decl->owner_context &&
+            matched_prior_decl->owner_context !=
+                qualified_declarator.target_context.get()) {
+            if (!matched_prior_decl->owner_scope) {
+                error_custloc(
+                    "internal error: missing owning scope for inline namespace member declaration",
+                    qualified_declarator.loc);
+            }
+            collect_->collect_set_current_scope(matched_prior_decl->owner_scope);
+            qualified_declarator.target_context =
+                collect_->get_current_decl_context();
+            qualified_declarator.target_scope =
+                collect_->collect_current_scope();
+        }
+        return;
+    }
+
+    if (!qualified_declarator.owner_record_decl) {
+        return;
+    }
+
+    const RecordSemanticState* owner_state =
+        record_semantics_cache_lookup(qualified_declarator.owner_record_decl);
+    if (!owner_state || owner_state->is_incomplete) {
+        std::vector<std::string> owner_qualifiers = qualified_declarator.qualifiers;
+        std::string owner_terminal;
+        if (!owner_qualifiers.empty()) {
+            owner_terminal = owner_qualifiers.back();
+            owner_qualifiers.pop_back();
+        } else if (qualified_declarator.owner_record_decl) {
+            owner_terminal = qualified_declarator.owner_record_decl->tag;
+        }
+        error_custloc(
+            "incomplete type '" +
+                qualified_name_utils::format_cpp_qualified_name(
+                    qualified_declarator.has_global_qualifier,
+                    owner_qualifiers,
+                    owner_terminal) +
+                "' named in nested name specifier",
+            qualified_declarator.loc);
+    }
+
+    std::string qualified_name = qualified_name_utils::format_cpp_qualified_name(
+        qualified_declarator.has_global_qualifier,
+        qualified_declarator.qualifiers,
+        decl_parser.name);
+    if (canonical_type_kind(parsed_decl_type) == TypeKind::Function) {
+        bool saw_method_name_match = false;
+        bool saw_method_template_name_match = false;
+        for (const auto& method : owner_state->methods) {
+            if (method.name != decl_parser.name) {
+                continue;
+            }
+            saw_method_name_match = true;
+            if (!record_method_signature_matches(
+                    method,
+                    parsed_decl_type,
+                    decl_parser.trailing_function_cv_qualifiers)) {
+                continue;
+            }
+            qualified_declarator.method_match = &method;
+            break;
+        }
+        if (!qualified_declarator.method_match) {
+            for (const auto& method_template : owner_state->method_templates) {
+                if (method_template.name != decl_parser.name) {
+                    continue;
+                }
+                saw_method_name_match = true;
+                saw_method_template_name_match = true;
+                if (record_method_template_signature_matches(
+                        method_template,
+                        parsed_decl_type,
+                        decl_parser.trailing_function_cv_qualifiers)) {
+                    qualified_declarator.method_template_match = &method_template;
+                    qualified_declarator
+                        .method_template_specialization_arguments.clear();
+                    break;
+                }
+                if (record_method_template_explicit_specialization_matches(
+                        method_template,
+                        parsed_decl_type,
+                        decl_parser.trailing_function_cv_qualifiers,
+                        qualified_declarator.owner_class_template,
+                        qualified_declarator.owner_template_arguments,
+                        qualified_declarator.targets_template_pattern,
+                        qualified_declarator.loc,
+                        qualified_declarator
+                            .method_template_specialization_arguments)) {
+                    qualified_declarator.method_template_match = &method_template;
+                    break;
+                }
+            }
+        }
+        if (!qualified_declarator.method_match &&
+            !qualified_declarator.method_template_match) {
+            if (saw_method_name_match) {
+                error_custloc(
+                    "conflicting types for '" + qualified_name + "'",
+                    qualified_declarator.loc);
+            }
+            error_custloc(
+                "out-of-line declaration of '" + qualified_name +
+                    "' does not match any declaration in the target class",
+                qualified_declarator.loc);
+        }
+        return;
+    }
+
+    bool saw_name_match = false;
+    QualType declared_member_type(parsed_decl_type, decl_parser.qualifiers);
+    for (const auto& static_member : owner_state->static_data_members) {
+        if (static_member.name != decl_parser.name) {
+            continue;
+        }
+        saw_name_match = true;
+        if (!qualified_variable_types_compatible(
+                declared_member_type, static_member.type)) {
+            continue;
+        }
+        qualified_declarator.static_data_match = &static_member;
+        break;
+    }
+
+    if (!qualified_declarator.static_data_match) {
+        if (saw_name_match) {
+            error_custloc(
+                "conflicting types for '" + qualified_name + "'",
+                qualified_declarator.loc);
+        }
+        error_custloc(
+            "out-of-line declaration of '" + qualified_name +
+                "' does not match any declaration in the target class",
+            qualified_declarator.loc);
+    }
+}
+
 std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
     Token t = current_token();
     if (auto special_declaration = try_parse_special_declaration()) {
@@ -4070,168 +4440,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
     auto storage_class = decl_parser.str_class;
     const bool declaration_is_constexpr = decl_parser.is_constexpr;
     const LanguageLinkage declaration_language_linkage = current_decl_language_linkage();
-    std::function<bool(QualType, QualType, bool)> out_of_line_type_matches =
-        [&](QualType lhs, QualType rhs, bool ignore_top_level_qualifiers) -> bool {
-            return cpp_out_of_line_type_matches(
-                lhs,
-                rhs,
-                ignore_top_level_qualifiers);
-    };
-    auto record_method_signature_matches =
-        [&](const RecordSemanticState::Method& method,
-            const std::shared_ptr<CType>& parsed_decl_type,
-            uint8_t parsed_trailing_cv_qualifiers) -> bool {
-        auto parsed_fn_type =
-            desugar_type(QualType(parsed_decl_type)).as_shared<FunctionType>();
-        auto method_fn_type =
-            desugar_type(method.type).as_shared<FunctionType>();
-        if (!parsed_fn_type || !method_fn_type) {
-            return false;
-        }
-        if (parsed_fn_type->is_variadic != method_fn_type->is_variadic) {
-            return false;
-        }
-        if (parsed_fn_type->has_explicit_exception_spec !=
-            method_fn_type->has_explicit_exception_spec) {
-            return false;
-        }
-        if (parsed_fn_type->exception_spec != method_fn_type->exception_spec) {
-            return false;
-        }
-        if (!out_of_line_type_matches(
-                parsed_fn_type->ret_type,
-                method_fn_type->ret_type,
-                true)) {
-            return false;
-        }
-
-        size_t method_user_param_start = method.is_static ? 0 : 1;
-        if (method_fn_type->parameters.size() < method_user_param_start) {
-            return false;
-        }
-        size_t method_user_param_count =
-            method_fn_type->parameters.size() - method_user_param_start;
-        if (parsed_fn_type->parameters.size() != method_user_param_count) {
-            return false;
-        }
-        for (size_t idx = 0; idx < parsed_fn_type->parameters.size(); ++idx) {
-            if (!out_of_line_type_matches(
-                    parsed_fn_type->parameters[idx],
-                    method_fn_type->parameters[method_user_param_start + idx],
-                    true)) {
-                return false;
-            }
-        }
-
-        uint8_t parsed_cv =
-            parsed_trailing_cv_qualifiers &
-            static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE);
-        if (method.is_static) {
-            return parsed_cv == QUAL_NONE;
-        }
-
-        if (method_fn_type->parameters.empty()) {
-            return false;
-        }
-        auto this_ptr_type = desugar_type(method_fn_type->parameters.front())
-            .as_shared<PointerType>();
-        if (!this_ptr_type) {
-            return false;
-        }
-        uint8_t expected_cv =
-            this_ptr_type->pointed_type.get_qualifiers() &
-            static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE);
-        return parsed_cv == expected_cv;
-    };
-    auto active_template_parameter_list_matches =
-        [&](const TemplateParameterList& parameters) -> bool {
-        if (active_template_parameter_stack_.empty()) {
-            return false;
-        }
-        const auto& active_parameters = active_template_parameter_stack_.back();
-        if (active_parameters.size() != parameters.size()) {
-            return false;
-        }
-        for (size_t idx = 0; idx < parameters.size(); ++idx) {
-            const auto* active_parameter = active_parameters[idx];
-            const auto* existing_parameter = parameters[idx].get();
-            if (!active_parameter || !existing_parameter ||
-                active_parameter->get_kind() != existing_parameter->get_kind() ||
-                active_parameter->is_parameter_pack !=
-                    existing_parameter->is_parameter_pack) {
-                return false;
-            }
-            if (auto* active_non_type =
-                    dyn_cast<TemplateNonTypeParmDecl>(active_parameter)) {
-                auto* existing_non_type =
-                    dyn_cast<TemplateNonTypeParmDecl>(existing_parameter);
-                if (!existing_non_type ||
-                    !out_of_line_type_matches(
-                        active_non_type->type,
-                        existing_non_type->type,
-                        false)) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
-    auto record_method_template_signature_matches =
-        [&](const RecordSemanticState::MethodTemplate& method_template,
-            const std::shared_ptr<CType>& parsed_decl_type,
-            uint8_t parsed_trailing_cv_qualifiers) -> bool {
-        if (!method_template.decl || !method_template.decl->function_decl() ||
-            !active_template_parameter_list_matches(
-                method_template.decl->parameters)) {
-            return false;
-        }
-        RecordSemanticState::Method synthetic_method;
-        synthetic_method.type =
-            QualType(method_template.decl->function_decl()->type);
-        synthetic_method.is_static = method_template.is_static;
-        return record_method_signature_matches(
-            synthetic_method,
-            parsed_decl_type,
-            parsed_trailing_cv_qualifiers);
-    };
-    auto record_method_template_explicit_specialization_matches =
-        [&](const RecordSemanticState::MethodTemplate& method_template,
-            const std::shared_ptr<CType>& parsed_decl_type,
-            uint8_t parsed_trailing_cv_qualifiers,
-            const ClassTemplateDecl* owner_class_template,
-            const std::vector<TemplateArgument>& owner_template_arguments,
-            bool targets_template_pattern,
-            SrcLoc declarator_loc,
-            std::vector<TemplateArgument>& deduced_arguments_out) -> bool {
-            deduced_arguments_out.clear();
-            if (!is_parsing_cpp_explicit_specialization() ||
-                !method_template.decl ||
-                !method_template.decl->function_decl() ||
-                !parsed_decl_type) {
-                return false;
-            }
-
-            QualType pattern_type(method_template.decl->function_decl()->type);
-            if (owner_class_template &&
-                !owner_template_arguments.empty() &&
-                !targets_template_pattern) {
-                pattern_type = collect_->collect_partially_substitute_template_type(
-                    pattern_type,
-                    owner_class_template->parameters,
-                    owner_template_arguments,
-                    declarator_loc);
-            }
-
-            return collect_->deduce_function_template_specialization_arguments_from_pattern(
-                pattern_type,
-                method_template.decl->parameters,
-                method_template.decl,
-                QualType(parsed_decl_type),
-                deduced_arguments_out,
-                nullptr,
-                parsed_trailing_cv_qualifiers,
-                method_template.is_static ? 0u : 1u);
-        };
     auto remap_out_of_line_primary_template_method =
         [&](CppMethodDecl* method_decl,
             const ClassTemplateDecl* owner_class_template,
@@ -4481,205 +4689,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
             }
             error("didn't catch the name of the declarator");
         }
-        auto qualified_variable_types_compatible = [&](QualType declared_type,
-                                                       QualType member_type) -> bool {
-            declared_type = desugar_type(declared_type);
-        member_type = desugar_type(member_type);
-        if (!declared_type || !member_type) {
-            return declared_type.get_shared() == member_type.get_shared();
-        }
-        if (declared_type.equals_qualified(member_type) ||
-            declared_type.equals_unqualified(member_type) ||
-            out_of_line_type_matches(declared_type, member_type, false)) {
-            return true;
-        }
-            auto declared_arr = declared_type.as_shared<ArrayType>();
-            auto member_arr = member_type.as_shared<ArrayType>();
-            if (!declared_arr || !member_arr) {
-                return false;
-            }
-            if (!declared_arr->element_type.equals_qualified(
-                    member_arr->element_type)) {
-                return false;
-            }
-            bool declared_complete =
-                declared_arr->size_kind == ArraySizeKind::Constant &&
-                declared_arr->size.has_value();
-            bool member_complete =
-                member_arr->size_kind == ArraySizeKind::Constant &&
-                member_arr->size.has_value();
-            if (declared_complete && member_complete) {
-                return declared_arr->size.value() == member_arr->size.value();
-            }
-            return true;
-        };
-        if (qualified_declarator_target_context) {
-            auto prior_decls = LookupEngine::lookup_qualified_ordinary_bindings(
-                decl_parser.name,
-                qualified_declarator_target_context.get(),
-                qualified_declarator_target_scope,
-                LookupEngine::OrdinaryFilter::Any,
-                LookupEngine::NamespaceReachability::InlineVisible);
-            const LookupEngine::QualifiedOrdinaryBindingMatch* matched_prior_decl =
-                nullptr;
-            if (canonical_type_kind(newer_type) == TypeKind::Function) {
-                QualType declared_function_type = desugar_type(QualType(newer_type));
-                for (const auto& prior_decl : prior_decls) {
-                    if (!namespace_function_prior_match(
-                            prior_decl.binding,
-                            declared_function_type)) {
-                        continue;
-                    }
-                    matched_prior_decl = &prior_decl;
-                    break;
-                }
-            } else {
-                for (const auto& prior_decl : prior_decls) {
-                    if (!namespace_variable_prior_match(prior_decl.binding)) {
-                        continue;
-                    }
-                    matched_prior_decl = &prior_decl;
-                    break;
-                }
-            }
-            if (!matched_prior_decl) {
-                error_custloc(
-                    "out-of-line declaration of '" +
-                        qualified_name_utils::format_cpp_qualified_name(
-                            qualified_declarator_has_global_qualifier,
-                            qualified_declarator_qualifiers,
-                            decl_parser.name) +
-                        "' does not match any declaration in the target namespace",
-                    qualified_declarator_loc);
-            }
-            if (matched_prior_decl->owner_context &&
-                matched_prior_decl->owner_context !=
-                    qualified_declarator_target_context.get()) {
-                if (!matched_prior_decl->owner_scope) {
-                    error_custloc(
-                        "internal error: missing owning scope for inline namespace member declaration",
-                        qualified_declarator_loc);
-                }
-                collect_->collect_set_current_scope(matched_prior_decl->owner_scope);
-                qualified_declarator_target_context =
-                    collect_->get_current_decl_context();
-                qualified_declarator_target_scope =
-                    collect_->collect_current_scope();
-            }
-        } else if (qualified_declarator_owner_record_decl) {
-            const RecordSemanticState* owner_state =
-                record_semantics_cache_lookup(qualified_declarator_owner_record_decl);
-            if (!owner_state || owner_state->is_incomplete) {
-                std::vector<std::string> owner_qualifiers =
-                    qualified_declarator_qualifiers;
-                std::string owner_terminal;
-                if (!owner_qualifiers.empty()) {
-                    owner_terminal = owner_qualifiers.back();
-                    owner_qualifiers.pop_back();
-                } else if (qualified_declarator_owner_record_decl) {
-                    owner_terminal = qualified_declarator_owner_record_decl->tag;
-                }
-                error_custloc(
-                    "incomplete type '" +
-                        qualified_name_utils::format_cpp_qualified_name(
-                            qualified_declarator_has_global_qualifier,
-                            owner_qualifiers,
-                            owner_terminal) +
-                        "' named in nested name specifier",
-                    qualified_declarator_loc);
-            }
-
-            std::string qualified_name = qualified_name_utils::format_cpp_qualified_name(
-                qualified_declarator_has_global_qualifier,
-                qualified_declarator_qualifiers,
-                decl_parser.name);
-            if (canonical_type_kind(newer_type) == TypeKind::Function) {
-                bool saw_method_name_match = false;
-                bool saw_method_template_name_match = false;
-                for (const auto& method : owner_state->methods) {
-                    if (method.name != decl_parser.name) {
-                        continue;
-                    }
-                    saw_method_name_match = true;
-                    if (!record_method_signature_matches(
-                            method,
-                            newer_type,
-                            decl_parser.trailing_function_cv_qualifiers)) {
-                        continue;
-                    }
-                    qualified_declarator_method_match = &method;
-                    break;
-                }
-                if (!qualified_declarator_method_match) {
-                    for (const auto& method_template : owner_state->method_templates) {
-                        if (method_template.name != decl_parser.name) {
-                            continue;
-                        }
-                        saw_method_name_match = true;
-                        saw_method_template_name_match = true;
-                        if (record_method_template_signature_matches(
-                                method_template,
-                                newer_type,
-                                decl_parser.trailing_function_cv_qualifiers)) {
-                            qualified_declarator_method_template_match = &method_template;
-                            qualified_declarator_method_template_specialization_arguments.clear();
-                            break;
-                        }
-                        if (record_method_template_explicit_specialization_matches(
-                                method_template,
-                                newer_type,
-                                decl_parser.trailing_function_cv_qualifiers,
-                                qualified_declarator_owner_class_template,
-                                qualified_declarator_owner_template_arguments,
-                                qualified_declarator_targets_template_pattern,
-                                qualified_declarator_loc,
-                                qualified_declarator_method_template_specialization_arguments)) {
-                            qualified_declarator_method_template_match = &method_template;
-                            break;
-                        }
-                    }
-                }
-                if (!qualified_declarator_method_match &&
-                    !qualified_declarator_method_template_match) {
-                    if (saw_method_name_match) {
-                        error_custloc(
-                            "conflicting types for '" + qualified_name + "'",
-                            qualified_declarator_loc);
-                    }
-                    error_custloc(
-                        "out-of-line declaration of '" + qualified_name +
-                            "' does not match any declaration in the target class",
-                        qualified_declarator_loc);
-                }
-            } else {
-                bool saw_name_match = false;
-                QualType declared_member_type(newer_type, decl_parser.qualifiers);
-                for (const auto& static_member : owner_state->static_data_members) {
-                    if (static_member.name != decl_parser.name) {
-                        continue;
-                    }
-                    saw_name_match = true;
-                    if (!qualified_variable_types_compatible(
-                            declared_member_type, static_member.type)) {
-                        continue;
-                    }
-                    qualified_declarator_static_data_match = &static_member;
-                    break;
-                }
-
-                if (!qualified_declarator_static_data_match) {
-                    if (saw_name_match) {
-                        error_custloc(
-                            "conflicting types for '" + qualified_name + "'",
-                            qualified_declarator_loc);
-                    }
-                    error_custloc(
-                        "out-of-line declaration of '" + qualified_name +
-                            "' does not match any declaration in the target class",
-                        qualified_declarator_loc);
-                }
-            }
-        }
+        resolve_qualified_declarator_match(
+            qualified_declarator,
+            decl_parser,
+            newer_type);
         if (is_cxx_mode_active()) {
             auto current_decl_context = collect_->get_current_decl_context();
             bool collides_with_namespace_name = false;
