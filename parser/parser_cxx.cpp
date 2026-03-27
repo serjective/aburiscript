@@ -3175,9 +3175,6 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
 std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     Token template_tok = current_token();
     bool member_template_declaration = is_parsing_cpp_record_body();
-    if (!is_cxx_mode_active()) {
-        fail_cpp_unsupported("template-declaration", template_tok.loc);
-    }
     if (!can_parse_namespace_scope_template_declaration()) {
         if (!member_template_declaration) {
             fail_cpp_unsupported("block-scope template-declaration", template_tok.loc);
