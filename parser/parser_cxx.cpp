@@ -1986,6 +1986,10 @@ Parser::try_parse_cpp_named_type_specifier() {
         ParsedCppTypeNameSpecifier result;
         result.typedef_symbol = terminal_typedef_symbol;
         result.type = resolved_type;
+        result.spelling = qualified_name_utils::format_cpp_qualified_name(
+            has_global_qualifier,
+            resolved_prefix,
+            components.empty() ? std::string() : components.back().spelling());
         return result;
     };
 
@@ -2217,6 +2221,7 @@ Parser::try_parse_cpp_named_type_specifier() {
         if (is_terminal_component) {
             ParsedCppTypeNameSpecifier result;
             result.type = state.qualifier_type;
+            result.spelling = current_qualifier_spelling + "::" + member_spelling;
             return result;
         }
 
@@ -7113,23 +7118,71 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         }
         advance(); // ':'
 
-        auto parse_base_name = [&]() -> std::string {
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error("expected base class name");
-            }
-            std::string base_name = current_token().value;
-            advance();
-            while (is_cpp_scope_resolution_here()) {
-                consume_cpp_scope_resolution();
-                if (!gentle_check(TokenType::IDENTIFIER)) {
-                    error("expected identifier after '::' in base-specifier");
+        auto parse_base_type_name =
+            [&]() -> ParsedCppTypeNameSpecifier {
+                size_t saved_idx = get_token_idx();
+                auto saved_split_state = tok_mgnt.get_split_token_state();
+                if (auto parsed = try_parse_cpp_named_type_specifier()) {
+                    return *parsed;
                 }
-                base_name += "::";
-                base_name += current_token().value;
-                advance();
-            }
-            return base_name;
-        };
+                set_token_idx(saved_idx);
+                tok_mgnt.set_split_token_state(saved_split_state);
+
+                bool has_global_qualifier = consume_cpp_scope_resolution();
+                auto parse_component =
+                    [&](bool preceded_by_template_keyword)
+                    -> CppQualifiedNameComponent {
+                    if (!gentle_check(TokenType::IDENTIFIER)) {
+                        error_custloc(
+                            "expected identifier after '::' in base-specifier",
+                            current_token().loc);
+                    }
+                    CppQualifiedNameComponent component;
+                    component.name = current_token().value;
+                    component.loc = current_token().loc;
+                    component.preceded_by_template_keyword =
+                        preceded_by_template_keyword;
+                    advance();
+                    if (gentle_check(TokenType::LESS_THAN)) {
+                        component.has_template_argument_list = true;
+                        component.template_arguments =
+                            parse_cpp_template_argument_list();
+                    }
+                    if (component.preceded_by_template_keyword &&
+                        !component.has_template_argument_list) {
+                        error_custloc(
+                            "expected template-id after 'template' keyword",
+                            component.loc);
+                    }
+                    return component;
+                };
+
+                if (!gentle_check(TokenType::IDENTIFIER)) {
+                    error("expected base class name");
+                }
+
+                std::vector<CppQualifiedNameComponent> components;
+                components.push_back(parse_component(false));
+                while (is_cpp_scope_resolution_here()) {
+                    consume_cpp_scope_resolution();
+                    bool preceded_by_template_keyword =
+                        gentle_check_and_consume(TokenType::TEMPLATE);
+                    components.push_back(
+                        parse_component(preceded_by_template_keyword));
+                }
+
+                ParsedCppTypeNameSpecifier parsed;
+                std::vector<std::string> qualifiers;
+                qualifiers.reserve(components.size() > 0 ? components.size() - 1 : 0);
+                for (size_t idx = 0; idx + 1 < components.size(); ++idx) {
+                    qualifiers.push_back(components[idx].spelling());
+                }
+                parsed.spelling = qualified_name_utils::format_cpp_qualified_name(
+                    has_global_qualifier,
+                    qualifiers,
+                    components.back().spelling());
+                return parsed;
+            };
 
         while (true) {
             SrcLoc base_loc = current_token().loc;
@@ -7154,7 +7207,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 }
             }
 
-            std::string base_name = parse_base_name();
+            ParsedCppTypeNameSpecifier base_spec = parse_base_type_name();
             bool is_pack_expansion =
                 gentle_check_and_consume(TokenType::ELLIPSIS);
             if (is_pack_expansion && !is_in_template_pattern_context()) {
@@ -7168,7 +7221,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     : CppAccessSpecifier::Public;
             }
             bases.emplace_back(
-                base_name,
+                base_spec.spelling,
+                base_spec.type,
                 access,
                 is_virtual_base,
                 is_pack_expansion,

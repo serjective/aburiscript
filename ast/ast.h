@@ -2442,6 +2442,7 @@ struct CppAccessSpecDecl : Decl {
 
 struct CppBaseSpecifier {
     std::string type_name;
+    QualType type = nullptr;
     CppAccessSpecifier access = CppAccessSpecifier::None;
     bool is_virtual_base = false;
     bool is_pack_expansion = false;
@@ -2449,11 +2450,13 @@ struct CppBaseSpecifier {
 
     CppBaseSpecifier() = default;
     CppBaseSpecifier(std::string type_name,
+                     QualType type,
                      CppAccessSpecifier access,
                      bool is_virtual_base,
                      bool is_pack_expansion,
                      SrcLoc location = SrcLoc())
         : type_name(std::move(type_name)),
+          type(type),
           access(access),
           is_virtual_base(is_virtual_base),
           is_pack_expansion(is_pack_expansion),

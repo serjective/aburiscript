@@ -157,6 +157,37 @@ static RecordMemberAccess encode_cpp_access(CppAccessSpecifier access) {
     return RecordMemberAccess::Public;
 }
 
+static std::string cpp_base_specifier_name(const CppBaseSpecifier& base_spec) {
+    if (!base_spec.type_name.empty()) {
+        return base_spec.type_name;
+    }
+    return base_spec.type ? base_spec.type.to_string() : std::string();
+}
+
+static const ObjectDecl* cpp_base_record_decl_from_type(QualType base_type) {
+    auto base_object = desugar_type(base_type).as_shared<ObjectType>();
+    return base_object ? dyn_cast<ObjectDecl>(base_object->get_decl()) : nullptr;
+}
+
+static bool cpp_base_type_is_dependent(QualType base_type) {
+    auto dependent_base_raw = desugar_type(base_type).get_shared();
+    if (!dependent_base_raw) {
+        return false;
+    }
+
+    if (dependent_base_raw->kind == TypeKind::TemplateTypeParm ||
+        dependent_base_raw->kind == TypeKind::DependentName) {
+        return true;
+    }
+
+    if (auto specialization =
+            dyn_cast_shared<TemplateSpecializationType>(dependent_base_raw)) {
+        return specialization->is_dependent;
+    }
+
+    return false;
+}
+
 static size_t cpp_method_user_param_start(
     const std::shared_ptr<FunctionType>& fn_type) {
     if (!fn_type || fn_type->parameters.empty()) {
@@ -656,50 +687,42 @@ void Parser::build_cpp_record_resolve_bases(CppRecordBuildContext& ctx) {
     seen_direct_bases.reserve(ctx.record.bases.size());
     for (const auto& base_spec : ctx.record.bases) {
         RecordSemanticState::Base semantic_base;
-        semantic_base.name = base_spec.type_name;
+        std::string base_name = cpp_base_specifier_name(base_spec);
+        semantic_base.name = base_name;
         semantic_base.declared_access = encode_cpp_access(base_spec.access);
         semantic_base.is_virtual = base_spec.is_virtual_base;
         semantic_base.spec = &base_spec;
 
-        if (base_spec.type_name.empty()) {
+        if (base_name.empty()) {
             error_custloc("expected base class name in base-specifier",
                           base_spec.location);
         }
 
-        auto* base_tag_decl =
-            collect_->collect_lookup_tag_decl(base_spec.type_name, true);
-        auto* base_record_decl = dyn_cast<ObjectDecl>(base_tag_decl);
-        QualType dependent_base_type = QualType();
-        if (!base_record_decl) {
-            dependent_base_type =
-                collect_->collect_lookup_type_name(
-                    base_spec.type_name,
-                    true,
-                    true);
-            auto dependent_base_raw = desugar_type(dependent_base_type).get_shared();
-            bool dependent_base_ok = false;
-            if (dependent_base_raw) {
-                dependent_base_ok =
-                    dependent_base_raw->kind == TypeKind::TemplateTypeParm ||
-                    dependent_base_raw->kind == TypeKind::DependentName;
-                if (!dependent_base_ok) {
-                    if (auto specialization =
-                            dyn_cast_shared<TemplateSpecializationType>(
-                                dependent_base_raw)) {
-                        dependent_base_ok = specialization->is_dependent;
-                    }
-                }
+        QualType resolved_base_type = base_spec.type;
+        auto* base_record_decl = cpp_base_record_decl_from_type(resolved_base_type);
+        if (!base_record_decl && !resolved_base_type) {
+            auto* base_tag_decl =
+                collect_->collect_lookup_tag_decl(base_name, true);
+            base_record_decl = dyn_cast<ObjectDecl>(base_tag_decl);
+            if (!base_record_decl) {
+                resolved_base_type =
+                    collect_->collect_lookup_type_name(
+                        base_name,
+                        true,
+                        true);
+                base_record_decl =
+                    cpp_base_record_decl_from_type(resolved_base_type);
             }
-            if (!dependent_base_type ||
-                !dependent_base_ok) {
+        }
+
+        if (!base_record_decl) {
+            if (!resolved_base_type || !cpp_base_type_is_dependent(resolved_base_type)) {
                 error_custloc(
-                    "base type '" + base_spec.type_name +
+                    "base type '" + base_name +
                         "' does not name a class or struct",
                     base_spec.location);
             }
-        }
-        if (!base_record_decl) {
-            semantic_base.type = dependent_base_type;
+            semantic_base.type = resolved_base_type;
             ctx.bases.push_back(std::move(semantic_base));
             continue;
         }
@@ -713,18 +736,18 @@ void Parser::build_cpp_record_resolve_bases(CppRecordBuildContext& ctx) {
         }
 
         if (canonical_base_decl == ctx.semantic_decl ||
-            base_spec.type_name == ctx.record_name) {
+            base_name == ctx.record_name) {
             error_custloc("class '" + ctx.tag + "' cannot derive from itself",
                           base_spec.location);
         }
         if (seen_direct_bases.contains(canonical_base_decl)) {
             error_custloc(
-                "duplicate direct base class '" + base_spec.type_name + "'",
+                "duplicate direct base class '" + base_name + "'",
                 base_spec.location);
         }
         if (canonical_base_decl->is_union) {
             error_custloc(
-                "base type '" + base_spec.type_name +
+                "base type '" + base_name +
                     "' is a union; only class/struct bases are supported",
                 base_spec.location);
         }
@@ -732,7 +755,7 @@ void Parser::build_cpp_record_resolve_bases(CppRecordBuildContext& ctx) {
             record_semantics_cache_lookup(canonical_base_decl);
         if (!base_state || base_state->is_incomplete) {
             error_custloc(
-                "base class '" + base_spec.type_name +
+                "base class '" + base_name +
                     "' is incomplete",
                 base_spec.location);
         }
@@ -2743,51 +2766,42 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
         encode_member_access(record->default_access);
     for (const auto& base_spec : record->bases) {
         RecordSemanticState::Base semantic_base;
-        semantic_base.name = base_spec.type_name;
+        std::string base_name = cpp_base_specifier_name(base_spec);
+        semantic_base.name = base_name;
         semantic_base.declared_access = encode_member_access(base_spec.access);
         semantic_base.is_virtual = base_spec.is_virtual_base;
         semantic_base.spec = &base_spec;
 
-        if (base_spec.type_name.empty()) {
+        if (base_name.empty()) {
             error_custloc(
                 "expected base class name in base-specifier",
                 base_spec.location);
         }
 
-        auto* base_tag_decl =
-            collect_->collect_lookup_tag_decl(base_spec.type_name, true);
-        auto* base_record_decl = dyn_cast<ObjectDecl>(base_tag_decl);
-        QualType dependent_base_type = QualType();
-        if (!base_record_decl) {
-            dependent_base_type =
-                collect_->collect_lookup_type_name(
-                    base_spec.type_name,
-                    true,
-                    true);
-            auto dependent_base_raw = desugar_type(dependent_base_type).get_shared();
-            bool dependent_base_ok = false;
-            if (dependent_base_raw) {
-                dependent_base_ok =
-                    dependent_base_raw->kind == TypeKind::TemplateTypeParm ||
-                    dependent_base_raw->kind == TypeKind::DependentName;
-                if (!dependent_base_ok) {
-                    if (auto specialization =
-                            dyn_cast_shared<TemplateSpecializationType>(
-                                dependent_base_raw)) {
-                        dependent_base_ok = specialization->is_dependent;
-                    }
-                }
+        QualType resolved_base_type = base_spec.type;
+        auto* base_record_decl = cpp_base_record_decl_from_type(resolved_base_type);
+        if (!base_record_decl && !resolved_base_type) {
+            auto* base_tag_decl =
+                collect_->collect_lookup_tag_decl(base_name, true);
+            base_record_decl = dyn_cast<ObjectDecl>(base_tag_decl);
+            if (!base_record_decl) {
+                resolved_base_type =
+                    collect_->collect_lookup_type_name(
+                        base_name,
+                        true,
+                        true);
+                base_record_decl =
+                    cpp_base_record_decl_from_type(resolved_base_type);
             }
-            if (!dependent_base_type || !dependent_base_ok) {
+        }
+        if (!base_record_decl) {
+            if (!resolved_base_type || !cpp_base_type_is_dependent(resolved_base_type)) {
                 error_custloc(
-                    "base type '" + base_spec.type_name +
+                    "base type '" + base_name +
                         "' does not name a class or struct",
                     base_spec.location);
             }
-        }
-
-        if (!base_record_decl) {
-            semantic_base.type = dependent_base_type;
+            semantic_base.type = resolved_base_type;
             bases.push_back(std::move(semantic_base));
             continue;
         }
@@ -2802,14 +2816,14 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
         }
 
         if (canonical_base_decl == placeholder_decl ||
-            base_spec.type_name == record->name) {
+            base_name == record->name) {
             error_custloc(
                 "class '" + record->name + "' cannot derive from itself",
                 base_spec.location);
         }
         if (canonical_base_decl->is_union) {
             error_custloc(
-                "base type '" + base_spec.type_name +
+                "base type '" + base_name +
                     "' is a union; only class/struct bases are supported",
                 base_spec.location);
         }
@@ -2817,7 +2831,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             record_semantics_cache_lookup(canonical_base_decl);
         if (!base_state || base_state->is_incomplete) {
             error_custloc(
-                "base class '" + base_spec.type_name +
+                "base class '" + base_name +
                     "' is incomplete",
                 base_spec.location);
         }

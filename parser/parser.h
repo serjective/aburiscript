@@ -87,6 +87,7 @@ private:
     struct ParsedCppTypeNameSpecifier {
         QualType type = nullptr;
         std::shared_ptr<Symbol> typedef_symbol = nullptr;
+        std::string spelling;
     };
 
     struct CppDependentOwnerAnalysis {

@@ -1,7 +1,9 @@
 #include "collect.h"
 #include "collect_templates_internal.h"
 
+#include <limits>
 #include <optional>
+#include <sstream>
 
 using namespace template_sema_internal;
 
@@ -62,6 +64,276 @@ bool same_qualifier_prefix(const std::string* lhs, const std::string* rhs) {
     return *lhs == *rhs;
 }
 
+size_t cpp_method_user_param_start(
+    const std::shared_ptr<FunctionType>& fn_type) {
+    if (!fn_type || fn_type->parameters.empty()) {
+        return 0;
+    }
+    auto first_param =
+        desugar_type(fn_type->parameters.front()).as_shared<PointerType>();
+    if (!first_param) {
+        return 0;
+    }
+    if (canonical_type_kind(first_param->pointed_type) != TypeKind::Object) {
+        return 0;
+    }
+    return 1;
+}
+
+std::string make_virtual_slot_key(
+    const std::string& method_name,
+    QualType method_type) {
+    auto fn_type = desugar_type(method_type).as_shared<FunctionType>();
+    if (!fn_type) {
+        return method_name + "(<invalid>)";
+    }
+    std::ostringstream os;
+    os << method_name << "{cv=";
+    if (!fn_type->parameters.empty()) {
+        auto this_ptr =
+            desugar_type(fn_type->parameters.front()).as_shared<PointerType>();
+        if (this_ptr &&
+            canonical_type_kind(this_ptr->pointed_type) == TypeKind::Object) {
+            uint8_t this_cv = static_cast<uint8_t>(
+                this_ptr->pointed_type.get_qualifiers() &
+                static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
+            if (this_cv & QUAL_CONST) {
+                os << "c";
+            }
+            if (this_cv & QUAL_VOLATILE) {
+                os << "v";
+            }
+        }
+    }
+    os << ",ref=";
+    if (fn_type->member_ref_qualifier == FunctionRefQualifierKind::LValue) {
+        os << "&";
+    } else if (fn_type->member_ref_qualifier ==
+               FunctionRefQualifierKind::RValue) {
+        os << "&&";
+    } else {
+        os << "-";
+    }
+    os << "}(";
+    bool wrote_param = false;
+    size_t param_start = cpp_method_user_param_start(fn_type);
+    for (size_t idx = param_start; idx < fn_type->parameters.size(); ++idx) {
+        QualType param_type = fn_type->parameters[idx];
+        if (param_type && param_type->isVoid() &&
+            fn_type->parameters.size() == param_start + 1) {
+            break;
+        }
+        if (wrote_param) {
+            os << ",";
+        }
+        os << param_type.to_string();
+        wrote_param = true;
+    }
+    if (fn_type->is_variadic) {
+        if (wrote_param) {
+            os << ",";
+        }
+        os << "...";
+    }
+    os << ")";
+    return os.str();
+}
+
+using BasePathStep = std::pair<const ObjectDecl*, bool>;
+
+std::string encode_base_path_key(const std::vector<BasePathStep>& path) {
+    std::string key;
+    key.reserve(path.size() * 24);
+    for (const auto& step : path) {
+        key += step.second ? "V:" : "N:";
+        key += std::to_string(reinterpret_cast<uintptr_t>(step.first));
+        key.push_back(';');
+    }
+    return key;
+}
+
+size_t count_public_base_subobjects(
+    const ObjectDecl* derived_decl,
+    const ObjectDecl* target_base_decl,
+    const std::vector<RecordSemanticState::Base>& current_record_bases,
+    const ObjectDecl* current_record_decl) {
+    derived_decl = canonical_record_decl(derived_decl);
+    target_base_decl = canonical_record_decl(target_base_decl);
+    if (!derived_decl || !target_base_decl ||
+        derived_decl == target_base_decl) {
+        return 0;
+    }
+
+    std::unordered_set<std::string> matched_subobjects;
+    std::vector<BasePathStep> path;
+    std::unordered_set<const ObjectDecl*> active_stack;
+    active_stack.insert(derived_decl);
+
+    std::function<void(const ObjectDecl*)> walk =
+        [&](const ObjectDecl* current_decl) {
+        current_decl = canonical_record_decl(current_decl);
+        if (!current_decl) {
+            return;
+        }
+        if (current_decl == target_base_decl) {
+            if (!path.empty()) {
+                matched_subobjects.insert(encode_base_path_key(path));
+            }
+            return;
+        }
+
+        auto walk_base_edge = [&](const RecordSemanticState::Base& base) {
+            const ObjectDecl* base_decl = canonical_record_decl(base.record_decl);
+            if (!base_decl ||
+                base.declared_access != RecordMemberAccess::Public ||
+                active_stack.contains(base_decl)) {
+                return;
+            }
+
+            auto saved_path = path;
+            if (base.is_virtual) {
+                path.clear();
+                path.emplace_back(base_decl, true);
+            } else {
+                path.emplace_back(base_decl, false);
+            }
+
+            active_stack.insert(base_decl);
+            walk(base_decl);
+            active_stack.erase(base_decl);
+            path = std::move(saved_path);
+        };
+
+        if (current_decl == current_record_decl) {
+            for (const auto& base : current_record_bases) {
+                walk_base_edge(base);
+            }
+            return;
+        }
+
+        const RecordSemanticState* state =
+            record_semantics_cache_lookup(current_decl);
+        if (!state) {
+            return;
+        }
+
+        for (const auto& base : state->bases) {
+            walk_base_edge(base);
+        }
+    };
+
+    walk(derived_decl);
+    return matched_subobjects.size();
+}
+
+bool has_public_unambiguous_base_path(
+    const ObjectDecl* derived_decl,
+    const ObjectDecl* target_base_decl,
+    const std::vector<RecordSemanticState::Base>& current_record_bases,
+    const ObjectDecl* current_record_decl) {
+    return count_public_base_subobjects(
+               derived_decl,
+               target_base_decl,
+               current_record_bases,
+               current_record_decl) == 1;
+}
+
+struct CovariantReturnTarget {
+    enum class Kind : uint8_t {
+        Invalid,
+        Pointer,
+        LValueReference,
+        RValueReference,
+    };
+    Kind kind = Kind::Invalid;
+    QualType object_type;
+    const ObjectDecl* object_decl = nullptr;
+};
+
+CovariantReturnTarget extract_covariant_return_target(QualType return_type) {
+    CovariantReturnTarget target;
+    if (!return_type) {
+        return target;
+    }
+
+    auto canonical_return = desugar_type(return_type);
+    if (auto ptr_type = canonical_return.as_shared<PointerType>()) {
+        target.kind = CovariantReturnTarget::Kind::Pointer;
+        target.object_type = ptr_type->pointed_type;
+    } else if (auto ref_type = canonical_return.as_shared<ReferenceType>()) {
+        target.kind = ref_type->isRValueReference()
+            ? CovariantReturnTarget::Kind::RValueReference
+            : CovariantReturnTarget::Kind::LValueReference;
+        target.object_type = ref_type->referred_type;
+    } else {
+        return target;
+    }
+
+    auto object_type =
+        desugar_type(target.object_type).as_shared<ObjectType>();
+    if (!object_type) {
+        target.kind = CovariantReturnTarget::Kind::Invalid;
+        target.object_type = QualType();
+        return target;
+    }
+    target.object_decl =
+        canonical_record_decl(dyn_cast<ObjectDecl>(object_type->get_decl()));
+    if (!target.object_decl) {
+        target.kind = CovariantReturnTarget::Kind::Invalid;
+        target.object_type = QualType();
+    }
+    return target;
+}
+
+bool returns_are_covariant(
+    QualType overriding_return,
+    QualType overridden_return,
+    const std::vector<RecordSemanticState::Base>& current_record_bases,
+    const ObjectDecl* current_record_decl) {
+    if (!overriding_return || !overridden_return) {
+        return false;
+    }
+    if (overriding_return.equals_unqualified(overridden_return)) {
+        return true;
+    }
+
+    CovariantReturnTarget overriding_target =
+        extract_covariant_return_target(overriding_return);
+    CovariantReturnTarget overridden_target =
+        extract_covariant_return_target(overridden_return);
+    if (overriding_target.kind == CovariantReturnTarget::Kind::Invalid ||
+        overridden_target.kind == CovariantReturnTarget::Kind::Invalid ||
+        overriding_target.kind != overridden_target.kind ||
+        !overriding_target.object_type ||
+        !overridden_target.object_type ||
+        !overriding_target.object_decl ||
+        !overridden_target.object_decl) {
+        return false;
+    }
+
+    if (!overridden_target.object_type.has_all_qualifiers_of(
+            overriding_target.object_type)) {
+        return false;
+    }
+    if (overriding_target.object_decl == overridden_target.object_decl) {
+        return true;
+    }
+    return has_public_unambiguous_base_path(
+        overriding_target.object_decl,
+        overridden_target.object_decl,
+        current_record_bases,
+        current_record_decl);
+}
+
+struct VirtualSlotState {
+    size_t slot_index = 0;
+    bool is_pure = false;
+    bool is_final = false;
+    bool is_destructor = false;
+    std::shared_ptr<Symbol> final_symbol = nullptr;
+    std::string name;
+};
+
 } // namespace
 
 struct Collect::ClassTemplateSpecializationInstantiator {
@@ -106,6 +378,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     TemplateSubstitutionPass* clone_pass_ptr = nullptr;
 
     QualType owner_type;
+    std::vector<RecordSemanticState::Base> direct_bases;
+    std::vector<RecordSemanticState::VirtualBase> virtual_bases;
     std::vector<ObjectType::Field> user_fields;
     std::vector<RecordSemanticState::Method> methods;
     std::vector<RecordSemanticState::MethodTemplate> method_templates;
@@ -175,20 +449,17 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
         } depth_guard{ast_ctx()};
 
-        if (!pattern->bases.empty()) {
-            fail_instantiation(
-                "class template instantiation with base classes is not supported yet",
-                loc);
-            return entry->specialization_decl.get();
-        }
-
         build_pattern_symbol_maps();
         owner_type = QualType(entry->specialization_type);
-        if (!initialize_clone_pass() || !instantiate_members()) {
+        if (!instantiate_base_graph() ||
+            !initialize_clone_pass() ||
+            !instantiate_members()) {
             return entry->specialization_decl.get();
         }
 
-        build_semantic_state();
+        if (!build_semantic_state()) {
+            return entry->specialization_decl.get();
+        }
         record_semantics_cache_set(entry->specialization_decl.get(), semantic_state);
         if (!resolve_static_data_members() ||
             !clone_pending_member_templates() ||
@@ -462,6 +733,154 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             active_bindings,
             loc,
             true);
+    }
+
+    bool instantiate_base_graph() {
+        direct_bases.clear();
+        virtual_bases.clear();
+        if (pattern->bases.empty()) {
+            return true;
+        }
+        if (!pattern_state) {
+            return fail_instantiation(
+                "internal error: missing class template pattern semantic state for base instantiation",
+                loc);
+        }
+
+        direct_bases.reserve(pattern_state->bases.size());
+        std::unordered_set<const ObjectDecl*> seen_direct_bases;
+        seen_direct_bases.reserve(pattern_state->bases.size());
+
+        for (const auto& pattern_base : pattern_state->bases) {
+            const CppBaseSpecifier* base_spec = pattern_base.spec;
+            SrcLoc base_loc = base_spec ? base_spec->location : loc;
+            if (base_spec && base_spec->is_pack_expansion) {
+                return fail_instantiation(
+                    "class template base-specifier pack expansions are not supported yet",
+                    base_loc);
+            }
+
+            RecordSemanticState::Base specialized_base;
+            specialized_base.name = !pattern_base.name.empty()
+                ? pattern_base.name
+                : (base_spec ? base_spec->type_name : std::string());
+            specialized_base.declared_access = pattern_base.declared_access;
+            specialized_base.is_virtual = pattern_base.is_virtual;
+            specialized_base.spec = base_spec;
+
+            QualType base_type = pattern_base.type;
+            if (!base_type && base_spec) {
+                base_type = base_spec->type;
+            }
+            if (base_type) {
+                base_type =
+                    rewrite_class_template_type(base_type, specialization_bindings);
+            } else if (base_spec && !base_spec->type_name.empty()) {
+                base_type = collect.collect_lookup_type_name(
+                    base_spec->type_name,
+                    true,
+                    true);
+            }
+            base_type = collect.finalize_deferred_semantic_type(base_type, base_loc);
+
+            auto base_object = desugar_type(base_type).as_shared<ObjectType>();
+            auto* base_record_decl =
+                base_object ? dyn_cast<ObjectDecl>(base_object->get_decl()) : nullptr;
+            if (!base_record_decl) {
+                if (base_type &&
+                    type_depends_on_template_parameters(base_type, ast_ctx())) {
+                    return fail_instantiation(
+                        "class template base type remains dependent after substitution",
+                        base_loc);
+                }
+                return fail_instantiation(
+                    "base type '" + specialized_base.name +
+                        "' does not name a class or struct",
+                    base_loc);
+            }
+
+            const ObjectDecl* canonical_base_decl = canonical_record_decl(base_record_decl);
+            if (!canonical_base_decl) {
+                return fail_instantiation(
+                    "internal error: failed to canonicalize template base class",
+                    base_loc);
+            }
+            if (canonical_base_decl == entry->specialization_decl.get()) {
+                return fail_instantiation(
+                    "class '" + specialization_name + "' cannot derive from itself",
+                    base_loc);
+            }
+            if (!seen_direct_bases.insert(canonical_base_decl).second) {
+                return fail_instantiation(
+                    "duplicate direct base class '" + specialized_base.name + "'",
+                    base_loc);
+            }
+            if (canonical_base_decl->is_union) {
+                return fail_instantiation(
+                    "base type '" + specialized_base.name +
+                        "' is a union; only class/struct bases are supported",
+                    base_loc);
+            }
+            const RecordSemanticState* base_state =
+                record_semantics_cache_lookup(canonical_base_decl);
+            if (!base_state || base_state->is_incomplete) {
+                return fail_instantiation(
+                    "base class '" + specialized_base.name + "' is incomplete",
+                    base_loc);
+            }
+
+            specialized_base.record_decl = canonical_base_decl;
+            specialized_base.type = QualType(canonical_base_decl->get_record_type());
+            direct_bases.push_back(std::move(specialized_base));
+        }
+
+        std::unordered_set<const ObjectDecl*> seen_virtual_base_decls;
+        std::unordered_set<const ObjectDecl*> visited_base_graph;
+        auto append_virtual_base = [&](const RecordSemanticState::Base& base_edge) {
+            const ObjectDecl* virtual_base_decl = base_edge.record_decl;
+            if (!virtual_base_decl) {
+                return;
+            }
+            if (!seen_virtual_base_decls.insert(virtual_base_decl).second) {
+                return;
+            }
+            RecordSemanticState::VirtualBase virtual_base;
+            virtual_base.name = !base_edge.name.empty()
+                ? base_edge.name
+                : virtual_base_decl->tag;
+            virtual_base.type = QualType(virtual_base_decl->get_record_type());
+            virtual_base.declared_access = base_edge.declared_access;
+            virtual_base.record_decl = virtual_base_decl;
+            virtual_bases.push_back(std::move(virtual_base));
+        };
+        std::function<void(const ObjectDecl*)> walk_base_graph =
+            [&](const ObjectDecl* current_decl) {
+            if (!current_decl || visited_base_graph.contains(current_decl)) {
+                return;
+            }
+            visited_base_graph.insert(current_decl);
+            const RecordSemanticState* current_state =
+                record_semantics_cache_lookup(current_decl);
+            if (!current_state) {
+                return;
+            }
+            for (const auto& inherited_base : current_state->bases) {
+                if (!inherited_base.record_decl) {
+                    continue;
+                }
+                if (inherited_base.is_virtual) {
+                    append_virtual_base(inherited_base);
+                }
+                walk_base_graph(inherited_base.record_decl);
+            }
+        };
+        for (const auto& direct_base : direct_bases) {
+            if (direct_base.is_virtual) {
+                append_virtual_base(direct_base);
+            }
+            walk_base_graph(direct_base.record_decl);
+        }
+        return true;
     }
 
     bool build_pack_element_bindings(
@@ -1713,82 +2132,486 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return true;
     }
 
-    void assign_virtual_slots(
-        RecordSemanticState& state,
-        std::vector<RecordSemanticState::Method>& state_methods,
-        std::vector<RecordSemanticState::Destructor>& state_destructors) const {
-        state.virtual_slots.clear();
-        state.is_polymorphic = false;
-        state.has_virtual_destructor = false;
-        state.is_abstract = false;
+    bool resolve_virtual_dispatch_state() {
+        const ObjectDecl* current_record_decl =
+            canonical_record_decl(entry->specialization_decl.get());
 
-        size_t next_virtual_slot = 0;
-        for (auto& method : state_methods) {
-            if (!method.is_virtual || method.is_static) {
+        std::vector<const RecordSemanticState*> linear_base_states;
+        std::unordered_set<const ObjectDecl*> seen_base_chain;
+        auto append_base_chain =
+            [&](const RecordSemanticState* state, const auto& self_ref) -> void {
+            if (!state) {
+                return;
+            }
+            for (const auto& base : state->bases) {
+                if (!base.record_decl || seen_base_chain.contains(base.record_decl)) {
+                    continue;
+                }
+                const RecordSemanticState* base_state =
+                    record_semantics_cache_lookup(base.record_decl);
+                if (!base_state) {
+                    continue;
+                }
+                seen_base_chain.insert(base.record_decl);
+                self_ref(base_state, self_ref);
+                linear_base_states.push_back(base_state);
+            }
+        };
+        for (const auto& base : direct_bases) {
+            if (!base.record_decl || seen_base_chain.contains(base.record_decl)) {
+                continue;
+            }
+            const RecordSemanticState* base_state =
+                record_semantics_cache_lookup(base.record_decl);
+            if (!base_state) {
+                continue;
+            }
+            seen_base_chain.insert(base.record_decl);
+            append_base_chain(base_state, append_base_chain);
+            linear_base_states.push_back(base_state);
+        }
+
+        std::vector<RecordSemanticState::VirtualSlot> semantic_virtual_slots;
+        std::unordered_map<std::string, VirtualSlotState> virtual_slots;
+        bool any_base_polymorphic = false;
+        for (const auto* base_state : linear_base_states) {
+            if (!base_state) {
+                continue;
+            }
+            any_base_polymorphic = any_base_polymorphic || base_state->is_polymorphic;
+
+            if (!base_state->virtual_slots.empty()) {
+                for (const auto& inherited_slot : base_state->virtual_slots) {
+                    auto inherited_it = virtual_slots.find(inherited_slot.key);
+                    if (inherited_it != virtual_slots.end()) {
+                        size_t slot_index = inherited_it->second.slot_index;
+                        if (slot_index < semantic_virtual_slots.size()) {
+                            semantic_virtual_slots[slot_index] = inherited_slot;
+                        }
+                        inherited_it->second.is_pure = inherited_slot.is_pure;
+                        inherited_it->second.is_final = inherited_slot.is_final;
+                        inherited_it->second.is_destructor =
+                            inherited_slot.is_destructor;
+                        inherited_it->second.final_symbol =
+                            inherited_slot.final_symbol;
+                        inherited_it->second.name = inherited_slot.name;
+                        continue;
+                    }
+                    size_t inherited_index = semantic_virtual_slots.size();
+                    semantic_virtual_slots.push_back(inherited_slot);
+                    virtual_slots[inherited_slot.key] = VirtualSlotState{
+                        inherited_index,
+                        inherited_slot.is_pure,
+                        inherited_slot.is_final,
+                        inherited_slot.is_destructor,
+                        inherited_slot.final_symbol,
+                        inherited_slot.name};
+                }
+                continue;
+            }
+
+            for (const auto& base_method : base_state->methods) {
+                if (!base_method.is_virtual || base_method.is_static) {
+                    continue;
+                }
+                std::string slot_key =
+                    make_virtual_slot_key(base_method.name, base_method.type);
+                auto inherited_it = virtual_slots.find(slot_key);
+                if (inherited_it != virtual_slots.end()) {
+                    size_t slot_index = inherited_it->second.slot_index;
+                    if (slot_index < semantic_virtual_slots.size()) {
+                        auto& slot = semantic_virtual_slots[slot_index];
+                        slot.key = slot_key;
+                        slot.name = base_method.name;
+                        slot.is_destructor = false;
+                        slot.is_pure = base_method.is_pure;
+                        slot.is_final = base_method.is_final;
+                        slot.final_symbol = base_method.symbol;
+                    }
+                    inherited_it->second.is_pure = base_method.is_pure;
+                    inherited_it->second.is_final = base_method.is_final;
+                    inherited_it->second.is_destructor = false;
+                    inherited_it->second.final_symbol = base_method.symbol;
+                    inherited_it->second.name = base_method.name;
+                    continue;
+                }
+                size_t inherited_index = semantic_virtual_slots.size();
+                RecordSemanticState::VirtualSlot inherited_slot;
+                inherited_slot.key = slot_key;
+                inherited_slot.name = base_method.name;
+                inherited_slot.is_destructor = false;
+                inherited_slot.is_pure = base_method.is_pure;
+                inherited_slot.is_final = base_method.is_final;
+                inherited_slot.final_symbol = base_method.symbol;
+                semantic_virtual_slots.push_back(std::move(inherited_slot));
+                virtual_slots[slot_key] = VirtualSlotState{
+                    inherited_index,
+                    base_method.is_pure,
+                    base_method.is_final,
+                    false,
+                    base_method.symbol,
+                    base_method.name};
+            }
+            for (const auto& base_dtor : base_state->destructors) {
+                if (!base_dtor.is_virtual) {
+                    continue;
+                }
+                auto inherited_it = virtual_slots.find("<destructor>");
+                if (inherited_it != virtual_slots.end()) {
+                    size_t slot_index = inherited_it->second.slot_index;
+                    if (slot_index < semantic_virtual_slots.size()) {
+                        auto& slot = semantic_virtual_slots[slot_index];
+                        slot.key = "<destructor>";
+                        slot.name = base_dtor.name;
+                        slot.is_destructor = true;
+                        slot.is_pure = base_dtor.is_pure;
+                        slot.is_final = base_dtor.is_final;
+                        slot.final_symbol = base_dtor.symbol;
+                    }
+                    inherited_it->second.is_pure = base_dtor.is_pure;
+                    inherited_it->second.is_final = base_dtor.is_final;
+                    inherited_it->second.is_destructor = true;
+                    inherited_it->second.final_symbol = base_dtor.symbol;
+                    inherited_it->second.name = base_dtor.name;
+                    continue;
+                }
+                size_t inherited_index = semantic_virtual_slots.size();
+                RecordSemanticState::VirtualSlot inherited_slot;
+                inherited_slot.key = "<destructor>";
+                inherited_slot.name = base_dtor.name;
+                inherited_slot.is_destructor = true;
+                inherited_slot.is_pure = base_dtor.is_pure;
+                inherited_slot.is_final = base_dtor.is_final;
+                inherited_slot.final_symbol = base_dtor.symbol;
+                semantic_virtual_slots.push_back(std::move(inherited_slot));
+                virtual_slots["<destructor>"] = VirtualSlotState{
+                    inherited_index,
+                    base_dtor.is_pure,
+                    base_dtor.is_final,
+                    true,
+                    base_dtor.symbol,
+                    base_dtor.name};
+            }
+        }
+
+        semantic_state.is_polymorphic = any_base_polymorphic;
+        semantic_state.has_virtual_destructor =
+            virtual_slots.contains("<destructor>");
+
+        for (auto& method : methods) {
+            if (method.is_static) {
+                method.is_virtual = false;
+                method.overrides_base_virtual = false;
+                method.is_pure = false;
                 method.virtual_slot_index = -1;
+                if (method.decl && ast_ctx()) {
+                    if (auto* info =
+                            ast_ctx()->get_cpp_member_decl_info(method.decl->node_id)) {
+                        info->is_virtual = false;
+                        info->is_override = method.is_override;
+                        info->is_final = method.is_final;
+                        info->is_pure = false;
+                    }
+                }
                 continue;
             }
-            state.is_polymorphic = true;
-            method.virtual_slot_index = static_cast<int32_t>(next_virtual_slot++);
-            RecordSemanticState::VirtualSlot slot;
-            slot.key = make_method_virtual_slot_key(method.name, method.type);
-            slot.name = method.name;
-            slot.is_pure = method.is_pure;
-            slot.is_final = method.is_final;
-            slot.final_symbol = method.symbol;
-            state.virtual_slots.push_back(std::move(slot));
+
+            std::string slot_key = make_virtual_slot_key(method.name, method.type);
+            auto inherited_slot_it = virtual_slots.find(slot_key);
+            bool overrides_base = inherited_slot_it != virtual_slots.end();
+            bool inherited_final =
+                overrides_base && inherited_slot_it->second.is_final;
+
+            SrcLoc method_loc = method.decl ? method.decl->location : loc;
+            if (overrides_base && inherited_slot_it->second.final_symbol) {
+                auto overriding_type =
+                    desugar_type(method.type).as_shared<FunctionType>();
+                auto overridden_type = desugar_type(
+                    inherited_slot_it->second.final_symbol->type)
+                    .as_shared<FunctionType>();
+                if (overriding_type && overridden_type &&
+                    !returns_are_covariant(
+                        overriding_type->ret_type,
+                        overridden_type->ret_type,
+                        direct_bases,
+                        current_record_decl)) {
+                    return fail_instantiation(
+                        "return type of overriding virtual function '" +
+                            method.name +
+                            "' is not covariant with the base virtual function",
+                        method_loc);
+                }
+            }
+            if (inherited_final) {
+                return fail_instantiation(
+                    "cannot override final virtual function '" + method.name + "'",
+                    method_loc);
+            }
+            if (method.is_override && !overrides_base) {
+                return fail_instantiation(
+                    "'" + method.name +
+                        "' marked 'override' but does not override a base virtual function",
+                    method_loc);
+            }
+
+            bool effective_virtual =
+                method.is_virtual || method.is_override || overrides_base;
+            if (method.is_final && !effective_virtual) {
+                return fail_instantiation(
+                    "'" + method.name + "' marked 'final' but is not virtual",
+                    method_loc);
+            }
+            if (method.is_pure && !effective_virtual) {
+                return fail_instantiation(
+                    "pure-specifier can only be specified for virtual member functions",
+                    method_loc);
+            }
+
+            method.is_virtual = effective_virtual;
+            method.overrides_base_virtual = overrides_base;
+            if (method.is_virtual) {
+                semantic_state.is_polymorphic = true;
+                if (overrides_base) {
+                    size_t slot_index = inherited_slot_it->second.slot_index;
+                    method.virtual_slot_index = static_cast<int32_t>(slot_index);
+                    if (slot_index < semantic_virtual_slots.size()) {
+                        auto& slot = semantic_virtual_slots[slot_index];
+                        slot.name = method.name;
+                        slot.is_destructor = false;
+                        slot.is_pure = method.is_pure;
+                        slot.is_final = method.is_final;
+                        slot.final_symbol = method.symbol;
+                    }
+                    inherited_slot_it->second.is_pure = method.is_pure;
+                    inherited_slot_it->second.is_final = method.is_final;
+                    inherited_slot_it->second.is_destructor = false;
+                    inherited_slot_it->second.final_symbol = method.symbol;
+                    inherited_slot_it->second.name = method.name;
+                } else {
+                    size_t slot_index = semantic_virtual_slots.size();
+                    method.virtual_slot_index = static_cast<int32_t>(slot_index);
+                    RecordSemanticState::VirtualSlot slot;
+                    slot.key = slot_key;
+                    slot.name = method.name;
+                    slot.is_destructor = false;
+                    slot.is_pure = method.is_pure;
+                    slot.is_final = method.is_final;
+                    slot.final_symbol = method.symbol;
+                    semantic_virtual_slots.push_back(std::move(slot));
+                    virtual_slots[slot_key] = VirtualSlotState{
+                        slot_index,
+                        method.is_pure,
+                        method.is_final,
+                        false,
+                        method.symbol,
+                        method.name};
+                }
+            } else {
+                method.virtual_slot_index = -1;
+            }
+
+            if (method.decl && ast_ctx()) {
+                if (auto* info =
+                        ast_ctx()->get_cpp_member_decl_info(method.decl->node_id)) {
+                    info->is_virtual = method.is_virtual;
+                    info->is_override = method.is_override;
+                    info->is_final = method.is_final;
+                    info->is_pure = method.is_pure;
+                }
+            }
         }
-        for (auto& dtor : state_destructors) {
-            if (!dtor.is_virtual) {
+
+        for (auto& dtor : destructors) {
+            auto inherited_slot_it = virtual_slots.find("<destructor>");
+            bool overrides_base = inherited_slot_it != virtual_slots.end();
+            bool inherited_final =
+                overrides_base && inherited_slot_it->second.is_final;
+
+            SrcLoc dtor_loc = dtor.decl ? dtor.decl->location : loc;
+            if (inherited_final) {
+                return fail_instantiation(
+                    "cannot override final virtual destructor",
+                    dtor_loc);
+            }
+            if (dtor.is_override && !overrides_base) {
+                return fail_instantiation(
+                    "destructor marked 'override' but does not override a base virtual destructor",
+                    dtor_loc);
+            }
+
+            bool effective_virtual =
+                dtor.is_virtual || dtor.is_override || overrides_base;
+            if (dtor.is_final && !effective_virtual) {
+                return fail_instantiation(
+                    "destructor marked 'final' but is not virtual",
+                    dtor_loc);
+            }
+            if (dtor.is_pure && !effective_virtual) {
+                return fail_instantiation(
+                    "pure-specifier can only be specified for virtual member functions",
+                    dtor_loc);
+            }
+
+            dtor.is_virtual = effective_virtual;
+            dtor.overrides_base_virtual = overrides_base;
+            if (dtor.is_virtual) {
+                semantic_state.is_polymorphic = true;
+                semantic_state.has_virtual_destructor = true;
+                if (overrides_base) {
+                    size_t slot_index = inherited_slot_it->second.slot_index;
+                    dtor.virtual_slot_index = static_cast<int32_t>(slot_index);
+                    if (slot_index < semantic_virtual_slots.size()) {
+                        auto& slot = semantic_virtual_slots[slot_index];
+                        slot.name = dtor.name;
+                        slot.is_destructor = true;
+                        slot.is_pure = dtor.is_pure;
+                        slot.is_final = dtor.is_final;
+                        slot.final_symbol = dtor.symbol;
+                    }
+                    inherited_slot_it->second.is_pure = dtor.is_pure;
+                    inherited_slot_it->second.is_final = dtor.is_final;
+                    inherited_slot_it->second.is_destructor = true;
+                    inherited_slot_it->second.final_symbol = dtor.symbol;
+                    inherited_slot_it->second.name = dtor.name;
+                } else {
+                    size_t slot_index = semantic_virtual_slots.size();
+                    dtor.virtual_slot_index = static_cast<int32_t>(slot_index);
+                    RecordSemanticState::VirtualSlot slot;
+                    slot.key = "<destructor>";
+                    slot.name = dtor.name;
+                    slot.is_destructor = true;
+                    slot.is_pure = dtor.is_pure;
+                    slot.is_final = dtor.is_final;
+                    slot.final_symbol = dtor.symbol;
+                    semantic_virtual_slots.push_back(std::move(slot));
+                    virtual_slots["<destructor>"] = VirtualSlotState{
+                        slot_index,
+                        dtor.is_pure,
+                        dtor.is_final,
+                        true,
+                        dtor.symbol,
+                        dtor.name};
+                }
+            } else {
                 dtor.virtual_slot_index = -1;
-                continue;
             }
-            state.is_polymorphic = true;
-            state.has_virtual_destructor = true;
-            dtor.virtual_slot_index = static_cast<int32_t>(next_virtual_slot++);
-            RecordSemanticState::VirtualSlot slot;
-            slot.key = "<destructor>";
-            slot.name = dtor.name;
-            slot.is_destructor = true;
-            slot.is_pure = dtor.is_pure;
-            slot.is_final = dtor.is_final;
-            slot.final_symbol = dtor.symbol;
-            state.virtual_slots.push_back(std::move(slot));
+
+            if (dtor.decl && ast_ctx()) {
+                if (auto* info =
+                        ast_ctx()->get_cpp_member_decl_info(dtor.decl->node_id)) {
+                    info->is_virtual = dtor.is_virtual;
+                    info->is_override = dtor.is_override;
+                    info->is_final = dtor.is_final;
+                    info->is_pure = dtor.is_pure;
+                }
+            }
         }
-        for (const auto& slot : state.virtual_slots) {
+
+        semantic_state.virtual_slots = std::move(semantic_virtual_slots);
+        semantic_state.is_abstract = false;
+        for (const auto& slot : semantic_state.virtual_slots) {
             if (slot.is_pure) {
-                state.is_abstract = true;
+                semantic_state.is_abstract = true;
                 break;
             }
         }
+        return true;
     }
 
-    void build_semantic_state() {
-        RecordSemanticState layout_state;
-        layout_state.is_incomplete = !pattern->is_definition;
-        if (pattern->get_definition_data()) {
-            layout_state.definition_data = *pattern->get_definition_data();
+    void build_layout_state() {
+        RecordSemanticState::DefinitionData definition_data =
+            semantic_state.definition_data;
+        bool semantic_is_polymorphic = semantic_state.is_polymorphic;
+        bool semantic_requires_vptr =
+            semantic_is_polymorphic || !virtual_bases.empty();
+        bool semantic_is_abstract = semantic_state.is_abstract;
+        bool semantic_has_virtual_destructor =
+            semantic_state.has_virtual_destructor;
+        auto computed_virtual_slots = semantic_state.virtual_slots;
+        auto type_ctx = ast_ctx() ? ast_ctx()->type_ctx.get() : nullptr;
+        const AbiPolicy* abi_policy =
+            ast_ctx() && ast_ctx()->abi_policy ? ast_ctx()->abi_policy.get() : nullptr;
+
+        size_t primary_non_virtual_base_index = std::numeric_limits<size_t>::max();
+        for (size_t base_index = 0; base_index < direct_bases.size(); ++base_index) {
+            const auto& base = direct_bases[base_index];
+            if (base.is_virtual ||
+                !base.type ||
+                canonical_type_kind(base.type) != TypeKind::Object) {
+                continue;
+            }
+            primary_non_virtual_base_index = base_index;
+            break;
         }
-        assign_virtual_slots(layout_state, methods, destructors);
+
+        bool primary_base_provides_vptr = false;
+        if (semantic_requires_vptr &&
+            primary_non_virtual_base_index != std::numeric_limits<size_t>::max()) {
+            const auto& primary_base = direct_bases[primary_non_virtual_base_index];
+            const RecordSemanticState* primary_base_state =
+                record_semantics_cache_lookup(primary_base.record_decl);
+            primary_base_provides_vptr =
+                primary_base_state &&
+                !primary_base_state->is_incomplete &&
+                (primary_base_state->is_polymorphic ||
+                 !primary_base_state->virtual_bases.empty());
+        }
+        bool inject_own_vptr_field =
+            semantic_requires_vptr && !is_union && !primary_base_provides_vptr;
 
         std::vector<ObjectType::Field> layout_fields;
         layout_fields.reserve(
-            user_fields.size() +
-            (layout_state.is_polymorphic && !is_union ? 1 : 0));
-        if (layout_state.is_polymorphic && !is_union) {
-            auto void_type =
-                ast_ctx() && ast_ctx()->type_ctx
-                    ? ast_ctx()->type_ctx->get_builtin(BuiltinTypes::Void)
-                    : nullptr;
+            user_fields.size() + direct_bases.size() +
+            (inject_own_vptr_field ? 1 : 0));
+        std::vector<size_t> direct_base_layout_field_indices(
+            direct_bases.size(),
+            std::numeric_limits<size_t>::max());
+        if (inject_own_vptr_field) {
+            auto void_type = type_ctx ? type_ctx->get_builtin(BuiltinTypes::Void) : nullptr;
             if (void_type) {
                 QualType vptr_type(
                     std::make_shared<PointerType>(QualType(void_type)));
-                layout_fields.emplace_back(
-                    "",
-                    vptr_type,
-                    0,
-                    RecordMemberAccess::Private);
+                layout_fields.push_back(
+                    ObjectType::Field("", vptr_type, 0, RecordMemberAccess::Private));
             }
+        }
+        for (size_t base_index = 0; base_index < direct_bases.size(); ++base_index) {
+            const auto& base = direct_bases[base_index];
+            if (base.is_virtual ||
+                !base.type ||
+                canonical_type_kind(base.type) != TypeKind::Object) {
+                continue;
+            }
+            direct_base_layout_field_indices[base_index] = layout_fields.size();
+            size_t base_size_override = 0;
+            size_t base_alignment_override = 1;
+            if (const RecordSemanticState* base_state =
+                    record_semantics_cache_lookup(base.record_decl)) {
+                base_size_override = (base_state->non_virtual_size_bits + 7) / 8;
+                base_alignment_override = base_state->non_virtual_alignment;
+            }
+            if (base_size_override == 0 && base.type) {
+                int64_t fallback_width = base.type->getWidthBytes();
+                if (fallback_width > 0) {
+                    base_size_override = static_cast<size_t>(fallback_width);
+                }
+            }
+            if (base_size_override == 0) {
+                base_size_override = 1;
+            }
+            if (base_alignment_override == 0 && base.type) {
+                if (auto base_obj = desugar_type(base.type).as_shared<ObjectType>()) {
+                    base_alignment_override = base_obj->getAlignment();
+                }
+            }
+            if (base_alignment_override == 0) {
+                base_alignment_override = 1;
+            }
+            ObjectType::Field base_field("", base.type, 0, base.declared_access);
+            base_field.is_base_subobject = true;
+            base_field.storage_size_override = base_size_override;
+            base_field.storage_alignment_override = base_alignment_override;
+            layout_fields.push_back(std::move(base_field));
         }
         for (const auto& field : user_fields) {
             layout_fields.push_back(field);
@@ -1801,13 +2624,138 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             0,
             0,
             !pattern->is_definition,
-            ast_ctx()->abi_policy.get());
-        semantic_state.is_incomplete = !pattern->is_definition;
+            abi_policy);
+        semantic_state.definition_data = definition_data;
         semantic_state.non_virtual_size_bits = semantic_state.size_bits;
         semantic_state.non_virtual_alignment = semantic_state.alignment;
+        for (size_t base_index = 0; base_index < direct_bases.size(); ++base_index) {
+            auto& base = direct_bases[base_index];
+            base.has_non_virtual_offset = false;
+            base.non_virtual_offset = 0;
+            size_t layout_field_index = direct_base_layout_field_indices[base_index];
+            if (layout_field_index == std::numeric_limits<size_t>::max()) {
+                continue;
+            }
+            if (layout_field_index >= semantic_state.fields.size()) {
+                continue;
+            }
+            base.has_non_virtual_offset = true;
+            if (base_index == primary_non_virtual_base_index) {
+                base.non_virtual_offset = 0;
+            } else {
+                base.non_virtual_offset =
+                    semantic_state.fields[layout_field_index].offset;
+            }
+        }
+
+        if (!virtual_bases.empty()) {
+            auto complete_layout_fields = semantic_state.fields;
+            complete_layout_fields.reserve(
+                complete_layout_fields.size() + virtual_bases.size());
+            std::vector<size_t> virtual_base_layout_field_indices(
+                virtual_bases.size(),
+                std::numeric_limits<size_t>::max());
+            auto uchar_type = type_ctx ? type_ctx->get_builtin(BuiltinTypes::UChar) : nullptr;
+            if (!uchar_type && type_ctx) {
+                uchar_type = type_ctx->get_builtin(BuiltinTypes::Char);
+            }
+
+            for (size_t vb_index = 0; vb_index < virtual_bases.size(); ++vb_index) {
+                auto& virtual_base = virtual_bases[vb_index];
+                size_t vb_size_override = 0;
+                size_t vb_alignment_override = 1;
+                if (const RecordSemanticState* virtual_base_state =
+                        record_semantics_cache_lookup(virtual_base.record_decl)) {
+                    vb_size_override =
+                        (virtual_base_state->non_virtual_size_bits + 7) / 8;
+                    vb_alignment_override = virtual_base_state->non_virtual_alignment;
+                }
+                if (vb_size_override == 0 && virtual_base.type) {
+                    int64_t fallback_width = virtual_base.type->getWidthBytes();
+                    if (fallback_width > 0) {
+                        vb_size_override = static_cast<size_t>(fallback_width);
+                    }
+                }
+                if (vb_size_override == 0) {
+                    vb_size_override = 1;
+                }
+                if (vb_alignment_override == 0 && virtual_base.type) {
+                    if (auto virtual_obj =
+                            desugar_type(virtual_base.type).as_shared<ObjectType>()) {
+                        vb_alignment_override = virtual_obj->getAlignment();
+                    }
+                }
+                if (vb_alignment_override == 0) {
+                    vb_alignment_override = 1;
+                }
+
+                QualType virtual_storage_type = virtual_base.type;
+                if (uchar_type) {
+                    virtual_storage_type = QualType(
+                        std::make_shared<ArrayType>(
+                            QualType(uchar_type),
+                            std::optional<size_t>(vb_size_override)));
+                }
+                ObjectType::Field virtual_storage_field(
+                    "",
+                    virtual_storage_type,
+                    0,
+                    virtual_base.declared_access);
+                virtual_storage_field.is_base_subobject = true;
+                virtual_storage_field.is_virtual_base_storage = true;
+                virtual_storage_field.storage_size_override = vb_size_override;
+                virtual_storage_field.storage_alignment_override =
+                    vb_alignment_override;
+                virtual_base_layout_field_indices[vb_index] =
+                    complete_layout_fields.size();
+                complete_layout_fields.push_back(std::move(virtual_storage_field));
+            }
+
+            RecordSemanticState complete_layout_state = compute_record_semantics(
+                std::move(complete_layout_fields),
+                is_union,
+                false,
+                0,
+                0,
+                false,
+                abi_policy);
+            complete_layout_state.definition_data = definition_data;
+            semantic_state.fields = std::move(complete_layout_state.fields);
+            semantic_state.size_bits = complete_layout_state.size_bits;
+            semantic_state.alignment = complete_layout_state.alignment;
+            semantic_state.has_flexible_array_member =
+                complete_layout_state.has_flexible_array_member;
+
+            for (size_t vb_index = 0; vb_index < virtual_bases.size(); ++vb_index) {
+                size_t layout_field_index = virtual_base_layout_field_indices[vb_index];
+                if (layout_field_index >= semantic_state.fields.size()) {
+                    continue;
+                }
+                virtual_bases[vb_index].has_offset = true;
+                virtual_bases[vb_index].offset =
+                    semantic_state.fields[layout_field_index].offset;
+            }
+        }
+
+        semantic_state.is_polymorphic = semantic_is_polymorphic;
+        semantic_state.is_abstract = semantic_is_abstract;
+        semantic_state.has_virtual_destructor = semantic_has_virtual_destructor;
+        semantic_state.virtual_slots = std::move(computed_virtual_slots);
+    }
+
+    bool build_semantic_state() {
+        semantic_state = RecordSemanticState{};
+        semantic_state.is_incomplete = !pattern->is_definition;
         if (pattern->get_definition_data()) {
             semantic_state.definition_data = *pattern->get_definition_data();
         }
+        if (!resolve_virtual_dispatch_state()) {
+            return false;
+        }
+        build_layout_state();
+        semantic_state.is_incomplete = !pattern->is_definition;
+        semantic_state.bases = direct_bases;
+        semantic_state.virtual_bases = virtual_bases;
         semantic_state.methods = std::move(methods);
         semantic_state.method_templates = std::move(method_templates);
         semantic_state.constructors = std::move(constructors);
@@ -1815,10 +2763,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         semantic_state.static_data_members = std::move(static_data_members);
         semantic_state.nested_types = std::move(nested_types);
         semantic_state.nested_templates = std::move(nested_templates);
-        assign_virtual_slots(
-            semantic_state,
-            semantic_state.methods,
-            semantic_state.destructors);
+        return true;
     }
 
     bool resolve_static_data_members() {
