@@ -3789,6 +3789,276 @@ std::shared_ptr<CType> Parser::parse_declaration_head(Token start_token,
     return parsed_type;
 }
 
+Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
+    DeclarationParser& decl_parser) {
+    decl_parser.reset_declarator_parsing_state();
+
+    QualifiedDeclaratorContext context;
+    context.info.loc = current_token().loc;
+    context.scope_snapshot.scope = collect_->collect_current_scope();
+    context.scope_snapshot.decl_context = collect_->get_current_decl_context();
+
+    auto starts_with_member_pointer_declarator_prefix = [&]() -> bool {
+        if (!is_cxx_mode_active() || !gentle_check(TokenType::IDENTIFIER)) {
+            return false;
+        }
+        size_t offset = 1;
+        Token sep = peek_token(offset);
+        if (sep.type == TokenType::SCOPE_RESOLUTION) {
+            ++offset;
+        } else if (sep.type == TokenType::COLON &&
+                   peek_token(offset + 1).type == TokenType::COLON) {
+            offset += 2;
+        } else {
+            return false;
+        }
+        return peek_token(offset).type == TokenType::MULTIPLY;
+    };
+
+    struct QualifiedDeclaratorComponent {
+        std::string name;
+        std::vector<TemplateArgument> template_arguments;
+        bool has_template_argument_list = false;
+
+        std::string spelling() const {
+            if (!has_template_argument_list) {
+                return name;
+            }
+            std::string spelled = name;
+            spelled += "<";
+            for (size_t idx = 0; idx < template_arguments.size(); ++idx) {
+                if (idx > 0) {
+                    spelled += ", ";
+                }
+                spelled += template_arguments[idx].to_string();
+            }
+            spelled += ">";
+            return spelled;
+        }
+    };
+
+    auto qualified_declarator_matches_primary_class_template_owner =
+        [&](const ClassTemplateDecl* class_template,
+            const std::vector<TemplateArgument>& arguments) -> bool {
+            return cpp_primary_template_owner_matches(class_template, arguments);
+        };
+
+    if (!is_cxx_mode_active() || starts_with_member_pointer_declarator_prefix()) {
+        return context;
+    }
+
+    bool has_global_qualifier = false;
+    std::vector<QualifiedDeclaratorComponent> qualifier_components;
+    std::vector<std::string> qualifier_component_spellings;
+    std::optional<size_t> terminal_token_idx;
+    {
+        RevertingTentativeParsingAction tentative(*this);
+        context.info.loc = current_token().loc;
+        has_global_qualifier = consume_cpp_scope_resolution();
+        auto parse_qualified_component =
+            [&]() -> std::pair<QualifiedDeclaratorComponent, size_t> {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected identifier after '::' in qualified-id declarator",
+                    current_token().loc);
+            }
+            QualifiedDeclaratorComponent component;
+            size_t ident_token_idx = get_token_idx();
+            component.name = current_token().value;
+            advance();
+            if (gentle_check(TokenType::LESS_THAN)) {
+                component.has_template_argument_list = true;
+                component.template_arguments =
+                    parse_cpp_template_argument_list();
+            }
+            return {std::move(component), ident_token_idx};
+        };
+        if (has_global_qualifier || gentle_check(TokenType::IDENTIFIER)) {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected identifier after '::' in qualified-id declarator",
+                    current_token().loc);
+            }
+            auto [component, ident_token_idx] = parse_qualified_component();
+            while (is_cpp_scope_resolution_here()) {
+                consume_cpp_scope_resolution();
+                qualifier_component_spellings.push_back(component.spelling());
+                qualifier_components.push_back(std::move(component));
+                auto next_component = parse_qualified_component();
+                component = std::move(next_component.first);
+                ident_token_idx = next_component.second;
+            }
+            if (has_global_qualifier || !qualifier_components.empty()) {
+                terminal_token_idx = ident_token_idx;
+            }
+        }
+    }
+
+    if (!terminal_token_idx.has_value()) {
+        return context;
+    }
+
+    auto current_scope = collect_->collect_current_scope();
+    auto tu_context = collect_->get_translation_unit_decl_context();
+    auto current_context = collect_->get_current_decl_context();
+    if (!current_scope || !tu_context || !current_context) {
+        diag_engine->report_error(
+            "internal error: namespace lookup context missing",
+            context.info.loc);
+        error_custloc("namespace lookup context missing", context.info.loc);
+    }
+    auto global_scope = current_scope;
+    while (global_scope && global_scope->parent) {
+        global_scope = global_scope->parent;
+    }
+    if (!global_scope) {
+        diag_engine->report_error(
+            "internal error: global scope missing",
+            context.info.loc);
+        error_custloc("global scope missing", context.info.loc);
+    }
+
+    auto lookup_scope = has_global_qualifier ? global_scope : current_scope;
+    const DeclContext* lookup_context =
+        has_global_qualifier ? tu_context.get() : current_context.get();
+    for (size_t idx = 0; idx < qualifier_components.size(); ++idx) {
+        bool allow_enclosing_lookup = (!has_global_qualifier && idx == 0);
+        bool is_last_component = idx + 1 == qualifier_components.size();
+        const auto& component = qualifier_components[idx];
+        if (component.has_template_argument_list && !is_last_component) {
+            fail_cpp_future_work(
+                "template-id nested-name specifier",
+                "template-id qualifier chains",
+                context.info.loc);
+        }
+        auto namespace_scope = resolve_named_namespace_scope(
+            lookup_context, component.name, allow_enclosing_lookup);
+        if (namespace_scope && namespace_scope->associated_decl_context) {
+            lookup_scope = namespace_scope;
+            lookup_context = namespace_scope->associated_decl_context;
+            continue;
+        }
+        if (!lookup_scope) {
+            error_custloc(
+                "internal error: missing lookup scope while resolving nested-name specifier",
+                context.info.loc);
+        }
+        if (!is_last_component) {
+            error_custloc(
+                "nested-name specifier component '" +
+                    component.spelling() +
+                    "' does not name a namespace",
+                context.info.loc);
+        }
+
+        if (component.has_template_argument_list) {
+            const DeclBinding* template_binding =
+                LookupEngine::lookup_unqualified_template_binding(
+                    component.name,
+                    lookup_scope,
+                    allow_enclosing_lookup,
+                    LookupNamespace::Tag);
+            const Decl* primary_template = nullptr;
+            if (template_binding) {
+                primary_template = template_binding->template_decl;
+                if (!primary_template &&
+                    template_binding->template_overload_candidates.size() == 1) {
+                    primary_template =
+                        template_binding->template_overload_candidates.front();
+                }
+            }
+            auto* class_template =
+                dyn_cast<ClassTemplateDecl>(primary_template);
+            if (!class_template) {
+                error_custloc(
+                    "out-of-line declaration target '" +
+                        component.spelling() +
+                        "' does not name the primary class template pattern",
+                    context.info.loc);
+            }
+            context.info.owner_class_template = class_template;
+            context.info.owner_template_arguments = component.template_arguments;
+            if (!qualified_declarator_matches_primary_class_template_owner(
+                    class_template,
+                    component.template_arguments)) {
+                if (!is_parsing_cpp_explicit_specialization()) {
+                    error_custloc(
+                        "out-of-line declaration target '" +
+                            component.spelling() +
+                            "' does not name the primary class template pattern",
+                        context.info.loc);
+                }
+                context.info.targets_template_pattern = false;
+            } else {
+                context.info.targets_template_pattern = true;
+            }
+            context.info.owner_record_decl =
+                class_template->pattern_semantic_decl();
+            if (!context.info.owner_record_decl) {
+                error_custloc(
+                    "internal error: missing primary class template pattern owner",
+                    context.info.loc);
+            }
+        } else {
+            auto* owner_tag_decl = LookupEngine::lookup_tag_decl(
+                component.name,
+                lookup_scope,
+                allow_enclosing_lookup);
+            const auto* owner_record_decl = dyn_cast<ObjectDecl>(owner_tag_decl);
+            if (!owner_record_decl) {
+                error_custloc(
+                    "out-of-line declaration target '" +
+                        component.spelling() +
+                        "' is not a class/struct/union",
+                    context.info.loc);
+            }
+            if (owner_record_decl->get_record_type()) {
+                if (auto* canonical_owner =
+                        dyn_cast<ObjectDecl>(
+                            owner_record_decl->get_record_type()->get_decl())) {
+                    owner_record_decl = canonical_owner;
+                }
+            }
+            context.info.owner_record_decl = owner_record_decl;
+            context.info.targets_template_pattern = false;
+        }
+        break;
+    }
+
+    set_token_idx(*terminal_token_idx);
+    if (context.info.owner_record_decl &&
+        context.scope_snapshot.scope &&
+        scope_flags_contains(
+            context.scope_snapshot.scope->flags,
+            ScopeFlags::TemplateParameterScope) &&
+        context.scope_snapshot.decl_context) {
+        auto rebased_scope =
+            std::make_shared<Scope>(*context.scope_snapshot.scope);
+        rebased_scope->parent = lookup_scope;
+        rebased_scope->associated_decl_context =
+            context.scope_snapshot.decl_context.get();
+        collect_->collect_set_current_scope(std::move(rebased_scope));
+    } else {
+        collect_->collect_set_current_scope(lookup_scope);
+    }
+    if (!context.info.owner_record_decl) {
+        context.info.target_context =
+            collect_->get_current_decl_context();
+        context.info.target_scope =
+            collect_->collect_current_scope();
+        if (!context.info.target_context) {
+            diag_engine->report_error(
+                "internal error: namespace declaration context missing",
+                context.info.loc);
+            error_custloc("namespace declaration context missing",
+                          context.info.loc);
+        }
+    }
+    context.info.has_global_qualifier = has_global_qualifier;
+    context.info.qualifiers = std::move(qualifier_component_spellings);
+    return context;
+}
+
 std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
     Token t = current_token();
     if (auto special_declaration = try_parse_special_declaration()) {
@@ -4108,26 +4378,35 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
             advance();
         }
         t = current_token();
-        decl_parser.reset_declarator_parsing_state();
-        bool qualified_declarator_has_global_qualifier = false;
-        std::vector<std::string> qualified_declarator_qualifiers;
-        std::shared_ptr<DeclContext> qualified_declarator_target_context;
-        std::shared_ptr<Scope> qualified_declarator_target_scope;
-        const ObjectDecl* qualified_declarator_owner_record_decl = nullptr;
-        const ClassTemplateDecl* qualified_declarator_owner_class_template = nullptr;
-        std::vector<TemplateArgument> qualified_declarator_owner_template_arguments;
-        bool qualified_declarator_targets_template_pattern = false;
-        const RecordSemanticState::Method*
-            qualified_declarator_method_match = nullptr;
-        const RecordSemanticState::MethodTemplate*
-            qualified_declarator_method_template_match = nullptr;
-        std::vector<TemplateArgument>
-            qualified_declarator_method_template_specialization_arguments;
-        const RecordSemanticState::StaticDataMember*
-            qualified_declarator_static_data_match = nullptr;
-        SrcLoc qualified_declarator_loc = current_token().loc;
-        auto declarator_scope_before_qualifier = collect_->collect_current_scope();
-        auto declarator_context_before_qualifier = collect_->get_current_decl_context();
+        auto qualified_declarator_context =
+            prepare_qualified_declarator_context(decl_parser);
+        auto& qualified_declarator = qualified_declarator_context.info;
+        auto& qualified_declarator_has_global_qualifier =
+            qualified_declarator.has_global_qualifier;
+        auto& qualified_declarator_qualifiers =
+            qualified_declarator.qualifiers;
+        auto& qualified_declarator_target_context =
+            qualified_declarator.target_context;
+        auto& qualified_declarator_target_scope =
+            qualified_declarator.target_scope;
+        auto& qualified_declarator_owner_record_decl =
+            qualified_declarator.owner_record_decl;
+        auto& qualified_declarator_owner_class_template =
+            qualified_declarator.owner_class_template;
+        auto& qualified_declarator_owner_template_arguments =
+            qualified_declarator.owner_template_arguments;
+        auto& qualified_declarator_targets_template_pattern =
+            qualified_declarator.targets_template_pattern;
+        auto& qualified_declarator_method_match =
+            qualified_declarator.method_match;
+        auto& qualified_declarator_method_template_match =
+            qualified_declarator.method_template_match;
+        auto& qualified_declarator_method_template_specialization_arguments =
+            qualified_declarator.method_template_specialization_arguments;
+        auto& qualified_declarator_static_data_match =
+            qualified_declarator.static_data_match;
+        const SrcLoc qualified_declarator_loc =
+            qualified_declarator.loc;
         struct QualifiedDeclaratorScopeRestoreGuard {
             Collect* collect = nullptr;
             std::shared_ptr<Scope> scope;
@@ -4140,266 +4419,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
                 collect->collect_set_current_scope(scope);
                 collect->set_current_decl_context(decl_context);
             }
-        } scope_restore_guard{
+        } scope_restore_guard {
             collect_.get(),
-            declarator_scope_before_qualifier,
-            declarator_context_before_qualifier
+            qualified_declarator_context.scope_snapshot.scope,
+            qualified_declarator_context.scope_snapshot.decl_context
         };
-        auto starts_with_member_pointer_declarator_prefix = [&]() -> bool {
-            if (!is_cxx_mode_active() || !gentle_check(TokenType::IDENTIFIER)) {
-                return false;
-            }
-            size_t offset = 1;
-            Token sep = peek_token(offset);
-            if (sep.type == TokenType::SCOPE_RESOLUTION) {
-                ++offset;
-            } else if (sep.type == TokenType::COLON &&
-                       peek_token(offset + 1).type == TokenType::COLON) {
-                offset += 2;
-            } else {
-                return false;
-            }
-            return peek_token(offset).type == TokenType::MULTIPLY;
-        };
-        struct QualifiedDeclaratorComponent {
-            std::string name;
-            std::vector<TemplateArgument> template_arguments;
-            bool has_template_argument_list = false;
-
-            std::string spelling() const {
-                if (!has_template_argument_list) {
-                    return name;
-                }
-                std::string spelled = name;
-                spelled += "<";
-                for (size_t idx = 0; idx < template_arguments.size(); ++idx) {
-                    if (idx > 0) {
-                        spelled += ", ";
-                    }
-                    spelled += template_arguments[idx].to_string();
-                }
-                spelled += ">";
-                return spelled;
-            }
-        };
-        auto qualified_declarator_matches_primary_class_template_owner =
-            [&](const ClassTemplateDecl* class_template,
-                const std::vector<TemplateArgument>& arguments) -> bool {
-                return cpp_primary_template_owner_matches(
-                    class_template,
-                    arguments);
-            };
-        if (is_cxx_mode_active() &&
-            !starts_with_member_pointer_declarator_prefix()) {
-            bool has_global_qualifier = false;
-            std::vector<QualifiedDeclaratorComponent> qualifier_components;
-            std::vector<std::string> qualifier_component_spellings;
-            std::optional<size_t> terminal_token_idx;
-            {
-                RevertingTentativeParsingAction tentative(*this);
-                qualified_declarator_loc = current_token().loc;
-                has_global_qualifier = consume_cpp_scope_resolution();
-                auto parse_qualified_component =
-                    [&]() -> std::pair<QualifiedDeclaratorComponent, size_t> {
-                    if (!gentle_check(TokenType::IDENTIFIER)) {
-                        error_custloc(
-                            "expected identifier after '::' in qualified-id declarator",
-                            current_token().loc);
-                    }
-                    QualifiedDeclaratorComponent component;
-                    size_t ident_token_idx = get_token_idx();
-                    component.name = current_token().value;
-                    advance();
-                    if (gentle_check(TokenType::LESS_THAN)) {
-                        component.has_template_argument_list = true;
-                        component.template_arguments =
-                            parse_cpp_template_argument_list();
-                    }
-                    return {std::move(component), ident_token_idx};
-                };
-                if (has_global_qualifier || gentle_check(TokenType::IDENTIFIER)) {
-                    if (!gentle_check(TokenType::IDENTIFIER)) {
-                        error_custloc(
-                            "expected identifier after '::' in qualified-id declarator",
-                            current_token().loc);
-                    }
-                    auto [component, ident_token_idx] = parse_qualified_component();
-                    while (is_cpp_scope_resolution_here()) {
-                        consume_cpp_scope_resolution();
-                        qualifier_component_spellings.push_back(component.spelling());
-                        qualifier_components.push_back(std::move(component));
-                        auto next_component = parse_qualified_component();
-                        component = std::move(next_component.first);
-                        ident_token_idx = next_component.second;
-                    }
-                    if (has_global_qualifier || !qualifier_components.empty()) {
-                        terminal_token_idx = ident_token_idx;
-                    }
-                }
-            }
-            if (terminal_token_idx.has_value()) {
-                auto current_scope = collect_->collect_current_scope();
-                auto tu_context = collect_->get_translation_unit_decl_context();
-                auto current_context = collect_->get_current_decl_context();
-                if (!current_scope || !tu_context || !current_context) {
-                    diag_engine->report_error(
-                        "internal error: namespace lookup context missing",
-                        qualified_declarator_loc);
-                    error_custloc("namespace lookup context missing", qualified_declarator_loc);
-                }
-                auto global_scope = current_scope;
-                while (global_scope && global_scope->parent) {
-                    global_scope = global_scope->parent;
-                }
-                if (!global_scope) {
-                    diag_engine->report_error(
-                        "internal error: global scope missing",
-                        qualified_declarator_loc);
-                    error_custloc("global scope missing", qualified_declarator_loc);
-                }
-
-                auto lookup_scope = has_global_qualifier ? global_scope : current_scope;
-                const DeclContext* lookup_context =
-                    has_global_qualifier ? tu_context.get() : current_context.get();
-                for (size_t idx = 0; idx < qualifier_components.size(); ++idx) {
-                    bool allow_enclosing_lookup = (!has_global_qualifier && idx == 0);
-                    bool is_last_component = idx + 1 == qualifier_components.size();
-                    const auto& component = qualifier_components[idx];
-                    if (component.has_template_argument_list && !is_last_component) {
-                        fail_cpp_future_work(
-                            "template-id nested-name specifier",
-                            "template-id qualifier chains",
-                            qualified_declarator_loc);
-                    }
-                    auto namespace_scope = resolve_named_namespace_scope(
-                        lookup_context, component.name, allow_enclosing_lookup);
-                    if (namespace_scope && namespace_scope->associated_decl_context) {
-                        lookup_scope = namespace_scope;
-                        lookup_context = namespace_scope->associated_decl_context;
-                        continue;
-                    }
-                    if (!lookup_scope) {
-                        error_custloc(
-                            "internal error: missing lookup scope while resolving nested-name specifier",
-                            qualified_declarator_loc);
-                    }
-                    if (!is_last_component) {
-                        error_custloc(
-                            "nested-name specifier component '" +
-                                component.spelling() +
-                                "' does not name a namespace",
-                            qualified_declarator_loc);
-                    }
-
-                    if (component.has_template_argument_list) {
-                        const DeclBinding* template_binding =
-                            LookupEngine::lookup_unqualified_template_binding(
-                                component.name,
-                                lookup_scope,
-                                allow_enclosing_lookup,
-                                LookupNamespace::Tag);
-                        const Decl* primary_template = nullptr;
-                        if (template_binding) {
-                            primary_template = template_binding->template_decl;
-                            if (!primary_template &&
-                                template_binding->template_overload_candidates.size() == 1) {
-                                primary_template =
-                                    template_binding->template_overload_candidates.front();
-                            }
-                        }
-                        auto* class_template =
-                            dyn_cast<ClassTemplateDecl>(primary_template);
-                        if (!class_template) {
-                            error_custloc(
-                                "out-of-line declaration target '" +
-                                    component.spelling() +
-                                    "' does not name the primary class template pattern",
-                                qualified_declarator_loc);
-                        }
-                        qualified_declarator_owner_class_template = class_template;
-                        qualified_declarator_owner_template_arguments =
-                            component.template_arguments;
-                        if (!qualified_declarator_matches_primary_class_template_owner(
-                                class_template,
-                                component.template_arguments)) {
-                            if (!is_parsing_cpp_explicit_specialization()) {
-                                error_custloc(
-                                    "out-of-line declaration target '" +
-                                        component.spelling() +
-                                        "' does not name the primary class template pattern",
-                                    qualified_declarator_loc);
-                            }
-                            qualified_declarator_targets_template_pattern = false;
-                        } else {
-                            qualified_declarator_targets_template_pattern = true;
-                        }
-                        qualified_declarator_owner_record_decl =
-                            class_template->pattern_semantic_decl();
-                        if (!qualified_declarator_owner_record_decl) {
-                            error_custloc(
-                                "internal error: missing primary class template pattern owner",
-                                qualified_declarator_loc);
-                        }
-                    } else {
-                        auto* owner_tag_decl = LookupEngine::lookup_tag_decl(
-                            component.name,
-                            lookup_scope,
-                            allow_enclosing_lookup);
-                        const auto* owner_record_decl = dyn_cast<ObjectDecl>(owner_tag_decl);
-                        if (!owner_record_decl) {
-                            error_custloc(
-                                "out-of-line declaration target '" +
-                                    component.spelling() +
-                                    "' is not a class/struct/union",
-                                qualified_declarator_loc);
-                        }
-                        if (owner_record_decl->get_record_type()) {
-                            if (auto* canonical_owner =
-                                    dyn_cast<ObjectDecl>(
-                                        owner_record_decl->get_record_type()->get_decl())) {
-                                owner_record_decl = canonical_owner;
-                            }
-                        }
-                        qualified_declarator_owner_record_decl = owner_record_decl;
-                        qualified_declarator_targets_template_pattern = false;
-                    }
-                    break;
-                }
-
-                set_token_idx(*terminal_token_idx);
-                if (qualified_declarator_owner_record_decl &&
-                    declarator_scope_before_qualifier &&
-                    scope_flags_contains(
-                        declarator_scope_before_qualifier->flags,
-                        ScopeFlags::TemplateParameterScope) &&
-                    declarator_context_before_qualifier) {
-                    auto rebased_scope =
-                        std::make_shared<Scope>(*declarator_scope_before_qualifier);
-                    rebased_scope->parent = lookup_scope;
-                    rebased_scope->associated_decl_context =
-                        declarator_context_before_qualifier.get();
-                    collect_->collect_set_current_scope(std::move(rebased_scope));
-                } else {
-                    collect_->collect_set_current_scope(lookup_scope);
-                }
-                if (!qualified_declarator_owner_record_decl) {
-                    qualified_declarator_target_context =
-                        collect_->get_current_decl_context();
-                    qualified_declarator_target_scope =
-                        collect_->collect_current_scope();
-                    if (!qualified_declarator_target_context) {
-                        diag_engine->report_error(
-                            "internal error: namespace declaration context missing",
-                            qualified_declarator_loc);
-                        error_custloc("namespace declaration context missing",
-                                      qualified_declarator_loc);
-                    }
-                }
-                qualified_declarator_has_global_qualifier = has_global_qualifier;
-                qualified_declarator_qualifiers =
-                    std::move(qualifier_component_spellings);
-            }
-        }
         std::shared_ptr<CType> newer_type = decl_parser.parse_declarator(new_type);
         retain_type_specifier_decl_if_needed(decl_parser);
         if (is_cxx_mode_active() && is_cpp_scope_resolution_here()) {

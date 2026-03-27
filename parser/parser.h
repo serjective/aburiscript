@@ -163,6 +163,32 @@ private:
         const Decl* primary_member_decl = nullptr;
     };
 
+    struct ScopeContextSnapshot {
+        std::shared_ptr<Scope> scope;
+        std::shared_ptr<DeclContext> decl_context;
+    };
+
+    struct QualifiedDeclaratorInfo {
+        bool has_global_qualifier = false;
+        std::vector<std::string> qualifiers;
+        std::shared_ptr<DeclContext> target_context;
+        std::shared_ptr<Scope> target_scope;
+        const ObjectDecl* owner_record_decl = nullptr;
+        const ClassTemplateDecl* owner_class_template = nullptr;
+        std::vector<TemplateArgument> owner_template_arguments;
+        bool targets_template_pattern = false;
+        const RecordSemanticState::Method* method_match = nullptr;
+        const RecordSemanticState::MethodTemplate* method_template_match = nullptr;
+        std::vector<TemplateArgument> method_template_specialization_arguments;
+        const RecordSemanticState::StaticDataMember* static_data_match = nullptr;
+        SrcLoc loc;
+    };
+
+    struct QualifiedDeclaratorContext {
+        ScopeContextSnapshot scope_snapshot;
+        QualifiedDeclaratorInfo info;
+    };
+
     struct TentativeContextFrame {
         size_t id = 0;
         TentativeParserState parser_checkpoint;
@@ -331,6 +357,8 @@ private:
     std::shared_ptr<CType> parse_declaration_head(Token start_token,
         DeclarationParser& decl_parser,
         std::vector<std::unique_ptr<Decl>>& ret_vec);
+    QualifiedDeclaratorContext prepare_qualified_declarator_context(
+        DeclarationParser& decl_parser);
     std::vector<std::unique_ptr<Decl>> parse_declaration();
 
     std::unique_ptr<Decl> parse_parameter_declaration();
