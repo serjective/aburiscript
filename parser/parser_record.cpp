@@ -4429,6 +4429,969 @@ void Parser::resolve_qualified_declarator_match(
     }
 }
 
+void Parser::merge_function_asm_label(DeclarationParser& decl_parser,
+                                      const std::shared_ptr<Symbol>& sym,
+                                      SrcLoc loc) {
+    if (!sym) {
+        return;
+    }
+    if (decl_parser.asm_label.has_value()) {
+        if (sym->asm_label.has_value() &&
+            sym->asm_label.value() != decl_parser.asm_label.value()) {
+            diag_engine->report_error(
+                "conflicting asm label for function '" + decl_parser.name + "'",
+                loc);
+            // Keep the previously established asm label as canonical.
+            decl_parser.asm_label = sym->asm_label;
+            return;
+        }
+        sym->asm_label = decl_parser.asm_label;
+        return;
+    }
+    if (sym->asm_label.has_value()) {
+        // Preserve asm label from a prior declaration on later redeclarations/definition.
+        decl_parser.asm_label = sym->asm_label;
+    }
+}
+
+void Parser::remap_out_of_line_primary_template_method(
+    CppMethodDecl* method_decl,
+    const ClassTemplateDecl* owner_class_template,
+    SrcLoc declarator_loc) {
+    if (!method_decl ||
+        !owner_class_template ||
+        active_template_parameter_stack_.empty()) {
+        return;
+    }
+
+    const auto& active_parameters = active_template_parameter_stack_.back();
+    if (active_parameters.size() != owner_class_template->parameters.size()) {
+        error_custloc(
+            "internal error: out-of-line template head does not match owner template parameter list",
+            declarator_loc);
+    }
+
+    ASTCloneContext clone_ctx;
+    clone_ctx.ast_ctx = ast_ctx.get();
+    std::unordered_map<const TemplateParameterDecl*, const TemplateParameterDecl*>
+        parameter_rebinds;
+    parameter_rebinds.reserve(active_parameters.size());
+
+    for (size_t idx = 0; idx < active_parameters.size(); ++idx) {
+        const auto* active_parameter = active_parameters[idx];
+        const auto* canonical_parameter =
+            owner_class_template->parameters[idx].get();
+        if (!active_parameter || !canonical_parameter ||
+            active_parameter->get_kind() != canonical_parameter->get_kind()) {
+            error_custloc(
+                "internal error: out-of-line template head is not structurally compatible with the owner template",
+                declarator_loc);
+        }
+        parameter_rebinds.emplace(active_parameter, canonical_parameter);
+
+        if (auto* canonical_type =
+                dyn_cast<TemplateTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(canonical_parameter))) {
+            (void)canonical_type;
+            continue;
+        }
+
+        if (auto* canonical_non_type =
+                dyn_cast<TemplateNonTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(canonical_parameter))) {
+            auto* active_non_type =
+                dyn_cast<TemplateNonTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(active_parameter));
+            if (active_non_type && active_non_type->sym &&
+                canonical_non_type->sym) {
+                clone_ctx.symbol_remap.emplace(
+                    active_non_type->sym.get(),
+                    canonical_non_type->sym);
+            }
+            continue;
+        }
+
+        error_custloc(
+            "internal error: unsupported out-of-line owner template parameter kind",
+            declarator_loc);
+    }
+
+    clone_ctx.rewrite_type = [&](QualType type) -> QualType {
+        return template_sema_internal::remap_template_parameter_types_in_type(
+            type,
+            parameter_rebinds);
+    };
+    clone_ctx.rewrite_symbol =
+        [&](const std::shared_ptr<Symbol>& sym) -> std::shared_ptr<Symbol> {
+        if (!sym) {
+            return nullptr;
+        }
+        if (auto it = clone_ctx.symbol_remap.find(sym.get());
+            it != clone_ctx.symbol_remap.end()) {
+            return it->second;
+        }
+        return sym;
+    };
+
+    method_decl->type =
+        clone_ctx.rewrite_type(QualType(method_decl->type)).get_shared();
+
+    std::vector<std::unique_ptr<Decl>> remapped_parameters;
+    remapped_parameters.reserve(method_decl->parameters.size());
+    for (const auto& parameter : method_decl->parameters) {
+        std::string clone_error;
+        auto remapped_parameter =
+            clone_decl_tree(parameter.get(), clone_ctx, &clone_error);
+        if (!remapped_parameter) {
+            error_custloc(
+                clone_error.empty()
+                    ? "failed to remap out-of-line template method parameter"
+                    : clone_error,
+                parameter ? parameter->location : declarator_loc);
+        }
+        remapped_parameters.push_back(std::move(remapped_parameter));
+    }
+    method_decl->parameters = std::move(remapped_parameters);
+
+    if (method_decl->body) {
+        std::string clone_error;
+        auto remapped_body =
+            clone_stmt_tree(method_decl->body.get(), clone_ctx, &clone_error);
+        if (!remapped_body) {
+            error_custloc(
+                clone_error.empty()
+                    ? "failed to remap out-of-line template method body"
+                    : clone_error,
+                method_decl->body->location);
+        }
+        method_decl->body = std::move(remapped_body);
+    }
+}
+
+Parser::DeclaratorHandlingResult Parser::handle_typedef_declarator(
+    DeclarationParser& decl_parser,
+    Token declarator_token,
+    std::shared_ptr<CType>& parsed_decl_type,
+    std::vector<ParsedAttribute>& trailing_attrs,
+    bool declaration_is_constexpr,
+    std::vector<std::unique_ptr<Decl>>& ret_vec) {
+    if (declaration_is_constexpr) {
+        error("'constexpr' cannot be combined with 'typedef'");
+    }
+    if (gentle_check(TokenType::ASSIGN)) {
+        error("illegal initializer in typedef (typedefs do not declare objects)");
+    }
+    auto all_attrs_for_typedef = decl_parser.leading_attrs;
+    all_attrs_for_typedef.insert(
+        all_attrs_for_typedef.end(),
+        trailing_attrs.begin(),
+        trailing_attrs.end());
+    for (const auto& attr : all_attrs_for_typedef) {
+        std::string canon = attr.canonical_name();
+        if (canon == "vector_size" && !attr.args.empty() &&
+            attr.args[0].kind == AttributeArg::Kind::INTEGER) {
+            if (parsed_decl_type &&
+                canonical_type_kind(parsed_decl_type) == TypeKind::Vector) {
+                continue;
+            }
+            size_t vec_bytes = static_cast<size_t>(attr.args[0].int_value);
+            auto base = parsed_decl_type;
+            if (!base->isArithmetic() || base->isVoid()) {
+                error("vector_size attribute requires an integer or floating-point base type");
+            }
+            if (vec_bytes == 0 || (vec_bytes & (vec_bytes - 1)) != 0) {
+                error("vector_size must be a power of 2");
+            }
+            int64_t elem_bytes = base->getWidthBytes();
+            if (elem_bytes <= 0 ||
+                vec_bytes % static_cast<size_t>(elem_bytes) != 0) {
+                error("vector_size must be a multiple of the base type size");
+            }
+            parsed_decl_type =
+                std::make_shared<VectorType>(QualType(parsed_decl_type), vec_bytes);
+            continue;
+        }
+        if (canon == "transparent_union") {
+            auto obj = dyn_cast_shared<ObjectType>(parsed_decl_type);
+            if (obj && obj->is_union) {
+                obj->is_transparent_union = true;
+            }
+        }
+    }
+    auto typedef_underlying =
+        QualType(parsed_decl_type, decl_parser.qualifiers);
+    auto td_sym = collect_->collect_declare_typedef_symbol(
+        decl_parser.name, typedef_underlying, declarator_token.loc);
+    if (td_sym) {
+        for (const auto& attr : decl_parser.leading_attrs) {
+            td_sym->sym_attrs.attrs.push_back(attr);
+        }
+        for (const auto& attr : trailing_attrs) {
+            td_sym->sym_attrs.attrs.push_back(attr);
+        }
+    }
+    auto typedef_decl = collect_->collect_typedef_declaration(
+        decl_parser.name,
+        td_sym ? td_sym->type : typedef_underlying,
+        td_sym,
+        declarator_token.loc);
+    if (td_sym && td_sym->type->kind == TypeKind::Typedef) {
+        auto ttype = td_sym->type.as<TypedefType>();
+        auto tdecl = dyn_cast<TypedefDecl>(typedef_decl.get());
+        ttype->typedef_decl = tdecl;
+    }
+    ret_vec.push_back(std::move(typedef_decl));
+    return DeclaratorHandlingResult::Continue;
+}
+
+Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
+    DeclarationParser& decl_parser,
+    Token declarator_token,
+    const std::shared_ptr<CType>& parsed_decl_type,
+    std::vector<ParsedAttribute>& trailing_attrs,
+    StorageClass storage_class,
+    bool declaration_is_constexpr,
+    LanguageLinkage declaration_language_linkage,
+    QualifiedDeclaratorInfo& qualified_declarator,
+    std::vector<std::unique_ptr<Decl>>& ret_vec) {
+    if (qualified_declarator.owner_record_decl) {
+        bool matched_member_template =
+            qualified_declarator.method_template_match != nullptr;
+        bool preserve_member_template_explicit_specialization =
+            is_parsing_cpp_explicit_specialization() &&
+            matched_member_template;
+        bool preserve_ordinary_member_explicit_specialization =
+            is_parsing_cpp_explicit_specialization() &&
+            qualified_declarator.owner_class_template != nullptr &&
+            !qualified_declarator.owner_template_arguments.empty() &&
+            !matched_member_template &&
+            !qualified_declarator.targets_template_pattern;
+        bool preserve_explicit_specialization_member_decl =
+            preserve_member_template_explicit_specialization ||
+            preserve_ordinary_member_explicit_specialization;
+        auto method_sym =
+            preserve_explicit_specialization_member_decl
+                ? nullptr
+                : qualified_declarator.method_match
+                ? qualified_declarator.method_match->symbol
+                : nullptr;
+        if (!preserve_explicit_specialization_member_decl &&
+            !matched_member_template &&
+            (!qualified_declarator.method_match || !method_sym)) {
+            error_custloc(
+                "internal error: missing member function symbol for out-of-line declaration",
+                qualified_declarator.loc);
+        }
+        if (storage_class == StorageClass::STATIC) {
+            error_custloc(
+                "out-of-line member function declaration must not use 'static'",
+                qualified_declarator.loc);
+        }
+        bool is_static_method = matched_member_template
+            ? qualified_declarator.method_template_match->is_static
+            : qualified_declarator.method_match->is_static;
+        if (is_static_method &&
+            (decl_parser.trailing_function_cv_qualifiers != QUAL_NONE ||
+             decl_parser.trailing_function_ref_qualifier != 0)) {
+            error_custloc(
+                "static member function cannot have cv/ref qualifier",
+                qualified_declarator.loc);
+        }
+        validate_cpp_operator_function_declaration(
+            decl_parser.name,
+            true,
+            is_static_method,
+            declarator_token.loc);
+
+        cxx_record_parse_stack_.push_back(CppRecordParseFrame{
+            qualified_declarator.owner_record_decl->is_union
+                ? CppRecordKind::Union
+                : CppRecordKind::Class,
+            qualified_declarator.owner_record_decl->tag});
+        struct RecordParseScopeGuard {
+            std::vector<CppRecordParseFrame>* stack = nullptr;
+            ~RecordParseScopeGuard() {
+                if (stack && !stack->empty()) {
+                    stack->pop_back();
+                }
+            }
+        } record_parse_scope_guard{&cxx_record_parse_stack_};
+
+        merge_function_asm_label(decl_parser, method_sym, declarator_token.loc);
+        auto parsed_method_decl =
+            parse_function(&decl_parser, declarator_token.loc, method_sym);
+        auto* parsed_method_func_raw = dyn_cast<FuncDecl>(parsed_method_decl.get());
+        if (!parsed_method_func_raw) {
+            error_custloc(
+                "internal error: expected function declaration for out-of-line member function",
+                qualified_declarator.loc);
+        }
+        auto parsed_method_func = std::unique_ptr<FuncDecl>(
+            static_cast<FuncDecl*>(parsed_method_decl.release()));
+
+        auto out_of_line_method = std::make_unique<CppMethodDecl>(
+            parsed_method_func->name,
+            parsed_method_func->type,
+            std::move(parsed_method_func->parameters),
+            std::move(parsed_method_func->body),
+            std::move(parsed_method_func->stmt_labels),
+            parsed_method_func->storage_class,
+            parsed_method_func->is_inline != 0,
+            parsed_method_func->location);
+        out_of_line_method->node_id = parsed_method_func->node_id;
+        out_of_line_method->scope = parsed_method_func->scope;
+        out_of_line_method->type = parsed_method_func->type;
+        out_of_line_method->is_constexpr = parsed_method_func->is_constexpr;
+        out_of_line_method->explicit_specialization_arguments =
+            parsed_method_func->explicit_specialization_arguments;
+        out_of_line_method->has_explicit_specialization_argument_list =
+            parsed_method_func->has_explicit_specialization_argument_list;
+        out_of_line_method->set_language_linkage(
+            parsed_method_func->get_language_linkage());
+        if (parsed_method_func->asm_label) {
+            out_of_line_method->set_asm_label(*parsed_method_func->asm_label);
+        }
+
+        auto* matched_method_decl = matched_member_template
+            ? const_cast<CppMethodDecl*>(
+                  dyn_cast<CppMethodDecl>(
+                      qualified_declarator.method_template_match->decl
+                          ? qualified_declarator.method_template_match->decl
+                                ->function_decl()
+                          : nullptr))
+            : const_cast<CppMethodDecl*>(qualified_declarator.method_match->decl);
+        if (matched_member_template && !matched_method_decl) {
+            error_custloc(
+                "internal error: missing member template method declaration for out-of-line definition",
+                qualified_declarator.loc);
+        }
+        out_of_line_method->is_virtual = matched_method_decl
+            ? matched_method_decl->is_virtual
+            : qualified_declarator.method_match->is_virtual;
+        out_of_line_method->is_override = matched_method_decl
+            ? matched_method_decl->is_override
+            : qualified_declarator.method_match->is_override;
+        out_of_line_method->is_final = matched_method_decl
+            ? matched_method_decl->is_final
+            : qualified_declarator.method_match->is_final;
+        out_of_line_method->is_pure = matched_method_decl
+            ? matched_method_decl->is_pure
+            : qualified_declarator.method_match->is_pure;
+
+        if (matched_method_decl) {
+            if (auto* existing_prefix =
+                    get_func_decl_cxx_qualifier_prefix(matched_method_decl)) {
+                set_func_decl_cxx_qualifier_prefix(
+                    out_of_line_method.get(), *existing_prefix);
+            }
+        }
+
+        QualType explicit_specialized_owner_type;
+        if (preserve_explicit_specialization_member_decl &&
+            qualified_declarator.owner_class_template &&
+            !qualified_declarator.owner_template_arguments.empty() &&
+            !qualified_declarator.targets_template_pattern) {
+            auto owner_record_kind =
+                qualified_declarator.owner_record_decl->is_union
+                    ? CppRecordKind::Union
+                    : CppRecordKind::Class;
+            auto* specialized_owner_decl =
+                ensure_cpp_specialized_record_semantic_owner(
+                    owner_record_kind,
+                    qualified_declarator.owner_class_template
+                        ->record_decl()
+                        ->name,
+                    qualified_declarator.owner_template_arguments,
+                    qualified_declarator.loc,
+                    qualified_declarator.owner_class_template);
+            if (!specialized_owner_decl ||
+                !specialized_owner_decl->get_record_type()) {
+                error_custloc(
+                    "internal error: failed to realize specialized owner for explicit specialization",
+                    qualified_declarator.loc);
+            }
+            explicit_specialized_owner_type =
+                QualType(specialized_owner_decl->get_record_type());
+            std::string specialized_owner_prefix =
+                qualified_name_utils::format_cpp_qualified_name(
+                    qualified_declarator.has_global_qualifier,
+                    qualified_declarator.qualifiers,
+                    "");
+            if (specialized_owner_prefix.size() >= 2 &&
+                specialized_owner_prefix.ends_with("::")) {
+                specialized_owner_prefix.erase(
+                    specialized_owner_prefix.size() - 2);
+            }
+            if (!specialized_owner_prefix.empty()) {
+                set_func_decl_cxx_qualifier_prefix(
+                    out_of_line_method.get(),
+                    specialized_owner_prefix);
+            }
+            set_func_decl_owner_record_type(
+                out_of_line_method.get(),
+                explicit_specialized_owner_type);
+        }
+
+        if (!is_static_method) {
+            auto method_fn_type = desugar_type(
+                matched_member_template
+                    ? QualType(matched_method_decl->type)
+                    : qualified_declarator.method_match->type)
+                .as_shared<FunctionType>();
+            if (!method_fn_type || method_fn_type->parameters.empty()) {
+                error_custloc(
+                    "internal error: out-of-line method is missing implicit object parameter",
+                    qualified_declarator.loc);
+            }
+            QualType this_type = method_fn_type->parameters.front();
+            if (explicit_specialized_owner_type) {
+                if (auto this_ptr_type =
+                        desugar_type(this_type).as_shared<PointerType>()) {
+                    QualType specialized_pointee = explicit_specialized_owner_type;
+                    if (this_ptr_type->pointed_type.is_const()) {
+                        specialized_pointee = specialized_pointee.with_const();
+                    }
+                    if (this_ptr_type->pointed_type.is_volatile()) {
+                        specialized_pointee =
+                            specialized_pointee.with_volatile();
+                    }
+                    this_type = QualType(
+                        std::make_shared<PointerType>(specialized_pointee));
+                }
+            }
+            auto this_param = collect_->collect_parameter_declaration(
+                this_type,
+                "this",
+                nullptr,
+                StorageClass::NONE,
+                qualified_declarator.loc);
+            out_of_line_method->parameters.insert(
+                out_of_line_method->parameters.begin(), std::move(this_param));
+            if (auto fn_type =
+                    dyn_cast_shared<FunctionType>(out_of_line_method->type)) {
+                fn_type->parameters.insert(fn_type->parameters.begin(), this_type);
+                fn_type->has_prototype = true;
+            }
+        }
+
+        bool is_definition = out_of_line_method->body != nullptr;
+        if (preserve_explicit_specialization_member_decl) {
+            const Decl* primary_member_decl = nullptr;
+            const FunctionTemplateDecl* primary_member_template = nullptr;
+            std::vector<TemplateArgument> specialization_arguments;
+            std::vector<TemplateArgument> owner_specialization_arguments;
+
+            if (preserve_member_template_explicit_specialization) {
+                primary_member_template =
+                    qualified_declarator.method_template_match
+                        ? qualified_declarator.method_template_match->decl
+                        : nullptr;
+                primary_member_decl =
+                    primary_member_template
+                        ? static_cast<const Decl*>(
+                              primary_member_template->function_decl())
+                        : nullptr;
+                specialization_arguments =
+                    qualified_declarator
+                        .method_template_specialization_arguments;
+                owner_specialization_arguments =
+                    qualified_declarator.owner_template_arguments;
+            } else {
+                primary_member_decl =
+                    qualified_declarator.method_match
+                        ? static_cast<const Decl*>(
+                              qualified_declarator.method_match->decl)
+                        : nullptr;
+                specialization_arguments =
+                    qualified_declarator.owner_template_arguments;
+            }
+
+            if (!primary_member_decl) {
+                error_custloc(
+                    "internal error: missing primary member declaration for explicit specialization",
+                    qualified_declarator.loc);
+            }
+            pending_cpp_explicit_specialization_info_ =
+                PendingCppExplicitSpecializationInfo{
+                    qualified_declarator.owner_class_template,
+                    primary_member_template,
+                    std::move(specialization_arguments),
+                    std::move(owner_specialization_arguments),
+                    primary_member_decl,
+                };
+            ast_ctx->append_attrs(
+                out_of_line_method->node_id,
+                std::move(decl_parser.leading_attrs));
+            ast_ctx->append_attrs(
+                out_of_line_method->node_id,
+                std::move(trailing_attrs));
+            ret_vec.push_back(std::move(out_of_line_method));
+            return is_definition ? DeclaratorHandlingResult::Return
+                                 : DeclaratorHandlingResult::Continue;
+        }
+
+        if (qualified_declarator.owner_class_template &&
+            qualified_declarator.targets_template_pattern &&
+            !matched_member_template) {
+            remap_out_of_line_primary_template_method(
+                out_of_line_method.get(),
+                qualified_declarator.owner_class_template,
+                qualified_declarator.loc);
+        }
+
+        if (is_definition) {
+            if (!matched_method_decl) {
+                error_custloc(
+                    "internal error: missing member declaration for out-of-line definition",
+                    qualified_declarator.loc);
+            }
+            if (matched_method_decl->body != nullptr ||
+                matched_method_decl->has_deferred_inline_body() ||
+                (method_sym && method_sym->is_defined)) {
+                error_custloc(
+                    "redefinition of '" +
+                        qualified_name_utils::format_cpp_qualified_name(
+                            qualified_declarator.has_global_qualifier,
+                            qualified_declarator.qualifiers,
+                            decl_parser.name) +
+                        "'",
+                    qualified_declarator.loc);
+            }
+
+            matched_method_decl->parameters =
+                std::move(out_of_line_method->parameters);
+            matched_method_decl->type = out_of_line_method->type;
+            matched_method_decl->body = std::move(out_of_line_method->body);
+            matched_method_decl->scope = out_of_line_method->scope;
+            matched_method_decl->stmt_labels =
+                std::move(out_of_line_method->stmt_labels);
+            matched_method_decl->is_constexpr =
+                out_of_line_method->is_constexpr;
+            matched_method_decl->set_language_linkage(
+                out_of_line_method->get_language_linkage());
+            if (out_of_line_method->asm_label) {
+                matched_method_decl->set_asm_label(*out_of_line_method->asm_label);
+            } else {
+                matched_method_decl->clear_asm_label();
+            }
+            if (auto* parsed_prefix =
+                    get_func_decl_cxx_qualifier_prefix(out_of_line_method.get())) {
+                set_func_decl_cxx_qualifier_prefix(
+                    matched_method_decl, *parsed_prefix);
+            }
+
+            if (method_sym) {
+                method_sym->is_defined = true;
+                method_sym->type = QualType(matched_method_decl->type);
+                method_sym->function_definition = matched_method_decl;
+            }
+
+            if (const auto* owner_state =
+                    record_semantics_cache_lookup(
+                        qualified_declarator.owner_record_decl)) {
+                RecordSemanticState updated_state = *owner_state;
+                if (!matched_member_template) {
+                    for (auto& method : updated_state.methods) {
+                        if (method.decl != qualified_declarator.method_match->decl) {
+                            continue;
+                        }
+                        method.decl = matched_method_decl;
+                        method.type = QualType(matched_method_decl->type);
+                        if (method_sym) {
+                            method.symbol = method_sym;
+                        }
+                        break;
+                    }
+                }
+                record_semantics_cache_set(
+                    qualified_declarator.owner_record_decl,
+                    std::move(updated_state));
+            }
+
+            ast_ctx->append_attrs(
+                matched_method_decl->node_id,
+                std::move(decl_parser.leading_attrs));
+            ast_ctx->append_attrs(
+                matched_method_decl->node_id,
+                std::move(trailing_attrs));
+            ret_vec.push_back(
+                collect_->collect_nop_declaration(qualified_declarator.loc));
+            return DeclaratorHandlingResult::Return;
+        }
+
+        ast_ctx->append_attrs(
+            out_of_line_method->node_id,
+            std::move(decl_parser.leading_attrs));
+        ast_ctx->append_attrs(
+            out_of_line_method->node_id,
+            std::move(trailing_attrs));
+        ret_vec.push_back(
+            collect_->collect_nop_declaration(qualified_declarator.loc));
+        return DeclaratorHandlingResult::Continue;
+    }
+
+    if (is_cxx_mode_active() &&
+        (decl_parser.trailing_function_cv_qualifiers != QUAL_NONE ||
+         decl_parser.trailing_function_ref_qualifier != 0)) {
+        error("non-member function cannot have cv/ref qualifier");
+    }
+    if (declaration_is_constexpr) {
+        error("'constexpr' can only be applied to object declarations");
+    }
+    validate_cpp_operator_function_declaration(
+        decl_parser.name,
+        false,
+        false,
+        declarator_token.loc);
+    bool preserve_function_explicit_specialization_decl =
+        is_parsing_cpp_explicit_specialization();
+    std::shared_ptr<Symbol> predecl_sym = nullptr;
+    if (!preserve_function_explicit_specialization_decl) {
+        predecl_sym = collect_->collect_declare_function_symbol(
+            decl_parser.name,
+            QualType(parsed_decl_type),
+            storage_class,
+            decl_parser.is_inline,
+            false,
+            declarator_token.loc,
+            declaration_language_linkage);
+        merge_function_asm_label(decl_parser, predecl_sym, declarator_token.loc);
+    }
+    auto funct = parse_function(&decl_parser, declarator_token.loc, predecl_sym);
+    auto* func_decl_check = dyn_cast<FuncDecl>(funct.get());
+    bool is_definition = func_decl_check && func_decl_check->body != nullptr;
+    std::shared_ptr<Symbol> final_sym = nullptr;
+    if (!preserve_function_explicit_specialization_decl) {
+        final_sym = collect_->collect_declare_function_symbol(
+            decl_parser.name,
+            QualType(parsed_decl_type),
+            storage_class,
+            decl_parser.is_inline,
+            is_definition,
+            declarator_token.loc,
+            declaration_language_linkage);
+        if (is_definition && func_decl_check) {
+            if (predecl_sym) {
+                predecl_sym->function_definition = func_decl_check;
+            }
+            if (final_sym) {
+                final_sym->function_definition = func_decl_check;
+            }
+        }
+        if (func_decl_check && final_sym && final_sym != predecl_sym) {
+            register_function_default_arguments(
+                final_sym, func_decl_check, declarator_token.loc);
+        }
+        merge_function_asm_label(decl_parser, final_sym, declarator_token.loc);
+    }
+    ast_ctx->append_attrs(funct->node_id, std::move(decl_parser.leading_attrs));
+    ast_ctx->append_attrs(funct->node_id, std::move(trailing_attrs));
+    ret_vec.push_back(std::move(funct));
+    return is_definition ? DeclaratorHandlingResult::Return
+                         : DeclaratorHandlingResult::Continue;
+}
+
+Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
+    DeclarationParser& decl_parser,
+    Token declarator_token,
+    const std::shared_ptr<CType>& parsed_decl_type,
+    std::vector<ParsedAttribute>& trailing_attrs,
+    StorageClass storage_class,
+    bool declaration_is_constexpr,
+    LanguageLinkage declaration_language_linkage,
+    QualifiedDeclaratorInfo& qualified_declarator,
+    std::optional<QualType>& first_cxx_auto_deduced_type,
+    std::vector<std::unique_ptr<Decl>>& ret_vec) {
+    auto has_cxx_auto_type = [&](const std::shared_ptr<CType>& type) -> bool {
+        return auto_type_utils::has_cxx_auto_type(type);
+    };
+    auto has_gnu_auto_type = [&](const std::shared_ptr<CType>& type) -> bool {
+        return auto_type_utils::has_gnu_auto_type(type);
+    };
+
+    bool declarator_has_gnu_auto_type = has_gnu_auto_type(parsed_decl_type);
+    bool declarator_has_cxx_auto_type = has_cxx_auto_type(parsed_decl_type);
+    if (declarator_has_gnu_auto_type && declarator_has_cxx_auto_type) {
+        error("cannot mix '__auto_type' and 'auto' in the same declaration");
+    }
+    if (declarator_has_gnu_auto_type && !gentle_check(TokenType::ASSIGN)) {
+        error("'__auto_type' requires an initializer");
+    }
+    QualType declared_type(parsed_decl_type, decl_parser.qualifiers);
+    if (declaration_is_constexpr && storage_class == StorageClass::EXTERN) {
+        error("'constexpr' cannot be combined with 'extern'");
+    }
+    if (declaration_is_constexpr && storage_class == StorageClass::AUTO) {
+        error("'constexpr' cannot be combined with 'auto'");
+    }
+    if (declaration_is_constexpr && decl_parser.is_thread_local) {
+        error("'constexpr' cannot be combined with '_Thread_local'");
+    }
+    std::shared_ptr<Symbol> declared_sym = nullptr;
+    bool preserve_explicit_specialization_static_decl =
+        is_parsing_cpp_explicit_specialization() &&
+        qualified_declarator.owner_class_template != nullptr &&
+        !qualified_declarator.owner_template_arguments.empty() &&
+        !qualified_declarator.targets_template_pattern;
+    if (qualified_declarator.owner_record_decl) {
+        if (storage_class == StorageClass::STATIC) {
+            error_custloc(
+                "out-of-line static data member definition must not use 'static'",
+                qualified_declarator.loc);
+        }
+        if (!preserve_explicit_specialization_static_decl &&
+            (!qualified_declarator.static_data_match ||
+             !qualified_declarator.static_data_match->symbol)) {
+            error_custloc(
+                "internal error: missing static data member symbol for out-of-line definition",
+                qualified_declarator.loc);
+        }
+        if (!preserve_explicit_specialization_static_decl) {
+            declared_sym = qualified_declarator.static_data_match->symbol;
+            declared_sym->type = desugar_type(declared_type);
+            declared_sym->storage_class = StorageClass::STATIC;
+            declared_sym->is_constexpr = declaration_is_constexpr;
+            if (declared_sym->get_language_linkage() == LanguageLinkage::None) {
+                declared_sym->set_language_linkage(
+                    declaration_language_linkage);
+            }
+        }
+    } else {
+        declared_sym = collect_->collect_declare_variable_symbol(
+            decl_parser.name,
+            declared_type,
+            storage_class,
+            declaration_is_constexpr,
+            declarator_token.loc,
+            declaration_language_linkage);
+    }
+    if (declared_sym) {
+        declared_sym->is_constexpr = declaration_is_constexpr;
+    }
+    if (declared_sym) {
+        for (const auto& attr : decl_parser.leading_attrs) {
+            declared_sym->sym_attrs.attrs.push_back(attr);
+        }
+        for (const auto& attr : trailing_attrs) {
+            declared_sym->sym_attrs.attrs.push_back(attr);
+        }
+    }
+    bool is_file_scope = collect_->collect_is_file_scope();
+    std::unique_ptr<Expr> init_expr;
+    bool is_copy_initialization = false;
+    bool is_cxx_object_decl =
+        is_cxx_mode_active() &&
+        canonical_type_kind(declared_type) == TypeKind::Object;
+    if (gentle_check_and_consume(TokenType::ASSIGN)) {
+        is_copy_initialization = true;
+        if (gentle_check(TokenType::LEFT_BRACE)) {
+            init_expr = parse_init_list();
+        } else {
+            init_expr = parse_assignment_expression();
+        }
+    } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_PAREN)) {
+        init_expr = parse_paren_init_list();
+    } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_BRACE)) {
+        init_expr = parse_init_list();
+    }
+
+    auto var_decl_base = collect_->collect_variable_declaration(
+        declared_type,
+        decl_parser.name,
+        std::move(init_expr),
+        declared_sym,
+        storage_class,
+        {declaration_is_constexpr,
+         decl_parser.is_inline,
+         is_file_scope,
+         decl_parser.is_thread_local,
+         decl_parser.is_block_byref,
+         is_copy_initialization,
+         false},
+        declarator_token.loc,
+        declaration_language_linkage);
+    auto* var_decl = cast<VariableDecl>(var_decl_base.get());
+    var_decl->is_thread_local = decl_parser.is_thread_local;
+    var_decl->is_block_byref = decl_parser.is_block_byref;
+    var_decl->is_constexpr = declaration_is_constexpr;
+    var_decl->set_asm_label(decl_parser.asm_label);
+    if (decl_parser.asm_label.has_value() &&
+        !is_file_scope &&
+        storage_class != StorageClass::STATIC &&
+        storage_class != StorageClass::REGISTER) {
+        error("asm label on automatic local variable is not allowed");
+    }
+    ast_ctx->append_attrs(var_decl->node_id, std::move(decl_parser.leading_attrs));
+    ast_ctx->append_attrs(var_decl->node_id, std::move(trailing_attrs));
+
+    if (preserve_explicit_specialization_static_decl) {
+        const Decl* primary_member_decl =
+            qualified_declarator.static_data_match
+                ? static_cast<const Decl*>(
+                      qualified_declarator.static_data_match->decl)
+                : nullptr;
+        if (!primary_member_decl) {
+            error_custloc(
+                "internal error: missing primary static data member declaration for explicit specialization",
+                qualified_declarator.loc);
+        }
+        pending_cpp_explicit_specialization_info_ =
+            PendingCppExplicitSpecializationInfo{
+                qualified_declarator.owner_class_template,
+                nullptr,
+                qualified_declarator.owner_template_arguments,
+                {},
+                primary_member_decl,
+            };
+        ret_vec.push_back(std::move(var_decl_base));
+        return DeclaratorHandlingResult::Continue;
+    }
+
+    if (qualified_declarator.owner_record_decl &&
+        declared_sym &&
+        !qualified_declarator.targets_template_pattern) {
+        bool is_definition =
+            storage_class != StorageClass::EXTERN || var_decl->init != nullptr;
+        if (is_definition) {
+            if (declared_sym->is_defined) {
+                error_custloc(
+                    "redefinition of '" +
+                        qualified_name_utils::format_cpp_qualified_name(
+                            qualified_declarator.has_global_qualifier,
+                            qualified_declarator.qualifiers,
+                            decl_parser.name) +
+                        "'",
+                    qualified_declarator.loc);
+            }
+            declared_sym->is_defined = true;
+        }
+    }
+
+    if (qualified_declarator.owner_record_decl &&
+        qualified_declarator.targets_template_pattern) {
+        auto* matched_static_decl =
+            qualified_declarator.static_data_match
+                ? const_cast<VariableDecl*>(
+                      qualified_declarator.static_data_match->decl)
+                : nullptr;
+        if (!matched_static_decl) {
+            error_custloc(
+                "internal error: missing primary template static data member declaration",
+                qualified_declarator.loc);
+        }
+
+        bool is_definition =
+            storage_class != StorageClass::EXTERN || var_decl->init != nullptr;
+        if (is_definition &&
+            (matched_static_decl->init != nullptr ||
+             (declared_sym && declared_sym->is_defined))) {
+            error_custloc(
+                "redefinition of '" +
+                    qualified_name_utils::format_cpp_qualified_name(
+                        qualified_declarator.has_global_qualifier,
+                        qualified_declarator.qualifiers,
+                        decl_parser.name) +
+                    "'",
+                qualified_declarator.loc);
+        }
+
+        matched_static_decl->type = var_decl->type;
+        matched_static_decl->sym = declared_sym;
+        matched_static_decl->storage_class = StorageClass::STATIC;
+        matched_static_decl->is_inline = var_decl->is_inline;
+        matched_static_decl->is_constexpr = var_decl->is_constexpr;
+        matched_static_decl->is_thread_local = var_decl->is_thread_local;
+        matched_static_decl->set_language_linkage(
+            var_decl->get_language_linkage());
+        if (var_decl->asm_label) {
+            matched_static_decl->set_asm_label(*var_decl->asm_label);
+        } else {
+            matched_static_decl->clear_asm_label();
+        }
+        if (is_definition) {
+            matched_static_decl->init = std::move(var_decl->init);
+        }
+
+        if (declared_sym) {
+            declared_sym->type = desugar_type(matched_static_decl->type);
+            declared_sym->storage_class = StorageClass::STATIC;
+            declared_sym->is_constexpr = matched_static_decl->is_constexpr;
+            if (declared_sym->get_language_linkage() ==
+                LanguageLinkage::None) {
+                declared_sym->set_language_linkage(
+                    matched_static_decl->get_language_linkage());
+            }
+            if (is_definition) {
+                declared_sym->is_defined = true;
+            }
+        }
+
+        if (const auto* owner_state =
+                record_semantics_cache_lookup(
+                    qualified_declarator.owner_record_decl)) {
+            RecordSemanticState updated_state = *owner_state;
+            for (auto& static_member : updated_state.static_data_members) {
+                if (static_member.decl !=
+                    qualified_declarator.static_data_match->decl) {
+                    continue;
+                }
+                static_member.decl = matched_static_decl;
+                static_member.type = matched_static_decl->type;
+                static_member.symbol = declared_sym;
+                break;
+            }
+            record_semantics_cache_set(
+                qualified_declarator.owner_record_decl,
+                std::move(updated_state));
+        }
+
+        const auto& parsed_attrs = ast_ctx->get_attrs(var_decl->node_id).attrs;
+        if (!parsed_attrs.empty()) {
+            auto& dst_attrs =
+                ast_ctx->get_attrs_mut(matched_static_decl->node_id).attrs;
+            dst_attrs.insert(
+                dst_attrs.end(), parsed_attrs.begin(), parsed_attrs.end());
+        }
+
+        ret_vec.push_back(
+            collect_->collect_nop_declaration(qualified_declarator.loc));
+        return DeclaratorHandlingResult::Continue;
+    }
+
+    ret_vec.push_back(std::move(var_decl_base));
+
+    if (declarator_has_cxx_auto_type) {
+        auto deduced = auto_type_utils::extract_auto_placeholder_replacement(
+            declared_type, var_decl->type);
+        if (deduced.has_value() &&
+            deduced->get_shared() &&
+            auto_type_utils::auto_type_flavors_in(deduced->get_shared()) == 0) {
+            QualType deduced_canonical = desugar_type(*deduced);
+            if (!first_cxx_auto_deduced_type.has_value()) {
+                first_cxx_auto_deduced_type = deduced_canonical;
+            } else {
+                QualType first_canonical =
+                    desugar_type(first_cxx_auto_deduced_type.value());
+                if (!deduced_canonical.equals_qualified(first_canonical)) {
+                    error(
+                        "inconsistent deduction for 'auto': '" +
+                        first_canonical.to_string() + "' and then '" +
+                        deduced_canonical.to_string() + "'");
+                }
+            }
+        }
+    }
+
+    if (declarator_has_gnu_auto_type && gentle_check(TokenType::COMMA)) {
+        error("'__auto_type' cannot be used in a multi-declarator statement");
+    }
+    if (!gentle_check(TokenType::SEMICOLON) &&
+        !gentle_check(TokenType::COMMA)) {
+        error("expected ',' or ';' after declarator");
+    }
+    return DeclaratorHandlingResult::Continue;
+}
+
 std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
     Token t = current_token();
     if (auto special_declaration = try_parse_special_declaration()) {
@@ -4440,127 +5403,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
     auto storage_class = decl_parser.str_class;
     const bool declaration_is_constexpr = decl_parser.is_constexpr;
     const LanguageLinkage declaration_language_linkage = current_decl_language_linkage();
-    auto remap_out_of_line_primary_template_method =
-        [&](CppMethodDecl* method_decl,
-            const ClassTemplateDecl* owner_class_template,
-            SrcLoc declarator_loc) -> bool {
-            if (!method_decl ||
-                !owner_class_template ||
-                active_template_parameter_stack_.empty()) {
-                return true;
-            }
-
-            const auto& active_parameters = active_template_parameter_stack_.back();
-            if (active_parameters.size() != owner_class_template->parameters.size()) {
-                error_custloc(
-                    "internal error: out-of-line template head does not match owner template parameter list",
-                    declarator_loc);
-            }
-
-            ASTCloneContext clone_ctx;
-            clone_ctx.ast_ctx = ast_ctx.get();
-            std::unordered_map<const TemplateParameterDecl*,
-                               const TemplateParameterDecl*> parameter_rebinds;
-            parameter_rebinds.reserve(active_parameters.size());
-
-            for (size_t idx = 0; idx < active_parameters.size(); ++idx) {
-                const auto* active_parameter = active_parameters[idx];
-                const auto* canonical_parameter =
-                    owner_class_template->parameters[idx].get();
-                if (!active_parameter || !canonical_parameter ||
-                    active_parameter->get_kind() != canonical_parameter->get_kind()) {
-                    error_custloc(
-                        "internal error: out-of-line template head is not structurally compatible with the owner template",
-                        declarator_loc);
-                }
-                parameter_rebinds.emplace(active_parameter, canonical_parameter);
-
-                if (auto* canonical_type =
-                        dyn_cast<TemplateTypeParmDecl>(const_cast<TemplateParameterDecl*>(
-                            canonical_parameter))) {
-                    continue;
-                }
-
-                if (auto* canonical_non_type =
-                        dyn_cast<TemplateNonTypeParmDecl>(
-                            const_cast<TemplateParameterDecl*>(canonical_parameter))) {
-                    auto* active_non_type =
-                        dyn_cast<TemplateNonTypeParmDecl>(
-                            const_cast<TemplateParameterDecl*>(active_parameter));
-                    if (active_non_type && active_non_type->sym &&
-                        canonical_non_type->sym) {
-                        clone_ctx.symbol_remap.emplace(
-                            active_non_type->sym.get(),
-                            canonical_non_type->sym);
-                    }
-                    continue;
-                }
-
-                error_custloc(
-                    "internal error: unsupported out-of-line owner template parameter kind",
-                    declarator_loc);
-            }
-
-            clone_ctx.rewrite_type =
-                [&](QualType type) -> QualType {
-                return template_sema_internal::remap_template_parameter_types_in_type(
-                    type,
-                    parameter_rebinds);
-            };
-            clone_ctx.rewrite_symbol =
-                [&](const std::shared_ptr<Symbol>& sym) -> std::shared_ptr<Symbol> {
-                if (!sym) {
-                    return nullptr;
-                }
-                if (auto it = clone_ctx.symbol_remap.find(sym.get());
-                    it != clone_ctx.symbol_remap.end()) {
-                    return it->second;
-                }
-                return sym;
-            };
-
-            method_decl->type =
-                clone_ctx.rewrite_type(QualType(method_decl->type)).get_shared();
-
-            std::vector<std::unique_ptr<Decl>> remapped_parameters;
-            remapped_parameters.reserve(method_decl->parameters.size());
-            for (const auto& parameter : method_decl->parameters) {
-                std::string clone_error;
-                auto remapped_parameter =
-                    clone_decl_tree(parameter.get(), clone_ctx, &clone_error);
-                if (!remapped_parameter) {
-                    error_custloc(
-                        clone_error.empty()
-                            ? "failed to remap out-of-line template method parameter"
-                            : clone_error,
-                        parameter ? parameter->location : declarator_loc);
-                }
-                remapped_parameters.push_back(std::move(remapped_parameter));
-            }
-            method_decl->parameters = std::move(remapped_parameters);
-
-            if (method_decl->body) {
-                std::string clone_error;
-                auto remapped_body =
-                    clone_stmt_tree(method_decl->body.get(), clone_ctx, &clone_error);
-                if (!remapped_body) {
-                    error_custloc(
-                        clone_error.empty()
-                            ? "failed to remap out-of-line template method body"
-                            : clone_error,
-                        method_decl->body->location);
-                }
-                method_decl->body = std::move(remapped_body);
-            }
-
-            return true;
-        };
-    auto has_cxx_auto_type = [&](const std::shared_ptr<CType>& type) -> bool {
-        return auto_type_utils::has_cxx_auto_type(type);
-    };
-    auto has_gnu_auto_type = [&](const std::shared_ptr<CType>& type) -> bool {
-        return auto_type_utils::has_gnu_auto_type(type);
-    };
     std::optional<QualType> first_cxx_auto_deduced_type;
     // Error production: missing ';' after struct/union/enum definition
     // Detect: struct S { ... } <type-keyword> — likely forgot ';'
@@ -4711,814 +5553,43 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
                 error("redefinition of '" + decl_parser.name + "' as variable");
             }
         }
-        // Handle typedef: register the name as a type alias and emit TypedefDecl
         if (storage_class == StorageClass::TYPEDEF) {
-            if (declaration_is_constexpr) {
-                error("'constexpr' cannot be combined with 'typedef'");
-            }
-            if (gentle_check(TokenType::ASSIGN)) {
-                error("illegal initializer in typedef (typedefs do not declare objects)");
-            }
-            // Apply vector_size type attribute to transform the typedef's underlying type
-            auto all_attrs_for_typedef = decl_parser.leading_attrs;
-            all_attrs_for_typedef.insert(all_attrs_for_typedef.end(), trailing_attrs.begin(), trailing_attrs.end());
-            for (const auto& attr : all_attrs_for_typedef) {
-                std::string canon = attr.canonical_name();
-                if (canon == "vector_size" && !attr.args.empty() &&
-                    attr.args[0].kind == AttributeArg::Kind::INTEGER) {
-                    if (newer_type && canonical_type_kind(newer_type) == TypeKind::Vector) {
-                        continue;
-                    }
-                    size_t vec_bytes = static_cast<size_t>(attr.args[0].int_value);
-                    auto base = newer_type;
-                    if (!base->isArithmetic() || base->isVoid()) {
-                        error("vector_size attribute requires an integer or floating-point base type");
-                    }
-                    if (vec_bytes == 0 || (vec_bytes & (vec_bytes - 1)) != 0) {
-                        error("vector_size must be a power of 2");
-                    }
-                    int64_t elem_bytes = base->getWidthBytes();
-                    if (elem_bytes <= 0 || vec_bytes % static_cast<size_t>(elem_bytes) != 0) {
-                        error("vector_size must be a multiple of the base type size");
-                    }
-                    newer_type = std::make_shared<VectorType>(QualType(newer_type), vec_bytes);
-                    continue;
-                }
-                if (canon == "transparent_union") {
-                    auto obj = dyn_cast_shared<ObjectType>(newer_type);
-                    if (obj && obj->is_union) {
-                        obj->is_transparent_union = true;
-                    }
-                }
-            }
-            auto typedef_underlying = QualType(newer_type, decl_parser.qualifiers);
-            auto td_sym = collect_->collect_declare_typedef_symbol(
-                decl_parser.name, typedef_underlying, t.loc);
-            // Preserve attributes on the typedef symbol so they propagate when the typedef is used
-            // todo: should we also place attrs in the AST?
-            if (td_sym) {
-                for (const auto& attr : decl_parser.leading_attrs) {
-                    td_sym->sym_attrs.attrs.push_back(attr);
-                }
-                for (const auto& attr : trailing_attrs) {
-                    td_sym->sym_attrs.attrs.push_back(attr);
-                }
-            }
-            auto typedef_decl = collect_->collect_typedef_declaration(
-                decl_parser.name,
-                td_sym ? td_sym->type : typedef_underlying,
-                td_sym,
-                t.loc);
-            if (td_sym && td_sym->type->kind == TypeKind::Typedef) {
-                auto ttype = td_sym->type.as<TypedefType>();
-                auto tdecl = dyn_cast<TypedefDecl>(typedef_decl.get());
-                ttype->typedef_decl = tdecl;
-            }
-            ret_vec.push_back(std::move(typedef_decl));
-            if (gentle_check(TokenType::COMMA)) {
-                continue; // more declarators to come
-            }
-            // otherwise the loop will check for semicolon at the top
+            handle_typedef_declarator(
+                decl_parser,
+                t,
+                newer_type,
+                trailing_attrs,
+                declaration_is_constexpr,
+                ret_vec);
             continue;
         }
         if (canonical_type_kind(newer_type) == TypeKind::Function) {
-            auto merge_function_asm_label = [&](const std::shared_ptr<Symbol>& sym) {
-                if (!sym) {
-                    return;
-                }
-                if (decl_parser.asm_label.has_value()) {
-                    if (sym->asm_label.has_value() &&
-                        sym->asm_label.value() != decl_parser.asm_label.value()) {
-                        diag_engine->report_error(
-                            "conflicting asm label for function '" + decl_parser.name + "'",
-                            t.loc);
-                        // Keep the previously established asm label as canonical.
-                        decl_parser.asm_label = sym->asm_label;
-                        return;
-                    }
-                    sym->asm_label = decl_parser.asm_label;
-                    return;
-                }
-                if (sym->asm_label.has_value()) {
-                    // Preserve asm label from a prior declaration on later redeclarations/definition.
-                    decl_parser.asm_label = sym->asm_label;
-                }
-            };
-
-            if (qualified_declarator_owner_record_decl) {
-                bool matched_member_template =
-                    qualified_declarator_method_template_match != nullptr;
-                bool preserve_member_template_explicit_specialization =
-                    is_parsing_cpp_explicit_specialization() &&
-                    matched_member_template;
-                bool preserve_ordinary_member_explicit_specialization =
-                    is_parsing_cpp_explicit_specialization() &&
-                    qualified_declarator_owner_class_template != nullptr &&
-                    !qualified_declarator_owner_template_arguments.empty() &&
-                    !matched_member_template &&
-                    !qualified_declarator_targets_template_pattern;
-                bool preserve_explicit_specialization_member_decl =
-                    preserve_member_template_explicit_specialization ||
-                    preserve_ordinary_member_explicit_specialization;
-                auto method_sym =
-                    preserve_explicit_specialization_member_decl
-                        ? nullptr
-                        : qualified_declarator_method_match
-                        ? qualified_declarator_method_match->symbol
-                        : nullptr;
-                if (!preserve_explicit_specialization_member_decl &&
-                    !matched_member_template &&
-                    (!qualified_declarator_method_match || !method_sym)) {
-                    error_custloc(
-                        "internal error: missing member function symbol for out-of-line declaration",
-                        qualified_declarator_loc);
-                }
-                if (storage_class == StorageClass::STATIC) {
-                    error_custloc(
-                        "out-of-line member function declaration must not use 'static'",
-                        qualified_declarator_loc);
-                }
-                bool is_static_method = matched_member_template
-                    ? qualified_declarator_method_template_match->is_static
-                    : qualified_declarator_method_match->is_static;
-                if (is_static_method &&
-                    (decl_parser.trailing_function_cv_qualifiers != QUAL_NONE ||
-                     decl_parser.trailing_function_ref_qualifier != 0)) {
-                    error_custloc(
-                        "static member function cannot have cv/ref qualifier",
-                        qualified_declarator_loc);
-                }
-                validate_cpp_operator_function_declaration(
-                    decl_parser.name,
-                    true,
-                    is_static_method,
-                    t.loc);
-
-                cxx_record_parse_stack_.push_back(
-                    CppRecordParseFrame{
-                        qualified_declarator_owner_record_decl->is_union
-                            ? CppRecordKind::Union
-                            : CppRecordKind::Class,
-                        qualified_declarator_owner_record_decl->tag});
-                struct RecordParseScopeGuard {
-                    std::vector<CppRecordParseFrame>* stack = nullptr;
-                    ~RecordParseScopeGuard() {
-                        if (stack && !stack->empty()) {
-                            stack->pop_back();
-                        }
-                    }
-                } record_parse_scope_guard{&cxx_record_parse_stack_};
-
-                merge_function_asm_label(method_sym);
-                auto parsed_method_decl = parse_function(&decl_parser, t.loc, method_sym);
-                auto* parsed_method_func_raw = dyn_cast<FuncDecl>(parsed_method_decl.get());
-                if (!parsed_method_func_raw) {
-                    error_custloc(
-                        "internal error: expected function declaration for out-of-line member function",
-                        qualified_declarator_loc);
-                }
-                auto parsed_method_func = std::unique_ptr<FuncDecl>(
-                    static_cast<FuncDecl*>(parsed_method_decl.release()));
-
-                auto out_of_line_method = std::make_unique<CppMethodDecl>(
-                    parsed_method_func->name,
-                    parsed_method_func->type,
-                    std::move(parsed_method_func->parameters),
-                    std::move(parsed_method_func->body),
-                    std::move(parsed_method_func->stmt_labels),
-                    parsed_method_func->storage_class,
-                    parsed_method_func->is_inline != 0,
-                    parsed_method_func->location);
-                out_of_line_method->node_id = parsed_method_func->node_id;
-                out_of_line_method->scope = parsed_method_func->scope;
-                out_of_line_method->type = parsed_method_func->type;
-                out_of_line_method->is_constexpr = parsed_method_func->is_constexpr;
-                out_of_line_method->explicit_specialization_arguments =
-                    parsed_method_func->explicit_specialization_arguments;
-                out_of_line_method->has_explicit_specialization_argument_list =
-                    parsed_method_func->has_explicit_specialization_argument_list;
-                out_of_line_method->set_language_linkage(
-                    parsed_method_func->get_language_linkage());
-                if (parsed_method_func->asm_label) {
-                    out_of_line_method->set_asm_label(*parsed_method_func->asm_label);
-                }
-
-                auto* matched_method_decl = matched_member_template
-                    ? const_cast<CppMethodDecl*>(
-                          dyn_cast<CppMethodDecl>(
-                              qualified_declarator_method_template_match->decl
-                                  ? qualified_declarator_method_template_match->decl
-                                        ->function_decl()
-                                  : nullptr))
-                    : const_cast<CppMethodDecl*>(
-                          qualified_declarator_method_match->decl);
-                if (matched_member_template && !matched_method_decl) {
-                    error_custloc(
-                        "internal error: missing member template method declaration for out-of-line definition",
-                        qualified_declarator_loc);
-                }
-                out_of_line_method->is_virtual = matched_method_decl
-                    ? matched_method_decl->is_virtual
-                    : qualified_declarator_method_match->is_virtual;
-                out_of_line_method->is_override = matched_method_decl
-                    ? matched_method_decl->is_override
-                    : qualified_declarator_method_match->is_override;
-                out_of_line_method->is_final = matched_method_decl
-                    ? matched_method_decl->is_final
-                    : qualified_declarator_method_match->is_final;
-                out_of_line_method->is_pure = matched_method_decl
-                    ? matched_method_decl->is_pure
-                    : qualified_declarator_method_match->is_pure;
-
-                if (matched_method_decl) {
-                    if (auto* existing_prefix =
-                            get_func_decl_cxx_qualifier_prefix(matched_method_decl)) {
-                        set_func_decl_cxx_qualifier_prefix(
-                            out_of_line_method.get(), *existing_prefix);
-                    }
-                }
-
-                QualType explicit_specialized_owner_type;
-                if (preserve_explicit_specialization_member_decl &&
-                    qualified_declarator_owner_class_template &&
-                    !qualified_declarator_owner_template_arguments.empty() &&
-                    !qualified_declarator_targets_template_pattern) {
-                    auto owner_record_kind =
-                        qualified_declarator_owner_record_decl->is_union
-                            ? CppRecordKind::Union
-                            : CppRecordKind::Class;
-                    auto* specialized_owner_decl =
-                        ensure_cpp_specialized_record_semantic_owner(
-                            owner_record_kind,
-                            qualified_declarator_owner_class_template
-                                ->record_decl()
-                                ->name,
-                            qualified_declarator_owner_template_arguments,
-                            qualified_declarator_loc,
-                            qualified_declarator_owner_class_template);
-                    if (!specialized_owner_decl ||
-                        !specialized_owner_decl->get_record_type()) {
-                        error_custloc(
-                            "internal error: failed to realize specialized owner for explicit specialization",
-                            qualified_declarator_loc);
-                    }
-                    explicit_specialized_owner_type =
-                        QualType(specialized_owner_decl->get_record_type());
-                    std::string specialized_owner_prefix =
-                        qualified_name_utils::format_cpp_qualified_name(
-                            qualified_declarator_has_global_qualifier,
-                            qualified_declarator_qualifiers,
-                            "");
-                    if (specialized_owner_prefix.size() >= 2 &&
-                        specialized_owner_prefix.ends_with("::")) {
-                        specialized_owner_prefix.erase(
-                            specialized_owner_prefix.size() - 2);
-                    }
-                    if (!specialized_owner_prefix.empty()) {
-                        set_func_decl_cxx_qualifier_prefix(
-                            out_of_line_method.get(),
-                            specialized_owner_prefix);
-                    }
-                    set_func_decl_owner_record_type(
-                        out_of_line_method.get(),
-                        explicit_specialized_owner_type);
-                }
-
-                if (!is_static_method) {
-                    auto method_fn_type = desugar_type(
-                        matched_member_template
-                            ? QualType(matched_method_decl->type)
-                            : qualified_declarator_method_match->type)
-                        .as_shared<FunctionType>();
-                    if (!method_fn_type || method_fn_type->parameters.empty()) {
-                        error_custloc(
-                            "internal error: out-of-line method is missing implicit object parameter",
-                            qualified_declarator_loc);
-                    }
-                    QualType this_type = method_fn_type->parameters.front();
-                    if (explicit_specialized_owner_type) {
-                        if (auto this_ptr_type =
-                                desugar_type(this_type).as_shared<PointerType>()) {
-                            QualType specialized_pointee =
-                                explicit_specialized_owner_type;
-                            if (this_ptr_type->pointed_type.is_const()) {
-                                specialized_pointee =
-                                    specialized_pointee.with_const();
-                            }
-                            if (this_ptr_type->pointed_type.is_volatile()) {
-                                specialized_pointee = specialized_pointee.with_volatile();
-                            }
-                            this_type = QualType(
-                                std::make_shared<PointerType>(specialized_pointee));
-                        }
-                    }
-                    auto this_param = collect_->collect_parameter_declaration(
-                        this_type,
-                        "this",
-                        nullptr,
-                        StorageClass::NONE,
-                        qualified_declarator_loc);
-                    out_of_line_method->parameters.insert(
-                        out_of_line_method->parameters.begin(), std::move(this_param));
-                    if (auto fn_type = dyn_cast_shared<FunctionType>(out_of_line_method->type)) {
-                        fn_type->parameters.insert(fn_type->parameters.begin(), this_type);
-                        fn_type->has_prototype = true;
-                    }
-                }
-
-                bool is_definition = out_of_line_method->body != nullptr;
-                if (preserve_explicit_specialization_member_decl) {
-                    const Decl* primary_member_decl = nullptr;
-                    const FunctionTemplateDecl* primary_member_template = nullptr;
-                    std::vector<TemplateArgument> specialization_arguments;
-                    std::vector<TemplateArgument> owner_specialization_arguments;
-
-                    if (preserve_member_template_explicit_specialization) {
-                        primary_member_template =
-                            qualified_declarator_method_template_match
-                                ? qualified_declarator_method_template_match->decl
-                                : nullptr;
-                        primary_member_decl =
-                            primary_member_template
-                                ? static_cast<const Decl*>(
-                                      primary_member_template->function_decl())
-                                : nullptr;
-                        specialization_arguments =
-                            qualified_declarator_method_template_specialization_arguments;
-                        owner_specialization_arguments =
-                            qualified_declarator_owner_template_arguments;
-                    } else {
-                        primary_member_decl =
-                            qualified_declarator_method_match
-                                ? static_cast<const Decl*>(
-                                      qualified_declarator_method_match->decl)
-                                : nullptr;
-                        specialization_arguments =
-                            qualified_declarator_owner_template_arguments;
-                    }
-
-                    if (!primary_member_decl) {
-                        error_custloc(
-                            "internal error: missing primary member declaration for explicit specialization",
-                            qualified_declarator_loc);
-                    }
-                    pending_cpp_explicit_specialization_info_ =
-                        PendingCppExplicitSpecializationInfo{
-                            qualified_declarator_owner_class_template,
-                            primary_member_template,
-                            std::move(specialization_arguments),
-                            std::move(owner_specialization_arguments),
-                            primary_member_decl,
-                        };
-                    ast_ctx->append_attrs(
-                        out_of_line_method->node_id,
-                        std::move(decl_parser.leading_attrs));
-                    ast_ctx->append_attrs(
-                        out_of_line_method->node_id,
-                        std::move(trailing_attrs));
-                    ret_vec.push_back(std::move(out_of_line_method));
-                    if (is_definition) {
-                        return ret_vec;
-                    }
-                    continue;
-                }
-
-                if (qualified_declarator_owner_class_template &&
-                    qualified_declarator_targets_template_pattern &&
-                    !matched_member_template) {
-                    remap_out_of_line_primary_template_method(
-                        out_of_line_method.get(),
-                        qualified_declarator_owner_class_template,
-                        qualified_declarator_loc);
-                }
-
-                if (is_definition) {
-                    if (!matched_method_decl) {
-                        error_custloc(
-                            "internal error: missing member declaration for out-of-line definition",
-                            qualified_declarator_loc);
-                    }
-                    if (matched_method_decl->body != nullptr ||
-                        matched_method_decl->has_deferred_inline_body() ||
-                        (method_sym && method_sym->is_defined)) {
-                        error_custloc(
-                            "redefinition of '" +
-                                qualified_name_utils::format_cpp_qualified_name(
-                                    qualified_declarator_has_global_qualifier,
-                                    qualified_declarator_qualifiers,
-                                    decl_parser.name) +
-                                "'",
-                            qualified_declarator_loc);
-                    }
-
-                    matched_method_decl->parameters =
-                        std::move(out_of_line_method->parameters);
-                    matched_method_decl->type = out_of_line_method->type;
-                    matched_method_decl->body = std::move(out_of_line_method->body);
-                    matched_method_decl->scope = out_of_line_method->scope;
-                    matched_method_decl->stmt_labels =
-                        std::move(out_of_line_method->stmt_labels);
-                    matched_method_decl->is_constexpr =
-                        out_of_line_method->is_constexpr;
-                    matched_method_decl->set_language_linkage(
-                        out_of_line_method->get_language_linkage());
-                    if (out_of_line_method->asm_label) {
-                        matched_method_decl->set_asm_label(
-                            *out_of_line_method->asm_label);
-                    } else {
-                        matched_method_decl->clear_asm_label();
-                    }
-                    if (auto* parsed_prefix =
-                            get_func_decl_cxx_qualifier_prefix(out_of_line_method.get())) {
-                        set_func_decl_cxx_qualifier_prefix(
-                            matched_method_decl, *parsed_prefix);
-                    }
-
-                    if (method_sym) {
-                        method_sym->is_defined = true;
-                        method_sym->type = QualType(matched_method_decl->type);
-                        method_sym->function_definition = matched_method_decl;
-                    }
-
-                    if (const auto* owner_state =
-                            record_semantics_cache_lookup(
-                                qualified_declarator_owner_record_decl)) {
-                        RecordSemanticState updated_state = *owner_state;
-                        if (!matched_member_template) {
-                            for (auto& method : updated_state.methods) {
-                                if (method.decl != qualified_declarator_method_match->decl) {
-                                    continue;
-                                }
-                                method.decl = matched_method_decl;
-                                method.type = QualType(matched_method_decl->type);
-                                if (method_sym) {
-                                    method.symbol = method_sym;
-                                }
-                                break;
-                            }
-                        }
-                        record_semantics_cache_set(
-                            qualified_declarator_owner_record_decl,
-                            std::move(updated_state));
-                    }
-
-                    ast_ctx->append_attrs(
-                        matched_method_decl->node_id,
-                        std::move(decl_parser.leading_attrs));
-                    ast_ctx->append_attrs(
-                        matched_method_decl->node_id,
-                        std::move(trailing_attrs));
-                    ret_vec.push_back(
-                        collect_->collect_nop_declaration(qualified_declarator_loc));
-                    return ret_vec;
-                }
-
-                ast_ctx->append_attrs(
-                    out_of_line_method->node_id,
-                    std::move(decl_parser.leading_attrs));
-                ast_ctx->append_attrs(
-                    out_of_line_method->node_id,
-                    std::move(trailing_attrs));
-                ret_vec.push_back(
-                    collect_->collect_nop_declaration(qualified_declarator_loc));
-                continue;
-            }
-
-            if (is_cxx_mode_active() &&
-                (decl_parser.trailing_function_cv_qualifiers != QUAL_NONE ||
-                 decl_parser.trailing_function_ref_qualifier != 0)) {
-                error("non-member function cannot have cv/ref qualifier");
-            }
-            if (declaration_is_constexpr) {
-                error("'constexpr' can only be applied to object declarations");
-            }
-            validate_cpp_operator_function_declaration(
-                decl_parser.name,
-                false,
-                false,
-                t.loc);
-            bool preserve_function_explicit_specialization_decl =
-                is_parsing_cpp_explicit_specialization();
-            // Predeclare function symbol before parsing body so recursive/self calls
-            // resolve during parse of the function definition.
-            std::shared_ptr<Symbol> predecl_sym = nullptr;
-            if (!preserve_function_explicit_specialization_decl) {
-                predecl_sym = collect_->collect_declare_function_symbol(
-                    decl_parser.name,
-                    QualType(newer_type),
+            if (handle_function_declarator(
+                    decl_parser,
+                    t,
+                    newer_type,
+                    trailing_attrs,
                     storage_class,
-                    decl_parser.is_inline,
-                    false,
-                    t.loc,
-                    declaration_language_linkage);
-                merge_function_asm_label(predecl_sym);
+                    declaration_is_constexpr,
+                    declaration_language_linkage,
+                    qualified_declarator,
+                    ret_vec) == DeclaratorHandlingResult::Return) {
+                return ret_vec;
             }
-            auto funct = parse_function(&decl_parser, t.loc, predecl_sym);
-            auto *func_decl_check = dyn_cast<FuncDecl>(funct.get());
-            bool is_definition = func_decl_check && func_decl_check->body != nullptr;
-            std::shared_ptr<Symbol> final_sym = nullptr;
-            if (!preserve_function_explicit_specialization_decl) {
-                final_sym = collect_->collect_declare_function_symbol(
-                    decl_parser.name,
-                    QualType(newer_type),
-                    storage_class,
-                    decl_parser.is_inline,
-                    is_definition,
-                    t.loc,
-                    declaration_language_linkage);
-                if (is_definition && func_decl_check) {
-                    if (predecl_sym) {
-                        predecl_sym->function_definition = func_decl_check;
-                    }
-                    if (final_sym) {
-                        final_sym->function_definition = func_decl_check;
-                    }
-                }
-                if (func_decl_check && final_sym && final_sym != predecl_sym) {
-                    register_function_default_arguments(
-                        final_sym, func_decl_check, t.loc);
-                }
-                merge_function_asm_label(final_sym);
-            }
-            // Attach leading + trailing attributes to function
-            ast_ctx->append_attrs(funct->node_id, std::move(decl_parser.leading_attrs));
-            ast_ctx->append_attrs(funct->node_id, std::move(trailing_attrs));
-            ret_vec.push_back(std::move(funct));
-            if (is_definition) {
-                return ret_vec; // function definitions end the declarator list
-            }
-            // prototype — continue loop to handle comma-separated declarators
             continue;
         }
-        bool declarator_has_gnu_auto_type = has_gnu_auto_type(newer_type);
-        bool declarator_has_cxx_auto_type = has_cxx_auto_type(newer_type);
-        if (declarator_has_gnu_auto_type && declarator_has_cxx_auto_type) {
-            error("cannot mix '__auto_type' and 'auto' in the same declaration");
-        }
-        if (declarator_has_gnu_auto_type && !gentle_check(TokenType::ASSIGN)) {
-            error("'__auto_type' requires an initializer");
-        }
-        QualType declared_type(newer_type, decl_parser.qualifiers);
-        if (declaration_is_constexpr && storage_class == StorageClass::EXTERN) {
-            error("'constexpr' cannot be combined with 'extern'");
-        }
-        if (declaration_is_constexpr && storage_class == StorageClass::AUTO) {
-            error("'constexpr' cannot be combined with 'auto'");
-        }
-        if (declaration_is_constexpr && decl_parser.is_thread_local) {
-            error("'constexpr' cannot be combined with '_Thread_local'");
-        }
-        std::shared_ptr<Symbol> declared_sym = nullptr;
-        bool preserve_explicit_specialization_static_decl =
-            is_parsing_cpp_explicit_specialization() &&
-            qualified_declarator_owner_class_template != nullptr &&
-            !qualified_declarator_owner_template_arguments.empty() &&
-            !qualified_declarator_targets_template_pattern;
-        if (qualified_declarator_owner_record_decl) {
-            if (storage_class == StorageClass::STATIC) {
-                error_custloc(
-                    "out-of-line static data member definition must not use 'static'",
-                    qualified_declarator_loc);
-            }
-            if (!preserve_explicit_specialization_static_decl &&
-                (!qualified_declarator_static_data_match ||
-                 !qualified_declarator_static_data_match->symbol)) {
-                error_custloc(
-                    "internal error: missing static data member symbol for out-of-line definition",
-                    qualified_declarator_loc);
-            }
-            if (!preserve_explicit_specialization_static_decl) {
-                declared_sym = qualified_declarator_static_data_match->symbol;
-                declared_sym->type = desugar_type(declared_type);
-                declared_sym->storage_class = StorageClass::STATIC;
-                declared_sym->is_constexpr = declaration_is_constexpr;
-                if (declared_sym->get_language_linkage() == LanguageLinkage::None) {
-                    declared_sym->set_language_linkage(declaration_language_linkage);
-                }
-            }
-        } else {
-            declared_sym = collect_->collect_declare_variable_symbol(
-                decl_parser.name, declared_type, storage_class, declaration_is_constexpr,
-                t.loc, declaration_language_linkage);
-        }
-        if (declared_sym) {
-            declared_sym->is_constexpr = declaration_is_constexpr;
-        }
-        if (declared_sym) {
-            for (const auto& attr : decl_parser.leading_attrs) {
-                declared_sym->sym_attrs.attrs.push_back(attr);
-            }
-            for (const auto& attr : trailing_attrs) {
-                declared_sym->sym_attrs.attrs.push_back(attr);
-            }
-        }
-        bool is_file_scope = collect_->collect_is_file_scope();
-        std::unique_ptr<Expr> init_expr;
-        bool is_copy_initialization = false;
-        bool is_cxx_object_decl =
-            is_cxx_mode_active() &&
-            canonical_type_kind(declared_type) == TypeKind::Object;
-        if (gentle_check_and_consume(TokenType::ASSIGN)) {
-            is_copy_initialization = true;
-            if (gentle_check(TokenType::LEFT_BRACE)) {
-                init_expr = parse_init_list();
-            } else {
-                init_expr = parse_assignment_expression();
-            }
-        } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_PAREN)) {
-            init_expr = parse_paren_init_list();
-        } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_BRACE)) {
-            init_expr = parse_init_list();
-        }
-
-        auto var_decl_base = collect_->collect_variable_declaration(
-            declared_type,
-            decl_parser.name,
-            std::move(init_expr),
-            declared_sym,
-            storage_class,
-            {declaration_is_constexpr, decl_parser.is_inline, is_file_scope,
-             decl_parser.is_thread_local, decl_parser.is_block_byref,
-             is_copy_initialization, false},
-            t.loc,
-            declaration_language_linkage);
-        auto* var_decl = cast<VariableDecl>(var_decl_base.get());
-        var_decl->is_thread_local = decl_parser.is_thread_local;
-        var_decl->is_block_byref = decl_parser.is_block_byref;
-        var_decl->is_constexpr = declaration_is_constexpr;
-        var_decl->set_asm_label(decl_parser.asm_label);
-        if (decl_parser.asm_label.has_value() &&
-            !is_file_scope &&
-            storage_class != StorageClass::STATIC &&
-            storage_class != StorageClass::REGISTER) {
-            error("asm label on automatic local variable is not allowed");
-        }
-        ast_ctx->append_attrs(var_decl->node_id, std::move(decl_parser.leading_attrs));
-        ast_ctx->append_attrs(var_decl->node_id, std::move(trailing_attrs));
-
-        if (preserve_explicit_specialization_static_decl) {
-            const Decl* primary_member_decl =
-                qualified_declarator_static_data_match
-                    ? static_cast<const Decl*>(
-                          qualified_declarator_static_data_match->decl)
-                    : nullptr;
-            if (!primary_member_decl) {
-                error_custloc(
-                    "internal error: missing primary static data member declaration for explicit specialization",
-                    qualified_declarator_loc);
-            }
-            pending_cpp_explicit_specialization_info_ =
-                PendingCppExplicitSpecializationInfo{
-                    qualified_declarator_owner_class_template,
-                    nullptr,
-                    qualified_declarator_owner_template_arguments,
-                    {},
-                    primary_member_decl,
-                };
-            ret_vec.push_back(std::move(var_decl_base));
-            continue;
-        }
-
-        if (qualified_declarator_owner_record_decl &&
-            declared_sym &&
-            !qualified_declarator_targets_template_pattern) {
-            bool is_definition =
-                storage_class != StorageClass::EXTERN || var_decl->init != nullptr;
-            if (is_definition) {
-                if (declared_sym->is_defined) {
-                    error_custloc(
-                        "redefinition of '" +
-                            qualified_name_utils::format_cpp_qualified_name(
-                                qualified_declarator_has_global_qualifier,
-                                qualified_declarator_qualifiers,
-                                decl_parser.name) +
-                            "'",
-                        qualified_declarator_loc);
-                }
-                declared_sym->is_defined = true;
-            }
-        }
-
-        if (qualified_declarator_owner_record_decl &&
-            qualified_declarator_targets_template_pattern) {
-            auto* matched_static_decl =
-                qualified_declarator_static_data_match
-                    ? const_cast<VariableDecl*>(
-                        qualified_declarator_static_data_match->decl)
-                    : nullptr;
-            if (!matched_static_decl) {
-                error_custloc(
-                    "internal error: missing primary template static data member declaration",
-                    qualified_declarator_loc);
-            }
-
-            bool is_definition =
-                storage_class != StorageClass::EXTERN || var_decl->init != nullptr;
-            if (is_definition &&
-                (matched_static_decl->init != nullptr ||
-                 (declared_sym && declared_sym->is_defined))) {
-                error_custloc(
-                    "redefinition of '" +
-                        qualified_name_utils::format_cpp_qualified_name(
-                            qualified_declarator_has_global_qualifier,
-                            qualified_declarator_qualifiers,
-                            decl_parser.name) +
-                        "'",
-                    qualified_declarator_loc);
-            }
-
-            matched_static_decl->type = var_decl->type;
-            matched_static_decl->sym = declared_sym;
-            matched_static_decl->storage_class = StorageClass::STATIC;
-            matched_static_decl->is_inline = var_decl->is_inline;
-            matched_static_decl->is_constexpr = var_decl->is_constexpr;
-            matched_static_decl->is_thread_local = var_decl->is_thread_local;
-            matched_static_decl->set_language_linkage(var_decl->get_language_linkage());
-            if (var_decl->asm_label) {
-                matched_static_decl->set_asm_label(*var_decl->asm_label);
-            } else {
-                matched_static_decl->clear_asm_label();
-            }
-            if (is_definition) {
-                matched_static_decl->init = std::move(var_decl->init);
-            }
-
-            if (declared_sym) {
-                declared_sym->type = desugar_type(matched_static_decl->type);
-                declared_sym->storage_class = StorageClass::STATIC;
-                declared_sym->is_constexpr = matched_static_decl->is_constexpr;
-                if (declared_sym->get_language_linkage() ==
-                    LanguageLinkage::None) {
-                    declared_sym->set_language_linkage(
-                        matched_static_decl->get_language_linkage());
-                }
-                if (is_definition) {
-                    declared_sym->is_defined = true;
-                }
-            }
-
-            if (const auto* owner_state =
-                    record_semantics_cache_lookup(
-                        qualified_declarator_owner_record_decl)) {
-                RecordSemanticState updated_state = *owner_state;
-                for (auto& static_member : updated_state.static_data_members) {
-                    if (static_member.decl != qualified_declarator_static_data_match->decl) {
-                        continue;
-                    }
-                    static_member.decl = matched_static_decl;
-                    static_member.type = matched_static_decl->type;
-                    static_member.symbol = declared_sym;
-                    break;
-                }
-                record_semantics_cache_set(
-                    qualified_declarator_owner_record_decl,
-                    std::move(updated_state));
-            }
-
-            const auto& parsed_attrs = ast_ctx->get_attrs(var_decl->node_id).attrs;
-            if (!parsed_attrs.empty()) {
-                auto& dst_attrs =
-                    ast_ctx->get_attrs_mut(matched_static_decl->node_id).attrs;
-                dst_attrs.insert(
-                    dst_attrs.end(), parsed_attrs.begin(), parsed_attrs.end());
-            }
-
-            ret_vec.push_back(
-                collect_->collect_nop_declaration(qualified_declarator_loc));
-            continue;
-        }
-
-        ret_vec.push_back(std::move(var_decl_base));
-
-        if (declarator_has_cxx_auto_type) {
-            auto deduced = auto_type_utils::extract_auto_placeholder_replacement(
-                declared_type, var_decl->type);
-            if (deduced.has_value() &&
-                deduced->get_shared() &&
-                auto_type_utils::auto_type_flavors_in(deduced->get_shared()) == 0) {
-                QualType deduced_canonical = desugar_type(*deduced);
-                if (!first_cxx_auto_deduced_type.has_value()) {
-                    first_cxx_auto_deduced_type = deduced_canonical;
-                } else {
-                    QualType first_canonical =
-                        desugar_type(first_cxx_auto_deduced_type.value());
-                    if (!deduced_canonical.equals_qualified(first_canonical)) {
-                        error(
-                            "inconsistent deduction for 'auto': '" +
-                            first_canonical.to_string() + "' and then '" +
-                            deduced_canonical.to_string() + "'");
-                    }
-                }
-            }
-        }
-
-        // __auto_type: forbid multi-declarator
-        if (declarator_has_gnu_auto_type && gentle_check(TokenType::COMMA)) {
-            error("'__auto_type' cannot be used in a multi-declarator statement");
-        }
-        // After handling a declarator, expect comma or semicolon
-        if (!gentle_check(TokenType::SEMICOLON) && !gentle_check(TokenType::COMMA)) {
-            error("expected ',' or ';' after declarator");
+        if (handle_variable_declarator(
+                decl_parser,
+                t,
+                newer_type,
+                trailing_attrs,
+                storage_class,
+                declaration_is_constexpr,
+                declaration_language_linkage,
+                qualified_declarator,
+                first_cxx_auto_deduced_type,
+                ret_vec) == DeclaratorHandlingResult::Return) {
+            return ret_vec;
         }
     }
     return ret_vec;

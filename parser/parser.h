@@ -189,6 +189,11 @@ private:
         QualifiedDeclaratorInfo info;
     };
 
+    enum class DeclaratorHandlingResult : uint8_t {
+        Continue,
+        Return
+    };
+
     struct TentativeContextFrame {
         size_t id = 0;
         TentativeParserState parser_checkpoint;
@@ -384,6 +389,41 @@ private:
         QualifiedDeclaratorInfo& qualified_declarator,
         const DeclarationParser& decl_parser,
         const std::shared_ptr<CType>& parsed_decl_type);
+    void merge_function_asm_label(DeclarationParser& decl_parser,
+        const std::shared_ptr<Symbol>& sym,
+        SrcLoc loc);
+    void remap_out_of_line_primary_template_method(
+        CppMethodDecl* method_decl,
+        const ClassTemplateDecl* owner_class_template,
+        SrcLoc declarator_loc);
+    DeclaratorHandlingResult handle_typedef_declarator(
+        DeclarationParser& decl_parser,
+        Token declarator_token,
+        std::shared_ptr<CType>& parsed_decl_type,
+        std::vector<ParsedAttribute>& trailing_attrs,
+        bool declaration_is_constexpr,
+        std::vector<std::unique_ptr<Decl>>& ret_vec);
+    DeclaratorHandlingResult handle_function_declarator(
+        DeclarationParser& decl_parser,
+        Token declarator_token,
+        const std::shared_ptr<CType>& parsed_decl_type,
+        std::vector<ParsedAttribute>& trailing_attrs,
+        StorageClass storage_class,
+        bool declaration_is_constexpr,
+        LanguageLinkage declaration_language_linkage,
+        QualifiedDeclaratorInfo& qualified_declarator,
+        std::vector<std::unique_ptr<Decl>>& ret_vec);
+    DeclaratorHandlingResult handle_variable_declarator(
+        DeclarationParser& decl_parser,
+        Token declarator_token,
+        const std::shared_ptr<CType>& parsed_decl_type,
+        std::vector<ParsedAttribute>& trailing_attrs,
+        StorageClass storage_class,
+        bool declaration_is_constexpr,
+        LanguageLinkage declaration_language_linkage,
+        QualifiedDeclaratorInfo& qualified_declarator,
+        std::optional<QualType>& first_cxx_auto_deduced_type,
+        std::vector<std::unique_ptr<Decl>>& ret_vec);
     std::vector<std::unique_ptr<Decl>> parse_declaration();
 
     std::unique_ptr<Decl> parse_parameter_declaration();
