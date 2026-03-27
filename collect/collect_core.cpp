@@ -989,7 +989,6 @@ void Collect::bind_tag_decl_in_scope(const std::shared_ptr<Scope>& scope,
     }
     materialize_tentative_snapshot_if_needed();
     record_scope_mutation(scope);
-    scope->add_tag_decl(tag, decl);
 
     auto context = resolve_scope_decl_context(scope);
     if (!context) {

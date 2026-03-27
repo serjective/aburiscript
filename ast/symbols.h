@@ -177,21 +177,13 @@ struct GlobalIdentTracker {
 struct Scope {
     // Separate namespace for struct/union/enum tags (C has separate namespaces).
     // Canonical ownership is declaration-based.
-    std::unordered_map<std::string, TagDecl*> tag_map;
     std::shared_ptr<Scope> parent = nullptr;
     ScopeFlags flags = ScopeFlags::None;
     std::vector<std::string> cxx_namespace_path;
     DeclContext* associated_decl_context = nullptr;
 
-    // Struct/union/enum tag management
-    void add_tag_decl(const std::string& tag, TagDecl* decl) {
-        if (tag.empty() || !decl) {
-            return;
-        }
-        tag_map[tag] = decl;
-    }
 
-    Scope(): tag_map(), parent(nullptr), flags(ScopeFlags::None),
+    Scope(): parent(nullptr), flags(ScopeFlags::None),
         cxx_namespace_path(),
         associated_decl_context(nullptr) {};
 };
