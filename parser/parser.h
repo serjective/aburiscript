@@ -324,6 +324,13 @@ private:
     std::optional<std::vector<std::unique_ptr<Decl>>> try_parse_extern_linkage_declaration();
     std::optional<std::vector<std::unique_ptr<Decl>>> try_parse_cpp_standalone_record_declaration();
     std::optional<std::vector<std::unique_ptr<Decl>>> try_parse_special_declaration();
+    void validate_declaration_start(Token start_token);
+    void emit_declaration_head_side_decls(DeclarationParser& decl_parser,
+        const std::shared_ptr<CType>& parsed_type,
+        std::vector<std::unique_ptr<Decl>>& ret_vec);
+    std::shared_ptr<CType> parse_declaration_head(Token start_token,
+        DeclarationParser& decl_parser,
+        std::vector<std::unique_ptr<Decl>>& ret_vec);
     std::vector<std::unique_ptr<Decl>> parse_declaration();
 
     std::unique_ptr<Decl> parse_parameter_declaration();

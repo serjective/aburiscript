@@ -3720,12 +3720,7 @@ std::optional<std::vector<std::unique_ptr<Decl>>> Parser::try_parse_special_decl
     return std::nullopt;
 }
 
-std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
-    Token t = current_token();
-    if (auto special_declaration = try_parse_special_declaration()) {
-        return std::move(*special_declaration);
-    }
-    std::vector<std::unique_ptr<Decl>> ret_vec;
+void Parser::validate_declaration_start(Token start_token) {
     if (!isTokenDeclarationSpec(current_token())) {
         // K&R / C89 implicit int: if this looks like a declarator, assume int.
         bool looks_like_implicit_int_decl =
@@ -3737,11 +3732,30 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
             !(current_token().type == TokenType::IDENTIFIER &&
               peek_token().type == TokenType::LEFT_PAREN)) {
             error("Unexpected token while parsing declaration: expected a decl specifier, got \""
-                          + t.value + "\" instead.");
-            return {};
+                          + start_token.value + "\" instead.");
         }
     }
-    auto decl_parser = DeclarationParser(this);
+}
+
+void Parser::emit_declaration_head_side_decls(DeclarationParser& decl_parser,
+    const std::shared_ptr<CType>& parsed_type,
+    std::vector<std::unique_ptr<Decl>>& ret_vec) {
+    if (decl_parser.cpp_record_obj) {
+        ret_vec.push_back(std::move(decl_parser.cpp_record_obj));
+    }
+    if (canonical_type_kind(parsed_type) == TypeKind::Object && decl_parser.struct_obj) {
+        // We will "weed" out the unncessary object_decls at sema stage
+        ret_vec.push_back(std::move(decl_parser.struct_obj));
+    } else if (canonical_type_kind(parsed_type) == TypeKind::Enum && decl_parser.enum_obj) {
+        ret_vec.push_back(std::move(decl_parser.enum_obj));
+    }
+}
+
+std::shared_ptr<CType> Parser::parse_declaration_head(Token start_token,
+    DeclarationParser& decl_parser,
+    std::vector<std::unique_ptr<Decl>>& ret_vec) {
+    validate_declaration_start(start_token);
+
     bool enable_implicit_int_for_decl =
         !lang_opts.implicit_int &&
         current_token().type == TokenType::IDENTIFIER &&
@@ -3753,10 +3767,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
         lang_opts.implicit_function_declarations = true;
         collect_->set_lang_options(lang_opts);
     }
-    // examples: int test(int,int)
-    std::shared_ptr<CType> new_type;
+    std::shared_ptr<CType> parsed_type;
     try {
-        new_type = decl_parser.parse_declaration(false);
+        parsed_type = decl_parser.parse_declaration(false);
     } catch (...) {
         if (enable_implicit_int_for_decl) {
             lang_opts.implicit_int = saved_implicit_int;
@@ -3772,15 +3785,18 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
         lang_opts.implicit_function_declarations = true;
         collect_->set_lang_options(lang_opts);
     }
-    if (decl_parser.cpp_record_obj) {
-        ret_vec.push_back(std::move(decl_parser.cpp_record_obj));
+    emit_declaration_head_side_decls(decl_parser, parsed_type, ret_vec);
+    return parsed_type;
+}
+
+std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
+    Token t = current_token();
+    if (auto special_declaration = try_parse_special_declaration()) {
+        return std::move(*special_declaration);
     }
-    if (canonical_type_kind(new_type) == TypeKind::Object && decl_parser.struct_obj) {
-        // We will "weed" out the unncessary object_decls at sema stage
-        ret_vec.push_back(std::move(decl_parser.struct_obj));
-    } else if (canonical_type_kind(new_type) == TypeKind::Enum && decl_parser.enum_obj) {
-        ret_vec.push_back(std::move(decl_parser.enum_obj));
-    }
+    std::vector<std::unique_ptr<Decl>> ret_vec;
+    auto decl_parser = DeclarationParser(this);
+    auto new_type = parse_declaration_head(t, decl_parser, ret_vec);
     auto storage_class = decl_parser.str_class;
     const bool declaration_is_constexpr = decl_parser.is_constexpr;
     const LanguageLinkage declaration_language_linkage = current_decl_language_linkage();
