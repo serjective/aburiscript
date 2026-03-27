@@ -321,6 +321,9 @@ private:
     void parse_kr_declaration_list(DeclarationParser *decl_parser, FuncDecl *func_decl);
     std::unique_ptr<Decl> parse_translation_unit();
 
+    std::optional<std::vector<std::unique_ptr<Decl>>> try_parse_extern_linkage_declaration();
+    std::optional<std::vector<std::unique_ptr<Decl>>> try_parse_cpp_standalone_record_declaration();
+    std::optional<std::vector<std::unique_ptr<Decl>>> try_parse_special_declaration();
     std::vector<std::unique_ptr<Decl>> parse_declaration();
 
     std::unique_ptr<Decl> parse_parameter_declaration();

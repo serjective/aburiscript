@@ -3558,70 +3558,108 @@ void Parser::prepare_cpp_template_pattern_record(
 /*
  * int x, y, z, a(int, int), h[67], *accra(int belgrade, int bucharest); is a valid declstmt
  */
-std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
+std::optional<std::vector<std::unique_ptr<Decl>>> Parser::try_parse_extern_linkage_declaration() {
     Token t = current_token();
-    std::vector<std::unique_ptr<Decl>> ret_vec;
-    if (t.type == TokenType::EXTERN) {
-        Token next = peek_token();
-        if (next.type == TokenType::STRING_LITERAL) {
-            advance(); // consume extern
-            Token linkage_tok = current_token();
-            LanguageLinkage linkage_kind = LanguageLinkage::None;
-            if (linkage_tok.literal_prefix != LiteralPrefix::None) {
-                error_custloc(
-                    "invalid language linkage specification; expected \"C\" or \"C++\"",
-                    linkage_tok.loc);
-            }
-            if (linkage_tok.value == "C") {
-                linkage_kind = LanguageLinkage::C;
-            } else if (linkage_tok.value == "C++") {
-                linkage_kind = LanguageLinkage::CXX;
-            } else {
-                error_custloc(
-                    "invalid language linkage specification \"" + linkage_tok.value +
-                        "\"; expected \"C\" or \"C++\"",
-                    linkage_tok.loc);
-            }
-            advance(); // consume string literal
+    if (t.type != TokenType::EXTERN || peek_token().type != TokenType::STRING_LITERAL) {
+        return std::nullopt;
+    }
 
-            LanguageLinkage saved_linkage = current_language_linkage_;
-            current_language_linkage_ = linkage_kind;
-            try {
-                if (gentle_check_and_consume(TokenType::LEFT_BRACE)) {
-                    while (!gentle_check(TokenType::RIGHT_BRACE)) {
-                        if (gentle_check(TokenType::Eof)) {
-                            error("Expected '}' to close extern linkage block");
-                            return {};
-                        }
-                        auto decls = parse_declaration();
-                        if (decls.empty()) {
-                            error("While parsing extern linkage block, we encountered a non-declaration");
-                            return {};
-                        }
-                        ret_vec.insert(ret_vec.end(),
-                            std::make_move_iterator(decls.begin()),
-                            std::make_move_iterator(decls.end()));
-                    }
-                    advance(); // consume }
-                    gentle_check_and_consume(TokenType::SEMICOLON);
-                    if (ret_vec.empty()) {
-                        ret_vec.push_back(
-                            collect_->collect_nop_declaration(linkage_tok.loc));
-                    }
-                    current_language_linkage_ = saved_linkage;
-                    return ret_vec;
+    std::vector<std::unique_ptr<Decl>> ret_vec;
+    advance(); // consume extern
+    Token linkage_tok = current_token();
+    LanguageLinkage linkage_kind = LanguageLinkage::None;
+    if (linkage_tok.literal_prefix != LiteralPrefix::None) {
+        error_custloc(
+            "invalid language linkage specification; expected \"C\" or \"C++\"",
+            linkage_tok.loc);
+    }
+    if (linkage_tok.value == "C") {
+        linkage_kind = LanguageLinkage::C;
+    } else if (linkage_tok.value == "C++") {
+        linkage_kind = LanguageLinkage::CXX;
+    } else {
+        error_custloc(
+            "invalid language linkage specification \"" + linkage_tok.value +
+                "\"; expected \"C\" or \"C++\"",
+            linkage_tok.loc);
+    }
+    advance(); // consume string literal
+
+    LanguageLinkage saved_linkage = current_language_linkage_;
+    current_language_linkage_ = linkage_kind;
+    try {
+        if (gentle_check_and_consume(TokenType::LEFT_BRACE)) {
+            while (!gentle_check(TokenType::RIGHT_BRACE)) {
+                if (gentle_check(TokenType::Eof)) {
+                    error("Expected '}' to close extern linkage block");
+                    return std::vector<std::unique_ptr<Decl>>{};
                 }
                 auto decls = parse_declaration();
-                current_language_linkage_ = saved_linkage;
-                return decls;
-            } catch (...) {
-                current_language_linkage_ = saved_linkage;
-                throw;
+                if (decls.empty()) {
+                    error("While parsing extern linkage block, we encountered a non-declaration");
+                    return std::vector<std::unique_ptr<Decl>>{};
+                }
+                ret_vec.insert(ret_vec.end(),
+                    std::make_move_iterator(decls.begin()),
+                    std::make_move_iterator(decls.end()));
             }
+            advance(); // consume }
+            gentle_check_and_consume(TokenType::SEMICOLON);
+            if (ret_vec.empty()) {
+                ret_vec.push_back(collect_->collect_nop_declaration(linkage_tok.loc));
+            }
+            current_language_linkage_ = saved_linkage;
+            return std::move(ret_vec);
+        }
+        auto decls = parse_declaration();
+        current_language_linkage_ = saved_linkage;
+        return decls;
+    } catch (...) {
+        current_language_linkage_ = saved_linkage;
+        throw;
+    }
+}
+
+std::optional<std::vector<std::unique_ptr<Decl>>> Parser::try_parse_cpp_standalone_record_declaration() {
+    if (!is_cxx_mode_active() ||
+        (!gentle_check(TokenType::CLASS) &&
+         !gentle_check(TokenType::STRUCT) &&
+         !gentle_check(TokenType::UNION))) {
+        return std::nullopt;
+    }
+
+    std::vector<std::unique_ptr<Decl>> ret_vec;
+    RevertingTentativeParsingAction tentative(*this);
+    try {
+        auto cpp_record = parse_cpp_record_specifier();
+        if (gentle_check(TokenType::SEMICOLON)) {
+            tentative.Commit();
+            auto* cpp_record_decl = dyn_cast<CppRecordDecl>(cpp_record.get());
+            ret_vec.push_back(std::move(cpp_record));
+            if (cpp_record_decl) {
+                if (auto semantic_decl = build_cpp_record_semantic_decl(*cpp_record_decl)) {
+                    ret_vec.push_back(std::move(semantic_decl));
+                }
+            }
+            advance();
+            return std::move(ret_vec);
+        }
+    } catch (const ParseError& e) {
+        if (e.message.find("C++ parser unsupported syntax:") == 0) {
+            throw;
         }
     }
-    // Handle _Static_assert as a declaration
+
+    return std::nullopt;
+}
+
+std::optional<std::vector<std::unique_ptr<Decl>>> Parser::try_parse_special_declaration() {
+    if (auto extern_linkage = try_parse_extern_linkage_declaration()) {
+        return extern_linkage;
+    }
+
     if (gentle_check(TokenType::STATIC_ASSERT)) {
+        std::vector<std::unique_ptr<Decl>> ret_vec;
         SrcLoc sa_loc = current_token().loc;
         advance(); // consume _Static_assert
         check_and_consume(TokenType::LEFT_PAREN);
@@ -3640,24 +3678,25 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
         check_and_consume(TokenType::SEMICOLON);
         ret_vec.push_back(collect_->collect_static_assert_declaration(
             std::move(condition), message, has_message, sa_loc));
-        return ret_vec;
+        return std::move(ret_vec);
     }
-    // Handle __extension__ prefix on declarations
+
     if (gentle_check(TokenType::EXTENSION_KW)) {
         advance(); // consume __extension__
         return parse_declaration();
     }
-    // Handle empty declarations (bare ';' at file scope)
+
     if (gentle_check(TokenType::SEMICOLON)) {
+        std::vector<std::unique_ptr<Decl>> ret_vec;
         SrcLoc loc = current_token().loc;
         advance();
         ret_vec.push_back(collect_->collect_nop_declaration(loc));
-        return ret_vec;
+        return std::move(ret_vec);
     }
+
     if (is_cxx_mode_active() &&
         (gentle_check(TokenType::NAMESPACE) ||
-         (gentle_check(TokenType::INLINE) &&
-          peek_token().type == TokenType::NAMESPACE))) {
+         (gentle_check(TokenType::INLINE) && peek_token().type == TokenType::NAMESPACE))) {
         return parse_cpp_namespace_definition();
     }
     if (is_cxx_mode_active() && gentle_check(TokenType::USING)) {
@@ -3674,38 +3713,19 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
             return parse_cpp_out_of_line_destructor_definition();
         }
     }
-    if (is_cxx_mode_active() &&
-        (gentle_check(TokenType::CLASS) ||
-         gentle_check(TokenType::STRUCT) ||
-         gentle_check(TokenType::UNION))) {
-        // In C++ mode, prefer CppRecordDecl for standalone record declarations/
-        // definitions. If declarators follow the record specifier, fall back to
-        // the shared C/C++ declaration path.
-        RevertingTentativeParsingAction tentative(*this);
-        try {
-            auto cpp_record = parse_cpp_record_specifier();
-            if (gentle_check(TokenType::SEMICOLON)) {
-                // Pure record declaration/definition statement:
-                // emit both syntactic C++ record node and semantic tag decl now.
-                tentative.Commit();
-                auto* cpp_record_decl = dyn_cast<CppRecordDecl>(cpp_record.get());
-                ret_vec.push_back(std::move(cpp_record));
-                if (cpp_record_decl) {
-                    if (auto semantic_decl = build_cpp_record_semantic_decl(*cpp_record_decl)) {
-                        ret_vec.push_back(std::move(semantic_decl));
-                    }
-                }
-                advance();
-                return ret_vec;
-            }
-        } catch (const ParseError& e) {
-            if (e.message.find("C++ parser unsupported syntax:") == 0) {
-                throw;
-            }
-            // Fall through to shared declaration parser path for forms like
-            // `class X { ... } obj;` where declarators follow the specifier.
-        }
+    if (auto standalone_record = try_parse_cpp_standalone_record_declaration()) {
+        return standalone_record;
     }
+
+    return std::nullopt;
+}
+
+std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
+    Token t = current_token();
+    if (auto special_declaration = try_parse_special_declaration()) {
+        return std::move(*special_declaration);
+    }
+    std::vector<std::unique_ptr<Decl>> ret_vec;
     if (!isTokenDeclarationSpec(current_token())) {
         // K&R / C89 implicit int: if this looks like a declarator, assume int.
         bool looks_like_implicit_int_decl =
