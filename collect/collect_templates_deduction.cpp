@@ -7,6 +7,21 @@ enum class TemplateTypeDeductionMode : uint8_t {
     PartialOrdering,
 };
 
+bool deduce_function_template_argument_types(
+    QualType pattern_type,
+    QualType argument_type,
+    const TemplateParameterList& parameters,
+    TemplateArgumentBindings& deduced_arguments,
+    bool argument_is_lvalue = false);
+
+bool deduce_template_argument_types_impl(
+    QualType pattern_type,
+    QualType argument_type,
+    const TemplateParameterList& parameters,
+    TemplateArgumentBindings& deduced_arguments,
+    TemplateTypeDeductionMode deduction_mode,
+    bool argument_is_lvalue = false);
+
 std::optional<size_t> find_template_parameter_index(
     const TemplateTypeParmType* parm_type,
     const TemplateParameterList& parameters) {
@@ -39,6 +54,30 @@ struct TemplateSpecializationMatchInfo {
     const std::vector<TemplateArgument>* arguments = nullptr;
 };
 
+struct TemplatePatternLayout {
+    size_t element_count = 0;
+    std::optional<size_t> pack_index;
+    size_t leading_count = 0;
+    size_t trailing_count = 0;
+    bool valid = true;
+
+    size_t fixed_count() const {
+        return leading_count + trailing_count;
+    }
+};
+
+struct FunctionParameterLayout {
+    size_t parameter_count = 0;
+    std::optional<size_t> pack_index;
+    size_t leading_count = 0;
+    size_t trailing_count = 0;
+    bool valid = true;
+
+    size_t fixed_count() const {
+        return leading_count + trailing_count;
+    }
+};
+
 std::optional<TemplateSpecializationMatchInfo> extract_template_specialization_match_info(
     QualType type) {
     auto spelled = desugar_typedefs(type);
@@ -69,6 +108,488 @@ std::optional<TemplateSpecializationMatchInfo> extract_template_specialization_m
         object->get_primary_class_template(),
         template_name,
         &object->get_template_specialization_arguments()};
+}
+
+TemplatePatternLayout analyze_template_argument_pattern_layout(
+    const std::vector<TemplateArgument>& arguments,
+    const TemplateParameterList* parameters = nullptr) {
+    TemplatePatternLayout layout;
+    layout.element_count = arguments.size();
+    size_t pack_count = 0;
+    for (size_t idx = 0; idx < arguments.size(); ++idx) {
+        bool expands_pack = arguments[idx].expands_parameter_pack;
+        if (!expands_pack && parameters) {
+            template_sema_internal::TemplatePackExpansionShape shape;
+            if (template_sema_internal::collect_pack_expansion_shape_in_template_argument(
+                    arguments[idx],
+                    *parameters,
+                    shape) &&
+                !shape.empty()) {
+                expands_pack = true;
+            }
+        }
+        if (!expands_pack) {
+            continue;
+        }
+        ++pack_count;
+        layout.pack_index = idx;
+    }
+    if (pack_count > 1) {
+        layout.valid = false;
+        return layout;
+    }
+    if (layout.pack_index.has_value()) {
+        layout.leading_count = *layout.pack_index;
+        layout.trailing_count = arguments.size() - *layout.pack_index - 1;
+    }
+    return layout;
+}
+
+FunctionParameterLayout analyze_function_parameter_layout(const FuncDecl* pattern) {
+    FunctionParameterLayout layout;
+    if (!pattern) {
+        layout.valid = false;
+        return layout;
+    }
+
+    auto function_type =
+        desugar_type(QualType(pattern->type)).as_shared<FunctionType>();
+    bool has_void_param = function_type &&
+        function_type->parameters.size() == 1 &&
+        function_type->parameters[0]->isVoid();
+    layout.parameter_count = has_void_param ? 0 : pattern->parameters.size();
+
+    size_t pack_count = 0;
+    for (size_t idx = 0; idx < layout.parameter_count; ++idx) {
+        auto* param_decl = dyn_cast<ParamDecl>(pattern->parameters[idx].get());
+        if (!param_decl || !param_decl->is_parameter_pack) {
+            continue;
+        }
+        ++pack_count;
+        layout.pack_index = idx;
+    }
+    if (pack_count > 1) {
+        layout.valid = false;
+        return layout;
+    }
+    if (layout.pack_index.has_value()) {
+        layout.leading_count = *layout.pack_index;
+        layout.trailing_count = layout.parameter_count - *layout.pack_index - 1;
+    }
+    return layout;
+}
+
+bool finalize_deduced_template_bindings(const TemplateParameterList& parameters,
+                                        TemplateArgumentBindings& deduced_arguments) {
+    for (size_t idx = 0; idx < deduced_arguments.size(); ++idx) {
+        if (!deduced_arguments[idx].is_unbound()) {
+            continue;
+        }
+        const auto* parameter = idx < parameters.size() ? parameters[idx].get() : nullptr;
+        if (parameter && parameter->is_parameter_pack) {
+            deduced_arguments[idx] = TemplateArgumentBinding::pack({});
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+TemplateArgument make_partial_ordering_unique_type_argument(size_t ordinal) {
+    auto unique_type = std::make_shared<ObjectType>(
+        "__aburi_partial_ordering_" + std::to_string(ordinal),
+        false,
+        true);
+    return TemplateArgument(QualType(unique_type));
+}
+
+TemplateArgument make_partial_ordering_pack_placeholder_argument(
+    const TemplateParameterDecl* parameter,
+    size_t ordinal) {
+    if (!parameter) {
+        return TemplateArgument();
+    }
+    if (auto* type_parameter = dyn_cast<TemplateTypeParmDecl>(
+            const_cast<TemplateParameterDecl*>(parameter))) {
+        (void)type_parameter;
+        return make_partial_ordering_unique_type_argument(ordinal);
+    }
+    if (auto* non_type_parameter = dyn_cast<TemplateNonTypeParmDecl>(
+            const_cast<TemplateParameterDecl*>(parameter))) {
+        return TemplateArgument::dependent_value_argument(
+            non_type_parameter->type,
+            nullptr,
+            non_type_parameter->get_name(),
+            non_type_parameter);
+    }
+    if (auto* template_parameter = dyn_cast<TemplateTemplateParmDecl>(
+            const_cast<TemplateParameterDecl*>(parameter))) {
+        return TemplateArgument::dependent_template_argument(
+            template_parameter->get_name(),
+            template_parameter);
+    }
+    return TemplateArgument();
+}
+
+bool build_partial_ordering_transformed_bindings(
+    const TemplateParameterList& parameters,
+    size_t pack_arity,
+    TemplateArgumentBindings& transformed_bindings_out) {
+    transformed_bindings_out.clear();
+    transformed_bindings_out.resize(parameters.size());
+
+    size_t unique_type_ordinal = 0;
+    for (size_t idx = 0; idx < parameters.size(); ++idx) {
+        const auto* parameter = parameters[idx].get();
+        if (!parameter) {
+            return false;
+        }
+
+        if (!parameter->is_parameter_pack) {
+            if (isa<TemplateTypeParmDecl>(parameter)) {
+                transformed_bindings_out[idx] = TemplateArgumentBinding::single(
+                    make_partial_ordering_unique_type_argument(
+                        unique_type_ordinal++));
+            }
+            continue;
+        }
+
+        std::vector<TemplateArgument> pack_arguments;
+        pack_arguments.reserve(pack_arity);
+        for (size_t element_index = 0; element_index < pack_arity; ++element_index) {
+            pack_arguments.push_back(
+                make_partial_ordering_pack_placeholder_argument(
+                    parameter,
+                    unique_type_ordinal++));
+        }
+        transformed_bindings_out[idx] =
+            TemplateArgumentBinding::pack(std::move(pack_arguments));
+    }
+    return true;
+}
+
+bool bind_deduced_template_argument_value(
+    const TemplateParameterDecl* parameter,
+    const TemplateArgument& argument,
+    const TemplateParameterList& parameters,
+    TemplateArgumentBindings& deduced_arguments) {
+    auto parameter_index = template_sema_internal::find_template_parameter_index_by_decl(
+        parameter,
+        parameters);
+    if (!parameter_index || *parameter_index >= deduced_arguments.size()) {
+        return false;
+    }
+
+    auto& existing = deduced_arguments[*parameter_index];
+    if (parameter->is_parameter_pack) {
+        if (existing.is_unbound()) {
+            existing.kind = TemplateArgumentBindingKind::Pack;
+        } else if (!existing.is_pack()) {
+            return false;
+        }
+        existing.arguments.push_back(argument);
+        return true;
+    }
+
+    if (existing.is_unbound()) {
+        existing = TemplateArgumentBinding::single(argument);
+        return true;
+    }
+
+    const auto* existing_single = existing.single_argument();
+    return existing_single && existing_single->equals(argument);
+}
+
+TemplateArgument materialize_template_argument_pack_element(
+    const TemplateArgument& argument) {
+    TemplateArgument element_argument = argument;
+    element_argument.expands_parameter_pack = false;
+    element_argument.pack_expansion_parameters.clear();
+    return element_argument;
+}
+
+bool deduce_class_template_argument_binding(
+    const TemplateArgument& pattern_argument,
+    const TemplateArgument& argument_argument,
+    const TemplateParameterList& parameters,
+    TemplateArgumentBindings& deduced_bindings) {
+    if (pattern_argument.kind != argument_argument.kind) {
+        return false;
+    }
+    if (pattern_argument.kind == TemplateArgumentKind::Type) {
+        auto pattern_argument_type = desugar_typedefs(pattern_argument.type);
+        auto argument_argument_type = desugar_typedefs(argument_argument.type);
+        if (auto pattern_ref =
+                dyn_cast_shared<ReferenceType>(
+                    pattern_argument_type.get_shared())) {
+            auto argument_ref =
+                dyn_cast_shared<ReferenceType>(
+                    argument_argument_type.get_shared());
+            if (!argument_ref ||
+                pattern_ref->reference_kind != argument_ref->reference_kind) {
+                return false;
+            }
+        }
+        if (!type_depends_on_template_parameters(pattern_argument.type)) {
+            return desugar_type(pattern_argument.type).equals_qualified(
+                desugar_type(argument_argument.type));
+        }
+        return deduce_function_template_argument_types(
+            pattern_argument.type,
+            argument_argument.type,
+            parameters,
+            deduced_bindings);
+    }
+
+    if (pattern_argument.is_dependent &&
+        pattern_argument.referenced_parameter) {
+        return bind_deduced_template_argument_value(
+            pattern_argument.referenced_parameter,
+            argument_argument,
+            parameters,
+            deduced_bindings);
+    }
+
+    TemplateArgument normalized_pattern = pattern_argument;
+    TemplateArgument normalized_argument = argument_argument;
+    QualType target_type = normalized_argument.value_type
+        ? normalized_argument.value_type
+        : normalized_pattern.value_type;
+    return template_sema_internal::normalize_concrete_template_value_argument(
+               normalized_pattern,
+               target_type,
+               nullptr) &&
+           template_sema_internal::normalize_concrete_template_value_argument(
+               normalized_argument,
+               target_type,
+               nullptr) &&
+           normalized_pattern.equals(normalized_argument);
+}
+
+bool deduce_class_template_specialization_argument_list(
+    const std::vector<TemplateArgument>& pattern_arguments,
+    const TemplatePatternLayout& pattern_layout,
+    const TemplateParameterList& parameters,
+    const std::vector<TemplateArgument>& actual_arguments,
+    TemplateArgumentBindings& deduced_bindings_out) {
+    if (!pattern_layout.valid) {
+        return false;
+    }
+
+    if (!pattern_layout.pack_index.has_value()) {
+        if (pattern_arguments.size() != actual_arguments.size()) {
+            return false;
+        }
+    } else if (actual_arguments.size() < pattern_layout.fixed_count()) {
+        return false;
+    }
+
+    deduced_bindings_out.clear();
+    deduced_bindings_out.resize(parameters.size());
+
+    if (!pattern_layout.pack_index.has_value()) {
+        for (size_t idx = 0; idx < pattern_arguments.size(); ++idx) {
+            if (!deduce_class_template_argument_binding(
+                    pattern_arguments[idx],
+                    actual_arguments[idx],
+                    parameters,
+                    deduced_bindings_out)) {
+                return false;
+            }
+        }
+        return finalize_deduced_template_bindings(parameters, deduced_bindings_out);
+    }
+
+    for (size_t idx = 0; idx < pattern_layout.leading_count; ++idx) {
+        if (!deduce_class_template_argument_binding(
+                pattern_arguments[idx],
+                actual_arguments[idx],
+                parameters,
+                deduced_bindings_out)) {
+            return false;
+        }
+    }
+
+    if (pattern_layout.pack_index.has_value()) {
+        const size_t pack_argument_count =
+            actual_arguments.size() - pattern_layout.fixed_count();
+        TemplateArgument pack_pattern_argument =
+            materialize_template_argument_pack_element(
+                pattern_arguments[*pattern_layout.pack_index]);
+        for (size_t idx = 0; idx < pack_argument_count; ++idx) {
+            if (!deduce_class_template_argument_binding(
+                    pack_pattern_argument,
+                    actual_arguments[pattern_layout.leading_count + idx],
+                    parameters,
+                    deduced_bindings_out)) {
+                return false;
+            }
+        }
+    }
+
+    for (size_t idx = 0; idx < pattern_layout.trailing_count; ++idx) {
+        const size_t pattern_index =
+            pattern_arguments.size() - pattern_layout.trailing_count + idx;
+        const size_t argument_index =
+            actual_arguments.size() - pattern_layout.trailing_count + idx;
+        if (!deduce_class_template_argument_binding(
+                pattern_arguments[pattern_index],
+                actual_arguments[argument_index],
+                parameters,
+                deduced_bindings_out)) {
+            return false;
+        }
+    }
+
+    return finalize_deduced_template_bindings(parameters, deduced_bindings_out);
+}
+
+bool expand_partial_specialization_argument_pattern(
+    const std::vector<TemplateArgument>& pattern_arguments,
+    const TemplatePatternLayout& pattern_layout,
+    size_t target_argument_count,
+    std::vector<TemplateArgument>& expanded_arguments_out) {
+    expanded_arguments_out.clear();
+    if (!pattern_layout.valid) {
+        return false;
+    }
+    if (!pattern_layout.pack_index.has_value()) {
+        if (pattern_arguments.size() != target_argument_count) {
+            return false;
+        }
+        expanded_arguments_out = pattern_arguments;
+        return true;
+    }
+    if (target_argument_count < pattern_layout.fixed_count()) {
+        return false;
+    }
+
+    const size_t pack_argument_count =
+        target_argument_count - pattern_layout.fixed_count();
+    expanded_arguments_out.reserve(target_argument_count);
+    for (size_t idx = 0; idx < pattern_layout.leading_count; ++idx) {
+        expanded_arguments_out.push_back(pattern_arguments[idx]);
+    }
+
+    TemplateArgument pack_pattern_argument =
+        materialize_template_argument_pack_element(
+            pattern_arguments[*pattern_layout.pack_index]);
+    for (size_t idx = 0; idx < pack_argument_count; ++idx) {
+        expanded_arguments_out.push_back(pack_pattern_argument);
+    }
+
+    for (size_t idx = 0; idx < pattern_layout.trailing_count; ++idx) {
+        expanded_arguments_out.push_back(
+            pattern_arguments[pattern_arguments.size() -
+                              pattern_layout.trailing_count + idx]);
+    }
+    return true;
+}
+
+int compare_pack_layout_specificity(const TemplatePatternLayout& lhs,
+                                    const TemplatePatternLayout& rhs) {
+    if (lhs.pack_index.has_value() != rhs.pack_index.has_value()) {
+        return lhs.pack_index.has_value() ? -1 : 1;
+    }
+    if (!lhs.pack_index.has_value()) {
+        return 0;
+    }
+    if (lhs.fixed_count() != rhs.fixed_count()) {
+        return lhs.fixed_count() > rhs.fixed_count() ? 1 : -1;
+    }
+    return 0;
+}
+
+int compare_pack_layout_specificity(const FunctionParameterLayout& lhs,
+                                    const FunctionParameterLayout& rhs) {
+    if (lhs.pack_index.has_value() != rhs.pack_index.has_value()) {
+        return lhs.pack_index.has_value() ? -1 : 1;
+    }
+    if (!lhs.pack_index.has_value()) {
+        return 0;
+    }
+    if (lhs.fixed_count() != rhs.fixed_count()) {
+        return lhs.fixed_count() > rhs.fixed_count() ? 1 : -1;
+    }
+    return 0;
+}
+
+bool function_template_is_at_least_as_specialized_as(
+    const FunctionTemplateDecl* parameter_template,
+    const FunctionParameterLayout& parameter_layout,
+    const std::vector<QualType>& transformed_argument_types) {
+    if (!parameter_template) {
+        return false;
+    }
+
+    const auto* parameter_pattern = parameter_template->function_decl();
+    if (!parameter_pattern || !parameter_layout.valid) {
+        return false;
+    }
+
+    TemplateArgumentBindings deduced_arguments(
+        parameter_template->parameters.size());
+
+    auto deduce_one_parameter =
+        [&](size_t parameter_index, size_t argument_index) -> bool {
+        auto* parameter_decl = dyn_cast<ParamDecl>(
+            parameter_pattern->parameters[parameter_index].get());
+        if (!parameter_decl || argument_index >= transformed_argument_types.size()) {
+            return false;
+        }
+        return deduce_template_argument_types_impl(
+            parameter_decl->type,
+            transformed_argument_types[argument_index],
+            parameter_template->parameters,
+            deduced_arguments,
+            TemplateTypeDeductionMode::PartialOrdering);
+    };
+
+    if (!parameter_layout.pack_index.has_value()) {
+        if (transformed_argument_types.size() != parameter_layout.parameter_count) {
+            return false;
+        }
+        for (size_t idx = 0; idx < parameter_layout.parameter_count; ++idx) {
+            if (!deduce_one_parameter(idx, idx)) {
+                return false;
+            }
+        }
+    } else {
+        if (transformed_argument_types.size() < parameter_layout.fixed_count()) {
+            return false;
+        }
+        for (size_t idx = 0; idx < parameter_layout.leading_count; ++idx) {
+            if (!deduce_one_parameter(idx, idx)) {
+                return false;
+            }
+        }
+
+        const size_t pack_argument_count =
+            transformed_argument_types.size() - parameter_layout.fixed_count();
+        for (size_t idx = 0; idx < pack_argument_count; ++idx) {
+            if (!deduce_one_parameter(
+                    *parameter_layout.pack_index,
+                    parameter_layout.leading_count + idx)) {
+                return false;
+            }
+        }
+
+        for (size_t idx = 0; idx < parameter_layout.trailing_count; ++idx) {
+            const size_t parameter_index =
+                parameter_layout.parameter_count - parameter_layout.trailing_count +
+                idx;
+            const size_t argument_index =
+                transformed_argument_types.size() -
+                parameter_layout.trailing_count + idx;
+            if (!deduce_one_parameter(parameter_index, argument_index)) {
+                return false;
+            }
+        }
+    }
+
+    return finalize_deduced_template_bindings(
+        parameter_template->parameters,
+        deduced_arguments);
 }
 
 bool bind_deduced_template_argument(
@@ -184,7 +705,7 @@ bool deduce_template_argument_types_impl(
     const TemplateParameterList& parameters,
     TemplateArgumentBindings& deduced_arguments,
     TemplateTypeDeductionMode deduction_mode,
-    bool argument_is_lvalue = false) {
+    bool argument_is_lvalue) {
     if (!pattern_type) {
         return true;
     }
@@ -490,7 +1011,7 @@ bool deduce_function_template_argument_types(
     QualType argument_type,
     const TemplateParameterList& parameters,
     TemplateArgumentBindings& deduced_arguments,
-    bool argument_is_lvalue = false) {
+    bool argument_is_lvalue) {
     return deduce_template_argument_types_impl(
         pattern_type,
         argument_type,
@@ -506,106 +1027,44 @@ bool class_template_partial_specialization_is_at_least_as_specialized_as(
     if (!parameter_partial || !argument_partial) {
         return false;
     }
-    if (parameter_partial->specialization_arguments.size() !=
-        argument_partial->specialization_arguments.size()) {
+    TemplatePatternLayout parameter_layout =
+        analyze_template_argument_pattern_layout(
+            parameter_partial->specialization_arguments,
+            &parameter_partial->parameters);
+    TemplatePatternLayout argument_layout =
+        analyze_template_argument_pattern_layout(
+            argument_partial->specialization_arguments,
+            &argument_partial->parameters);
+    if (!parameter_layout.valid || !argument_layout.valid) {
         return false;
     }
-    for (const auto& parameter : parameter_partial->parameters) {
-        if (parameter && parameter->is_parameter_pack) {
-            return false;
-        }
+
+    size_t transformed_argument_count = 0;
+    if (!argument_layout.pack_index.has_value()) {
+        transformed_argument_count = argument_layout.element_count;
+    } else if (!parameter_layout.pack_index.has_value()) {
+        transformed_argument_count = parameter_layout.element_count;
+    } else {
+        transformed_argument_count =
+            std::max(parameter_layout.fixed_count(), argument_layout.fixed_count()) + 1;
     }
 
-    TemplateArgumentBindings deduced_bindings(
-        parameter_partial->parameters.size());
-    for (size_t idx = 0;
-         idx < parameter_partial->specialization_arguments.size();
-         ++idx) {
-        const auto& pattern_argument =
-            parameter_partial->specialization_arguments[idx];
-        const auto& argument_argument =
-            argument_partial->specialization_arguments[idx];
-        if (pattern_argument.kind != argument_argument.kind) {
-            return false;
-        }
-        if (pattern_argument.kind == TemplateArgumentKind::Type) {
-            auto pattern_argument_type = desugar_typedefs(pattern_argument.type);
-            auto argument_argument_type = desugar_typedefs(argument_argument.type);
-            if (auto pattern_ref =
-                    dyn_cast_shared<ReferenceType>(
-                        pattern_argument_type.get_shared())) {
-                auto argument_ref =
-                    dyn_cast_shared<ReferenceType>(
-                        argument_argument_type.get_shared());
-                if (!argument_ref ||
-                    pattern_ref->reference_kind != argument_ref->reference_kind) {
-                    return false;
-                }
-            }
-            if (!type_depends_on_template_parameters(pattern_argument.type)) {
-                if (!desugar_type(pattern_argument.type).equals_qualified(
-                        desugar_type(argument_argument.type))) {
-                    return false;
-                }
-                continue;
-            }
-            if (!deduce_function_template_argument_types(
-                    pattern_argument.type,
-                    argument_argument.type,
-                    parameter_partial->parameters,
-                    deduced_bindings)) {
-                return false;
-            }
-            continue;
-        }
-
-        if (pattern_argument.is_dependent &&
-            pattern_argument.referenced_parameter) {
-            auto parameter_index =
-                template_sema_internal::find_template_parameter_index_by_decl(
-                    pattern_argument.referenced_parameter,
-                    parameter_partial->parameters);
-            if (!parameter_index ||
-                *parameter_index >= deduced_bindings.size()) {
-                return false;
-            }
-            auto& existing = deduced_bindings[*parameter_index];
-            if (existing.is_unbound()) {
-                existing = TemplateArgumentBinding::single(argument_argument);
-            } else {
-                const auto* existing_single = existing.single_argument();
-                if (!existing_single ||
-                    !existing_single->equals(argument_argument)) {
-                    return false;
-                }
-            }
-            continue;
-        }
-
-        TemplateArgument normalized_pattern = pattern_argument;
-        TemplateArgument normalized_argument = argument_argument;
-        QualType target_type = normalized_argument.value_type
-            ? normalized_argument.value_type
-            : normalized_pattern.value_type;
-        if (!template_sema_internal::normalize_concrete_template_value_argument(
-                normalized_pattern,
-                target_type,
-                nullptr) ||
-            !template_sema_internal::normalize_concrete_template_value_argument(
-                normalized_argument,
-                target_type,
-                nullptr) ||
-            !normalized_pattern.equals(normalized_argument)) {
-            return false;
-        }
+    std::vector<TemplateArgument> transformed_argument_patterns;
+    if (!expand_partial_specialization_argument_pattern(
+            argument_partial->specialization_arguments,
+            argument_layout,
+            transformed_argument_count,
+            transformed_argument_patterns)) {
+        return false;
     }
 
-    for (const auto& binding : deduced_bindings) {
-        if (binding.is_unbound()) {
-            return false;
-        }
-    }
-    return true;
+    TemplateArgumentBindings deduced_bindings;
+    return deduce_class_template_specialization_argument_list(
+        parameter_partial->specialization_arguments,
+        parameter_layout,
+        parameter_partial->parameters,
+        transformed_argument_patterns,
+        deduced_bindings);
 }
 
 } // namespace
@@ -620,101 +1079,16 @@ bool deduce_class_template_partial_specialization_bindings(
     if (!partial_specialization) {
         return false;
     }
-    if (partial_specialization->specialization_arguments.size() !=
-        actual_arguments.size()) {
-        return false;
-    }
-    for (const auto& parameter : partial_specialization->parameters) {
-        if (parameter && parameter->is_parameter_pack) {
-            return false;
-        }
-    }
-
-    deduced_bindings_out.resize(partial_specialization->parameters.size());
-    for (size_t idx = 0; idx < actual_arguments.size(); ++idx) {
-        const auto& pattern_argument =
-            partial_specialization->specialization_arguments[idx];
-        const auto& actual_argument = actual_arguments[idx];
-        if (pattern_argument.kind != actual_argument.kind) {
-            return false;
-        }
-        if (pattern_argument.kind == TemplateArgumentKind::Type) {
-            auto pattern_argument_type = desugar_typedefs(pattern_argument.type);
-            auto actual_argument_type = desugar_typedefs(actual_argument.type);
-            if (auto pattern_ref =
-                    dyn_cast_shared<ReferenceType>(
-                        pattern_argument_type.get_shared())) {
-                auto actual_ref =
-                    dyn_cast_shared<ReferenceType>(
-                        actual_argument_type.get_shared());
-                if (!actual_ref ||
-                    pattern_ref->reference_kind != actual_ref->reference_kind) {
-                    return false;
-                }
-            }
-            if (!type_depends_on_template_parameters(pattern_argument.type)) {
-                if (!desugar_type(pattern_argument.type).equals_qualified(
-                        desugar_type(actual_argument.type))) {
-                    return false;
-                }
-                continue;
-            }
-            if (!deduce_function_template_argument_types(
-                    pattern_argument.type,
-                    actual_argument.type,
-                    partial_specialization->parameters,
-                    deduced_bindings_out)) {
-                return false;
-            }
-            continue;
-        }
-
-        if (pattern_argument.is_dependent &&
-            pattern_argument.referenced_parameter) {
-            auto parameter_index = find_template_parameter_index_by_decl(
-                pattern_argument.referenced_parameter,
-                partial_specialization->parameters);
-            if (!parameter_index ||
-                *parameter_index >= deduced_bindings_out.size()) {
-                return false;
-            }
-            auto& existing = deduced_bindings_out[*parameter_index];
-            if (existing.is_unbound()) {
-                existing = TemplateArgumentBinding::single(actual_argument);
-            } else {
-                const auto* existing_single = existing.single_argument();
-                if (!existing_single ||
-                    !existing_single->equals(actual_argument)) {
-                    return false;
-                }
-            }
-            continue;
-        }
-
-        TemplateArgument normalized_pattern = pattern_argument;
-        TemplateArgument normalized_actual = actual_argument;
-        QualType target_type = normalized_actual.value_type
-            ? normalized_actual.value_type
-            : normalized_pattern.value_type;
-        if (!normalize_concrete_template_value_argument(
-                normalized_pattern,
-                target_type,
-                nullptr) ||
-            !normalize_concrete_template_value_argument(
-                normalized_actual,
-                target_type,
-                nullptr) ||
-            !normalized_pattern.equals(normalized_actual)) {
-            return false;
-        }
-    }
-
-    for (const auto& binding : deduced_bindings_out) {
-        if (binding.is_unbound()) {
-            return false;
-        }
-    }
-    return true;
+    TemplatePatternLayout pattern_layout =
+        analyze_template_argument_pattern_layout(
+            partial_specialization->specialization_arguments,
+            &partial_specialization->parameters);
+    return deduce_class_template_specialization_argument_list(
+        partial_specialization->specialization_arguments,
+        pattern_layout,
+        partial_specialization->parameters,
+        actual_arguments,
+        deduced_bindings_out);
 }
 
 bool is_class_template_partial_specialization_more_specialized(
@@ -735,7 +1109,18 @@ bool is_class_template_partial_specialization_more_specialized(
         class_template_partial_specialization_is_at_least_as_specialized_as(
             lhs_partial,
             rhs_partial);
-    return !lhs_from_rhs;
+    if (!lhs_from_rhs) {
+        return true;
+    }
+    TemplatePatternLayout lhs_layout =
+        analyze_template_argument_pattern_layout(
+            lhs_partial->specialization_arguments,
+            &lhs_partial->parameters);
+    TemplatePatternLayout rhs_layout =
+        analyze_template_argument_pattern_layout(
+            rhs_partial->specialization_arguments,
+            &rhs_partial->parameters);
+    return compare_pack_layout_specificity(lhs_layout, rhs_layout) > 0;
 }
 
 } // namespace template_sema_internal
@@ -1052,40 +1437,104 @@ Collect::compare_function_template_partial_ordering(
         return TemplatePartialOrderingResult::Unordered;
     }
 
-    auto count_named_params = [](const FuncDecl* pattern) -> size_t {
-        if (!pattern) {
-            return 0;
-        }
-        auto function_type = desugar_type(QualType(pattern->type)).as_shared<FunctionType>();
-        bool has_void_param = function_type &&
-            function_type->parameters.size() == 1 &&
-            function_type->parameters[0]->isVoid();
-        return has_void_param ? 0 : pattern->parameters.size();
-    };
-
-    size_t lhs_param_count = count_named_params(lhs_pattern);
-    size_t rhs_param_count = count_named_params(rhs_pattern);
-    if (lhs_param_count != rhs_param_count) {
+    FunctionParameterLayout lhs_layout =
+        analyze_function_parameter_layout(lhs_pattern);
+    FunctionParameterLayout rhs_layout =
+        analyze_function_parameter_layout(rhs_pattern);
+    if (!lhs_layout.valid || !rhs_layout.valid) {
         return TemplatePartialOrderingResult::Unordered;
     }
-    auto has_parameter_pack = [](const FuncDecl* pattern) -> bool {
-        if (!pattern) {
-            return false;
-        }
-        for (const auto& parameter : pattern->parameters) {
-            auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
-            if (param_decl && param_decl->is_parameter_pack) {
-                return true;
+
+    if (!lhs_layout.pack_index.has_value() &&
+        !rhs_layout.pack_index.has_value() &&
+        lhs_layout.parameter_count == rhs_layout.parameter_count) {
+        const size_t lhs_param_count = lhs_layout.parameter_count;
+        const size_t rhs_param_count = rhs_layout.parameter_count;
+
+        auto build_non_pack_partial_ordering_argument_types =
+            [&](const FunctionTemplateDecl* argument_template,
+                std::vector<QualType>& transformed_types_out) -> bool {
+            transformed_types_out.clear();
+            const auto* argument_pattern =
+                argument_template ? argument_template->function_decl() : nullptr;
+            if (!argument_pattern) {
+                return false;
             }
+
+            TemplateArgumentBindings transformed_bindings(
+                argument_template->parameters.size());
+            for (size_t idx = 0; idx < argument_template->parameters.size(); ++idx) {
+                const auto* parameter = argument_template->parameters[idx].get();
+                if (!parameter || parameter->is_parameter_pack) {
+                    return false;
+                }
+                if (isa<TemplateTypeParmDecl>(parameter)) {
+                    transformed_bindings[idx] = TemplateArgumentBinding::single(
+                        make_partial_ordering_unique_type_argument(idx));
+                }
+            }
+
+            transformed_types_out.reserve(rhs_param_count);
+            for (size_t idx = 0; idx < rhs_param_count; ++idx) {
+                auto* argument_decl =
+                    dyn_cast<ParamDecl>(argument_pattern->parameters[idx].get());
+                if (!argument_decl) {
+                    return false;
+                }
+                auto transformed_type = substitute_template_type_with_bindings(
+                    argument_decl->type,
+                    argument_template->parameters,
+                    transformed_bindings,
+                    argument_decl->location,
+                    true);
+                if (type_depends_on_template_parameters(transformed_type)) {
+                    return false;
+                }
+                transformed_types_out.push_back(transformed_type);
+            }
+            return true;
+        };
+
+        auto template_is_at_least_as_specialized_as =
+            [&](const FunctionTemplateDecl* parameter_template,
+                const FunctionTemplateDecl* argument_template) -> bool {
+            std::vector<QualType> transformed_argument_types;
+            if (!build_non_pack_partial_ordering_argument_types(
+                    argument_template,
+                    transformed_argument_types) ||
+                transformed_argument_types.size() != lhs_param_count) {
+                return false;
+            }
+
+            FunctionParameterLayout parameter_layout =
+                analyze_function_parameter_layout(
+                    parameter_template ? parameter_template->function_decl() : nullptr);
+            return function_template_is_at_least_as_specialized_as(
+                parameter_template,
+                parameter_layout,
+                transformed_argument_types);
+        };
+
+        bool lhs_at_least_as =
+            template_is_at_least_as_specialized_as(rhs_template, lhs_template);
+        bool rhs_at_least_as =
+            template_is_at_least_as_specialized_as(lhs_template, rhs_template);
+
+        if (lhs_at_least_as && !rhs_at_least_as) {
+            return TemplatePartialOrderingResult::LhsMoreSpecialized;
         }
-        return false;
-    };
-    if (has_parameter_pack(lhs_pattern) || has_parameter_pack(rhs_pattern)) {
+        if (rhs_at_least_as && !lhs_at_least_as) {
+            return TemplatePartialOrderingResult::RhsMoreSpecialized;
+        }
+        if (lhs_at_least_as && rhs_at_least_as) {
+            return TemplatePartialOrderingResult::Equivalent;
+        }
         return TemplatePartialOrderingResult::Unordered;
     }
 
     auto build_partial_ordering_argument_types =
         [&](const FunctionTemplateDecl* argument_template,
+            const FunctionParameterLayout& parameter_layout,
             std::vector<QualType>& transformed_types_out) -> bool {
         transformed_types_out.clear();
         const auto* argument_pattern =
@@ -1094,40 +1543,106 @@ Collect::compare_function_template_partial_ordering(
             return false;
         }
 
-        TemplateArgumentBindings transformed_bindings(
-            argument_template->parameters.size());
-        for (size_t idx = 0; idx < argument_template->parameters.size(); ++idx) {
-            const auto* parameter = argument_template->parameters[idx].get();
-            if (!parameter || parameter->is_parameter_pack) {
-                return false;
-            }
-            if (isa<TemplateTypeParmDecl>(parameter)) {
-                auto unique_type = std::make_shared<ObjectType>(
-                    "__aburi_partial_ordering_" + std::to_string(idx),
-                    false,
-                    true);
-                transformed_bindings[idx] = TemplateArgumentBinding::single(
-                    TemplateArgument(QualType(unique_type)));
-            }
+        FunctionParameterLayout argument_layout =
+            analyze_function_parameter_layout(argument_pattern);
+        if (!argument_layout.valid) {
+            return false;
         }
 
-        transformed_types_out.reserve(rhs_param_count);
-        for (size_t idx = 0; idx < rhs_param_count; ++idx) {
-            auto* argument_decl =
-                dyn_cast<ParamDecl>(argument_pattern->parameters[idx].get());
+        size_t target_parameter_count = 0;
+        if (!argument_layout.pack_index.has_value()) {
+            target_parameter_count = argument_layout.parameter_count;
+        } else if (!parameter_layout.pack_index.has_value()) {
+            target_parameter_count = parameter_layout.parameter_count;
+        } else {
+            target_parameter_count =
+                std::max(parameter_layout.fixed_count(),
+                         argument_layout.fixed_count()) + 1;
+        }
+
+        size_t pack_argument_count = 0;
+        if (!argument_layout.pack_index.has_value()) {
+            if (argument_layout.parameter_count != target_parameter_count) {
+                return false;
+            }
+        } else {
+            if (target_parameter_count < argument_layout.fixed_count()) {
+                return false;
+            }
+            pack_argument_count =
+                target_parameter_count - argument_layout.fixed_count();
+        }
+
+        TemplateArgumentBindings transformed_bindings;
+        if (!build_partial_ordering_transformed_bindings(
+                argument_template->parameters,
+                pack_argument_count,
+                transformed_bindings)) {
+            return false;
+        }
+
+        transformed_types_out.reserve(target_parameter_count);
+        auto append_parameter_type =
+            [&](const ParamDecl* argument_decl,
+                std::optional<size_t> pack_element_index) -> bool {
             if (!argument_decl) {
                 return false;
             }
+
+            TemplateArgumentBindings active_bindings = transformed_bindings;
+            if (pack_element_index.has_value()) {
+                std::string binding_error;
+                if (!template_sema_internal::build_pack_element_argument_bindings(
+                        argument_template->parameters,
+                        transformed_bindings,
+                        *pack_element_index,
+                        active_bindings,
+                        &binding_error)) {
+                    return false;
+                }
+            }
+
             auto transformed_type = substitute_template_type_with_bindings(
                 argument_decl->type,
                 argument_template->parameters,
-                transformed_bindings,
+                active_bindings,
                 argument_decl->location,
                 true);
             if (type_depends_on_template_parameters(transformed_type)) {
                 return false;
             }
             transformed_types_out.push_back(transformed_type);
+            return true;
+        };
+
+        for (size_t idx = 0; idx < argument_layout.leading_count; ++idx) {
+            auto* argument_decl =
+                dyn_cast<ParamDecl>(argument_pattern->parameters[idx].get());
+            if (!append_parameter_type(argument_decl, std::nullopt)) {
+                return false;
+            }
+        }
+
+        if (argument_layout.pack_index.has_value()) {
+            auto* argument_decl = dyn_cast<ParamDecl>(
+                argument_pattern->parameters[*argument_layout.pack_index].get());
+            for (size_t element_index = 0;
+                 element_index < pack_argument_count;
+                 ++element_index) {
+                if (!append_parameter_type(argument_decl, element_index)) {
+                    return false;
+                }
+            }
+        }
+
+        for (size_t idx = 0; idx < argument_layout.trailing_count; ++idx) {
+            const size_t parameter_index =
+                argument_layout.parameter_count - argument_layout.trailing_count + idx;
+            auto* argument_decl = dyn_cast<ParamDecl>(
+                argument_pattern->parameters[parameter_index].get());
+            if (!append_parameter_type(argument_decl, std::nullopt)) {
+                return false;
+            }
         }
         return true;
     };
@@ -1135,51 +1650,22 @@ Collect::compare_function_template_partial_ordering(
     auto template_is_at_least_as_specialized_as =
         [&](const FunctionTemplateDecl* parameter_template,
             const FunctionTemplateDecl* argument_template) -> bool {
-        const auto* parameter_pattern = parameter_template->function_decl();
-        if (!parameter_pattern) {
-            return false;
-        }
+        FunctionParameterLayout parameter_layout =
+            analyze_function_parameter_layout(
+                parameter_template ? parameter_template->function_decl() : nullptr);
 
         std::vector<QualType> transformed_argument_types;
         if (!build_partial_ordering_argument_types(
                 argument_template,
-                transformed_argument_types) ||
-            transformed_argument_types.size() != lhs_param_count) {
+                parameter_layout,
+                transformed_argument_types)) {
             return false;
         }
 
-        TemplateArgumentBindings deduced_arguments(
-            parameter_template->parameters.size());
-        for (size_t idx = 0; idx < lhs_param_count; ++idx) {
-            auto* parameter_decl =
-                dyn_cast<ParamDecl>(parameter_pattern->parameters[idx].get());
-            if (!parameter_decl) {
-                return false;
-            }
-
-            QualType pattern_type = parameter_decl->type;
-            QualType argument_type = transformed_argument_types[idx];
-            if (!deduce_template_argument_types_impl(
-                    pattern_type,
-                    argument_type,
-                    parameter_template->parameters,
-                    deduced_arguments,
-                    TemplateTypeDeductionMode::PartialOrdering)) {
-                return false;
-            }
-        }
-
-        for (size_t idx = 0; idx < deduced_arguments.size(); ++idx) {
-            if (deduced_arguments[idx].is_unbound()) {
-                const auto* parameter = parameter_template->parameters[idx].get();
-                if (parameter && parameter->is_parameter_pack) {
-                    deduced_arguments[idx] = TemplateArgumentBinding::pack({});
-                    continue;
-                }
-                return false;
-            }
-        }
-        return true;
+        return function_template_is_at_least_as_specialized_as(
+            parameter_template,
+            parameter_layout,
+            transformed_argument_types);
     };
 
     bool lhs_at_least_as =
@@ -1194,6 +1680,13 @@ Collect::compare_function_template_partial_ordering(
         return TemplatePartialOrderingResult::RhsMoreSpecialized;
     }
     if (lhs_at_least_as && rhs_at_least_as) {
+        int specificity = compare_pack_layout_specificity(lhs_layout, rhs_layout);
+        if (specificity > 0) {
+            return TemplatePartialOrderingResult::LhsMoreSpecialized;
+        }
+        if (specificity < 0) {
+            return TemplatePartialOrderingResult::RhsMoreSpecialized;
+        }
         return TemplatePartialOrderingResult::Equivalent;
     }
     return TemplatePartialOrderingResult::Unordered;

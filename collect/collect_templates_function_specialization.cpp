@@ -569,9 +569,6 @@ FuncDecl* Collect::instantiate_function_template_specialization(
             FunctionTemplateSpecializationInfo{
                 function_template,
                 normalized_arguments});
-        if (!specialization_is_dependent) {
-            collect_add_global_symbol(specialization_symbol);
-        }
 
         entry = &ast_ctx_->get_or_create_function_template_specialization(
             cache_key,
@@ -613,6 +610,9 @@ FuncDecl* Collect::instantiate_function_template_specialization(
     auto* specialization_decl_ptr = entry->specialization_decl.get();
     auto specialization_symbol_ptr = entry->specialization_symbol;
     specialization_symbol_ptr->function_definition = specialization_decl_ptr;
+    if (!specialization_is_dependent) {
+        collect_add_global_symbol(specialization_symbol_ptr);
+    }
 
     entry->is_instantiating = true;
     struct InstantiationGuard {
