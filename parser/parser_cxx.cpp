@@ -102,7 +102,7 @@ void merge_out_of_line_constructor_definition(
     }
 
     if (const RecordSemanticState* owner_state =
-            record_semantics_cache_lookup(owner_record_decl)) {
+            record_semantics_cache_lookup(owner_record_decl, ast_ctx.get())) {
         RecordSemanticState updated_state = *owner_state;
         for (auto& ctor : updated_state.constructors) {
             if (ctor.decl != matched_ctor_state->decl) {
@@ -119,7 +119,10 @@ void merge_out_of_line_constructor_definition(
         cpp_recompute_default_constructor_traits(
             updated_state.definition_data,
             updated_state.constructors);
-        record_semantics_cache_set(owner_record_decl, std::move(updated_state));
+        record_semantics_cache_set(
+            ast_ctx.get(),
+            owner_record_decl,
+            std::move(updated_state));
     }
 }
 } // namespace
@@ -340,7 +343,10 @@ const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
         return nullptr;
     }
 
-    record_semantics_cache_set(placeholder_decl.get(), RecordSemanticState{});
+    record_semantics_cache_set(
+        ast_ctx.get(),
+        placeholder_decl.get(),
+        RecordSemanticState{});
     collect_->collect_add_tag_decl(specialization_name, placeholder_decl.get());
     auto* semantic_owner = placeholder_decl.get();
     cpp_transient_semantic_decls_.push_back(std::move(placeholder_decl));
@@ -3967,7 +3973,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                 "' does not match any declaration in the target class",
             decl_loc);
     }
-    const RecordSemanticState* owner_state = record_semantics_cache_lookup(owner_record_decl);
+    const RecordSemanticState* owner_state =
+        record_semantics_cache_lookup(owner_record_decl, ast_ctx.get());
     if (!owner_state || owner_state->is_incomplete) {
         error_custloc(
             "incomplete type '" + qualified_owner_name +
@@ -4715,7 +4722,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
                 "' does not match any declaration in the target class",
             decl_loc);
     }
-    const RecordSemanticState* owner_state = record_semantics_cache_lookup(owner_record_decl);
+    const RecordSemanticState* owner_state =
+        record_semantics_cache_lookup(owner_record_decl, ast_ctx.get());
     if (!owner_state || owner_state->is_incomplete) {
         error_custloc(
             "incomplete type '" + qualified_owner_name +
@@ -4971,7 +4979,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
             break;
         }
     }
-    record_semantics_cache_set(owner_record_decl, std::move(updated_state));
+    record_semantics_cache_set(
+        ast_ctx.get(),
+        owner_record_decl,
+        std::move(updated_state));
 
     parsed_decls.push_back(collect_->collect_nop_declaration(decl_loc));
     return parsed_decls;

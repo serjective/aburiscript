@@ -14,32 +14,6 @@
 #include <unordered_set>
 
 namespace {
-struct EnumSemanticsCacheEntry {
-    bool is_incomplete = true;
-    bool has_negative_values = false;
-    std::shared_ptr<CType> underlying_type;
-};
-
-// Threading: these global caches assume single-threaded compilation per
-// process.  They are NOT thread-safe.  The caches are keyed by raw pointer,
-// so they also assume no ABA reuse of AST node addresses within an epoch.
-// If parallel compilation is introduced, move these into a session-owned
-// context and protect with a mutex.
-//
-// g_record_semantics_cache_epoch is a monotonic counter bumped on every
-// cache mutation.  Consumers use it to detect staleness.  On overflow it
-// resets to 1 (not 0) so that a zero sentinel always means "no epoch seen".
-std::unordered_map<const ObjectDecl*, RecordSemanticState> g_record_semantics_cache;
-std::unordered_map<const EnumDecl*, EnumSemanticsCacheEntry> g_enum_semantics_cache;
-uint64_t g_record_semantics_cache_epoch = 1;
-
-void bump_record_semantics_cache_epoch() {
-    ++g_record_semantics_cache_epoch;
-    if (g_record_semantics_cache_epoch == 0) {
-        g_record_semantics_cache_epoch = 1;
-    }
-}
-
 void set_template_binding_error(std::string* error_out,
                                 const std::string& message) {
     if (error_out && error_out->empty()) {
@@ -53,6 +27,50 @@ const ASTContext* effective_ast_context(const ASTContext* ast_ctx) {
 
 ASTContext* effective_ast_context(ASTContext* ast_ctx) {
     return ast_ctx ? ast_ctx : get_active_side_table_ast_context();
+}
+
+const ASTContext* record_semantics_ast_context(const ObjectDecl* record_decl,
+                                               const ASTContext* ast_ctx) {
+    if (ast_ctx) {
+        return ast_ctx;
+    }
+    if (const auto* owner = get_side_table_ast_context_for(record_decl)) {
+        return owner;
+    }
+    return get_active_side_table_ast_context();
+}
+
+ASTContext* record_semantics_ast_context(const ObjectDecl* record_decl,
+                                         ASTContext* ast_ctx) {
+    if (ast_ctx) {
+        return ast_ctx;
+    }
+    if (auto* owner = get_side_table_ast_context_for(record_decl)) {
+        return owner;
+    }
+    return get_active_side_table_ast_context();
+}
+
+const ASTContext* enum_semantics_ast_context(const EnumDecl* enum_decl,
+                                             const ASTContext* ast_ctx) {
+    if (ast_ctx) {
+        return ast_ctx;
+    }
+    if (const auto* owner = get_side_table_ast_context_for(enum_decl)) {
+        return owner;
+    }
+    return get_active_side_table_ast_context();
+}
+
+ASTContext* enum_semantics_ast_context(const EnumDecl* enum_decl,
+                                       ASTContext* ast_ctx) {
+    if (ast_ctx) {
+        return ast_ctx;
+    }
+    if (auto* owner = get_side_table_ast_context_for(enum_decl)) {
+        return owner;
+    }
+    return get_active_side_table_ast_context();
 }
 
 bool is_builtin_nullptr_type_impl(QualType type, const ASTContext* ast_ctx) {
@@ -708,7 +726,7 @@ bool is_supported_non_type_template_parameter_type_impl(
                 return true;
             }
             const RecordSemanticState* state =
-                record_semantics_cache_lookup(record_decl);
+                record_semantics_cache_lookup(record_decl, ast_ctx);
             bool ok = state && state->bases.empty() && state->virtual_bases.empty();
             if (ok) {
                 for (const auto& field : state->fields) {
@@ -1423,82 +1441,159 @@ std::vector<TemplateArgument> flatten_template_argument_bindings(
     return flattened;
 }
 
-void record_semantics_cache_clear() {
-    g_record_semantics_cache.clear();
-    bump_record_semantics_cache_epoch();
+void record_semantics_cache_clear(ASTContext* ast_ctx) {
+    if (!ast_ctx) {
+        return;
+    }
+    ast_ctx->clear_record_semantics_cache();
 }
 
-void record_semantics_cache_set(const ObjectDecl* record_decl, RecordSemanticState state) {
+void record_semantics_cache_clear() {
+    record_semantics_cache_clear(get_active_side_table_ast_context());
+}
+
+void record_semantics_cache_set(ASTContext* ast_ctx,
+                                const ObjectDecl* record_decl,
+                                RecordSemanticState state) {
     if (!record_decl) {
         return;
     }
-    g_record_semantics_cache[record_decl] = std::move(state);
-    bump_record_semantics_cache_epoch();
+    if (auto* cache_ctx = record_semantics_ast_context(record_decl, ast_ctx)) {
+        cache_ctx->set_record_semantics(record_decl, std::move(state));
+    }
+}
+
+void record_semantics_cache_set(const ObjectDecl* record_decl,
+                                RecordSemanticState state) {
+    record_semantics_cache_set(nullptr, record_decl, std::move(state));
+}
+
+void record_semantics_cache_erase(ASTContext* ast_ctx,
+                                  const ObjectDecl* record_decl) {
+    if (!record_decl) {
+        return;
+    }
+    if (auto* cache_ctx = record_semantics_ast_context(record_decl, ast_ctx)) {
+        cache_ctx->erase_record_semantics(record_decl);
+    }
 }
 
 void record_semantics_cache_erase(const ObjectDecl* record_decl) {
-    if (!record_decl) {
-        return;
-    }
-    if (g_record_semantics_cache.erase(record_decl) > 0) {
-        bump_record_semantics_cache_epoch();
-    }
+    record_semantics_cache_erase(nullptr, record_decl);
 }
 
-const RecordSemanticState* record_semantics_cache_lookup(const ObjectDecl* record_decl) {
+const RecordSemanticState* record_semantics_cache_lookup(
+    const ObjectDecl* record_decl,
+    const ASTContext* ast_ctx) {
     if (!record_decl) {
         return nullptr;
     }
-    auto it = g_record_semantics_cache.find(record_decl);
-    if (it == g_record_semantics_cache.end()) {
-        return nullptr;
+    if (const auto* cache_ctx = record_semantics_ast_context(record_decl, ast_ctx)) {
+        return cache_ctx->lookup_record_semantics(record_decl);
     }
-    return &it->second;
+    return nullptr;
+}
+
+const RecordSemanticState* record_semantics_cache_lookup(
+    const ObjectDecl* record_decl) {
+    return record_semantics_cache_lookup(record_decl, nullptr);
+}
+
+uint64_t record_semantics_cache_epoch(const ASTContext* ast_ctx) {
+    if (ast_ctx) {
+        return ast_ctx->record_semantics_cache_epoch();
+    }
+    if (const auto* active = get_active_side_table_ast_context()) {
+        return active->record_semantics_cache_epoch();
+    }
+    return 0;
 }
 
 uint64_t record_semantics_cache_epoch() {
-    return g_record_semantics_cache_epoch;
+    return record_semantics_cache_epoch(get_active_side_table_ast_context());
+}
+
+void enum_semantics_cache_clear(ASTContext* ast_ctx) {
+    if (!ast_ctx) {
+        return;
+    }
+    ast_ctx->clear_enum_semantics_cache();
 }
 
 void enum_semantics_cache_clear() {
-    g_enum_semantics_cache.clear();
+    enum_semantics_cache_clear(get_active_side_table_ast_context());
 }
 
-void enum_semantics_cache_set(const EnumDecl* enum_decl,
+void enum_semantics_cache_set(ASTContext* ast_ctx,
+                              const EnumDecl* enum_decl,
                               bool is_incomplete,
                               std::shared_ptr<CType> underlying_type,
                               bool has_negative_values) {
     if (!enum_decl) {
         return;
     }
-    auto& entry = g_enum_semantics_cache[enum_decl];
-    entry.is_incomplete = is_incomplete;
-    entry.underlying_type = std::move(underlying_type);
-    entry.has_negative_values = has_negative_values;
+    if (auto* cache_ctx = enum_semantics_ast_context(enum_decl, ast_ctx)) {
+        cache_ctx->set_enum_semantics(
+            enum_decl,
+            is_incomplete,
+            std::move(underlying_type),
+            has_negative_values);
+    }
 }
 
-void enum_semantics_cache_erase(const EnumDecl* enum_decl) {
+void enum_semantics_cache_set(const EnumDecl* enum_decl,
+                              bool is_incomplete,
+                              std::shared_ptr<CType> underlying_type,
+                              bool has_negative_values) {
+    enum_semantics_cache_set(
+        nullptr,
+        enum_decl,
+        is_incomplete,
+        std::move(underlying_type),
+        has_negative_values);
+}
+
+void enum_semantics_cache_erase(ASTContext* ast_ctx, const EnumDecl* enum_decl) {
     if (!enum_decl) {
         return;
     }
-    g_enum_semantics_cache.erase(enum_decl);
+    if (auto* cache_ctx = enum_semantics_ast_context(enum_decl, ast_ctx)) {
+        cache_ctx->erase_enum_semantics(enum_decl);
+    }
+}
+
+void enum_semantics_cache_erase(const EnumDecl* enum_decl) {
+    enum_semantics_cache_erase(nullptr, enum_decl);
+}
+
+bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
+                                 bool& is_incomplete_out,
+                                 std::shared_ptr<CType>& underlying_type_out,
+                                 bool& has_negative_values_out,
+                                 const ASTContext* ast_ctx) {
+    if (!enum_decl) {
+        return false;
+    }
+    if (const auto* cache_ctx = enum_semantics_ast_context(enum_decl, ast_ctx)) {
+        return cache_ctx->lookup_enum_semantics(
+            enum_decl,
+            is_incomplete_out,
+            underlying_type_out,
+            has_negative_values_out);
+    }
+    return false;
 }
 
 bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
                                  bool& is_incomplete_out,
                                  std::shared_ptr<CType>& underlying_type_out,
                                  bool& has_negative_values_out) {
-    if (!enum_decl) {
-        return false;
-    }
-    auto it = g_enum_semantics_cache.find(enum_decl);
-    if (it == g_enum_semantics_cache.end()) {
-        return false;
-    }
-    is_incomplete_out = it->second.is_incomplete;
-    underlying_type_out = it->second.underlying_type;
-    has_negative_values_out = it->second.has_negative_values;
-    return true;
+    return enum_semantics_cache_lookup(
+        enum_decl,
+        is_incomplete_out,
+        underlying_type_out,
+        has_negative_values_out,
+        nullptr);
 }
 
 namespace {

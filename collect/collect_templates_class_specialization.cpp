@@ -156,7 +156,8 @@ size_t count_public_base_subobjects(
     const ObjectDecl* derived_decl,
     const ObjectDecl* target_base_decl,
     const std::vector<RecordSemanticState::Base>& current_record_bases,
-    const ObjectDecl* current_record_decl) {
+    const ObjectDecl* current_record_decl,
+    const ASTContext* ast_ctx) {
     derived_decl = canonical_record_decl(derived_decl);
     target_base_decl = canonical_record_decl(target_base_decl);
     if (!derived_decl || !target_base_decl ||
@@ -212,7 +213,7 @@ size_t count_public_base_subobjects(
         }
 
         const RecordSemanticState* state =
-            record_semantics_cache_lookup(current_decl);
+            record_semantics_cache_lookup(current_decl, ast_ctx);
         if (!state) {
             return;
         }
@@ -230,12 +231,14 @@ bool has_public_unambiguous_base_path(
     const ObjectDecl* derived_decl,
     const ObjectDecl* target_base_decl,
     const std::vector<RecordSemanticState::Base>& current_record_bases,
-    const ObjectDecl* current_record_decl) {
+    const ObjectDecl* current_record_decl,
+    const ASTContext* ast_ctx) {
     return count_public_base_subobjects(
                derived_decl,
                target_base_decl,
                current_record_bases,
-               current_record_decl) == 1;
+               current_record_decl,
+               ast_ctx) == 1;
 }
 
 struct CovariantReturnTarget {
@@ -289,7 +292,8 @@ bool returns_are_covariant(
     QualType overriding_return,
     QualType overridden_return,
     const std::vector<RecordSemanticState::Base>& current_record_bases,
-    const ObjectDecl* current_record_decl) {
+    const ObjectDecl* current_record_decl,
+    const ASTContext* ast_ctx) {
     if (!overriding_return || !overridden_return) {
         return false;
     }
@@ -322,7 +326,8 @@ bool returns_are_covariant(
         overriding_target.object_decl,
         overridden_target.object_decl,
         current_record_bases,
-        current_record_decl);
+        current_record_decl,
+        ast_ctx);
 }
 
 struct VirtualSlotState {
@@ -459,7 +464,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         if (!build_semantic_state()) {
             return entry->specialization_decl.get();
         }
-        record_semantics_cache_set(entry->specialization_decl.get(), semantic_state);
+        record_semantics_cache_set(
+            ast_ctx(),
+            entry->specialization_decl.get(),
+            semantic_state);
         if (!resolve_static_data_members() ||
             !clone_pending_member_templates() ||
             !clone_pending_member_bodies()) {
@@ -467,6 +475,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         }
 
         record_semantics_cache_set(
+            ast_ctx(),
             entry->specialization_decl.get(),
             std::move(semantic_state));
         entry->is_instantiated = pattern->is_definition;
@@ -655,6 +664,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         RecordSemanticState placeholder_state;
         placeholder_state.is_incomplete = true;
         record_semantics_cache_set(
+            ast_ctx(),
             specialization_decl.get(),
             placeholder_state);
 
@@ -671,7 +681,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
     void build_pattern_symbol_maps() {
         pattern_state = pattern_semantic_decl
-            ? record_semantics_cache_lookup(pattern_semantic_decl)
+            ? record_semantics_cache_lookup(pattern_semantic_decl, ast_ctx())
             : nullptr;
         pattern_method_symbols.clear();
         pattern_constructor_symbols.clear();
@@ -819,7 +829,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     base_loc);
             }
             const RecordSemanticState* base_state =
-                record_semantics_cache_lookup(canonical_base_decl);
+                record_semantics_cache_lookup(canonical_base_decl, ast_ctx());
             if (!base_state || base_state->is_incomplete) {
                 return fail_instantiation(
                     "base class '" + specialized_base.name + "' is incomplete",
@@ -857,7 +867,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
             visited_base_graph.insert(current_decl);
             const RecordSemanticState* current_state =
-                record_semantics_cache_lookup(current_decl);
+                record_semantics_cache_lookup(current_decl, ast_ctx());
             if (!current_state) {
                 return;
             }
@@ -1309,13 +1319,18 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     void publish_provisional_nested_members() {
         RecordSemanticState provisional_state;
         if (const auto* existing_state =
-                record_semantics_cache_lookup(entry->specialization_decl.get())) {
+                record_semantics_cache_lookup(
+                    entry->specialization_decl.get(),
+                    ast_ctx())) {
             provisional_state = *existing_state;
         }
         provisional_state.is_incomplete = true;
         provisional_state.nested_types = nested_types;
         provisional_state.nested_templates = nested_templates;
-        record_semantics_cache_set(entry->specialization_decl.get(), provisional_state);
+        record_semantics_cache_set(
+            ast_ctx(),
+            entry->specialization_decl.get(),
+            provisional_state);
     }
 
     bool instantiate_members() {
@@ -2145,7 +2160,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     continue;
                 }
                 const RecordSemanticState* base_state =
-                    record_semantics_cache_lookup(base.record_decl);
+                    record_semantics_cache_lookup(base.record_decl, ast_ctx());
                 if (!base_state) {
                     continue;
                 }
@@ -2159,7 +2174,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 continue;
             }
             const RecordSemanticState* base_state =
-                record_semantics_cache_lookup(base.record_decl);
+                record_semantics_cache_lookup(base.record_decl, ast_ctx());
             if (!base_state) {
                 continue;
             }
@@ -2331,7 +2346,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                         overriding_type->ret_type,
                         overridden_type->ret_type,
                         direct_bases,
-                        current_record_decl)) {
+                        current_record_decl,
+                        ast_ctx())) {
                     return fail_instantiation(
                         "return type of overriding virtual function '" +
                             method.name +
@@ -2546,7 +2562,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             primary_non_virtual_base_index != std::numeric_limits<size_t>::max()) {
             const auto& primary_base = direct_bases[primary_non_virtual_base_index];
             const RecordSemanticState* primary_base_state =
-                record_semantics_cache_lookup(primary_base.record_decl);
+                record_semantics_cache_lookup(primary_base.record_decl, ast_ctx());
             primary_base_provides_vptr =
                 primary_base_state &&
                 !primary_base_state->is_incomplete &&
@@ -2583,7 +2599,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             size_t base_size_override = 0;
             size_t base_alignment_override = 1;
             if (const RecordSemanticState* base_state =
-                    record_semantics_cache_lookup(base.record_decl)) {
+                    record_semantics_cache_lookup(base.record_decl, ast_ctx())) {
                 base_size_override = (base_state->non_virtual_size_bits + 7) / 8;
                 base_alignment_override = base_state->non_virtual_alignment;
             }
@@ -2662,7 +2678,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 size_t vb_size_override = 0;
                 size_t vb_alignment_override = 1;
                 if (const RecordSemanticState* virtual_base_state =
-                        record_semantics_cache_lookup(virtual_base.record_decl)) {
+                        record_semantics_cache_lookup(
+                            virtual_base.record_decl,
+                            ast_ctx())) {
                     vb_size_override =
                         (virtual_base_state->non_virtual_size_bits + 7) / 8;
                     vb_alignment_override = virtual_base_state->non_virtual_alignment;

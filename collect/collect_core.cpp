@@ -344,8 +344,8 @@ void Collect::collect_start_translation_unit() {
     tentative_snapshots_.clear();
     function_definition_stack_.clear();
     function_tentative_snapshot_stack_.clear();
-    record_semantics_cache_clear();
-    enum_semantics_cache_clear();
+    record_semantics_cache_clear(ast_ctx_.get());
+    enum_semantics_cache_clear(ast_ctx_.get());
 }
 
 

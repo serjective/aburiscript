@@ -1474,10 +1474,22 @@ struct RecordSemanticState {
     bool has_flexible_array_member = false;
 };
 
+void record_semantics_cache_clear(ASTContext* ast_ctx);
 void record_semantics_cache_clear();
-void record_semantics_cache_set(const ObjectDecl* record_decl, RecordSemanticState state);
+void record_semantics_cache_set(ASTContext* ast_ctx,
+                                const ObjectDecl* record_decl,
+                                RecordSemanticState state);
+void record_semantics_cache_set(const ObjectDecl* record_decl,
+                                RecordSemanticState state);
+void record_semantics_cache_erase(ASTContext* ast_ctx,
+                                  const ObjectDecl* record_decl);
 void record_semantics_cache_erase(const ObjectDecl* record_decl);
-const RecordSemanticState* record_semantics_cache_lookup(const ObjectDecl* record_decl);
+const RecordSemanticState* record_semantics_cache_lookup(
+    const ObjectDecl* record_decl,
+    const ASTContext* ast_ctx);
+const RecordSemanticState* record_semantics_cache_lookup(
+    const ObjectDecl* record_decl);
+uint64_t record_semantics_cache_epoch(const ASTContext* ast_ctx);
 uint64_t record_semantics_cache_epoch();
 RecordSemanticState compute_record_semantics(std::vector<ObjectType::Field> fields,
                                              bool is_union,
@@ -1490,12 +1502,24 @@ size_t object_field_storage_size_bytes(const ObjectType::Field& field);
 size_t object_field_storage_alignment(const ObjectType::Field& field);
 std::vector<ObjectType::Field> get_record_fields_for_type_matching(
     const ObjectType* record_type);
+void enum_semantics_cache_clear(ASTContext* ast_ctx);
 void enum_semantics_cache_clear();
+void enum_semantics_cache_set(ASTContext* ast_ctx,
+                              const EnumDecl* enum_decl,
+                              bool is_incomplete,
+                              std::shared_ptr<CType> underlying_type,
+                              bool has_negative_values);
 void enum_semantics_cache_set(const EnumDecl* enum_decl,
                               bool is_incomplete,
                               std::shared_ptr<CType> underlying_type,
                               bool has_negative_values);
+void enum_semantics_cache_erase(ASTContext* ast_ctx, const EnumDecl* enum_decl);
 void enum_semantics_cache_erase(const EnumDecl* enum_decl);
+bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
+                                 bool& is_incomplete_out,
+                                 std::shared_ptr<CType>& underlying_type_out,
+                                 bool& has_negative_values_out,
+                                 const ASTContext* ast_ctx);
 bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
                                  bool& is_incomplete_out,
                                  std::shared_ptr<CType>& underlying_type_out,

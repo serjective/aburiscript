@@ -28,6 +28,7 @@ struct TemplateDecl;
 struct ClassTemplateDecl;
 struct FunctionTemplateDecl;
 struct TemplateParameterDecl;
+struct EnumDecl;
 
 // Bitfield layout info stored in the side table, keyed by MemberExpr node_id.
 struct BitfieldInfo {
@@ -78,6 +79,12 @@ struct CppLambdaClosureDeclInfo {
 struct CppLambdaInvokerInfo {
     QualType closure_type;
     const FuncDecl* call_operator_decl = nullptr;
+};
+
+struct EnumSemanticsCacheEntry {
+    bool is_incomplete = true;
+    bool has_negative_values = false;
+    std::shared_ptr<CType> underlying_type;
 };
 
 struct TemplateSpecializationSemanticKey {
@@ -459,6 +466,27 @@ public:
         const DependentNameType* type) const;
     void clear_dependent_name_resolved_types();
 
+    void clear_record_semantics_cache();
+    void set_record_semantics(const ObjectDecl* record_decl,
+                              RecordSemanticState state);
+    void erase_record_semantics(const ObjectDecl* record_decl);
+    const RecordSemanticState* lookup_record_semantics(
+        const ObjectDecl* record_decl) const;
+    uint64_t record_semantics_cache_epoch() const {
+        return record_semantics_cache_epoch_;
+    }
+
+    void clear_enum_semantics_cache();
+    void set_enum_semantics(const EnumDecl* enum_decl,
+                            bool is_incomplete,
+                            std::shared_ptr<CType> underlying_type,
+                            bool has_negative_values);
+    void erase_enum_semantics(const EnumDecl* enum_decl);
+    bool lookup_enum_semantics(const EnumDecl* enum_decl,
+                               bool& is_incomplete_out,
+                               std::shared_ptr<CType>& underlying_type_out,
+                               bool& has_negative_values_out) const;
+
     ClassTemplateSpecializationEntry* lookup_class_template_specialization(
         const ClassTemplateDecl* primary_template,
         const std::vector<TemplateArgument>& arguments);
@@ -519,6 +547,10 @@ private:
         std::unordered_map<const TemplateSpecializationType*, std::shared_ptr<CType>>;
     using DependentNameResolvedTypeMap =
         std::unordered_map<const DependentNameType*, std::shared_ptr<CType>>;
+    using RecordSemanticsCacheMap =
+        std::unordered_map<const ObjectDecl*, RecordSemanticState>;
+    using EnumSemanticsCacheMap =
+        std::unordered_map<const EnumDecl*, EnumSemanticsCacheEntry>;
 
     uint32_t node_id_counter_ = 0;
     DenseMap<AttributeList> attr_table_;
@@ -538,6 +570,8 @@ private:
     SymbolExternalSemanticInfoMap symbol_semantic_info_map_;
     TemplateSpecializationResolvedTypeMap template_specialization_resolved_type_map_;
     DependentNameResolvedTypeMap dependent_name_resolved_type_map_;
+    RecordSemanticsCacheMap record_semantics_cache_;
+    EnumSemanticsCacheMap enum_semantics_cache_;
     std::unordered_map<
         TemplateSpecializationSemanticKey,
         size_t,
@@ -551,6 +585,7 @@ private:
     std::vector<std::unique_ptr<FunctionTemplateSpecializationEntry>>
         function_template_specializations_;
     std::vector<std::unique_ptr<Decl>> retained_external_decls_;
+    uint64_t record_semantics_cache_epoch_ = 1;
     size_t template_instantiation_depth_ = 0;
     uint32_t registry_id_ = 0;
 };
@@ -560,6 +595,8 @@ ASTContext* get_side_table_ast_context_for(const FuncDecl* decl);
 ASTContext* get_side_table_ast_context_for(const TemplateDecl* decl);
 ASTContext* get_side_table_ast_context_for(const TemplateParameterDecl* decl);
 ASTContext* get_side_table_ast_context_for(const ParamDecl* decl);
+ASTContext* get_side_table_ast_context_for(const ObjectDecl* decl);
+ASTContext* get_side_table_ast_context_for(const EnumDecl* decl);
 ASTContext* get_side_table_ast_context_for(const Symbol* sym);
 
 class ASTContextSideTableScope {

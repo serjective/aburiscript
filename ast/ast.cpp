@@ -91,7 +91,7 @@ LambdaSemanticInfo make_lambda_semantic_info(ASTContext& ctx, SrcLoc loc) {
     closure_state.non_virtual_alignment = 1;
     closure_state.size_bits = 8;
     closure_state.non_virtual_size_bits = 8;
-    record_semantics_cache_set(closure_decl.get(), std::move(closure_state));
+    record_semantics_cache_set(&ctx, closure_decl.get(), std::move(closure_state));
 
     ctx.set_cpp_lambda_closure_decl_info(
         closure_decl->node_id,
@@ -116,7 +116,7 @@ BlockSemanticInfo make_block_semantic_info(ASTContext& ctx, SrcLoc loc) {
     literal_state.non_virtual_alignment = 1;
     literal_state.size_bits = 8;
     literal_state.non_virtual_size_bits = 8;
-    record_semantics_cache_set(literal_decl.get(), std::move(literal_state));
+    record_semantics_cache_set(&ctx, literal_decl.get(), std::move(literal_state));
 
     info.literal_semantic_decl = std::move(literal_decl);
     return info;

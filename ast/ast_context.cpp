@@ -757,6 +757,16 @@ ASTContext* get_side_table_ast_context_for(const ParamDecl* decl) {
                 : nullptr;
 }
 
+ASTContext* get_side_table_ast_context_for(const ObjectDecl* decl) {
+    return decl ? lookup_registered_ast_context(decl->external_semantic_owner_id)
+                : nullptr;
+}
+
+ASTContext* get_side_table_ast_context_for(const EnumDecl* decl) {
+    return decl ? lookup_registered_ast_context(decl->external_semantic_owner_id)
+                : nullptr;
+}
+
 ASTContext* get_side_table_ast_context_for(const Symbol* sym) {
     return sym ? lookup_registered_ast_context(sym->external_semantic_owner_id)
                : nullptr;
@@ -1405,6 +1415,127 @@ void ASTContext::clear_dependent_name_resolved_types() {
     dependent_name_resolved_type_map_.clear();
 }
 
+void ASTContext::clear_record_semantics_cache() {
+    std::vector<const ObjectDecl*> decls;
+    decls.reserve(record_semantics_cache_.size());
+    for (const auto& [decl, state] : record_semantics_cache_) {
+        (void)state;
+        if (decl) {
+            decls.push_back(decl);
+        }
+    }
+    record_semantics_cache_.clear();
+    ++record_semantics_cache_epoch_;
+    if (record_semantics_cache_epoch_ == 0) {
+        record_semantics_cache_epoch_ = 1;
+    }
+    for (const ObjectDecl* decl : decls) {
+        if (decl->external_semantic_owner_id == registry_id_) {
+            decl->external_semantic_owner_id = 0;
+        }
+    }
+}
+
+void ASTContext::set_record_semantics(const ObjectDecl* record_decl,
+                                      RecordSemanticState state) {
+    if (!record_decl) {
+        return;
+    }
+    record_semantics_cache_[record_decl] = std::move(state);
+    record_decl->external_semantic_owner_id = registry_id_;
+    ++record_semantics_cache_epoch_;
+    if (record_semantics_cache_epoch_ == 0) {
+        record_semantics_cache_epoch_ = 1;
+    }
+}
+
+void ASTContext::erase_record_semantics(const ObjectDecl* record_decl) {
+    if (!record_decl) {
+        return;
+    }
+    if (record_semantics_cache_.erase(record_decl) > 0) {
+        if (record_decl->external_semantic_owner_id == registry_id_) {
+            record_decl->external_semantic_owner_id = 0;
+        }
+        ++record_semantics_cache_epoch_;
+        // in case of overflowws (seems highly unlikely)
+        if (record_semantics_cache_epoch_ == 0) {
+            record_semantics_cache_epoch_ = 1;
+        }
+    }
+}
+
+const RecordSemanticState* ASTContext::lookup_record_semantics(
+    const ObjectDecl* record_decl) const {
+    if (!record_decl) {
+        return nullptr;
+    }
+    auto it = record_semantics_cache_.find(record_decl);
+    if (it == record_semantics_cache_.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
+void ASTContext::clear_enum_semantics_cache() {
+    std::vector<const EnumDecl*> decls;
+    decls.reserve(enum_semantics_cache_.size());
+    for (const auto& [decl, state] : enum_semantics_cache_) {
+        (void)state;
+        if (decl) {
+            decls.push_back(decl);
+        }
+    }
+    enum_semantics_cache_.clear();
+    for (const EnumDecl* decl : decls) {
+        if (decl->external_semantic_owner_id == registry_id_) {
+            decl->external_semantic_owner_id = 0;
+        }
+    }
+}
+
+void ASTContext::set_enum_semantics(const EnumDecl* enum_decl,
+                                    bool is_incomplete,
+                                    std::shared_ptr<CType> underlying_type,
+                                    bool has_negative_values) {
+    if (!enum_decl) {
+        return;
+    }
+    auto& entry = enum_semantics_cache_[enum_decl];
+    entry.is_incomplete = is_incomplete;
+    entry.underlying_type = std::move(underlying_type);
+    entry.has_negative_values = has_negative_values;
+    enum_decl->external_semantic_owner_id = registry_id_;
+}
+
+void ASTContext::erase_enum_semantics(const EnumDecl* enum_decl) {
+    if (!enum_decl) {
+        return;
+    }
+    if (enum_semantics_cache_.erase(enum_decl) > 0 &&
+        enum_decl->external_semantic_owner_id == registry_id_) {
+        enum_decl->external_semantic_owner_id = 0;
+    }
+}
+
+bool ASTContext::lookup_enum_semantics(
+    const EnumDecl* enum_decl,
+    bool& is_incomplete_out,
+    std::shared_ptr<CType>& underlying_type_out,
+    bool& has_negative_values_out) const {
+    if (!enum_decl) {
+        return false;
+    }
+    auto it = enum_semantics_cache_.find(enum_decl);
+    if (it == enum_semantics_cache_.end()) {
+        return false;
+    }
+    is_incomplete_out = it->second.is_incomplete;
+    underlying_type_out = it->second.underlying_type;
+    has_negative_values_out = it->second.has_negative_values;
+    return true;
+}
+
 ClassTemplateSpecializationEntry* ASTContext::lookup_class_template_specialization(
     const ClassTemplateDecl* primary_template,
     const std::vector<TemplateArgument>& arguments) {
@@ -1548,6 +1679,8 @@ void ASTContext::clear_external_semantic_side_tables() {
     clear_symbol_cpp_default_arguments();
     clear_template_specialization_resolved_types();
     clear_dependent_name_resolved_types();
+    clear_record_semantics_cache();
+    clear_enum_semantics_cache();
     external_qualifier_pool_.clear();
 }
 

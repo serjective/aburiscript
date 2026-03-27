@@ -222,6 +222,8 @@ private:
 // PR1 keeps existing ObjectDecl/EnumDecl payload ownership unchanged; later
 // migration steps will move canonical semantic ownership to TagDecl-based nodes.
 struct TagDecl : Decl {
+    mutable uint32_t external_semantic_owner_id = 0; // Side-table/cache ownership
+
     TagDeclKind get_tag_decl_kind() const {
         return get_kind() == DeclKind::EnumDecl
             ? TagDeclKind::Enum

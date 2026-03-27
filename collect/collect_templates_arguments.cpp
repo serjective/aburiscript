@@ -279,10 +279,12 @@ std::shared_ptr<Expr> clone_constexpr_variable_initializer_expr(
         return nullptr;
     }
     if (!ast_ctx) {
-        ast_ctx = get_active_side_table_ast_context();
-    }
-    if (!ast_ctx) {
         ast_ctx = get_side_table_ast_context_for(sym);
+    }
+    // Some constexpr objects used as NTTP arguments still originate from the
+    // active compilation context rather than an owned side-table entry.
+    if (!ast_ctx) {
+        ast_ctx = get_active_side_table_ast_context();
     }
     if (!ast_ctx) {
         return nullptr;

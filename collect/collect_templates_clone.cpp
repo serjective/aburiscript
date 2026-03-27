@@ -755,7 +755,8 @@ bool rebind_member_expr_for_specialized_record(MemberExpr* member,
     if (!record_decl) {
         return true;
     }
-    const RecordSemanticState* state = record_semantics_cache_lookup(record_decl);
+    const RecordSemanticState* state =
+        record_semantics_cache_lookup(record_decl, ast_ctx);
     if (!state) {
         return true;
     }
