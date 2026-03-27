@@ -2531,12 +2531,10 @@ Parser::parse_cpp_explicit_specialization_declaration(
             if (const auto* class_template =
                     dyn_cast<ClassTemplateDecl>(
                         const_cast<TemplateDecl*>(primary_template))) {
-                std::string cache_key =
-                    template_sema_internal::make_class_template_specialization_cache_key(
+                const auto* entry =
+                    ast_ctx->lookup_class_template_specialization(
                         class_template,
                         explicit_specialization->specialization_arguments);
-                const auto* entry =
-                    ast_ctx->lookup_class_template_specialization(cache_key);
                 if (!entry) {
                     return SrcLoc();
                 }
@@ -2558,12 +2556,10 @@ Parser::parse_cpp_explicit_specialization_declaration(
             if (owner_primary_template &&
                 explicit_specialization->primary_member_decl &&
                 !explicit_specialization->owner_specialization_arguments.empty()) {
-                std::string owner_cache_key =
-                    template_sema_internal::make_class_template_specialization_cache_key(
+                const auto* owner_entry =
+                    ast_ctx->lookup_class_template_specialization(
                         owner_primary_template,
                         explicit_specialization->owner_specialization_arguments);
-                const auto* owner_entry =
-                    ast_ctx->lookup_class_template_specialization(owner_cache_key);
                 if (!owner_entry) {
                     return SrcLoc();
                 }
@@ -2575,12 +2571,10 @@ Parser::parse_cpp_explicit_specialization_declaration(
                 }
             }
 
-            std::string cache_key =
-                template_sema_internal::make_function_template_specialization_cache_key(
+            const auto* entry =
+                ast_ctx->lookup_function_template_specialization(
                     lookup_template,
                     explicit_specialization->specialization_arguments);
-            const auto* entry =
-                ast_ctx->lookup_function_template_specialization(cache_key);
             return entry ? entry->first_required_loc : SrcLoc();
         };
 

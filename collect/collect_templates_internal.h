@@ -297,16 +297,8 @@ std::unique_ptr<Expr> make_constant_expr_for_template_argument(
     ASTContext* ast_ctx,
     SrcLoc loc);
 
-std::string make_class_template_specialization_cache_key(
-    const ClassTemplateDecl* class_template,
-    const std::vector<TemplateArgument>& arguments);
-
 std::string make_class_template_specialization_name(
     const ClassTemplateDecl* class_template,
-    const std::vector<TemplateArgument>& arguments);
-
-std::string make_function_template_specialization_cache_key(
-    const FunctionTemplateDecl* function_template,
     const std::vector<TemplateArgument>& arguments);
 
 std::string make_function_template_specialization_name(

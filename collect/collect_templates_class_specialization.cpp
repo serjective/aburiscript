@@ -358,7 +358,6 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     TemplateArgumentBindings specialization_bindings;
     std::vector<TemplateArgument> normalized_arguments;
 
-    std::string cache_key;
     std::string specialization_name;
     bool is_union = false;
     ClassTemplateSpecializationEntry* entry = nullptr;
@@ -625,16 +624,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     }
 
     bool prepare_entry() {
-        cache_key = make_class_template_specialization_cache_key(
-            class_template,
-            normalized_arguments);
         specialization_name = make_class_template_specialization_name(
             class_template,
             normalized_arguments);
         is_union = pattern->record_kind == CppRecordKind::Union;
 
         if (auto* existing =
-                ast_ctx()->lookup_class_template_specialization(cache_key);
+                ast_ctx()->lookup_class_template_specialization(
+                    class_template,
+                    normalized_arguments);
             existing && existing->specialization_decl) {
             existing->note_first_required_loc(loc);
             entry = existing;
@@ -662,7 +660,6 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
         auto& specialization_entry =
             ast_ctx()->get_or_create_class_template_specialization(
-                cache_key,
                 class_template,
                 normalized_arguments,
                 specialization_type,

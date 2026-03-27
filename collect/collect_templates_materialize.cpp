@@ -1,9 +1,6 @@
 #include "collect.h"
 #include "collect_templates_internal.h"
 
-using template_sema_internal::make_class_template_specialization_cache_key;
-using template_sema_internal::make_function_template_specialization_cache_key;
-
 void Collect::note_specialization_use_for_symbol(
     const std::shared_ptr<Symbol>& symbol,
     SrcLoc loc) const {
@@ -14,11 +11,10 @@ void Collect::note_specialization_use_for_symbol(
     const auto* specialization_info =
         get_symbol_function_template_specialization(symbol.get());
     if (specialization_info && specialization_info->primary_template) {
-        std::string cache_key = make_function_template_specialization_cache_key(
-            specialization_info->primary_template,
-            specialization_info->arguments);
         if (auto* entry =
-                ast_ctx_->lookup_function_template_specialization(cache_key)) {
+                ast_ctx_->lookup_function_template_specialization(
+                    specialization_info->primary_template,
+                    specialization_info->arguments)) {
             entry->note_first_required_loc(loc);
         }
         return;
@@ -37,11 +33,10 @@ void Collect::note_specialization_use_for_symbol(
         return;
     }
 
-    std::string owner_cache_key = make_class_template_specialization_cache_key(
-        owner_primary_template,
-        owner_record_type->get_template_specialization_arguments());
     auto* owner_entry =
-        ast_ctx_->lookup_class_template_specialization(owner_cache_key);
+        ast_ctx_->lookup_class_template_specialization(
+            owner_primary_template,
+            owner_record_type->get_template_specialization_arguments());
     if (!owner_entry) {
         return;
     }
@@ -207,9 +202,8 @@ QualType Collect::substitute_class_template_type(
         return substituted;
     }
     auto* specialization_entry = ast_ctx_->lookup_class_template_specialization(
-        template_sema_internal::make_class_template_specialization_cache_key(
-            class_template,
-            specialization_arguments));
+        class_template,
+        specialization_arguments);
     if (!specialization_entry || !specialization_entry->specialization_type) {
         return substituted;
     }

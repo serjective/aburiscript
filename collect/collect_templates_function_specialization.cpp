@@ -8,7 +8,6 @@ using template_sema_internal::collect_pack_expansion_shape_in_expr;
 using template_sema_internal::copy_cpp_member_decl_info;
 using template_sema_internal::find_pack_expansion_arity_for_bindings;
 using template_sema_internal::lookup_symbol_remap_in_clone_context;
-using template_sema_internal::make_function_template_specialization_cache_key;
 using template_sema_internal::make_template_binding_clone_pass_builder;
 using template_sema_internal::normalize_concrete_template_value_argument;
 using template_sema_internal::rebind_member_expr_for_specialized_record;
@@ -464,11 +463,9 @@ FuncDecl* Collect::instantiate_function_template_specialization(
         return explicit_decl;
     }
 
-    std::string cache_key =
-        make_function_template_specialization_cache_key(
-            function_template,
-            normalized_arguments);
-    auto* entry = ast_ctx_->lookup_function_template_specialization(cache_key);
+    auto* entry = ast_ctx_->lookup_function_template_specialization(
+        function_template,
+        normalized_arguments);
     if (!entry) {
         auto substituted_function_type = substitute_template_type(
             QualType(pattern->type),
@@ -571,7 +568,6 @@ FuncDecl* Collect::instantiate_function_template_specialization(
                 normalized_arguments});
 
         entry = &ast_ctx_->get_or_create_function_template_specialization(
-            cache_key,
             function_template,
             normalized_arguments,
             std::move(specialization_decl),

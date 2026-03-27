@@ -1045,22 +1045,6 @@ void append_type_cache_key(std::string& out, QualType type) {
     out += std::to_string(static_cast<int>(raw->kind));
 }
 
-std::string make_class_template_specialization_cache_key(
-    const ClassTemplateDecl* class_template,
-    const std::vector<TemplateArgument>& arguments) {
-    std::string key = "class-template:";
-    key += pointer_identity_string(class_template);
-    key += "<";
-    for (size_t idx = 0; idx < arguments.size(); ++idx) {
-        if (idx > 0) {
-            key += ",";
-        }
-        append_template_argument_cache_key(key, arguments[idx]);
-    }
-    key += ">";
-    return key;
-}
-
 std::string make_class_template_specialization_name(
     const ClassTemplateDecl* class_template,
     const std::vector<TemplateArgument>& arguments) {
@@ -1075,22 +1059,6 @@ std::string make_class_template_specialization_name(
     }
     out << ">";
     return out.str();
-}
-
-std::string make_function_template_specialization_cache_key(
-    const FunctionTemplateDecl* function_template,
-    const std::vector<TemplateArgument>& arguments) {
-    std::string key = "function-template:";
-    key += pointer_identity_string(function_template);
-    key += "<";
-    for (size_t idx = 0; idx < arguments.size(); ++idx) {
-        if (idx > 0) {
-            key += ",";
-        }
-        append_template_argument_cache_key(key, arguments[idx]);
-    }
-    key += ">";
-    return key;
 }
 
 std::string make_function_template_specialization_name(

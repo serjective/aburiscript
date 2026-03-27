@@ -80,9 +80,20 @@ struct CppLambdaInvokerInfo {
     const FuncDecl* call_operator_decl = nullptr;
 };
 
+struct TemplateSpecializationSemanticKey {
+    const TemplateDecl* primary_template = nullptr;
+    std::vector<TemplateArgument> arguments;
+
+    bool operator==(const TemplateSpecializationSemanticKey& other) const;
+};
+
+struct TemplateSpecializationSemanticKeyHash {
+    size_t operator()(const TemplateSpecializationSemanticKey& key) const;
+};
+
 struct ClassTemplateSpecializationEntry {
     const ClassTemplateDecl* primary_template = nullptr;
-    std::string canonical_key;
+    TemplateSpecializationSemanticKey semantic_key;
     std::vector<TemplateArgument> arguments;
     std::shared_ptr<ObjectType> specialization_type = nullptr;
     std::unique_ptr<ObjectDecl> specialization_decl;
@@ -206,7 +217,7 @@ struct FunctionTemplateSpecializationInfo {
 
 struct FunctionTemplateSpecializationEntry {
     const FunctionTemplateDecl* primary_template = nullptr;
-    std::string canonical_key;
+    TemplateSpecializationSemanticKey semantic_key;
     std::vector<TemplateArgument> arguments;
     std::unique_ptr<FuncDecl> specialization_decl;
     std::shared_ptr<Symbol> specialization_symbol = nullptr;
@@ -449,11 +460,12 @@ public:
     void clear_dependent_name_resolved_types();
 
     ClassTemplateSpecializationEntry* lookup_class_template_specialization(
-        std::string_view canonical_key);
+        const ClassTemplateDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments);
     const ClassTemplateSpecializationEntry* lookup_class_template_specialization(
-        std::string_view canonical_key) const;
+        const ClassTemplateDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments) const;
     ClassTemplateSpecializationEntry& get_or_create_class_template_specialization(
-        std::string canonical_key,
         const ClassTemplateDecl* primary_template,
         std::vector<TemplateArgument> arguments,
         std::shared_ptr<ObjectType> specialization_type,
@@ -464,11 +476,12 @@ public:
     }
 
     FunctionTemplateSpecializationEntry* lookup_function_template_specialization(
-        std::string_view canonical_key);
+        const FunctionTemplateDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments);
     const FunctionTemplateSpecializationEntry* lookup_function_template_specialization(
-        std::string_view canonical_key) const;
+        const FunctionTemplateDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments) const;
     FunctionTemplateSpecializationEntry& get_or_create_function_template_specialization(
-        std::string canonical_key,
         const FunctionTemplateDecl* primary_template,
         std::vector<TemplateArgument> arguments,
         std::unique_ptr<FuncDecl> specialization_decl,
@@ -525,10 +538,16 @@ private:
     SymbolExternalSemanticInfoMap symbol_semantic_info_map_;
     TemplateSpecializationResolvedTypeMap template_specialization_resolved_type_map_;
     DependentNameResolvedTypeMap dependent_name_resolved_type_map_;
-    std::unordered_map<std::string, size_t> class_template_specialization_lookup_;
+    std::unordered_map<
+        TemplateSpecializationSemanticKey,
+        size_t,
+        TemplateSpecializationSemanticKeyHash> class_template_specialization_lookup_;
     std::vector<std::unique_ptr<ClassTemplateSpecializationEntry>>
         class_template_specializations_;
-    std::unordered_map<std::string, size_t> function_template_specialization_lookup_;
+    std::unordered_map<
+        TemplateSpecializationSemanticKey,
+        size_t,
+        TemplateSpecializationSemanticKeyHash> function_template_specialization_lookup_;
     std::vector<std::unique_ptr<FunctionTemplateSpecializationEntry>>
         function_template_specializations_;
     std::vector<std::unique_ptr<Decl>> retained_external_decls_;

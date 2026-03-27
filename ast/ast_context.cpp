@@ -2,6 +2,9 @@
 #include "ast.h"
 #include "abi/target_info.h"
 
+#include <limits>
+#include <sstream>
+
 // Static empty list returned by get_attrs when no attributes exist for a node
 static const AttributeList empty_attr_list{};
 
@@ -143,7 +146,592 @@ void erase_param_decl_owner_if_unused(const ASTContext* context,
         decl->external_semantic_owner_id = 0;
     }
 }
+
+std::string pointer_identity_string(const void* ptr) {
+    return std::to_string(reinterpret_cast<uintptr_t>(ptr));
+}
+
+const TemplateDecl* canonical_template_decl_identity(const TemplateDecl* decl) {
+    return decl ? get_template_decl_canonical_decl(decl) : nullptr;
+}
+
+const TemplateDecl* template_decl_from_decl(const Decl* decl) {
+    if (const auto* alias_template =
+            dyn_cast<AliasTemplateDecl>(const_cast<Decl*>(decl))) {
+        return alias_template;
+    }
+    if (const auto* function_template =
+            dyn_cast<FunctionTemplateDecl>(const_cast<Decl*>(decl))) {
+        return function_template;
+    }
+    if (const auto* class_template =
+            dyn_cast<ClassTemplateDecl>(const_cast<Decl*>(decl))) {
+        return class_template;
+    }
+    if (const auto* partial_specialization =
+            dyn_cast<ClassTemplatePartialSpecializationDecl>(
+                const_cast<Decl*>(decl))) {
+        return partial_specialization;
+    }
+    return nullptr;
+}
+
+void append_type_semantic_fingerprint(std::string& out, QualType type);
+void append_template_argument_semantic_fingerprint(
+    std::string& out,
+    const TemplateArgument& argument);
+
+void append_template_decl_semantic_identity(std::string& out,
+                                            const TemplateDecl* decl) {
+    if (const auto* canonical = canonical_template_decl_identity(decl)) {
+        out += pointer_identity_string(canonical);
+        return;
+    }
+    out += "invalid-template";
+}
+
+void append_template_parameter_semantic_fingerprint(
+    std::string& out,
+    const TemplateParameterDecl* parameter) {
+    if (!parameter) {
+        out += "null";
+        return;
+    }
+
+    out += "P";
+    out += std::to_string(static_cast<int>(parameter->get_kind()));
+    out += ":";
+    out += std::to_string(parameter->depth);
+    out += ":";
+    out += std::to_string(parameter->index);
+    out += parameter->is_parameter_pack ? ":pack" : ":single";
+    if (!parameter->get_name().empty()) {
+        out += ":";
+        out += parameter->get_name();
+    }
+
+    if (const auto* non_type_parameter =
+            dyn_cast<TemplateNonTypeParmDecl>(
+                const_cast<TemplateParameterDecl*>(parameter))) {
+        out += ":type(";
+        append_type_semantic_fingerprint(out, non_type_parameter->type);
+        out += ")";
+        return;
+    }
+
+    if (const auto* template_template_parameter =
+            dyn_cast<TemplateTemplateParmDecl>(
+                const_cast<TemplateParameterDecl*>(parameter))) {
+        out += template_template_parameter->uses_typename_keyword
+            ? ":typename("
+            : ":class(";
+        for (size_t idx = 0;
+             idx < template_template_parameter->parameters.size();
+             ++idx) {
+            if (idx > 0) {
+                out += ",";
+            }
+            append_template_parameter_semantic_fingerprint(
+                out,
+                template_template_parameter->parameters[idx].get());
+        }
+        out += ")";
+    }
+}
+
+void append_symbol_semantic_fingerprint(std::string& out, const Symbol* sym) {
+    if (!sym) {
+        out += "null";
+        return;
+    }
+
+    out += "S";
+    out += std::to_string(static_cast<int>(sym->kind));
+    out += ":";
+    out += sym->name;
+    out += ":T(";
+    append_type_semantic_fingerprint(out, sym->type);
+    out += ")";
+    out += ":SC";
+    out += std::to_string(static_cast<int>(sym->storage_class));
+    out += ":L";
+    out += std::to_string(static_cast<int>(sym->linkage));
+    out += ":Lang";
+    out += std::to_string(static_cast<int>(sym->get_language_linkage()));
+
+    if (const auto* qualifier_prefix = get_symbol_cxx_qualifier_prefix(sym);
+        qualifier_prefix && !qualifier_prefix->empty()) {
+        out += ":Q";
+        out += *qualifier_prefix;
+    }
+
+    if (QualType owner_type = get_symbol_owner_record_type(sym)) {
+        out += ":Owner(";
+        append_type_semantic_fingerprint(out, owner_type);
+        out += ")";
+    }
+
+    if (const auto* specialization_info =
+            get_symbol_function_template_specialization(sym);
+        specialization_info && specialization_info->primary_template) {
+        out += ":FT(";
+        append_template_decl_semantic_identity(
+            out,
+            specialization_info->primary_template);
+        out += ")<";
+        for (size_t idx = 0; idx < specialization_info->arguments.size(); ++idx) {
+            if (idx > 0) {
+                out += ",";
+            }
+            append_template_argument_semantic_fingerprint(
+                out,
+                specialization_info->arguments[idx]);
+        }
+        out += ">";
+    }
+
+    if (sym->asm_label.has_value()) {
+        out += ":Asm";
+        out += *sym->asm_label;
+    }
+}
+
+void append_const_value_semantic_fingerprint(std::string& out,
+                                             const ConstValue& value) {
+    switch (value.kind) {
+        case ConstValueKind::Invalid:
+            out += "invalid";
+            return;
+        case ConstValueKind::Integer:
+            out += value.int_value.is_unsigned ? "u:" : "s:";
+            out += value.int_value.is_unsigned
+                ? std::to_string(value.int_value.to_unsigned_u64())
+                : std::to_string(
+                      static_cast<uint64_t>(value.int_value.to_signed_i64()));
+            out += ":w";
+            out += std::to_string(value.int_value.bit_width);
+            return;
+        case ConstValueKind::Boolean:
+            out += value.bool_value ? "true" : "false";
+            return;
+        case ConstValueKind::Floating: {
+            std::ostringstream stream;
+            stream.precision(std::numeric_limits<long double>::max_digits10);
+            stream << value.float_value.value;
+            out += "f:";
+            out += stream.str();
+            out += ":w";
+            out += std::to_string(value.float_value.bit_width);
+            return;
+        }
+        case ConstValueKind::NullPointer:
+            out += "null";
+            return;
+        case ConstValueKind::Address:
+            out += "addr:";
+            append_symbol_semantic_fingerprint(out, value.address_value.symbol.get());
+            out += ":off";
+            out += std::to_string(value.address_value.byte_offset);
+            return;
+        case ConstValueKind::MemberPointer:
+            out += value.member_pointer_value.is_function_member
+                ? "mfn:"
+                : "mdata:";
+            append_symbol_semantic_fingerprint(
+                out,
+                value.member_pointer_value.method_symbol.get());
+            out += ":off";
+            out += std::to_string(value.member_pointer_value.byte_offset);
+            out += ":slot";
+            out += std::to_string(value.member_pointer_value.virtual_slot_index);
+            if (value.member_pointer_value.member_name) {
+                out += ":name:";
+                out += *value.member_pointer_value.member_name;
+            }
+            return;
+        case ConstValueKind::Object:
+            out += value.object_value &&
+                    value.object_value->kind == ConstObjectValueKind::Record
+                ? "obj:{"
+                : "arr:[";
+            if (value.object_value) {
+                for (size_t idx = 0; idx < value.object_value->elements.size(); ++idx) {
+                    if (idx > 0) {
+                        out += ",";
+                    }
+                    append_const_value_semantic_fingerprint(
+                        out,
+                        value.object_value->elements[idx]);
+                }
+            }
+            out += value.object_value &&
+                    value.object_value->kind == ConstObjectValueKind::Record
+                ? "}"
+                : "]";
+            return;
+    }
+}
+
+void append_template_argument_semantic_fingerprint(
+    std::string& out,
+    const TemplateArgument& argument) {
+    out += "A";
+    if (argument.expands_parameter_pack) {
+        out += "PX[";
+        if (argument.pack_expansion_parameters.empty()) {
+            out += "implicit";
+        } else {
+            for (size_t idx = 0; idx < argument.pack_expansion_parameters.size();
+                 ++idx) {
+                if (idx > 0) {
+                    out += ",";
+                }
+                append_template_parameter_semantic_fingerprint(
+                    out,
+                    argument.pack_expansion_parameters[idx]);
+            }
+        }
+        out += "]";
+    }
+
+    switch (argument.kind) {
+        case TemplateArgumentKind::Type:
+            out += "T(";
+            append_type_semantic_fingerprint(out, argument.type);
+            out += ")";
+            return;
+        case TemplateArgumentKind::Value:
+            out += "V(";
+            append_type_semantic_fingerprint(out, argument.value_type);
+            out += "):";
+            if (argument.is_dependent) {
+                if (argument.referenced_parameter) {
+                    out += "dep:";
+                    append_template_parameter_semantic_fingerprint(
+                        out,
+                        argument.referenced_parameter);
+                } else if (!argument.value_spelling.empty()) {
+                    out += "sp:";
+                    out += argument.value_spelling;
+                } else {
+                    out += "dep";
+                }
+                return;
+            }
+            append_const_value_semantic_fingerprint(out, argument.value);
+            return;
+        case TemplateArgumentKind::Template:
+            out += "TT:";
+            if (argument.is_dependent) {
+                if (argument.referenced_parameter) {
+                    out += "dep:";
+                    append_template_parameter_semantic_fingerprint(
+                        out,
+                        argument.referenced_parameter);
+                } else if (!argument.template_name.empty()) {
+                    out += "sp:";
+                    out += argument.template_name;
+                } else {
+                    out += "dep";
+                }
+                return;
+            }
+            if (argument.template_decl) {
+                append_template_decl_semantic_identity(out, argument.template_decl);
+                return;
+            }
+            if (!argument.template_name.empty()) {
+                out += "name:";
+                out += argument.template_name;
+                return;
+            }
+            out += "invalid";
+            return;
+    }
+}
+
+void append_type_semantic_fingerprint(std::string& out, QualType type) {
+    auto canonical = desugar_typedefs(type);
+    if (!canonical) {
+        out += "null";
+        return;
+    }
+
+    out += "q";
+    out += std::to_string(canonical.get_qualifiers());
+    out += ":";
+
+    auto raw = canonical.get_shared();
+    switch (raw->kind) {
+        case TypeKind::Builtin: {
+            auto builtin = static_cast<const BuiltinType*>(raw.get());
+            out += "b";
+            out += std::to_string(static_cast<int>(builtin->builtin_kind));
+            return;
+        }
+        case TypeKind::Pointer: {
+            auto ptr = static_cast<const PointerType*>(raw.get());
+            out += "P(";
+            append_type_semantic_fingerprint(out, ptr->pointed_type);
+            out += ")";
+            return;
+        }
+        case TypeKind::Reference: {
+            auto ref = static_cast<const ReferenceType*>(raw.get());
+            out += ref->isLValueReference() ? "L(" : "R(";
+            append_type_semantic_fingerprint(out, ref->referred_type);
+            out += ")";
+            return;
+        }
+        case TypeKind::MemberPointer: {
+            auto mem_ptr = static_cast<const MemberPointerType*>(raw.get());
+            out += "M(";
+            append_type_semantic_fingerprint(out, mem_ptr->class_type);
+            out += ")(";
+            append_type_semantic_fingerprint(out, mem_ptr->member_type);
+            out += ")";
+            return;
+        }
+        case TypeKind::BlockPointer: {
+            auto blk = static_cast<const BlockPointerType*>(raw.get());
+            out += "B(";
+            append_type_semantic_fingerprint(out, blk->pointed_type);
+            out += ")";
+            return;
+        }
+        case TypeKind::Array: {
+            auto arr = static_cast<const ArrayType*>(raw.get());
+            out += "Arr(";
+            append_type_semantic_fingerprint(out, arr->element_type);
+            out += ")[";
+            out += std::to_string(static_cast<int>(arr->size_kind));
+            out += ":";
+            if (arr->size.has_value()) {
+                out += std::to_string(*arr->size);
+            } else {
+                out += "?";
+            }
+            out += "]";
+            return;
+        }
+        case TypeKind::Function: {
+            auto func = static_cast<const FunctionType*>(raw.get());
+            out += "F(";
+            append_type_semantic_fingerprint(out, func->ret_type);
+            out += ")(";
+            for (size_t idx = 0; idx < func->parameters.size(); ++idx) {
+                if (idx > 0) {
+                    out += ",";
+                }
+                append_type_semantic_fingerprint(out, func->parameters[idx]);
+            }
+            out += ")";
+            out += func->is_variadic ? "V" : "N";
+            out += func->has_prototype ? "P" : "K";
+            out += ":RQ";
+            out += std::to_string(static_cast<int>(func->member_ref_qualifier));
+            out += ":ES";
+            out += std::to_string(static_cast<int>(func->exception_spec));
+            out += func->has_explicit_exception_spec ? ":X" : ":I";
+            return;
+        }
+        case TypeKind::Object: {
+            auto object = static_cast<const ObjectType*>(raw.get());
+            out += "O";
+            if (object->get_decl()) {
+                out += pointer_identity_string(object->get_decl());
+                return;
+            }
+            out += "anon:";
+            out += object->to_string();
+            return;
+        }
+        case TypeKind::Enum: {
+            auto enum_type = static_cast<const EnumType*>(raw.get());
+            out += "E";
+            if (enum_type->get_decl()) {
+                out += pointer_identity_string(enum_type->get_decl());
+                return;
+            }
+            out += "anon:";
+            out += enum_type->to_string();
+            return;
+        }
+        case TypeKind::Vector: {
+            auto vec = static_cast<const VectorType*>(raw.get());
+            out += "V(";
+            append_type_semantic_fingerprint(out, vec->element_type);
+            out += "):";
+            out += std::to_string(vec->total_bytes);
+            return;
+        }
+        case TypeKind::Complex: {
+            auto complex = static_cast<const ComplexType*>(raw.get());
+            out += "C";
+            out += std::to_string(
+                static_cast<int>(complex->element_type->builtin_kind));
+            return;
+        }
+        case TypeKind::TemplateTypeParm: {
+            auto parm = static_cast<const TemplateTypeParmType*>(raw.get());
+            out += "TP";
+            out += parm->is_parameter_pack ? "P" : "S";
+            if (parm->parameter_decl) {
+                append_template_parameter_semantic_fingerprint(
+                    out,
+                    parm->parameter_decl);
+                return;
+            }
+            out += std::to_string(parm->depth);
+            out += ":";
+            out += std::to_string(parm->index);
+            out += ":";
+            out += parm->name;
+            return;
+        }
+        case TypeKind::TemplateSpecialization: {
+            auto specialization =
+                static_cast<const TemplateSpecializationType*>(raw.get());
+            out += "TS";
+            if (const auto* template_decl =
+                    template_decl_from_decl(specialization->primary_template)) {
+                append_template_decl_semantic_identity(out, template_decl);
+            } else if (specialization->primary_template) {
+                out += "decl:";
+                out += pointer_identity_string(specialization->primary_template);
+            } else {
+                out += specialization->template_name;
+            }
+            out += "<";
+            for (size_t idx = 0; idx < specialization->arguments.size(); ++idx) {
+                if (idx > 0) {
+                    out += ",";
+                }
+                append_template_argument_semantic_fingerprint(
+                    out,
+                    specialization->arguments[idx]);
+            }
+            out += ">";
+            if (specialization->is_dependent) {
+                out += "#dep";
+            }
+            return;
+        }
+        case TypeKind::DependentName: {
+            auto dependent_name = static_cast<const DependentNameType*>(raw.get());
+            out += "DN(";
+            append_type_semantic_fingerprint(out, dependent_name->qualifier_type);
+            out += ")::";
+            out += dependent_name->member_name;
+            if (!dependent_name->template_arguments.empty()) {
+                out += "<";
+                for (size_t idx = 0;
+                     idx < dependent_name->template_arguments.size();
+                     ++idx) {
+                    if (idx > 0) {
+                        out += ",";
+                    }
+                    append_template_argument_semantic_fingerprint(
+                        out,
+                        dependent_name->template_arguments[idx]);
+                }
+                out += ">";
+            }
+            if (dependent_name->is_current_instantiation) {
+                out += "#CI";
+            }
+            if (dependent_name->requires_typename_keyword) {
+                out += "#TY";
+            }
+            if (dependent_name->requires_template_keyword) {
+                out += "#TM";
+            }
+            return;
+        }
+        case TypeKind::Auto: {
+            auto auto_type = static_cast<const AutoType*>(raw.get());
+            out += "Auto";
+            out += std::to_string(static_cast<int>(auto_type->flavor));
+            return;
+        }
+        case TypeKind::TypeofExpr:
+            out += "TypeofExpr";
+            return;
+        case TypeKind::DecltypeExpr: {
+            auto decltype_type = static_cast<const DecltypeExprType*>(raw.get());
+            out += "DecltypeExpr";
+            if (decltype_type->use_declared_type_rule) {
+                out += "#decl";
+            }
+            return;
+        }
+        case TypeKind::Typedef:
+            out += "Typedef(";
+            append_type_semantic_fingerprint(
+                out,
+                static_cast<const TypedefType*>(raw.get())->underlying_type);
+            out += ")";
+            return;
+        case TypeKind::Other:
+        case TypeKind::Placeholder:
+            break;
+    }
+
+    out += "K";
+    out += std::to_string(static_cast<int>(raw->kind));
+}
+
+std::string make_template_specialization_semantic_fingerprint(
+    const TemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) {
+    std::string fingerprint = "template-specialization:";
+    append_template_decl_semantic_identity(fingerprint, primary_template);
+    fingerprint += "<";
+    for (size_t idx = 0; idx < arguments.size(); ++idx) {
+        if (idx > 0) {
+            fingerprint += ",";
+        }
+        append_template_argument_semantic_fingerprint(fingerprint, arguments[idx]);
+    }
+    fingerprint += ">";
+    return fingerprint;
+}
+
+TemplateSpecializationSemanticKey make_template_specialization_semantic_key(
+    const TemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) {
+    TemplateSpecializationSemanticKey key;
+    key.primary_template = canonical_template_decl_identity(primary_template);
+    key.arguments = arguments;
+    return key;
+}
+
+FunctionTemplateSpecializationInfo canonicalize_function_template_specialization_info(
+    FunctionTemplateSpecializationInfo info) {
+    info.primary_template = dyn_cast<FunctionTemplateDecl>(
+        const_cast<TemplateDecl*>(
+            canonical_template_decl_identity(info.primary_template)));
+    return info;
+}
 } // namespace
+
+bool TemplateSpecializationSemanticKey::operator==(
+    const TemplateSpecializationSemanticKey& other) const {
+    return make_template_specialization_semantic_fingerprint(
+               primary_template,
+               arguments) ==
+           make_template_specialization_semantic_fingerprint(
+               other.primary_template,
+               other.arguments);
+}
+
+size_t TemplateSpecializationSemanticKeyHash::operator()(
+    const TemplateSpecializationSemanticKey& key) const {
+    return std::hash<std::string>{}(
+        make_template_specialization_semantic_fingerprint(
+            key.primary_template,
+            key.arguments));
+}
 
 ASTContext* get_active_side_table_ast_context() {
     return g_active_side_table_ast_context;
@@ -332,7 +920,8 @@ void ASTContext::set_func_decl_function_template_specialization(
         erase_func_decl_owner_if_unused(this, decl);
         return;
     }
-    decl_info.function_template_specialization = std::move(info);
+    decl_info.function_template_specialization =
+        canonicalize_function_template_specialization_info(std::move(info));
     decl->external_semantic_owner_id = registry_id_;
 }
 
@@ -662,7 +1251,8 @@ void ASTContext::set_symbol_function_template_specialization(
         erase_symbol_owner_if_unused(this, sym);
         return;
     }
-    sym_info.function_template_specialization = std::move(info);
+    sym_info.function_template_specialization =
+        canonicalize_function_template_specialization_info(std::move(info));
     sym->external_semantic_owner_id = registry_id_;
 }
 
@@ -816,8 +1406,10 @@ void ASTContext::clear_dependent_name_resolved_types() {
 }
 
 ClassTemplateSpecializationEntry* ASTContext::lookup_class_template_specialization(
-    std::string_view canonical_key) {
-    auto it = class_template_specialization_lookup_.find(std::string(canonical_key));
+    const ClassTemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) {
+    auto key = make_template_specialization_semantic_key(primary_template, arguments);
+    auto it = class_template_specialization_lookup_.find(key);
     if (it == class_template_specialization_lookup_.end()) {
         return nullptr;
     }
@@ -828,8 +1420,11 @@ ClassTemplateSpecializationEntry* ASTContext::lookup_class_template_specializati
 }
 
 const ClassTemplateSpecializationEntry*
-ASTContext::lookup_class_template_specialization(std::string_view canonical_key) const {
-    auto it = class_template_specialization_lookup_.find(std::string(canonical_key));
+ASTContext::lookup_class_template_specialization(
+    const ClassTemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) const {
+    auto key = make_template_specialization_semantic_key(primary_template, arguments);
+    auto it = class_template_specialization_lookup_.find(key);
     if (it == class_template_specialization_lookup_.end()) {
         return nullptr;
     }
@@ -841,32 +1436,38 @@ ASTContext::lookup_class_template_specialization(std::string_view canonical_key)
 
 ClassTemplateSpecializationEntry&
 ASTContext::get_or_create_class_template_specialization(
-    std::string canonical_key,
     const ClassTemplateDecl* primary_template,
     std::vector<TemplateArgument> arguments,
     std::shared_ptr<ObjectType> specialization_type,
     std::unique_ptr<ObjectDecl> specialization_decl) {
-    auto existing = lookup_class_template_specialization(canonical_key);
-    if (existing) {
-        return *existing;
+    auto semantic_key =
+        make_template_specialization_semantic_key(primary_template, arguments);
+    auto existing_it = class_template_specialization_lookup_.find(semantic_key);
+    if (existing_it != class_template_specialization_lookup_.end() &&
+        existing_it->second < class_template_specializations_.size()) {
+        return *class_template_specializations_[existing_it->second];
     }
 
     auto entry = std::make_unique<ClassTemplateSpecializationEntry>();
-    entry->primary_template = primary_template;
-    entry->canonical_key = canonical_key;
-    entry->arguments = std::move(arguments);
+    entry->primary_template = dyn_cast<ClassTemplateDecl>(
+        const_cast<TemplateDecl*>(semantic_key.primary_template));
+    entry->semantic_key = std::move(semantic_key);
+    entry->arguments = entry->semantic_key.arguments;
     entry->specialization_type = std::move(specialization_type);
     entry->specialization_decl = std::move(specialization_decl);
 
     size_t index = class_template_specializations_.size();
-    class_template_specialization_lookup_.emplace(entry->canonical_key, index);
+    class_template_specialization_lookup_.emplace(entry->semantic_key, index);
     class_template_specializations_.push_back(std::move(entry));
     return *class_template_specializations_.back();
 }
 
 FunctionTemplateSpecializationEntry*
-ASTContext::lookup_function_template_specialization(std::string_view canonical_key) {
-    auto it = function_template_specialization_lookup_.find(std::string(canonical_key));
+ASTContext::lookup_function_template_specialization(
+    const FunctionTemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) {
+    auto key = make_template_specialization_semantic_key(primary_template, arguments);
+    auto it = function_template_specialization_lookup_.find(key);
     if (it == function_template_specialization_lookup_.end()) {
         return nullptr;
     }
@@ -877,8 +1478,11 @@ ASTContext::lookup_function_template_specialization(std::string_view canonical_k
 }
 
 const FunctionTemplateSpecializationEntry*
-ASTContext::lookup_function_template_specialization(std::string_view canonical_key) const {
-    auto it = function_template_specialization_lookup_.find(std::string(canonical_key));
+ASTContext::lookup_function_template_specialization(
+    const FunctionTemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) const {
+    auto key = make_template_specialization_semantic_key(primary_template, arguments);
+    auto it = function_template_specialization_lookup_.find(key);
     if (it == function_template_specialization_lookup_.end()) {
         return nullptr;
     }
@@ -890,25 +1494,28 @@ ASTContext::lookup_function_template_specialization(std::string_view canonical_k
 
 FunctionTemplateSpecializationEntry&
 ASTContext::get_or_create_function_template_specialization(
-    std::string canonical_key,
     const FunctionTemplateDecl* primary_template,
     std::vector<TemplateArgument> arguments,
     std::unique_ptr<FuncDecl> specialization_decl,
     std::shared_ptr<Symbol> specialization_symbol) {
-    auto existing = lookup_function_template_specialization(canonical_key);
-    if (existing) {
-        return *existing;
+    auto semantic_key =
+        make_template_specialization_semantic_key(primary_template, arguments);
+    auto existing_it = function_template_specialization_lookup_.find(semantic_key);
+    if (existing_it != function_template_specialization_lookup_.end() &&
+        existing_it->second < function_template_specializations_.size()) {
+        return *function_template_specializations_[existing_it->second];
     }
 
     auto entry = std::make_unique<FunctionTemplateSpecializationEntry>();
-    entry->primary_template = primary_template;
-    entry->canonical_key = canonical_key;
-    entry->arguments = std::move(arguments);
+    entry->primary_template = dyn_cast<FunctionTemplateDecl>(
+        const_cast<TemplateDecl*>(semantic_key.primary_template));
+    entry->semantic_key = std::move(semantic_key);
+    entry->arguments = entry->semantic_key.arguments;
     entry->specialization_decl = std::move(specialization_decl);
     entry->specialization_symbol = std::move(specialization_symbol);
 
     size_t index = function_template_specializations_.size();
-    function_template_specialization_lookup_.emplace(entry->canonical_key, index);
+    function_template_specialization_lookup_.emplace(entry->semantic_key, index);
     function_template_specializations_.push_back(std::move(entry));
     return *function_template_specializations_.back();
 }
