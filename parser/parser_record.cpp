@@ -5431,32 +5431,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
         auto qualified_declarator_context =
             prepare_qualified_declarator_context(decl_parser);
         auto& qualified_declarator = qualified_declarator_context.info;
-        auto& qualified_declarator_has_global_qualifier =
-            qualified_declarator.has_global_qualifier;
-        auto& qualified_declarator_qualifiers =
-            qualified_declarator.qualifiers;
-        auto& qualified_declarator_target_context =
-            qualified_declarator.target_context;
-        auto& qualified_declarator_target_scope =
-            qualified_declarator.target_scope;
-        auto& qualified_declarator_owner_record_decl =
-            qualified_declarator.owner_record_decl;
-        auto& qualified_declarator_owner_class_template =
-            qualified_declarator.owner_class_template;
-        auto& qualified_declarator_owner_template_arguments =
-            qualified_declarator.owner_template_arguments;
-        auto& qualified_declarator_targets_template_pattern =
-            qualified_declarator.targets_template_pattern;
-        auto& qualified_declarator_method_match =
-            qualified_declarator.method_match;
-        auto& qualified_declarator_method_template_match =
-            qualified_declarator.method_template_match;
-        auto& qualified_declarator_method_template_specialization_arguments =
-            qualified_declarator.method_template_specialization_arguments;
-        auto& qualified_declarator_static_data_match =
-            qualified_declarator.static_data_match;
-        const SrcLoc qualified_declarator_loc =
-            qualified_declarator.loc;
         struct QualifiedDeclaratorScopeRestoreGuard {
             Collect* collect = nullptr;
             std::shared_ptr<Scope> scope;
