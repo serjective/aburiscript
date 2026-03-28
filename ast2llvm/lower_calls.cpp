@@ -566,16 +566,6 @@ llvm::Value* ASTToLLVM::convert_cpp_member_call(CppMemberCallExpr *expr) {
         return convert_function_call(lowered_call);
     }
 
-    for (size_t idx = 0; idx < std::min(named_param_count, lowered_call->args.size()); ++idx) {
-        auto param_canonical = desugar_type(fn_type->parameters[idx], ast_ctx.get());
-        if (param_canonical.as_shared<ReferenceType>() ||
-            pass_aggregate_by_reference(fn_type->parameters[idx]) ||
-            has_direct_aggregate_parameter_abi(fn_type->parameters[idx])) {
-            // Keep complex ABI cases on the existing direct-call lowering path.
-            return convert_function_call(lowered_call);
-        }
-    }
-
     auto this_arg_type =
         desugar_type(lowered_call->args.front()->get_type(), ast_ctx.get())
             .as_shared<PointerType>();
@@ -659,6 +649,26 @@ llvm::Value* ASTToLLVM::convert_cpp_member_call(CppMemberCallExpr *expr) {
     llvm::FunctionType* llvm_fn_type = llvm::FunctionType::get(
         return_type, param_types, fn_type->is_variadic);
 
+    struct ParamInfo {
+        bool byref = false;
+        bool direct_aggregate = false;
+        bool reference = false;
+        QualType referred_type;
+    };
+    std::vector<ParamInfo> param_info(named_param_count);
+    for (size_t idx = 0; idx < named_param_count; ++idx) {
+        auto param_canonical = desugar_type(fn_type->parameters[idx], ast_ctx.get());
+        if (auto ref_type = param_canonical.as_shared<ReferenceType>()) {
+            param_info[idx].reference = true;
+            param_info[idx].referred_type = ref_type->referred_type;
+            continue;
+        }
+        param_info[idx].byref = pass_aggregate_by_reference(fn_type->parameters[idx]);
+        param_info[idx].direct_aggregate =
+            !param_info[idx].byref &&
+            has_direct_aggregate_parameter_abi(fn_type->parameters[idx]);
+    }
+
     std::vector<llvm::Value*> argsV;
     argsV.reserve(lowered_call->args.size() + abi_param_prefix);
     llvm::AllocaInst* indirect_result_slot = nullptr;
@@ -677,6 +687,80 @@ llvm::Value* ASTToLLVM::convert_cpp_member_call(CppMemberCallExpr *expr) {
         llvm::Value* arg_val = nullptr;
         if (idx == 0) {
             arg_val = call_this_ptr;
+        } else if (idx < named_param_count && param_info[idx].reference) {
+            Expr* arg_expr = lowered_call->args[idx].get();
+            Expr* lvalue_base = arg_expr;
+            while (auto* cast = dyn_cast<ImplicitCast>(lvalue_base)) {
+                if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
+                    lvalue_base = cast->expr.get();
+                    continue;
+                }
+                break;
+            }
+
+            llvm::Value* ref_ptr = get_lvalue(lvalue_base).address;
+            if (!ref_ptr) {
+                llvm::Value* materialized_arg = convert_expression(arg_expr);
+                if (!materialized_arg) {
+                    error("convert_cpp_member_call(): failed to lower reference argument",
+                          expr->location);
+                    return nullptr;
+                }
+
+                QualType referred_type = param_info[idx].referred_type;
+                if (!referred_type) {
+                    error("convert_cpp_member_call(): invalid reference parameter type",
+                          expr->location);
+                    return nullptr;
+                }
+                llvm::Type* referred_llvm_type =
+                    convert_type(referred_type.get_shared());
+                if (!referred_llvm_type) {
+                    error("convert_cpp_member_call(): failed to lower reference target type",
+                          expr->location);
+                    return nullptr;
+                }
+                if (materialized_arg->getType() != referred_llvm_type) {
+                    bool src_unsigned =
+                        arg_expr->get_type() && arg_expr->get_type()->isUnsigned();
+                    materialized_arg = cast_llvm_type(
+                        materialized_arg,
+                        referred_llvm_type,
+                        src_unsigned);
+                }
+
+                llvm::Function* function = builder.GetInsertBlock()->getParent();
+                llvm::Value* tmp =
+                    create_entry_alloca(function, referred_llvm_type, nullptr, "vcall.ref.tmp");
+                if (!tmp) {
+                    error("convert_cpp_member_call(): failed to allocate reference argument temporary",
+                          expr->location);
+                    return nullptr;
+                }
+                builder.CreateStore(materialized_arg, tmp);
+                ref_ptr = tmp;
+            }
+            arg_val = ref_ptr;
+        } else if (idx < named_param_count && param_info[idx].byref) {
+            arg_val = materialize_indirect_aggregate_argument(
+                *this,
+                fn_type->parameters[idx],
+                lowered_call->args[idx].get(),
+                expr->location,
+                "vcall.byref.tmp");
+            if (!arg_val) {
+                return nullptr;
+            }
+        } else if (idx < named_param_count && param_info[idx].direct_aggregate) {
+            arg_val = materialize_direct_aggregate_argument(
+                *this,
+                fn_type->parameters[idx],
+                lowered_call->args[idx].get(),
+                expr->location,
+                "vcall.coerce.tmp");
+            if (!arg_val) {
+                return nullptr;
+            }
         } else {
             arg_val = convert_expression(lowered_call->args[idx].get());
         }
@@ -687,6 +771,10 @@ llvm::Value* ASTToLLVM::convert_cpp_member_call(CppMemberCallExpr *expr) {
 
         size_t llvm_param_index = abi_param_prefix + idx;
         if (llvm_param_index < param_types.size() &&
+            !(idx < named_param_count &&
+              (param_info[idx].reference ||
+               param_info[idx].byref ||
+               param_info[idx].direct_aggregate)) &&
             arg_val->getType() != param_types[llvm_param_index]) {
             bool is_unsigned = lowered_call->args[idx]->get_type() &&
                                lowered_call->args[idx]->get_type()->isUnsigned();

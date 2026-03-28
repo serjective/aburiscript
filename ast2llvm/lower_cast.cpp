@@ -638,6 +638,52 @@ llvm::Value* ASTToLLVM::lower_complex_cast(ImplicitCast *expr) {
 }
 
 llvm::Value* ASTToLLVM::convert_explicit_cast(ExplicitCast *expr) {
+    if (canonical_type_kind(expr->ctype, ast_ctx.get()) == TypeKind::Reference) {
+        auto ref_type =
+            desugar_type(expr->ctype, ast_ctx.get()).as_shared<ReferenceType>();
+        if (!ref_type || !ref_type->referred_type) {
+            error("convert_explicit_cast(): invalid reference cast target", expr->location);
+            return nullptr;
+        }
+
+        llvm::Value* bound_addr = get_lvalue(expr->expr.get()).address;
+        if (bound_addr) {
+            return bound_addr;
+        }
+
+        llvm::Value* bound_val = convert_expression(expr->expr.get());
+        if (!bound_val) {
+            error("convert_explicit_cast(): invalid reference binding source", expr->location);
+            return nullptr;
+        }
+
+        llvm::Type* referred_llvm_type = convert_type(ref_type->referred_type.get_shared());
+        if (!referred_llvm_type) {
+            error("convert_explicit_cast(): failed to lower referred type", expr->location);
+            return nullptr;
+        }
+        if (bound_val->getType() != referred_llvm_type) {
+            bool src_unsigned = expr->expr->get_type() && expr->expr->get_type()->isUnsigned();
+            bound_val = cast_llvm_type(bound_val, referred_llvm_type, src_unsigned);
+        }
+
+        if (!builder.GetInsertBlock()) {
+            error("convert_explicit_cast(): cannot materialize reference temporary at global scope",
+                  expr->location);
+            return nullptr;
+        }
+        llvm::Function* fn = builder.GetInsertBlock()->getParent();
+        llvm::Value* tmp =
+            create_entry_alloca(fn, referred_llvm_type, nullptr, "explicit.ref.tmp");
+        if (!tmp) {
+            error("convert_explicit_cast(): failed to allocate reference temporary",
+                  expr->location);
+            return nullptr;
+        }
+        builder.CreateStore(bound_val, tmp);
+        return tmp;
+    }
+
     llvm::Value *val = convert_expression(expr->expr.get());
     if (!val) return nullptr;
 

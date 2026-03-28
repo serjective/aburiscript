@@ -1,91 +1,9 @@
 #include "ast2llvm.h"
 #include "llvm/IR/Constants.h"
-#include <limits>
 #include <optional>
 #include <string>
-#include <unordered_set>
 
 namespace {
-
-std::optional<size_t> find_cpp_base_subobject_offset_impl(
-    const ASTToLLVM& lower,
-    const ObjectDecl* derived_decl,
-    const ObjectDecl* base_decl,
-    std::unordered_set<const ObjectDecl*>& active_stack) {
-    derived_decl = lower.canonical_cpp_record_decl(derived_decl);
-    base_decl = lower.canonical_cpp_record_decl(base_decl);
-    if (!derived_decl || !base_decl) {
-        return std::nullopt;
-    }
-    if (derived_decl == base_decl) {
-        return size_t{0};
-    }
-
-    const RecordSemanticState* state = lower.lookup_cpp_record_state(derived_decl);
-    if (!state) {
-        return std::nullopt;
-    }
-
-    std::optional<size_t> found_offset;
-    for (const auto& virtual_base : state->virtual_bases) {
-        if (!virtual_base.record_decl || !virtual_base.has_offset) {
-            continue;
-        }
-        const ObjectDecl* virtual_base_decl =
-            lower.canonical_cpp_record_decl(virtual_base.record_decl);
-        if (!virtual_base_decl || virtual_base_decl != base_decl) {
-            continue;
-        }
-        if (!found_offset.has_value()) {
-            found_offset = virtual_base.offset;
-            continue;
-        }
-        if (*found_offset != virtual_base.offset) {
-            return std::nullopt;
-        }
-    }
-    if (found_offset.has_value()) {
-        return found_offset;
-    }
-
-    for (const auto& base : state->bases) {
-        if (!base.record_decl || base.is_virtual || !base.has_non_virtual_offset) {
-            continue;
-        }
-
-        const ObjectDecl* base_record_decl =
-            lower.canonical_cpp_record_decl(base.record_decl);
-        if (!base_record_decl || active_stack.contains(base_record_decl)) {
-            continue;
-        }
-
-        active_stack.insert(base_record_decl);
-        std::optional<size_t> child_offset = find_cpp_base_subobject_offset_impl(
-            lower,
-            base_record_decl,
-            base_decl,
-            active_stack);
-        active_stack.erase(base_record_decl);
-        if (!child_offset.has_value()) {
-            continue;
-        }
-        if (*child_offset >
-            std::numeric_limits<size_t>::max() - base.non_virtual_offset) {
-            continue;
-        }
-
-        size_t total_offset = base.non_virtual_offset + *child_offset;
-        if (!found_offset.has_value()) {
-            found_offset = total_offset;
-            continue;
-        }
-        if (*found_offset != total_offset) {
-            return std::nullopt;
-        }
-    }
-
-    return found_offset;
-}
 
 llvm::Type* get_cpp_intptr_type(ASTToLLVM& lower) {
     return lower.module->getDataLayout().getIntPtrType(*lower.context);
@@ -256,19 +174,7 @@ llvm::Value* emit_null_checked_pointer_adjustment(
 std::optional<size_t> ASTToLLVM::find_cpp_base_subobject_offset(
     const ObjectDecl* derived_decl,
     const ObjectDecl* base_decl) const {
-    derived_decl = canonical_cpp_record_decl(derived_decl);
-    base_decl = canonical_cpp_record_decl(base_decl);
-    if (!derived_decl || !base_decl) {
-        return std::nullopt;
-    }
-
-    std::unordered_set<const ObjectDecl*> active_stack;
-    active_stack.insert(derived_decl);
-    return find_cpp_base_subobject_offset_impl(
-        *this,
-        derived_decl,
-        base_decl,
-        active_stack);
+    return record_base_subobject_offset(derived_decl, base_decl, ast_ctx.get());
 }
 
 llvm::Value* ASTToLLVM::adjust_cpp_pointer_by_static_offset(

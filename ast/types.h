@@ -1491,6 +1491,21 @@ const RecordSemanticState* record_semantics_cache_lookup(
     const ObjectDecl* record_decl);
 uint64_t record_semantics_cache_epoch(const ASTContext* ast_ctx);
 uint64_t record_semantics_cache_epoch();
+std::string make_cpp_virtual_slot_key(const std::string& method_name,
+                                      QualType method_type,
+                                      const ASTContext* ast_ctx = nullptr);
+std::optional<size_t> record_base_subobject_offset(
+    const ObjectDecl* from_decl,
+    const ObjectDecl* to_decl,
+    const ASTContext* ast_ctx = nullptr);
+size_t count_record_base_subobjects(const ObjectDecl* derived_decl,
+                                    const ObjectDecl* target_base_decl,
+                                    bool require_public_path,
+                                    const ASTContext* ast_ctx = nullptr);
+bool has_unambiguous_record_base_path(const ObjectDecl* derived_decl,
+                                      const ObjectDecl* target_base_decl,
+                                      bool require_public_path,
+                                      const ASTContext* ast_ctx = nullptr);
 RecordSemanticState compute_record_semantics(std::vector<ObjectType::Field> fields,
                                              bool is_union,
                                              bool is_packed,

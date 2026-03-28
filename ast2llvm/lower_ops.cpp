@@ -557,6 +557,18 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
             ptr = convert_implicit_cast(cast);
             ctype = ref_type->referred_type.get_shared();
         }
+    } else if (auto* cast = dyn_cast<ExplicitCast>(expr)) {
+        if (canonical_type_kind(cast->get_type(), ast_ctx.get()) ==
+            TypeKind::Reference) {
+            auto ref_type =
+                desugar_type(cast->get_type(), ast_ctx.get()).as_shared<ReferenceType>();
+            if (!ref_type || !ref_type->referred_type) {
+                error("get_lvalue(): invalid explicit reference cast type", expr->location);
+                return {};
+            }
+            ptr = convert_explicit_cast(cast);
+            ctype = ref_type->referred_type.get_shared();
+        }
     } else if (auto* call = dyn_cast<FuncCall>(expr)) {
         if (canonical_type_kind(call->get_type(), ast_ctx.get()) ==
             TypeKind::Reference) {

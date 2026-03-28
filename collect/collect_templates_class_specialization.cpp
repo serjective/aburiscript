@@ -64,79 +64,10 @@ bool same_qualifier_prefix(const std::string* lhs, const std::string* rhs) {
     return *lhs == *rhs;
 }
 
-size_t cpp_method_user_param_start(
-    const std::shared_ptr<FunctionType>& fn_type) {
-    if (!fn_type || fn_type->parameters.empty()) {
-        return 0;
-    }
-    auto first_param =
-        desugar_type(fn_type->parameters.front()).as_shared<PointerType>();
-    if (!first_param) {
-        return 0;
-    }
-    if (canonical_type_kind(first_param->pointed_type) != TypeKind::Object) {
-        return 0;
-    }
-    return 1;
-}
-
 std::string make_virtual_slot_key(
     const std::string& method_name,
     QualType method_type) {
-    auto fn_type = desugar_type(method_type).as_shared<FunctionType>();
-    if (!fn_type) {
-        return method_name + "(<invalid>)";
-    }
-    std::ostringstream os;
-    os << method_name << "{cv=";
-    if (!fn_type->parameters.empty()) {
-        auto this_ptr =
-            desugar_type(fn_type->parameters.front()).as_shared<PointerType>();
-        if (this_ptr &&
-            canonical_type_kind(this_ptr->pointed_type) == TypeKind::Object) {
-            uint8_t this_cv = static_cast<uint8_t>(
-                this_ptr->pointed_type.get_qualifiers() &
-                static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
-            if (this_cv & QUAL_CONST) {
-                os << "c";
-            }
-            if (this_cv & QUAL_VOLATILE) {
-                os << "v";
-            }
-        }
-    }
-    os << ",ref=";
-    if (fn_type->member_ref_qualifier == FunctionRefQualifierKind::LValue) {
-        os << "&";
-    } else if (fn_type->member_ref_qualifier ==
-               FunctionRefQualifierKind::RValue) {
-        os << "&&";
-    } else {
-        os << "-";
-    }
-    os << "}(";
-    bool wrote_param = false;
-    size_t param_start = cpp_method_user_param_start(fn_type);
-    for (size_t idx = param_start; idx < fn_type->parameters.size(); ++idx) {
-        QualType param_type = fn_type->parameters[idx];
-        if (param_type && param_type->isVoid() &&
-            fn_type->parameters.size() == param_start + 1) {
-            break;
-        }
-        if (wrote_param) {
-            os << ",";
-        }
-        os << param_type.to_string();
-        wrote_param = true;
-    }
-    if (fn_type->is_variadic) {
-        if (wrote_param) {
-            os << ",";
-        }
-        os << "...";
-    }
-    os << ")";
-    return os.str();
+    return make_cpp_virtual_slot_key(method_name, method_type);
 }
 
 using BasePathStep = std::pair<const ObjectDecl*, bool>;
@@ -2653,12 +2584,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 continue;
             }
             base.has_non_virtual_offset = true;
-            if (base_index == primary_non_virtual_base_index) {
-                base.non_virtual_offset = 0;
-            } else {
-                base.non_virtual_offset =
-                    semantic_state.fields[layout_field_index].offset;
-            }
+            base.non_virtual_offset =
+                semantic_state.fields[layout_field_index].offset;
         }
 
         if (!virtual_bases.empty()) {

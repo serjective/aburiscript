@@ -1,5 +1,174 @@
 #include "ast2llvm.h"
 
+namespace {
+
+enum class CppExprValueCategory : uint8_t {
+    Unknown,
+    LValue,
+    XValue,
+    PRValue,
+};
+
+CppExprValueCategory classify_cpp_expr_value_category(
+    Expr* expr,
+    const ASTContext* ast_ctx) {
+    if (!expr) {
+        return CppExprValueCategory::Unknown;
+    }
+
+    if (auto* cast = dyn_cast<ImplicitCast>(expr)) {
+        switch (cast->kind) {
+            case ImplicitCastTypes::UNKNOWN:
+                return classify_cpp_expr_value_category(cast->expr.get(), ast_ctx);
+            case ImplicitCastTypes::LVALUE_TO_RVALUE:
+            case ImplicitCastTypes::ARITH_CAST:
+            case ImplicitCastTypes::RAW_CAST:
+            case ImplicitCastTypes::ARRAY_TO_POINTER:
+            case ImplicitCastTypes::FUNCTION_TO_POINTER:
+            case ImplicitCastTypes::LAMBDA_TO_FUNCTION_POINTER:
+            case ImplicitCastTypes::VECTOR_SPLAT:
+            case ImplicitCastTypes::REAL_TO_COMPLEX:
+            case ImplicitCastTypes::COMPLEX_TO_REAL:
+            case ImplicitCastTypes::COMPLEX_TO_COMPLEX:
+                if (auto ref = desugar_type(cast->ctype, ast_ctx).as_shared<ReferenceType>()) {
+                    return ref->isRValueReference()
+                        ? CppExprValueCategory::XValue
+                        : CppExprValueCategory::LValue;
+                }
+                return CppExprValueCategory::PRValue;
+        }
+    }
+
+    if (auto* cast = dyn_cast<ExplicitCast>(expr)) {
+        if (auto ref = desugar_type(cast->get_type(), ast_ctx).as_shared<ReferenceType>()) {
+            return ref->isRValueReference()
+                ? CppExprValueCategory::XValue
+                : CppExprValueCategory::LValue;
+        }
+        return CppExprValueCategory::PRValue;
+    }
+
+    if (auto* call = dyn_cast<FuncCall>(expr)) {
+        if (auto ref = desugar_type(call->get_type(), ast_ctx).as_shared<ReferenceType>()) {
+            return ref->isRValueReference()
+                ? CppExprValueCategory::XValue
+                : CppExprValueCategory::LValue;
+        }
+        return CppExprValueCategory::PRValue;
+    }
+
+    if (auto* call = dyn_cast<CppMemberCallExpr>(expr)) {
+        if (auto ref = desugar_type(call->get_type(), ast_ctx).as_shared<ReferenceType>()) {
+            return ref->isRValueReference()
+                ? CppExprValueCategory::XValue
+                : CppExprValueCategory::LValue;
+        }
+        return CppExprValueCategory::PRValue;
+    }
+
+    if (auto* dynamic_cast_expr = dyn_cast<CppDynamicCastExpr>(expr)) {
+        if (auto ref = desugar_type(dynamic_cast_expr->get_type(), ast_ctx)
+                           .as_shared<ReferenceType>()) {
+            return ref->isRValueReference()
+                ? CppExprValueCategory::XValue
+                : CppExprValueCategory::LValue;
+        }
+        return CppExprValueCategory::PRValue;
+    }
+
+    if (auto* unary = dyn_cast<UnaryOperation>(expr)) {
+        switch (unary->uop) {
+            case UnaryOpTypes::INCREMENT_PREFIX:
+            case UnaryOpTypes::DECREMENT_PREFIX:
+            case UnaryOpTypes::DEREFERENCE:
+                return CppExprValueCategory::LValue;
+            case UnaryOpTypes::REAL_PART:
+            case UnaryOpTypes::IMAG_PART: {
+                auto operand_category =
+                    classify_cpp_expr_value_category(unary->exp.get(), ast_ctx);
+                if (operand_category == CppExprValueCategory::LValue ||
+                    operand_category == CppExprValueCategory::XValue) {
+                    return operand_category;
+                }
+                return CppExprValueCategory::PRValue;
+            }
+            default:
+                return CppExprValueCategory::PRValue;
+        }
+    }
+
+    if (auto* member = dyn_cast<MemberExpr>(expr)) {
+        if (!member->isArrow) {
+            auto base_category =
+                classify_cpp_expr_value_category(member->base.get(), ast_ctx);
+            if (base_category == CppExprValueCategory::XValue ||
+                base_category == CppExprValueCategory::PRValue) {
+                return CppExprValueCategory::XValue;
+            }
+        }
+        return CppExprValueCategory::LValue;
+    }
+
+    if (auto* member_ptr = dyn_cast<MemberPointerAccessExpr>(expr)) {
+        if (member_ptr->is_function_member) {
+            return CppExprValueCategory::PRValue;
+        }
+        if (!member_ptr->is_arrow) {
+            auto base_category =
+                classify_cpp_expr_value_category(member_ptr->base.get(), ast_ctx);
+            if (base_category == CppExprValueCategory::XValue ||
+                base_category == CppExprValueCategory::PRValue) {
+                return CppExprValueCategory::XValue;
+            }
+        }
+        return CppExprValueCategory::LValue;
+    }
+
+    if (auto* binary = dyn_cast<BinaryOperation>(expr)) {
+        if (binary->bop == BinOpTypes::COMMA) {
+            return classify_cpp_expr_value_category(binary->right.get(), ast_ctx);
+        }
+        return CppExprValueCategory::PRValue;
+    }
+
+    if (auto* cond = dyn_cast<CondExpr>(expr)) {
+        Expr* true_operand = cond->true_expr ? cond->true_expr.get() : cond->condition.get();
+        auto true_category = classify_cpp_expr_value_category(true_operand, ast_ctx);
+        auto false_category =
+            classify_cpp_expr_value_category(cond->false_expr.get(), ast_ctx);
+        bool true_is_glvalue =
+            true_category == CppExprValueCategory::LValue ||
+            true_category == CppExprValueCategory::XValue;
+        bool false_is_glvalue =
+            false_category == CppExprValueCategory::LValue ||
+            false_category == CppExprValueCategory::XValue;
+        if (!true_is_glvalue || !false_is_glvalue || true_category != false_category) {
+            return CppExprValueCategory::PRValue;
+        }
+
+        auto true_type = true_operand ? true_operand->get_type() : QualType();
+        auto false_type = cond->false_expr ? cond->false_expr->get_type() : QualType();
+        if (!true_type || !false_type || !true_type.equals_unqualified(false_type)) {
+            return CppExprValueCategory::PRValue;
+        }
+        return true_category;
+    }
+
+    if (expr->isLValue()) {
+        return CppExprValueCategory::LValue;
+    }
+    return CppExprValueCategory::PRValue;
+}
+
+bool is_cpp_glvalue(Expr* expr, const ASTContext* ast_ctx) {
+    CppExprValueCategory category =
+        classify_cpp_expr_value_category(expr, ast_ctx);
+    return category == CppExprValueCategory::LValue ||
+           category == CppExprValueCategory::XValue;
+}
+
+} // namespace
+
 llvm::Value* ASTToLLVM::convert_cpp_typeid_expression(CppTypeIdExpr* expr) {
     if (!expr) {
         error("convert_cpp_typeid_expression(): invalid typeid expression");
@@ -25,7 +194,10 @@ llvm::Value* ASTToLLVM::convert_cpp_typeid_expression(CppTypeIdExpr* expr) {
     bool needs_dynamic_lookup = false;
     std::shared_ptr<ObjectType> operand_object_type;
     const RecordSemanticState* operand_state = nullptr;
-    if (!expr->is_type_operand && expr->expr_operand && expr->expr_operand->isLValue()) {
+    bool operand_is_glvalue =
+        !expr->is_type_operand && expr->expr_operand &&
+        is_cpp_glvalue(expr->expr_operand.get(), ast_ctx.get());
+    if (!expr->is_type_operand && expr->expr_operand && operand_is_glvalue) {
         operand_object_type =
             normalized_operand_type.as_shared<ObjectType>();
         if (operand_object_type) {

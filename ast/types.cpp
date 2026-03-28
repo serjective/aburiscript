@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cassert>
 #include <functional>
+#include <sstream>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
@@ -1511,6 +1512,308 @@ uint64_t record_semantics_cache_epoch(const ASTContext* ast_ctx) {
 
 uint64_t record_semantics_cache_epoch() {
     return record_semantics_cache_epoch(get_active_side_table_ast_context());
+}
+
+std::string make_cpp_virtual_slot_key(const std::string& method_name,
+                                      QualType method_type,
+                                      const ASTContext* ast_ctx) {
+    auto fn_type = desugar_type(method_type, ast_ctx).as_shared<FunctionType>();
+    if (!fn_type) {
+        return method_name + "(<invalid>)";
+    }
+
+    auto append_canonical_param = [&](std::ostringstream& os,
+                                      QualType param_type) {
+        QualType canonical_param = desugar_type(param_type, ast_ctx);
+        os << canonical_param.to_string();
+    };
+
+    std::ostringstream os;
+    os << method_name << "{cv=";
+    if (!fn_type->parameters.empty()) {
+        auto this_ptr =
+            desugar_type(fn_type->parameters.front(), ast_ctx).as_shared<PointerType>();
+        if (this_ptr &&
+            canonical_type_kind(this_ptr->pointed_type) == TypeKind::Object) {
+            uint8_t this_cv = static_cast<uint8_t>(
+                this_ptr->pointed_type.get_qualifiers() &
+                static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
+            if (this_cv & QUAL_CONST) {
+                os << "c";
+            }
+            if (this_cv & QUAL_VOLATILE) {
+                os << "v";
+            }
+        }
+    }
+    os << ",ref=";
+    if (fn_type->member_ref_qualifier == FunctionRefQualifierKind::LValue) {
+        os << "&";
+    } else if (fn_type->member_ref_qualifier ==
+               FunctionRefQualifierKind::RValue) {
+        os << "&&";
+    } else {
+        os << "-";
+    }
+    os << "}(";
+
+    bool wrote_param = false;
+    size_t param_start = 0;
+    if (!fn_type->parameters.empty()) {
+        auto first_param =
+            desugar_type(fn_type->parameters.front(), ast_ctx).as_shared<PointerType>();
+        if (first_param &&
+            canonical_type_kind(first_param->pointed_type) == TypeKind::Object) {
+            param_start = 1;
+        }
+    }
+    for (size_t idx = param_start; idx < fn_type->parameters.size(); ++idx) {
+        QualType param_type = fn_type->parameters[idx];
+        if (param_type && param_type->isVoid() &&
+            fn_type->parameters.size() == param_start + 1) {
+            break;
+        }
+        if (wrote_param) {
+            os << ",";
+        }
+        append_canonical_param(os, param_type);
+        wrote_param = true;
+    }
+    if (fn_type->is_variadic) {
+        if (wrote_param) {
+            os << ",";
+        }
+        os << "...";
+    }
+    os << ")";
+    return os.str();
+}
+
+namespace {
+
+const ObjectDecl* canonical_record_semantics_decl(const ObjectDecl* decl) {
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto record_type = decl->get_record_type()) {
+        if (auto* canonical_decl =
+                dyn_cast<ObjectDecl>(record_type->get_decl())) {
+            return canonical_decl;
+        }
+    }
+    return decl;
+}
+
+struct BaseOffsetQueryResult {
+    bool found = false;
+    bool ambiguous = false;
+    size_t offset = 0;
+};
+
+void merge_base_offset_candidate(BaseOffsetQueryResult& aggregate,
+                                 size_t candidate_offset) {
+    if (!aggregate.found) {
+        aggregate.found = true;
+        aggregate.offset = candidate_offset;
+        return;
+    }
+    if (aggregate.offset != candidate_offset) {
+        aggregate.ambiguous = true;
+    }
+}
+
+BaseOffsetQueryResult record_base_subobject_offset_impl(
+    const ObjectDecl* current_decl,
+    const ObjectDecl* target_decl,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const ObjectDecl*>& active_stack) {
+    current_decl = canonical_record_semantics_decl(current_decl);
+    target_decl = canonical_record_semantics_decl(target_decl);
+    if (!current_decl || !target_decl) {
+        return {};
+    }
+    if (current_decl == target_decl) {
+        BaseOffsetQueryResult result;
+        result.found = true;
+        result.offset = 0;
+        return result;
+    }
+
+    const RecordSemanticState* state =
+        record_semantics_cache_lookup(current_decl, ast_ctx);
+    if (!state) {
+        return {};
+    }
+
+    BaseOffsetQueryResult aggregate;
+    for (const auto& virtual_base : state->virtual_bases) {
+        if (!virtual_base.record_decl || !virtual_base.has_offset) {
+            continue;
+        }
+        const ObjectDecl* virtual_base_decl =
+            canonical_record_semantics_decl(virtual_base.record_decl);
+        if (virtual_base_decl != target_decl) {
+            continue;
+        }
+        merge_base_offset_candidate(aggregate, virtual_base.offset);
+        if (aggregate.ambiguous) {
+            return aggregate;
+        }
+    }
+    if (aggregate.found) {
+        return aggregate;
+    }
+
+    for (const auto& base : state->bases) {
+        if (!base.record_decl || base.is_virtual || !base.has_non_virtual_offset) {
+            continue;
+        }
+        const ObjectDecl* base_decl =
+            canonical_record_semantics_decl(base.record_decl);
+        if (!base_decl || active_stack.contains(base_decl)) {
+            continue;
+        }
+
+        active_stack.insert(base_decl);
+        BaseOffsetQueryResult child = record_base_subobject_offset_impl(
+            base_decl,
+            target_decl,
+            ast_ctx,
+            active_stack);
+        active_stack.erase(base_decl);
+        if (child.ambiguous) {
+            aggregate.ambiguous = true;
+            return aggregate;
+        }
+        if (!child.found) {
+            continue;
+        }
+        if (child.offset >
+            std::numeric_limits<size_t>::max() - base.non_virtual_offset) {
+            continue;
+        }
+        size_t total_offset = base.non_virtual_offset + child.offset;
+        merge_base_offset_candidate(aggregate, total_offset);
+        if (aggregate.ambiguous) {
+            return aggregate;
+        }
+    }
+    return aggregate;
+}
+
+using BasePathStep = std::pair<const ObjectDecl*, bool>;
+
+std::string encode_base_path_key(const std::vector<BasePathStep>& path) {
+    std::string key;
+    key.reserve(path.size() * 24);
+    for (const auto& step : path) {
+        key += step.second ? "V:" : "N:";
+        key += std::to_string(reinterpret_cast<uintptr_t>(step.first));
+        key.push_back(';');
+    }
+    return key;
+}
+
+} // namespace
+
+std::optional<size_t> record_base_subobject_offset(
+    const ObjectDecl* from_decl,
+    const ObjectDecl* to_decl,
+    const ASTContext* ast_ctx) {
+    from_decl = canonical_record_semantics_decl(from_decl);
+    to_decl = canonical_record_semantics_decl(to_decl);
+    if (!from_decl || !to_decl) {
+        return std::nullopt;
+    }
+    if (from_decl == to_decl) {
+        return size_t{0};
+    }
+    std::unordered_set<const ObjectDecl*> active_stack;
+    active_stack.insert(from_decl);
+    BaseOffsetQueryResult result = record_base_subobject_offset_impl(
+        from_decl,
+        to_decl,
+        ast_ctx,
+        active_stack);
+    if (!result.found || result.ambiguous) {
+        return std::nullopt;
+    }
+    return result.offset;
+}
+
+size_t count_record_base_subobjects(const ObjectDecl* derived_decl,
+                                    const ObjectDecl* target_base_decl,
+                                    bool require_public_path,
+                                    const ASTContext* ast_ctx) {
+    derived_decl = canonical_record_semantics_decl(derived_decl);
+    target_base_decl = canonical_record_semantics_decl(target_base_decl);
+    if (!derived_decl || !target_base_decl || derived_decl == target_base_decl) {
+        return 0;
+    }
+
+    std::unordered_set<std::string> matched_subobjects;
+    std::vector<BasePathStep> path;
+    std::unordered_set<const ObjectDecl*> active_stack;
+    active_stack.insert(derived_decl);
+
+    std::function<void(const ObjectDecl*)> walk =
+        [&](const ObjectDecl* current_decl) {
+        current_decl = canonical_record_semantics_decl(current_decl);
+        if (!current_decl) {
+            return;
+        }
+        if (current_decl == target_base_decl) {
+            if (!path.empty()) {
+                matched_subobjects.insert(encode_base_path_key(path));
+            }
+            return;
+        }
+
+        const RecordSemanticState* state =
+            record_semantics_cache_lookup(current_decl, ast_ctx);
+        if (!state) {
+            return;
+        }
+
+        for (const auto& base : state->bases) {
+            const ObjectDecl* base_decl =
+                canonical_record_semantics_decl(base.record_decl);
+            if (!base_decl ||
+                (require_public_path &&
+                 base.declared_access != RecordMemberAccess::Public) ||
+                active_stack.contains(base_decl)) {
+                continue;
+            }
+
+            auto saved_path = path;
+            if (base.is_virtual) {
+                path.clear();
+                path.emplace_back(base_decl, true);
+            } else {
+                path.emplace_back(base_decl, false);
+            }
+
+            active_stack.insert(base_decl);
+            walk(base_decl);
+            active_stack.erase(base_decl);
+            path = std::move(saved_path);
+        }
+    };
+
+    walk(derived_decl);
+    return matched_subobjects.size();
+}
+
+bool has_unambiguous_record_base_path(const ObjectDecl* derived_decl,
+                                      const ObjectDecl* target_base_decl,
+                                      bool require_public_path,
+                                      const ASTContext* ast_ctx) {
+    size_t path_count = count_record_base_subobjects(
+        derived_decl,
+        target_base_decl,
+        require_public_path,
+        ast_ctx);
+    return path_count == 1;
 }
 
 void enum_semantics_cache_clear(ASTContext* ast_ctx) {
