@@ -1418,24 +1418,19 @@ bool Collect::finalize_cpp_lambda_semantics(
     }
 
     auto* closure_owner_type = closure_owner->get_record_type().get();
-    RecordSemanticState updated_state;
-    if (closure_fields.empty()) {
-        updated_state.is_incomplete = false;
-        updated_state.alignment = 1;
-        updated_state.non_virtual_alignment = 1;
-        updated_state.size_bits = 8;
-        updated_state.non_virtual_size_bits = 8;
-    } else {
-        updated_state = compute_record_semantics(
-            std::move(closure_fields),
-            closure_owner_type->is_union,
-            closure_owner_type->is_packed,
-            closure_owner_type->requested_alignment,
-            closure_owner_type->pack_alignment,
-            false,
-            ast_ctx_->abi_policy.get());
-    }
-    record_semantics_cache_set(closure_owner, updated_state);
+    CollectRecordBuildContext closure_ctx;
+    closure_ctx.record = lambda.semantic_info.closure_record_decl.get();
+    closure_ctx.loc = lambda.location;
+    closure_ctx.record_name = lambda.closure_name();
+    closure_ctx.tag = lambda.closure_name();
+    closure_ctx.is_union_record = closure_owner_type->is_union;
+    closure_ctx.record_type = closure_owner->get_record_type();
+    closure_ctx.semantic_decl = closure_owner;
+    closure_ctx.fields = std::move(closure_fields);
+    closure_ctx.semantic_state.is_incomplete = false;
+    collect_record_compute_layout(closure_ctx);
+    collect_record_publish_semantics(closure_ctx);
+    RecordSemanticState updated_state = std::move(closure_ctx.semantic_state);
 
     if (!lambda.semantic_info.capture_initializers.empty()) {
         auto init_list = collect_initializer_list_expression(lambda.location);
@@ -1746,24 +1741,10 @@ bool Collect::finalize_cpp_lambda_semantics(
             set_symbol_owner_record_type(
                 synthesized_symbol.get(),
                 lambda.semantic_info.closure_type());
-            std::vector<const Expr*> default_arguments(
-                synthesized_method->parameters.size(),
-                nullptr);
-            for (size_t index = 0;
-                 index < synthesized_method->parameters.size();
-                 ++index) {
-                auto* param_decl = dyn_cast<ParamDecl>(
-                    synthesized_method->parameters[index].get());
-                if (!param_decl) {
-                    continue;
-                }
-                default_arguments[index] =
-                    get_param_decl_default_argument(param_decl);
-            }
-            merge_symbol_cpp_default_arguments(
-                synthesized_symbol.get(),
-                default_arguments,
-                nullptr);
+            collect_record_register_function_default_arguments(
+                synthesized_symbol,
+                synthesized_method.get(),
+                synthesized_method->location);
             if (synthesized_method->body) {
                 synthesized_symbol->function_definition =
                     synthesized_method.get();
@@ -1816,7 +1797,10 @@ bool Collect::finalize_cpp_lambda_semantics(
         lambda.semantic_info.closure_record_decl->members.push_back(
             std::move(function_template));
     }
-    record_semantics_cache_set(closure_owner, std::move(updated_state));
+    collect_record_publish_state(
+        closure_owner,
+        closure_owner->get_record_type(),
+        updated_state);
 
     bool has_syntactic_captures =
         lambda.closure_info.default_capture != CppLambdaCaptureDefault::None ||
@@ -2010,15 +1994,17 @@ bool Collect::collect_finalize_block_expression(BlockExpr& block,
     }
 
     auto* literal_type = literal_record->get_record_type().get();
-    RecordSemanticState literal_state = compute_record_semantics(
-        std::move(literal_fields),
-        literal_type->is_union,
-        literal_type->is_packed,
-        literal_type->requested_alignment,
-        literal_type->pack_alignment,
-        false,
-        ast_ctx_->abi_policy.get());
-    record_semantics_cache_set(literal_record, std::move(literal_state));
+    CollectRecordBuildContext literal_ctx;
+    literal_ctx.loc = block.location;
+    literal_ctx.record_name = block.semantic_info.literal_name();
+    literal_ctx.tag = literal_record->tag;
+    literal_ctx.is_union_record = literal_type->is_union;
+    literal_ctx.record_type = literal_record->get_record_type();
+    literal_ctx.semantic_decl = literal_record;
+    literal_ctx.fields = std::move(literal_fields);
+    literal_ctx.semantic_state.is_incomplete = false;
+    collect_record_compute_layout(literal_ctx);
+    collect_record_publish_semantics(literal_ctx);
 
     auto* invoke_function_type =
         invoke_type.as_shared<FunctionType>().get();

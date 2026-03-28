@@ -276,34 +276,6 @@ struct VirtualSlotState {
 
 } // namespace
 
-struct Collect::CollectRecordBuildContext {
-    const CppRecordDecl& record;
-    const std::string& record_name;
-    const std::string& tag;
-    bool is_union_record = false;
-    std::shared_ptr<ObjectType> record_type;
-    ObjectDecl* semantic_decl = nullptr;
-    std::vector<std::unique_ptr<Decl>>* transient_decls_out = nullptr;
-    CppRecordDeferredBodyCallback deferred_body_callback;
-
-    std::vector<RecordSemanticState::Base> bases;
-    std::vector<RecordSemanticState::VirtualBase> virtual_bases;
-
-    std::vector<ObjectType::Field> fields;
-    std::vector<RecordSemanticState::Method> methods;
-    std::vector<RecordSemanticState::MethodTemplate> method_templates;
-    std::vector<RecordSemanticState::StaticDataMember> static_data_members;
-    std::vector<RecordSemanticState::NestedType> nested_types;
-    std::vector<RecordSemanticState::NestedTemplate> nested_templates;
-    std::unordered_set<std::string> seen_static_data_member_names;
-    std::vector<RecordSemanticState::Constructor> constructors;
-    std::vector<RecordSemanticState::Destructor> destructors;
-    std::vector<const FieldDecl*> required_ctor_member_init_fields;
-
-    std::vector<RecordSemanticState::VirtualSlot> semantic_virtual_slots;
-    RecordSemanticState semantic_state;
-};
-
 std::unique_ptr<Decl> Collect::collect_build_cpp_record_semantic_decl(
     const CppRecordDecl& record,
     std::optional<std::string> semantic_tag_name,
@@ -366,7 +338,8 @@ std::unique_ptr<Decl> Collect::collect_build_cpp_record_semantic_decl(
     RecordSemanticState semantic_state;
     if (record.is_definition) {
         CollectRecordBuildContext ctx{
-            record,
+            &record,
+            record.location,
             record_name,
             tag,
             is_union_record,
@@ -374,6 +347,12 @@ std::unique_ptr<Decl> Collect::collect_build_cpp_record_semantic_decl(
             semantic_decl.get(),
             transient_decls_out,
             std::move(deferred_body_callback)};
+        ctx.semantic_state.is_incomplete = false;
+        ctx.semantic_state.alignment = 1;
+        ctx.semantic_state.non_virtual_alignment = 1;
+        if (const auto* definition_data = record.get_definition_data()) {
+            ctx.semantic_state.definition_data = *definition_data;
+        }
         ctx.fields.reserve(record.members.size());
         ctx.methods.reserve(record.members.size());
         ctx.method_templates.reserve(record.members.size());
@@ -395,7 +374,7 @@ std::unique_ptr<Decl> Collect::collect_build_cpp_record_semantic_decl(
 
         if (ctx.deferred_body_callback) {
             ctx.deferred_body_callback(
-                ctx.record,
+                *ctx.record,
                 ctx.record_type,
                 ctx.semantic_state);
         }
@@ -471,10 +450,16 @@ void Collect::collect_record_register_function_default_arguments(
 }
 
 void Collect::collect_record_resolve_bases(CollectRecordBuildContext& ctx) const {
-    ctx.bases.reserve(ctx.record.bases.size());
+    if (!ctx.record) {
+        report_error(
+            "internal error: record base resolution requires parsed record syntax",
+            ctx.loc);
+        return;
+    }
+    ctx.bases.reserve(ctx.record->bases.size());
     std::unordered_set<const ObjectDecl*> seen_direct_bases;
-    seen_direct_bases.reserve(ctx.record.bases.size());
-    for (const auto& base_spec : ctx.record.bases) {
+    seen_direct_bases.reserve(ctx.record->bases.size());
+    for (const auto& base_spec : ctx.record->bases) {
         RecordSemanticState::Base semantic_base;
         std::string base_name = cpp_base_specifier_name(base_spec);
         semantic_base.name = base_name;
@@ -606,6 +591,12 @@ void Collect::collect_record_walk_virtual_bases(
 }
 
 void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) const {
+    if (!ctx.record) {
+        report_error(
+            "internal error: record member collection requires parsed record syntax",
+            ctx.loc);
+        return;
+    }
     auto ensure_namespace_qualifier_prefix = [&](std::string& qualifier_prefix) {
         if (!lang_opts_.is_cxx_mode()) {
             return;
@@ -614,8 +605,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) con
             collect_current_scope(),
             qualifier_prefix);
     };
-    RecordMemberAccess current_access = encode_cpp_access(ctx.record.default_access);
-    for (const auto& member : ctx.record.members) {
+    RecordMemberAccess current_access = encode_cpp_access(ctx.record->default_access);
+    for (const auto& member : ctx.record->members) {
         if (const auto* access_spec = dyn_cast<CppAccessSpecDecl>(member.get())) {
             current_access = encode_cpp_access(access_spec->access);
             continue;
@@ -1535,7 +1526,7 @@ void Collect::collect_record_resolve_virtual_dispatch(
         bool inherited_final =
             overrides_base && inherited_slot_it->second.is_final;
 
-        SrcLoc method_loc = method.decl ? method.decl->location : ctx.record.location;
+        SrcLoc method_loc = method.decl ? method.decl->location : ctx.loc;
         if (overrides_base && inherited_slot_it->second.final_symbol) {
             auto overriding_type =
                 desugar_type(method.type).as_shared<FunctionType>();
@@ -1639,7 +1630,7 @@ void Collect::collect_record_resolve_virtual_dispatch(
         bool inherited_final =
             overrides_base && inherited_slot_it->second.is_final;
 
-        SrcLoc dtor_loc = dtor.decl ? dtor.decl->location : ctx.record.location;
+        SrcLoc dtor_loc = dtor.decl ? dtor.decl->location : ctx.loc;
         if (inherited_final) {
             report_error("cannot override final virtual destructor", dtor_loc);
         }
@@ -1729,6 +1720,7 @@ void Collect::collect_record_resolve_virtual_dispatch(
 void Collect::collect_record_compute_layout(CollectRecordBuildContext& ctx) const {
     RecordSemanticState::DefinitionData definition_data =
         ctx.semantic_state.definition_data;
+    bool record_is_incomplete = ctx.semantic_state.is_incomplete;
     bool semantic_is_polymorphic = ctx.semantic_state.is_polymorphic;
     bool semantic_requires_vptr =
         semantic_is_polymorphic || !ctx.virtual_bases.empty();
@@ -1827,7 +1819,7 @@ void Collect::collect_record_compute_layout(CollectRecordBuildContext& ctx) cons
         false,
         0,
         0,
-        false,
+        record_is_incomplete,
         abi_policy);
     ctx.semantic_state.definition_data = definition_data;
     ctx.semantic_state.non_virtual_size_bits = ctx.semantic_state.size_bits;
@@ -1918,7 +1910,7 @@ void Collect::collect_record_compute_layout(CollectRecordBuildContext& ctx) cons
             false,
             0,
             0,
-            false,
+            record_is_incomplete,
             abi_policy);
         complete_layout_state.definition_data = definition_data;
         ctx.semantic_state.fields = std::move(complete_layout_state.fields);
@@ -1944,6 +1936,16 @@ void Collect::collect_record_compute_layout(CollectRecordBuildContext& ctx) cons
     ctx.semantic_state.virtual_slots = std::move(computed_virtual_slots);
 }
 
+void Collect::collect_record_publish_state(
+    ObjectDecl* semantic_decl,
+    const std::shared_ptr<ObjectType>& record_type,
+    const RecordSemanticState& state) const {
+    if (record_type) {
+        record_type->set_decl(semantic_decl);
+    }
+    record_semantics_cache_set(ast_ctx_.get(), semantic_decl, state);
+}
+
 void Collect::collect_record_publish_semantics(
     CollectRecordBuildContext& ctx) const {
     ctx.semantic_state.bases = std::move(ctx.bases);
@@ -1955,9 +1957,8 @@ void Collect::collect_record_publish_semantics(
     ctx.semantic_state.nested_templates = std::move(ctx.nested_templates);
     ctx.semantic_state.constructors = std::move(ctx.constructors);
     ctx.semantic_state.destructors = std::move(ctx.destructors);
-    if (ctx.record_type) {
-        ctx.record_type->set_decl(ctx.semantic_decl);
-    }
-
-    record_semantics_cache_set(ast_ctx_.get(), ctx.semantic_decl, ctx.semantic_state);
+    collect_record_publish_state(
+        ctx.semantic_decl,
+        ctx.record_type,
+        std::move(ctx.semantic_state));
 }

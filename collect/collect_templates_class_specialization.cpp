@@ -395,20 +395,16 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         if (!build_semantic_state()) {
             return entry->specialization_decl.get();
         }
-        record_semantics_cache_set(
-            ast_ctx(),
-            entry->specialization_decl.get(),
-            semantic_state);
         if (!resolve_static_data_members() ||
             !clone_pending_member_templates() ||
             !clone_pending_member_bodies()) {
             return entry->specialization_decl.get();
         }
 
-        record_semantics_cache_set(
-            ast_ctx(),
+        collect.collect_record_publish_state(
             entry->specialization_decl.get(),
-            std::move(semantic_state));
+            entry->specialization_type,
+            semantic_state);
         entry->is_instantiated = pattern->is_definition;
         return entry->specialization_decl.get();
     }
@@ -2462,229 +2458,6 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return true;
     }
 
-    void build_layout_state() {
-        RecordSemanticState::DefinitionData definition_data =
-            semantic_state.definition_data;
-        bool semantic_is_polymorphic = semantic_state.is_polymorphic;
-        bool semantic_requires_vptr =
-            semantic_is_polymorphic || !virtual_bases.empty();
-        bool semantic_is_abstract = semantic_state.is_abstract;
-        bool semantic_has_virtual_destructor =
-            semantic_state.has_virtual_destructor;
-        auto computed_virtual_slots = semantic_state.virtual_slots;
-        auto type_ctx = ast_ctx() ? ast_ctx()->type_ctx.get() : nullptr;
-        const AbiPolicy* abi_policy =
-            ast_ctx() && ast_ctx()->abi_policy ? ast_ctx()->abi_policy.get() : nullptr;
-
-        size_t primary_non_virtual_base_index = std::numeric_limits<size_t>::max();
-        for (size_t base_index = 0; base_index < direct_bases.size(); ++base_index) {
-            const auto& base = direct_bases[base_index];
-            if (base.is_virtual ||
-                !base.type ||
-                canonical_type_kind(base.type) != TypeKind::Object) {
-                continue;
-            }
-            primary_non_virtual_base_index = base_index;
-            break;
-        }
-
-        bool primary_base_provides_vptr = false;
-        if (semantic_requires_vptr &&
-            primary_non_virtual_base_index != std::numeric_limits<size_t>::max()) {
-            const auto& primary_base = direct_bases[primary_non_virtual_base_index];
-            const RecordSemanticState* primary_base_state =
-                record_semantics_cache_lookup(primary_base.record_decl, ast_ctx());
-            primary_base_provides_vptr =
-                primary_base_state &&
-                !primary_base_state->is_incomplete &&
-                (primary_base_state->is_polymorphic ||
-                 !primary_base_state->virtual_bases.empty());
-        }
-        bool inject_own_vptr_field =
-            semantic_requires_vptr && !is_union && !primary_base_provides_vptr;
-
-        std::vector<ObjectType::Field> layout_fields;
-        layout_fields.reserve(
-            user_fields.size() + direct_bases.size() +
-            (inject_own_vptr_field ? 1 : 0));
-        std::vector<size_t> direct_base_layout_field_indices(
-            direct_bases.size(),
-            std::numeric_limits<size_t>::max());
-        if (inject_own_vptr_field) {
-            auto void_type = type_ctx ? type_ctx->get_builtin(BuiltinTypes::Void) : nullptr;
-            if (void_type) {
-                QualType vptr_type(
-                    std::make_shared<PointerType>(QualType(void_type)));
-                layout_fields.push_back(
-                    ObjectType::Field("", vptr_type, 0, RecordMemberAccess::Private));
-            }
-        }
-        for (size_t base_index = 0; base_index < direct_bases.size(); ++base_index) {
-            const auto& base = direct_bases[base_index];
-            if (base.is_virtual ||
-                !base.type ||
-                canonical_type_kind(base.type) != TypeKind::Object) {
-                continue;
-            }
-            direct_base_layout_field_indices[base_index] = layout_fields.size();
-            size_t base_size_override = 0;
-            size_t base_alignment_override = 1;
-            if (const RecordSemanticState* base_state =
-                    record_semantics_cache_lookup(base.record_decl, ast_ctx())) {
-                base_size_override = (base_state->non_virtual_size_bits + 7) / 8;
-                base_alignment_override = base_state->non_virtual_alignment;
-            }
-            if (base_size_override == 0 && base.type) {
-                int64_t fallback_width = base.type->getWidthBytes();
-                if (fallback_width > 0) {
-                    base_size_override = static_cast<size_t>(fallback_width);
-                }
-            }
-            if (base_size_override == 0) {
-                base_size_override = 1;
-            }
-            if (base_alignment_override == 0 && base.type) {
-                if (auto base_obj = desugar_type(base.type).as_shared<ObjectType>()) {
-                    base_alignment_override = base_obj->getAlignment();
-                }
-            }
-            if (base_alignment_override == 0) {
-                base_alignment_override = 1;
-            }
-            ObjectType::Field base_field("", base.type, 0, base.declared_access);
-            base_field.is_base_subobject = true;
-            base_field.storage_size_override = base_size_override;
-            base_field.storage_alignment_override = base_alignment_override;
-            layout_fields.push_back(std::move(base_field));
-        }
-        for (const auto& field : user_fields) {
-            layout_fields.push_back(field);
-        }
-
-        semantic_state = compute_record_semantics(
-            std::move(layout_fields),
-            is_union,
-            false,
-            0,
-            0,
-            !pattern->is_definition,
-            abi_policy);
-        semantic_state.definition_data = definition_data;
-        semantic_state.non_virtual_size_bits = semantic_state.size_bits;
-        semantic_state.non_virtual_alignment = semantic_state.alignment;
-        for (size_t base_index = 0; base_index < direct_bases.size(); ++base_index) {
-            auto& base = direct_bases[base_index];
-            base.has_non_virtual_offset = false;
-            base.non_virtual_offset = 0;
-            size_t layout_field_index = direct_base_layout_field_indices[base_index];
-            if (layout_field_index == std::numeric_limits<size_t>::max()) {
-                continue;
-            }
-            if (layout_field_index >= semantic_state.fields.size()) {
-                continue;
-            }
-            base.has_non_virtual_offset = true;
-            base.non_virtual_offset =
-                semantic_state.fields[layout_field_index].offset;
-        }
-
-        if (!virtual_bases.empty()) {
-            auto complete_layout_fields = semantic_state.fields;
-            complete_layout_fields.reserve(
-                complete_layout_fields.size() + virtual_bases.size());
-            std::vector<size_t> virtual_base_layout_field_indices(
-                virtual_bases.size(),
-                std::numeric_limits<size_t>::max());
-            auto uchar_type = type_ctx ? type_ctx->get_builtin(BuiltinTypes::UChar) : nullptr;
-            if (!uchar_type && type_ctx) {
-                uchar_type = type_ctx->get_builtin(BuiltinTypes::Char);
-            }
-
-            for (size_t vb_index = 0; vb_index < virtual_bases.size(); ++vb_index) {
-                auto& virtual_base = virtual_bases[vb_index];
-                size_t vb_size_override = 0;
-                size_t vb_alignment_override = 1;
-                if (const RecordSemanticState* virtual_base_state =
-                        record_semantics_cache_lookup(
-                            virtual_base.record_decl,
-                            ast_ctx())) {
-                    vb_size_override =
-                        (virtual_base_state->non_virtual_size_bits + 7) / 8;
-                    vb_alignment_override = virtual_base_state->non_virtual_alignment;
-                }
-                if (vb_size_override == 0 && virtual_base.type) {
-                    int64_t fallback_width = virtual_base.type->getWidthBytes();
-                    if (fallback_width > 0) {
-                        vb_size_override = static_cast<size_t>(fallback_width);
-                    }
-                }
-                if (vb_size_override == 0) {
-                    vb_size_override = 1;
-                }
-                if (vb_alignment_override == 0 && virtual_base.type) {
-                    if (auto virtual_obj =
-                            desugar_type(virtual_base.type).as_shared<ObjectType>()) {
-                        vb_alignment_override = virtual_obj->getAlignment();
-                    }
-                }
-                if (vb_alignment_override == 0) {
-                    vb_alignment_override = 1;
-                }
-
-                QualType virtual_storage_type = virtual_base.type;
-                if (uchar_type) {
-                    virtual_storage_type = QualType(
-                        std::make_shared<ArrayType>(
-                            QualType(uchar_type),
-                            std::optional<size_t>(vb_size_override)));
-                }
-                ObjectType::Field virtual_storage_field(
-                    "",
-                    virtual_storage_type,
-                    0,
-                    virtual_base.declared_access);
-                virtual_storage_field.is_base_subobject = true;
-                virtual_storage_field.is_virtual_base_storage = true;
-                virtual_storage_field.storage_size_override = vb_size_override;
-                virtual_storage_field.storage_alignment_override =
-                    vb_alignment_override;
-                virtual_base_layout_field_indices[vb_index] =
-                    complete_layout_fields.size();
-                complete_layout_fields.push_back(std::move(virtual_storage_field));
-            }
-
-            RecordSemanticState complete_layout_state = compute_record_semantics(
-                std::move(complete_layout_fields),
-                is_union,
-                false,
-                0,
-                0,
-                false,
-                abi_policy);
-            complete_layout_state.definition_data = definition_data;
-            semantic_state.fields = std::move(complete_layout_state.fields);
-            semantic_state.size_bits = complete_layout_state.size_bits;
-            semantic_state.alignment = complete_layout_state.alignment;
-            semantic_state.has_flexible_array_member =
-                complete_layout_state.has_flexible_array_member;
-
-            for (size_t vb_index = 0; vb_index < virtual_bases.size(); ++vb_index) {
-                size_t layout_field_index = virtual_base_layout_field_indices[vb_index];
-                if (layout_field_index >= semantic_state.fields.size()) {
-                    continue;
-                }
-                virtual_bases[vb_index].has_offset = true;
-                virtual_bases[vb_index].offset =
-                    semantic_state.fields[layout_field_index].offset;
-            }
-        }
-
-        semantic_state.is_polymorphic = semantic_is_polymorphic;
-        semantic_state.is_abstract = semantic_is_abstract;
-        semantic_state.has_virtual_destructor = semantic_has_virtual_destructor;
-        semantic_state.virtual_slots = std::move(computed_virtual_slots);
-    }
-
     bool build_semantic_state() {
         semantic_state = RecordSemanticState{};
         semantic_state.is_incomplete = !pattern->is_definition;
@@ -2694,17 +2467,31 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         if (!resolve_virtual_dispatch_state()) {
             return false;
         }
-        build_layout_state();
-        semantic_state.is_incomplete = !pattern->is_definition;
-        semantic_state.bases = direct_bases;
-        semantic_state.virtual_bases = virtual_bases;
-        semantic_state.methods = std::move(methods);
-        semantic_state.method_templates = std::move(method_templates);
-        semantic_state.constructors = std::move(constructors);
-        semantic_state.destructors = std::move(destructors);
-        semantic_state.static_data_members = std::move(static_data_members);
-        semantic_state.nested_types = std::move(nested_types);
-        semantic_state.nested_templates = std::move(nested_templates);
+        CollectRecordBuildContext ctx;
+        ctx.record = pattern;
+        ctx.loc = loc;
+        ctx.record_name = specialization_name;
+        ctx.tag = specialization_name;
+        ctx.is_union_record = is_union;
+        ctx.record_type = entry ? entry->specialization_type : nullptr;
+        ctx.semantic_decl =
+            entry && entry->specialization_decl
+                ? entry->specialization_decl.get()
+                : nullptr;
+        ctx.bases = std::move(direct_bases);
+        ctx.virtual_bases = std::move(virtual_bases);
+        ctx.fields = std::move(user_fields);
+        ctx.methods = std::move(methods);
+        ctx.method_templates = std::move(method_templates);
+        ctx.constructors = std::move(constructors);
+        ctx.destructors = std::move(destructors);
+        ctx.static_data_members = std::move(static_data_members);
+        ctx.nested_types = std::move(nested_types);
+        ctx.nested_templates = std::move(nested_templates);
+        ctx.semantic_state = semantic_state;
+        collect.collect_record_compute_layout(ctx);
+        collect.collect_record_publish_semantics(ctx);
+        semantic_state = std::move(ctx.semantic_state);
         return true;
     }
 

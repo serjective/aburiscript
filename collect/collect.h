@@ -866,7 +866,34 @@ public:
     }
 
 private:
-    struct CollectRecordBuildContext;
+    struct CollectRecordBuildContext {
+        const CppRecordDecl* record = nullptr;
+        SrcLoc loc;
+        std::string record_name;
+        std::string tag;
+        bool is_union_record = false;
+        std::shared_ptr<ObjectType> record_type;
+        ObjectDecl* semantic_decl = nullptr;
+        std::vector<std::unique_ptr<Decl>>* transient_decls_out = nullptr;
+        CppRecordDeferredBodyCallback deferred_body_callback;
+
+        std::vector<RecordSemanticState::Base> bases;
+        std::vector<RecordSemanticState::VirtualBase> virtual_bases;
+
+        std::vector<ObjectType::Field> fields;
+        std::vector<RecordSemanticState::Method> methods;
+        std::vector<RecordSemanticState::MethodTemplate> method_templates;
+        std::vector<RecordSemanticState::StaticDataMember> static_data_members;
+        std::vector<RecordSemanticState::NestedType> nested_types;
+        std::vector<RecordSemanticState::NestedTemplate> nested_templates;
+        std::unordered_set<std::string> seen_static_data_member_names;
+        std::vector<RecordSemanticState::Constructor> constructors;
+        std::vector<RecordSemanticState::Destructor> destructors;
+        std::vector<const FieldDecl*> required_ctor_member_init_fields;
+
+        std::vector<RecordSemanticState::VirtualSlot> semantic_virtual_slots;
+        RecordSemanticState semantic_state;
+    };
 
     struct DelayedDiagnostic {
         bool is_error = true;
@@ -915,6 +942,9 @@ private:
     void collect_record_resolve_virtual_dispatch(
         CollectRecordBuildContext& ctx) const;
     void collect_record_compute_layout(CollectRecordBuildContext& ctx) const;
+    void collect_record_publish_state(ObjectDecl* semantic_decl,
+                                      const std::shared_ptr<ObjectType>& record_type,
+                                      const RecordSemanticState& state) const;
     void collect_record_publish_semantics(CollectRecordBuildContext& ctx) const;
 
     struct FunctionDefinitionState {
