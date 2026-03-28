@@ -43,6 +43,7 @@ set(COLLECT_SOURCES
         collect/collect_decl_variable.cpp
         collect/collect_decl_variable_helpers.cpp
         collect/collect_decl_symbols.cpp
+        collect/collect_record.cpp
         collect/collect_init.cpp
         collect/collect_templates_arguments.cpp
         collect/collect_templates_packs.cpp

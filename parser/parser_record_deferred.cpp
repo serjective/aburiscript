@@ -5,24 +5,8 @@
 // record-semantic build phases so class layout and body reparsing can evolve
 // independently.
 
-void Parser::build_cpp_record_assemble_state(CppRecordBuildContext& ctx) {
-    ctx.semantic_state.bases = std::move(ctx.bases);
-    ctx.semantic_state.virtual_bases = std::move(ctx.virtual_bases);
-    ctx.semantic_state.methods = std::move(ctx.methods);
-    ctx.semantic_state.method_templates = std::move(ctx.method_templates);
-    ctx.semantic_state.static_data_members = std::move(ctx.static_data_members);
-    ctx.semantic_state.nested_types = std::move(ctx.nested_types);
-    ctx.semantic_state.nested_templates = std::move(ctx.nested_templates);
-    ctx.semantic_state.constructors = std::move(ctx.constructors);
-    ctx.semantic_state.destructors = std::move(ctx.destructors);
-    ctx.record_type->set_decl(ctx.semantic_decl);
-
-    // Publish complete class semantics before rebinding inline method bodies
-    // so member lookups can see declarations that appear later in class text.
-    record_semantics_cache_set(ast_ctx.get(), ctx.semantic_decl, ctx.semantic_state);
-}
-
-void Parser::build_cpp_record_parse_deferred_bodies(CppRecordBuildContext& ctx) {
+void Parser::build_cpp_record_parse_deferred_bodies(
+    const CppRecordDeferredParseContext& ctx) {
     struct DeferredInlineParserState {
         size_t token_idx = 0;
         std::shared_ptr<CType> active_func_type;

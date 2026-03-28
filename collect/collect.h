@@ -81,6 +81,11 @@ public:
         bool ambiguous = false;
     };
 
+    using CppRecordDeferredBodyCallback = std::function<void(
+        const CppRecordDecl& record,
+        const std::shared_ptr<ObjectType>& record_type,
+        const RecordSemanticState& semantic_state)>;
+
     enum class ConversionSequenceKind {
         Identity,
         LValueToRValue,
@@ -244,6 +249,12 @@ public:
 
     std::shared_ptr<CType> collect_lookup_tag_type(const std::string& tag,
                                                    bool look_parents = true) const ;
+
+    std::unique_ptr<Decl> collect_build_cpp_record_semantic_decl(
+        const CppRecordDecl& record,
+        std::optional<std::string> semantic_tag_name = std::nullopt,
+        std::vector<std::unique_ptr<Decl>>* transient_decls_out = nullptr,
+        CppRecordDeferredBodyCallback deferred_body_callback = {}) const ;
 
     ObjectDecl* collect_instantiate_class_template_specialization(
         const ClassTemplateDecl* class_template,
@@ -855,6 +866,8 @@ public:
     }
 
 private:
+    struct CollectRecordBuildContext;
+
     struct DelayedDiagnostic {
         bool is_error = true;
         std::string message;
@@ -888,6 +901,21 @@ private:
 
     bool finalize_cpp_lambda_semantics(CppLambdaExpr& lambda,
                                        std::string* error_out = nullptr) const;
+
+    void collect_record_register_function_default_arguments(
+        const std::shared_ptr<Symbol>& sym,
+        const FuncDecl* decl,
+        SrcLoc fallback_loc) const;
+
+    void collect_record_resolve_bases(CollectRecordBuildContext& ctx) const;
+    void collect_record_walk_virtual_bases(CollectRecordBuildContext& ctx) const;
+    void collect_record_collect_members(CollectRecordBuildContext& ctx) const;
+    void collect_record_synthesize_implicit_members(
+        CollectRecordBuildContext& ctx) const;
+    void collect_record_resolve_virtual_dispatch(
+        CollectRecordBuildContext& ctx) const;
+    void collect_record_compute_layout(CollectRecordBuildContext& ctx) const;
+    void collect_record_publish_semantics(CollectRecordBuildContext& ctx) const;
 
     struct FunctionDefinitionState {
         bool in_function = false;

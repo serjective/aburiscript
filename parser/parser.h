@@ -431,8 +431,9 @@ private:
     std::unique_ptr<Decl> parse_parameter_declaration();
 
     // === Record and declarator parsing ===
-    // Owns struct/union/class declarations, class-member declaration matching,
-    // and the semantic record-build pipeline hooks.
+    // Owns struct/union/class syntax, class-member declaration matching, and
+    // deferred inline member body replay. Ordinary record semantic completion
+    // is delegated to Collect.
     std::unique_ptr<Decl> parse_struct_specifier();
     std::unique_ptr<Decl> parse_cpp_record_specifier(
         std::vector<TemplateArgument>* specialization_arguments_out = nullptr,
@@ -442,40 +443,13 @@ private:
     std::unique_ptr<Decl> build_cpp_record_semantic_decl(
         const CppRecordDecl& record,
         std::optional<std::string> semantic_tag_name = std::nullopt);
-
-    struct CppRecordBuildContext {
+    struct CppRecordDeferredParseContext {
         const CppRecordDecl& record;
-        const std::string& record_name;
-        const std::string& tag;
-        bool is_union_record;
         std::shared_ptr<ObjectType> record_type;
-        ObjectDecl* semantic_decl;
-
-        std::vector<RecordSemanticState::Base> bases;
-        std::vector<RecordSemanticState::VirtualBase> virtual_bases;
-
-        std::vector<ObjectType::Field> fields;
-        std::vector<RecordSemanticState::Method> methods;
-        std::vector<RecordSemanticState::MethodTemplate> method_templates;
-        std::vector<RecordSemanticState::StaticDataMember> static_data_members;
-        std::vector<RecordSemanticState::NestedType> nested_types;
-        std::vector<RecordSemanticState::NestedTemplate> nested_templates;
-        std::unordered_set<std::string> seen_static_data_member_names;
-        std::vector<RecordSemanticState::Constructor> constructors;
-        std::vector<RecordSemanticState::Destructor> destructors;
-        std::vector<const FieldDecl*> required_ctor_member_init_fields;
-
-        std::vector<RecordSemanticState::VirtualSlot> semantic_virtual_slots;
         RecordSemanticState semantic_state;
     };
-    void build_cpp_record_resolve_bases(CppRecordBuildContext& ctx);
-    void build_cpp_record_walk_virtual_bases(CppRecordBuildContext& ctx);
-    void build_cpp_record_collect_members(CppRecordBuildContext& ctx);
-    void build_cpp_record_synthesize_implicit_members(CppRecordBuildContext& ctx);
-    void build_cpp_record_resolve_virtual_dispatch(CppRecordBuildContext& ctx);
-    void build_cpp_record_compute_layout(CppRecordBuildContext& ctx);
-    void build_cpp_record_assemble_state(CppRecordBuildContext& ctx);
-    void build_cpp_record_parse_deferred_bodies(CppRecordBuildContext& ctx);
+    void build_cpp_record_parse_deferred_bodies(
+        const CppRecordDeferredParseContext& ctx);
     const ObjectDecl* ensure_cpp_specialized_record_semantic_owner(
         CppRecordKind record_kind,
         const std::string& name,
