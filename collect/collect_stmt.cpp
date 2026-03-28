@@ -111,7 +111,7 @@ std::unique_ptr<Stmt> Collect::collect_asm_statement(std::string asm_template, b
 
 std::unique_ptr<Stmt> Collect::collect_break_statement(SrcLoc loc) const {
 
-    if (func_state_.loop_depth <= 0 && func_state_.switch_depth <= 0) {
+    if (session_.func_state_.loop_depth <= 0 && session_.func_state_.switch_depth <= 0) {
         report_error("break statement not in loop or switch statement", loc);
     }
     return collect_make<BreakStmt>(loc);
@@ -120,16 +120,16 @@ std::unique_ptr<Stmt> Collect::collect_break_statement(SrcLoc loc) const {
 
 std::unique_ptr<Stmt> Collect::collect_continue_statement(SrcLoc loc) const {
 
-    if (func_state_.loop_depth <= 0) {
+    if (session_.func_state_.loop_depth <= 0) {
         report_error("continue statement not in loop statement", loc);
     }
     return collect_make<ContinueStmt>(loc);
 }
 
 
-std::unique_ptr<Stmt> Collect::collect_case_statement(std::unique_ptr<Expr> const_expr, std::unique_ptr<Expr> range_end, std::unique_ptr<Stmt> stmt, SrcLoc loc) const {
+std::unique_ptr<Stmt> Collect::collect_case_statement(std::unique_ptr<Expr> const_expr, std::unique_ptr<Expr> range_end, std::unique_ptr<Stmt> stmt, SrcLoc loc) {
 
-    if (func_state_.switch_depth <= 0) {
+    if (session_.func_state_.switch_depth <= 0) {
         report_error("case statement not in switch statement", loc);
         const_expr = collect_apply_standard_conversions(std::move(const_expr), ExprUseContext::RValue);
         if (range_end) {
@@ -140,8 +140,8 @@ std::unique_ptr<Stmt> Collect::collect_case_statement(std::unique_ptr<Expr> cons
     }
 
     const SwitchContext* switch_ctx = nullptr;
-    if (!func_state_.switch_context_stack.empty()) {
-        switch_ctx = &func_state_.switch_context_stack.back();
+    if (!session_.func_state_.switch_context_stack.empty()) {
+        switch_ctx = &session_.func_state_.switch_context_stack.back();
     }
 
     const_expr = collect_apply_standard_conversions(std::move(const_expr), ExprUseContext::RValue);
@@ -190,9 +190,9 @@ std::unique_ptr<Stmt> Collect::collect_case_statement(std::unique_ptr<Expr> cons
             if (empty_range) {
                 report_error("empty range specified", loc);
             } else {
-                if (!range_too_large && !func_state_.switch_context_stack.empty()) {
+                if (!range_too_large && !session_.func_state_.switch_context_stack.empty()) {
                     materialize_tentative_snapshot_if_needed();
-                    auto& mutable_ctx = func_state_.switch_context_stack.back();
+                    auto& mutable_ctx = session_.func_state_.switch_context_stack.back();
                     for (int64_t v = low_val; v <= high_val; ++v) {
                         if (mutable_ctx.case_values.contains(v)) {
                             report_error("duplicate case value", loc);
@@ -209,9 +209,9 @@ std::unique_ptr<Stmt> Collect::collect_case_statement(std::unique_ptr<Expr> cons
         return collect_make<CaseStmt>(std::move(const_expr), std::move(range_end), std::move(stmt), loc);
     }
 
-    if (low_val_opt.has_value() && !func_state_.switch_context_stack.empty()) {
+    if (low_val_opt.has_value() && !session_.func_state_.switch_context_stack.empty()) {
         materialize_tentative_snapshot_if_needed();
-        auto& mutable_ctx = func_state_.switch_context_stack.back();
+        auto& mutable_ctx = session_.func_state_.switch_context_stack.back();
         int64_t low_val = *low_val_opt;
         if (mutable_ctx.case_values.contains(low_val)) {
             report_error("duplicate case value", loc);
@@ -223,15 +223,15 @@ std::unique_ptr<Stmt> Collect::collect_case_statement(std::unique_ptr<Expr> cons
 }
 
 
-std::unique_ptr<Stmt> Collect::collect_default_statement(std::unique_ptr<Stmt> stmt, SrcLoc loc) const {
+std::unique_ptr<Stmt> Collect::collect_default_statement(std::unique_ptr<Stmt> stmt, SrcLoc loc) {
 
-    if (func_state_.switch_depth <= 0) {
+    if (session_.func_state_.switch_depth <= 0) {
         report_error("default statement not in switch statement", loc);
         return collect_make<DefaultStmt>(std::move(stmt), loc);
     }
-    if (!func_state_.switch_context_stack.empty()) {
+    if (!session_.func_state_.switch_context_stack.empty()) {
         materialize_tentative_snapshot_if_needed();
-        auto& switch_ctx = func_state_.switch_context_stack.back();
+        auto& switch_ctx = session_.func_state_.switch_context_stack.back();
         if (switch_ctx.has_default) {
             report_error("multiple default labels in one switch", loc);
         } else {
@@ -254,7 +254,7 @@ std::unique_ptr<Stmt> Collect::collect_if_statement(std::unique_ptr<Expr> condit
 }
 
 
-std::unique_ptr<Expr> Collect::collect_switch_condition(std::unique_ptr<Expr> condition, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_switch_condition(std::unique_ptr<Expr> condition, SrcLoc loc) {
 
     condition = collect_apply_standard_conversions(std::move(condition), ExprUseContext::Condition);
     if (!condition) {
@@ -273,9 +273,9 @@ std::unique_ptr<Expr> Collect::collect_switch_condition(std::unique_ptr<Expr> co
     if (promoted && !cond_type->equals(*promoted.get_shared())) {
         condition = collect_make<ImplicitCast>(std::move(condition), promoted);
     }
-    if (!func_state_.switch_context_stack.empty()) {
+    if (!session_.func_state_.switch_context_stack.empty()) {
         materialize_tentative_snapshot_if_needed();
-        func_state_.switch_context_stack.back().switch_type = promoted ? promoted : cond_type;
+        session_.func_state_.switch_context_stack.back().switch_type = promoted ? promoted : cond_type;
     }
     return condition;
 }
@@ -347,11 +347,11 @@ std::unique_ptr<Stmt> Collect::collect_labeled_statement(const std::string& name
 
 std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> expr, SrcLoc loc, QualType expected_return_type) {
 
-    if (func_state_.in_function) {
-        func_state_.current_function_has_return_statement = true;
+    if (session_.func_state_.in_function) {
+        session_.func_state_.current_function_has_return_statement = true;
     }
 
-    QualType return_type = expected_return_type ? expected_return_type : func_state_.current_function_return_type;
+    QualType return_type = expected_return_type ? expected_return_type : session_.func_state_.current_function_return_type;
     if (expr) {
         if (const auto* block = returned_block_literal_expr(expr.get())) {
             if (!block->semantic_info.captures.empty()) {
@@ -359,19 +359,19 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
             }
         }
     }
-    if (func_state_.current_function_has_cxx_auto_return_deduction &&
-        func_state_.current_function_cxx_auto_return_pattern) {
+    if (session_.func_state_.current_function_has_cxx_auto_return_deduction &&
+        session_.func_state_.current_function_cxx_auto_return_pattern) {
         bool deferred_template_dependent_return = false;
         auto deduce_auto_return_type = [&](const std::unique_ptr<Expr>& return_expr) -> QualType {
             QualType implicit_void(get_builtin_void());
             QualType fallback_return = implicit_void;
             auto fallback_raw = replace_auto_type(
-                func_state_.current_function_cxx_auto_return_pattern.get_shared(),
+                session_.func_state_.current_function_cxx_auto_return_pattern.get_shared(),
                 implicit_void.get_shared());
             if (fallback_raw) {
                 fallback_return = QualType(
                     fallback_raw,
-                    func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
+                    session_.func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
             }
 
             QualType deduction_source_type = implicit_void;
@@ -389,7 +389,7 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
                 if (!deduction_source_type) {
                     report_error(
                         "cannot deduce return type for function '" +
-                            func_state_.current_function_name +
+                            session_.func_state_.current_function_name +
                             "': return expression has no type",
                         loc);
                     return fallback_return;
@@ -399,26 +399,26 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
                         deduction_source_type,
                         ast_ctx_.get())) {
                     deferred_template_dependent_return = true;
-                    return func_state_.current_function_cxx_auto_return_pattern;
+                    return session_.func_state_.current_function_cxx_auto_return_pattern;
                 }
             }
 
             auto deduced_placeholder = auto_type_utils::extract_auto_placeholder_replacement(
-                func_state_.current_function_cxx_auto_return_pattern,
+                session_.func_state_.current_function_cxx_auto_return_pattern,
                 deduction_source_type);
             if (!deduced_placeholder.has_value() || !deduced_placeholder->get_shared()) {
                 if (return_expr) {
                     report_error(
                         "cannot deduce return type '" +
-                            func_state_.current_function_cxx_auto_return_pattern.to_string() +
+                            session_.func_state_.current_function_cxx_auto_return_pattern.to_string() +
                             "' from return expression of type '" +
                             deduction_source_type.to_string() + "'",
                         loc);
                 } else {
                     report_error(
                         "cannot deduce return type '" +
-                            func_state_.current_function_cxx_auto_return_pattern.to_string() +
-                            "' for function '" + func_state_.current_function_name +
+                            session_.func_state_.current_function_cxx_auto_return_pattern.to_string() +
+                            "' for function '" + session_.func_state_.current_function_name +
                             "' from 'return;'",
                         loc);
                 }
@@ -431,7 +431,7 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
                 auto_type_utils::auto_type_flavors_in(deduced_raw) != 0) {
                 report_error(
                     "cannot deduce return type for function '" +
-                        func_state_.current_function_name +
+                        session_.func_state_.current_function_name +
                         "': unresolved auto placeholder in return deduction from expression type '" +
                         deduction_source_type.to_string() + "'",
                     loc);
@@ -446,49 +446,49 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
             }
 
             auto replaced_raw = replace_auto_type(
-                func_state_.current_function_cxx_auto_return_pattern.get_shared(),
+                session_.func_state_.current_function_cxx_auto_return_pattern.get_shared(),
                 deduced_raw);
             if (!replaced_raw) {
                 return fallback_return;
             }
             return QualType(
                 replaced_raw,
-                func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
+                session_.func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
         };
 
-        if (func_state_.current_function_has_deferred_cxx_auto_return_deduction) {
-            return_type = func_state_.current_function_cxx_auto_return_pattern;
+        if (session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction) {
+            return_type = session_.func_state_.current_function_cxx_auto_return_pattern;
         } else {
             QualType deduced_return_type = deduce_auto_return_type(expr);
             if (deferred_template_dependent_return) {
-                func_state_.current_function_has_deferred_cxx_auto_return_deduction = true;
-                func_state_.current_function_return_type =
-                    func_state_.current_function_cxx_auto_return_pattern;
-                if (auto func_ty = func_state_.current_function_type.as_shared<FunctionType>()) {
-                    func_ty->ret_type = func_state_.current_function_return_type;
+                session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction = true;
+                session_.func_state_.current_function_return_type =
+                    session_.func_state_.current_function_cxx_auto_return_pattern;
+                if (auto func_ty = session_.func_state_.current_function_type.as_shared<FunctionType>()) {
+                    func_ty->ret_type = session_.func_state_.current_function_return_type;
                 }
             } else if (
-                func_state_.current_function_return_type &&
+                session_.func_state_.current_function_return_type &&
                 !auto_type_utils::has_cxx_auto_type(
-                    func_state_.current_function_return_type.get_shared())) {
+                    session_.func_state_.current_function_return_type.get_shared())) {
                 if (!deduced_return_type.equals_qualified(
-                        func_state_.current_function_return_type)) {
+                        session_.func_state_.current_function_return_type)) {
                     report_error(
                         "inconsistent deduction for function return type 'auto': '" +
-                            func_state_.current_function_return_type.to_string() +
+                            session_.func_state_.current_function_return_type.to_string() +
                             "' and then '" +
                             deduced_return_type.to_string() + "'",
                         loc);
                 }
             } else {
-                func_state_.current_function_return_type = deduced_return_type;
-                if (auto func_ty = func_state_.current_function_type.as_shared<FunctionType>()) {
+                session_.func_state_.current_function_return_type = deduced_return_type;
+                if (auto func_ty = session_.func_state_.current_function_type.as_shared<FunctionType>()) {
                     func_ty->ret_type = deduced_return_type;
                 }
             }
-            return_type = func_state_.current_function_return_type;
+            return_type = session_.func_state_.current_function_return_type;
         }
-        if (func_state_.current_function_has_deferred_cxx_auto_return_deduction &&
+        if (session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction &&
             return_type &&
             auto_type_utils::has_cxx_auto_type(return_type.get_shared())) {
             return collect_make<ReturnStmt>(std::move(expr), loc);

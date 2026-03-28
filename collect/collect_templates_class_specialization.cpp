@@ -282,7 +282,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_remap;
     };
 
-    const Collect& collect;
+    Collect& collect;
     const ClassTemplateDecl* class_template = nullptr;
     const std::vector<TemplateArgument>& arguments;
     SrcLoc loc;
@@ -1076,18 +1076,18 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     return nullptr;
                 };
 
-        if (collect.translation_unit_decl_context_) {
+        if (collect.session_.translation_unit_decl_context_) {
             if (auto symbol = lookup_in_decl_context(
-                    collect.translation_unit_decl_context_.get())) {
+                    collect.session_.translation_unit_decl_context_.get())) {
                 return symbol;
             }
         }
-        if (!collect.current_global_scope_) {
+        if (!collect.session_.current_global_scope_) {
             return nullptr;
         }
         auto it =
-            collect.current_global_scope_->all_variables.find(decl->name);
-        if (it == collect.current_global_scope_->all_variables.end()) {
+            collect.session_.current_global_scope_->all_variables.find(decl->name);
+        if (it == collect.session_.current_global_scope_->all_variables.end()) {
             return nullptr;
         }
         for (const auto& symbol : it->second) {
@@ -2994,7 +2994,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 ObjectDecl* Collect::instantiate_class_template_specialization(
     const ClassTemplateDecl* class_template,
     const std::vector<TemplateArgument>& arguments,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     return ClassTemplateSpecializationInstantiator{
         *this,
         class_template,
@@ -3006,7 +3006,7 @@ ObjectDecl* Collect::instantiate_class_template_specialization(
 ObjectDecl* Collect::collect_instantiate_class_template_specialization(
     const ClassTemplateDecl* class_template,
     const std::vector<TemplateArgument>& arguments,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     return instantiate_class_template_specialization(
         class_template,
         arguments,

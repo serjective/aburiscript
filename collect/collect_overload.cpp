@@ -197,7 +197,7 @@ Collect::build_cpp_overload_conversion_sequence_cached(
     Expr* arg,
     QualType to,
     bool allow_user_defined,
-    OverloadConversionMemoCache* conversion_cache) const {
+    OverloadConversionMemoCache* conversion_cache) {
     if (!conversion_cache || !arg || !to) {
         return build_cpp_overload_conversion_sequence(
             arg, to, allow_user_defined);
@@ -241,9 +241,9 @@ std::unique_ptr<Expr> Collect::append_member_overload_candidates(
     had_member_match_out = true;
     const ObjectDecl* object_record_decl = record_decl_from_record_type(record_type);
     const ObjectDecl* access_context_decl = nullptr;
-    if (lang_opts_.is_cxx_mode() && func_state_.current_function_is_cpp_member) {
+    if (lang_opts_.is_cxx_mode() && session_.func_state_.current_function_is_cpp_member) {
         access_context_decl =
-            current_record_decl_from_this_type(func_state_.current_function_cpp_this_type);
+            current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
     }
 
     candidates_out.reserve(candidates_out.size() + methods.size());
@@ -304,7 +304,7 @@ std::unique_ptr<Expr> Collect::append_member_template_overload_candidates(
     bool& saw_private_member_out,
     bool& saw_protected_member_out,
     bool& saw_template_instantiation_out,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     had_template_member_match_out = false;
     if (!record_type) {
         return nullptr;
@@ -320,9 +320,9 @@ std::unique_ptr<Expr> Collect::append_member_template_overload_candidates(
     had_template_member_match_out = true;
     const ObjectDecl* object_record_decl = record_decl_from_record_type(record_type);
     const ObjectDecl* access_context_decl = nullptr;
-    if (lang_opts_.is_cxx_mode() && func_state_.current_function_is_cpp_member) {
+    if (lang_opts_.is_cxx_mode() && session_.func_state_.current_function_is_cpp_member) {
         access_context_decl =
-            current_record_decl_from_this_type(func_state_.current_function_cpp_this_type);
+            current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
     }
 
     for (const auto& method_template_match : method_templates) {
@@ -431,13 +431,13 @@ std::unique_ptr<Expr> Collect::append_member_template_overload_candidates(
 void Collect::append_unqualified_overload_candidates(
     std::string_view function_name,
     OverloadImplicitObjectArgKind implicit_arg_kind,
-    std::vector<OverloadCallCandidate>& candidates_out) const {
+    std::vector<OverloadCallCandidate>& candidates_out) {
 
-    if (!current_scope_) {
+    if (!session_.current_scope_) {
         return;
     }
     auto function_candidates = LookupEngine::lookup_unqualified_function_candidates(
-        std::string(function_name), current_scope_, true);
+        std::string(function_name), session_.current_scope_, true);
     candidates_out.reserve(candidates_out.size() + function_candidates.size());
     for (const auto& fn_sym : function_candidates) {
         OverloadCallCandidate call_candidate;
@@ -455,7 +455,7 @@ std::unique_ptr<Expr> Collect::select_overload_candidate(
     Expr* implicit_object_arg,
     SrcLoc loc,
     std::shared_ptr<Symbol>& selected_symbol_out,
-    OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) const {
+    OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) {
 
     selected_symbol_out = nullptr;
     selected_implicit_object_arg_kind_out = OverloadImplicitObjectArgKind::None;
@@ -521,7 +521,7 @@ std::unique_ptr<Expr> Collect::make_hidden_overload_callee(
 std::optional<Collect::CppConversionConstructorMatch>
 Collect::select_cpp_conversion_constructor(Expr* arg,
                                                    QualType target_object_type,
-                                                   bool allow_explicit_constructors) const {
+                                                   bool allow_explicit_constructors) {
 
     if (!lang_opts_.is_cxx_mode() || !arg || !target_object_type) {
         return std::nullopt;
@@ -665,7 +665,7 @@ std::optional<Collect::CppUserDefinedConversionMatch>
 Collect::select_cpp_user_defined_conversion(
     Expr* arg,
     QualType target_type,
-    bool allow_explicit_constructors) const {
+    bool allow_explicit_constructors) {
 
     if (!lang_opts_.is_cxx_mode() || !arg || !target_type || !ast_ctx_) {
         return std::nullopt;
@@ -742,7 +742,7 @@ Collect::select_cpp_user_defined_conversion(
 std::unique_ptr<Expr> Collect::build_cpp_user_defined_conversion_expr(
     std::unique_ptr<Expr> arg,
     QualType target_type,
-    SrcLoc loc) const {
+    SrcLoc loc) {
 
     if (!arg || !target_type) {
         return arg;
@@ -889,7 +889,7 @@ std::unique_ptr<Expr> Collect::build_cpp_user_defined_conversion_expr(
 std::unique_ptr<Expr> Collect::convert_cpp_braced_init_argument(
     std::unique_ptr<Expr> arg,
     QualType target_type,
-    SrcLoc loc) const {
+    SrcLoc loc) {
 
     if (!lang_opts_.is_cxx_mode() || !arg || !target_type) {
         return arg;
@@ -961,7 +961,7 @@ bool Collect::probe_cpp_braced_init_argument_conversion(
     Expr* arg,
     QualType target_type,
     SrcLoc loc,
-    ImplicitConversionSequence& seq_out) const {
+    ImplicitConversionSequence& seq_out) {
 
     seq_out = ImplicitConversionSequence{};
     seq_out.from = arg ? arg->get_type() : QualType();
@@ -1026,7 +1026,7 @@ std::unique_ptr<Expr> Collect::build_overload_implicit_object_arg(
     OverloadImplicitObjectArgKind implicit_arg_kind,
     std::unique_ptr<Expr> object_expr,
     bool object_expr_is_pointer,
-    SrcLoc loc) const {
+    SrcLoc loc) {
 
     if (implicit_arg_kind == OverloadImplicitObjectArgKind::None) {
         return nullptr;
@@ -1079,7 +1079,7 @@ Collect::evaluate_overload_implicit_object_conversion(
     QualType param_type,
     OverloadImplicitObjectArgKind implicit_object_arg_kind,
     FunctionRefQualifierKind ref_qualifier,
-    OverloadConversionMemoCache* conversion_cache) const {
+    OverloadConversionMemoCache* conversion_cache) {
 
     auto classify_implicit_object_value_category =
         [&](Expr* arg) -> ValueCategory {
@@ -1180,7 +1180,7 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
     const OverloadCallCandidate& candidate_info,
     const std::vector<std::unique_ptr<Expr>>& explicit_args,
     Expr* implicit_object_arg,
-    OverloadConversionMemoCache* conversion_cache) const {
+    OverloadConversionMemoCache* conversion_cache) {
 
     bump_overload_candidate_evaluations();
     OverloadCandidateEval eval;
@@ -1526,7 +1526,7 @@ void Collect::emit_overload_candidate_notes(
 
 bool Collect::is_better_overload_candidate(
     const OverloadCandidateEval& lhs,
-    const OverloadCandidateEval& rhs) const {
+    const OverloadCandidateEval& rhs) {
     bool lhs_strictly_better = is_strictly_better_conversion_profile(
         lhs.conversions,
         lhs.function_type,
@@ -1574,7 +1574,7 @@ bool Collect::is_better_overload_candidate(
 
 std::optional<size_t> Collect::select_best_overload_candidate_index(
     const std::vector<OverloadCandidateEval>& evaluated,
-    const std::vector<size_t>& viable_indices) const {
+    const std::vector<size_t>& viable_indices) {
 
     std::optional<size_t> best_index;
     for (size_t idx : viable_indices) {
@@ -1608,7 +1608,7 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
     Expr* implicit_object_arg,
     SrcLoc loc,
     std::shared_ptr<Symbol>& selected_symbol_out,
-    OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) const {
+    OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) {
 
     selected_symbol_out = nullptr;
     selected_implicit_object_arg_kind_out = OverloadImplicitObjectArgKind::None;

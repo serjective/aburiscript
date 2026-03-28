@@ -804,7 +804,7 @@ bool rebind_member_expr_for_specialized_record(MemberExpr* member,
 }
 
 bool clone_function_parameters_for_specialization(
-    const Collect& collect,
+    Collect& collect,
     const FuncDecl* pattern,
     const TemplateParameterList& template_parameters,
     const TemplateArgumentBindings& specialization_bindings,
@@ -1077,7 +1077,7 @@ bool clone_function_parameters_for_specialization(
     return true;
 }
 
-bool clone_function_body_for_specialization(const Collect& collect,
+bool clone_function_body_for_specialization(Collect& collect,
                                             const FuncDecl* pattern,
                                             FuncDecl* specialization,
                                             TemplateSubstitutionPass& substitution_pass,
@@ -1114,7 +1114,7 @@ bool clone_function_body_for_specialization(const Collect& collect,
         return false;
     }
     if (finalize_body_semantics) {
-        if (!const_cast<Collect&>(collect).with_function_definition_state(
+        if (!collect.with_function_definition_state(
                 specialization,
                 [&]() {
                     return finalize_specialized_stmt_semantics(

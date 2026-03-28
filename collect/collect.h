@@ -212,7 +212,7 @@ public:
     bool resolve_dependent_expr_after_substitution(
         std::unique_ptr<Expr>& expr,
         QualType implicit_this_type,
-        std::string* error_out) const ;
+        std::string* error_out) ;
 
     void set_current_decl_context(std::shared_ptr<DeclContext> decl_context) ;
 
@@ -254,30 +254,30 @@ public:
         const CppRecordDecl& record,
         std::optional<std::string> semantic_tag_name = std::nullopt,
         std::vector<std::unique_ptr<Decl>>* transient_decls_out = nullptr,
-        CppRecordDeferredBodyCallback deferred_body_callback = {}) const ;
+        CppRecordDeferredBodyCallback deferred_body_callback = {}) ;
 
     ObjectDecl* collect_instantiate_class_template_specialization(
         const ClassTemplateDecl* class_template,
         const std::vector<TemplateArgument>& arguments,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     // === Type operations ===
 
     QualType collect_try_realize_deferred_semantic_type(
-        QualType type) const {
+        QualType type) {
         return try_realize_deferred_semantic_type(type);
     }
 
     QualType collect_finalize_deferred_semantic_type(
         QualType type,
-        SrcLoc loc = SrcLoc()) const {
+        SrcLoc loc = SrcLoc()) {
         return finalize_deferred_semantic_type(type, loc);
     }
 
     std::unique_ptr<Expr> collect_process_initializer_for_type(
         std::unique_ptr<Expr> init,
         QualType declared_type,
-        SrcLoc loc) const {
+        SrcLoc loc) {
         return process_initializer_for_type(std::move(init), declared_type, loc);
     }
     void collect_resolve_auto_variable_type_from_expr(
@@ -285,7 +285,7 @@ public:
         const Expr* init_expr,
         const std::shared_ptr<Symbol>& sym,
         const std::string& name,
-        SrcLoc loc) const {
+        SrcLoc loc) {
         resolve_auto_variable_type_from_expr(
             declared_type,
             init_expr,
@@ -306,16 +306,16 @@ public:
         const std::string& name,
         const std::vector<TemplateArgument>& arguments,
         SrcLoc loc,
-        bool* matched_template = nullptr) const ;
+        bool* matched_template = nullptr) ;
 
     // === Tag and symbol registration ===
 
-    void collect_add_tag_decl(const std::string& tag, TagDecl* decl) const ;
+    void collect_add_tag_decl(const std::string& tag, TagDecl* decl) ;
 
     void collect_bind_symbol_in_current_scope(const std::string& name,
-                                              std::shared_ptr<Symbol> sym) const ;
+                                              std::shared_ptr<Symbol> sym) ;
 
-    void collect_add_global_symbol(std::shared_ptr<Symbol> sym) const ;
+    void collect_add_global_symbol(std::shared_ptr<Symbol> sym) ;
 
     // === Control flow (loop/switch) ===
 
@@ -364,7 +364,7 @@ public:
 
     std::unique_ptr<Expr> collect_unqualified_identifier_expression(const std::string& name,
                                                                     bool looks_like_call,
-                                                                    SrcLoc loc) const ;
+                                                                    SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_identifier_reference(const std::string& name,
                                                        std::shared_ptr<Symbol> sym,
@@ -395,7 +395,7 @@ public:
         QualType explicit_return_type,
         bool has_parameter_clause,
         bool has_explicit_return_type,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
     std::unique_ptr<Expr> collect_cpp_lambda_expression(
         LambdaClosureInfo closure_info,
         LambdaSemanticInfo semantic_info,
@@ -410,26 +410,26 @@ public:
         bool has_noexcept,
         bool has_trailing_return,
         bool is_generic,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
     bool collect_finalize_block_expression(BlockExpr& block,
-                                           std::string* error_out = nullptr) const ;
+                                           std::string* error_out = nullptr) ;
     bool collect_finalize_cpp_lambda_expression(CppLambdaExpr& lambda,
-                                                std::string* error_out = nullptr) const ;
+                                                std::string* error_out = nullptr) ;
 
     std::unique_ptr<Expr> collect_compound_literal_expression(QualType type,
                                                               std::unique_ptr<Expr> init,
-                                                              SrcLoc loc) const ;
+                                                              SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_label_address_expression(const std::string& label,
                                                            SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_va_arg_expression(std::unique_ptr<Expr> va_list_expr,
                                                     QualType arg_type,
-                                                    SrcLoc loc) const ;
+                                                    SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_builtin_types_compatible_expression(QualType lhs,
                                                                       QualType rhs,
-                                                                      SrcLoc loc) const ;
+                                                                      SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_builtin_choose_expression(std::unique_ptr<Expr> const_expr,
                                                             std::unique_ptr<Expr> true_expr,
@@ -437,12 +437,12 @@ public:
                                                             SrcLoc loc) const ;
     std::unique_ptr<Expr> collect_builtin_convertvector_expression(std::unique_ptr<Expr> vector_expr,
                                                                    QualType target_type,
-                                                                   SrcLoc loc) const ;
+                                                                   SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_offsetof_expression(QualType type_operand,
                                                       const std::string& member_name,
                                                       std::vector<OffsetOfComponent> designator_path,
-                                                      SrcLoc loc) const ;
+                                                      SrcLoc loc) ;
 
     std::unique_ptr<InitListExpr> collect_initializer_list_expression(SrcLoc loc) const ;
 
@@ -487,16 +487,16 @@ public:
 
     std::unique_ptr<Expr> collect_explicit_cast(std::unique_ptr<Expr> expr,
                                                 QualType target_type,
-                                                SrcLoc loc) const ;
+                                                SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_cpp_named_cast(CppNamedCastKind cast_kind,
                                                  std::unique_ptr<Expr> expr,
                                                  QualType target_type,
-                                                 SrcLoc loc) const ;
+                                                 SrcLoc loc) ;
     std::unique_ptr<Expr> collect_cpp_typeid_type(QualType type_operand,
-                                                  SrcLoc loc) const ;
+                                                  SrcLoc loc) ;
     std::unique_ptr<Expr> collect_cpp_typeid_expression(std::unique_ptr<Expr> expr_operand,
-                                                        SrcLoc loc) const ;
+                                                        SrcLoc loc) ;
     std::unique_ptr<Expr> collect_cpp_throw_expression(std::unique_ptr<Expr> thrown_expr,
                                                        SrcLoc loc) const ;
     std::unique_ptr<Expr> collect_cpp_new_expression(
@@ -504,14 +504,14 @@ public:
         std::vector<std::unique_ptr<Expr>> placement_args,
         std::unique_ptr<Expr> initializer,
         bool is_global_allocation,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
     std::unique_ptr<Expr> collect_cpp_delete_expression(
         std::unique_ptr<Expr> operand,
         bool is_array_form,
         bool is_global_delete,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
-    std::unique_ptr<Expr> collect_sizeof_type(QualType type, SrcLoc loc) const ;
+    std::unique_ptr<Expr> collect_sizeof_type(QualType type, SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_sizeof_pack_expression(
         std::string pack_name,
@@ -519,37 +519,37 @@ public:
         SrcLoc loc) const ;
 
     std::unique_ptr<Expr> collect_sizeof_expression(std::unique_ptr<Expr> expr,
-                                                    SrcLoc loc) const ;
+                                                    SrcLoc loc) ;
 
-    std::unique_ptr<Expr> collect_alignof_type(QualType type, SrcLoc loc) const ;
+    std::unique_ptr<Expr> collect_alignof_type(QualType type, SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_alignof_expression(std::unique_ptr<Expr> expr,
-                                                     SrcLoc loc) const ;
+                                                     SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_unary_operation(UnaryOpTypes uop,
                                                   std::unique_ptr<Expr> expr,
-                                                  SrcLoc loc) const ;
+                                                  SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_function_call(std::unique_ptr<Expr> callee,
                                                 std::vector<std::unique_ptr<Expr>> args,
                                                 std::vector<TemplateArgument> explicit_template_args,
-                                                SrcLoc loc) const ;
+                                                SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_function_call(std::unique_ptr<Expr> callee,
                                                 std::vector<std::unique_ptr<Expr>> args,
                                                 std::vector<TemplateArgument> explicit_template_args,
                                                 bool has_explicit_template_args,
-                                                SrcLoc loc) const ;
+                                                SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_function_call(std::unique_ptr<Expr> callee,
                                                 std::vector<std::unique_ptr<Expr>> args,
-                                                SrcLoc loc) const ;
+                                                SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_explicit_function_template_call(
         std::unique_ptr<Expr> callee,
         std::vector<TemplateArgument> explicit_template_args,
         std::vector<std::unique_ptr<Expr>> args,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_pack_expansion_expression(
         std::unique_ptr<Expr> pattern,
@@ -564,14 +564,14 @@ public:
 
     std::unique_ptr<Expr> collect_array_subscript(std::unique_ptr<Expr> array,
                                                   std::unique_ptr<Expr> index,
-                                                  SrcLoc loc) const ;
+                                                  SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_member_expression(std::unique_ptr<Expr> base,
                                                     const std::string& member_name,
                                                     bool is_arrow,
                                                     SrcLoc loc,
                                                     bool allow_overloaded_method_set = false,
-                                                    bool suppress_virtual_dispatch = false) const ;
+                                                    bool suppress_virtual_dispatch = false) ;
 
     std::unique_ptr<Expr> collect_member_pointer_literal_expression(
         const std::string& owner_name,
@@ -591,16 +591,16 @@ public:
     std::unique_ptr<Stmt> collect_case_statement(std::unique_ptr<Expr> const_expr,
                                                  std::unique_ptr<Expr> range_end,
                                                  std::unique_ptr<Stmt> stmt,
-                                                 SrcLoc loc) const ;
+                                                 SrcLoc loc) ;
 
-    std::unique_ptr<Stmt> collect_default_statement(std::unique_ptr<Stmt> stmt, SrcLoc loc) const ;
+    std::unique_ptr<Stmt> collect_default_statement(std::unique_ptr<Stmt> stmt, SrcLoc loc) ;
 
     std::unique_ptr<Stmt> collect_if_statement(std::unique_ptr<Expr> condition,
                                                std::unique_ptr<Stmt> then_stmt,
                                                std::unique_ptr<Stmt> else_stmt,
                                                SrcLoc loc) const ;
 
-    std::unique_ptr<Expr> collect_switch_condition(std::unique_ptr<Expr> condition, SrcLoc loc) const ;
+    std::unique_ptr<Expr> collect_switch_condition(std::unique_ptr<Expr> condition, SrcLoc loc) ;
 
     std::unique_ptr<Stmt> collect_switch_statement(std::unique_ptr<Expr> condition,
                                                    std::unique_ptr<Stmt> stmt,
@@ -666,16 +666,16 @@ public:
                                                            bool is_inline,
                                                            std::optional<std::string> asm_label,
                                                            SrcLoc loc,
-                                                           LanguageLinkage language_linkage = LanguageLinkage::None) const ;
+                                                           LanguageLinkage language_linkage = LanguageLinkage::None) ;
 
     std::unique_ptr<Decl> collect_field_declaration(QualType type,
                                                     const std::string& name,
-                                                    SrcLoc loc) const ;
+                                                    SrcLoc loc) ;
 
     std::unique_ptr<Decl> collect_field_declaration(QualType type,
                                                     const std::string& name,
                                                     uint32_t bitfield_width,
-                                                    SrcLoc loc) const ;
+                                                    SrcLoc loc) ;
 
     std::unique_ptr<ObjectDecl> collect_record_declaration(std::string tag,
                                                            std::vector<std::unique_ptr<Decl>> fields,
@@ -708,13 +708,13 @@ public:
                                                        StorageClass storage_class,
                                                        const VariableDeclFlags& flags,
                                                        SrcLoc loc,
-                                                       LanguageLinkage language_linkage = LanguageLinkage::None) const ;
+                                                       LanguageLinkage language_linkage = LanguageLinkage::None) ;
 
     std::unique_ptr<Decl> collect_parameter_declaration(QualType type,
                                                         const std::string& name,
                                                         std::shared_ptr<Symbol> sym,
                                                         StorageClass storage_class,
-                                                        SrcLoc loc) const ;
+                                                        SrcLoc loc) ;
 
     std::shared_ptr<Symbol> collect_declare_variable_symbol(std::shared_ptr<Scope> scope,
                                                             std::shared_ptr<GlobalIdentTracker> global_scope,
@@ -723,14 +723,14 @@ public:
                                                             StorageClass storage_class,
                                                             bool is_constexpr,
                                                             SrcLoc loc,
-                                                            LanguageLinkage language_linkage = LanguageLinkage::None) const ;
+                                                            LanguageLinkage language_linkage = LanguageLinkage::None) ;
 
     std::shared_ptr<Symbol> collect_declare_variable_symbol(const std::string& name,
                                                             QualType type,
                                                             StorageClass storage_class,
                                                             bool is_constexpr,
                                                             SrcLoc loc,
-                                                            LanguageLinkage language_linkage = LanguageLinkage::None) const ;
+                                                            LanguageLinkage language_linkage = LanguageLinkage::None) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(std::shared_ptr<Scope> scope,
                                                             std::shared_ptr<GlobalIdentTracker> global_scope,
@@ -741,7 +741,7 @@ public:
                                                             bool is_definition,
                                                             SrcLoc loc,
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
-                                                            bool is_cpp_member_function = false) const ;
+                                                            bool is_cpp_member_function = false) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(const std::string& name,
                                                             QualType type,
@@ -750,46 +750,46 @@ public:
                                                             bool is_definition,
                                                             SrcLoc loc,
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
-                                                            bool is_cpp_member_function = false) const ;
+                                                            bool is_cpp_member_function = false) ;
 
     std::shared_ptr<Symbol> collect_declare_typedef_symbol(std::shared_ptr<Scope> scope,
                                                            std::shared_ptr<GlobalIdentTracker> global_scope,
                                                            const std::string& name,
                                                            QualType type,
-                                                           SrcLoc loc) const ;
+                                                           SrcLoc loc) ;
 
     std::shared_ptr<Symbol> collect_declare_typedef_symbol(const std::string& name,
                                                            QualType type,
-                                                           SrcLoc loc) const ;
+                                                           SrcLoc loc) ;
 
     std::shared_ptr<Symbol> collect_declare_type_name_symbol(
         std::shared_ptr<Scope> scope,
         const std::string& name,
         QualType type,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::shared_ptr<Symbol> collect_declare_type_name_symbol(
         const std::string& name,
         QualType type,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     void collect_bind_template_decl(const std::string& name,
                                     const Decl* decl,
-                                    LookupNamespace lookup_namespace) const ;
+                                    LookupNamespace lookup_namespace) ;
 
     void collect_add_function_template_decl(const std::string& name,
-                                            const Decl* decl) const ;
+                                            const Decl* decl) ;
 
     void collect_add_class_template_decl(const std::string& name,
-                                         const Decl* decl) const ;
+                                         const Decl* decl) ;
 
     void collect_add_alias_template_decl(const std::string& name,
-                                         const Decl* decl) const ;
+                                         const Decl* decl) ;
 
     std::unique_ptr<Expr> collect_binary_operation(std::unique_ptr<Expr> lhs,
                                                    std::unique_ptr<Expr> rhs,
                                                    BinOpTypes bop,
-                                                   SrcLoc loc) const ;
+                                                   SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_compound_assign_operation(std::unique_ptr<Expr> lhs,
                                                             std::unique_ptr<Expr> rhs,
@@ -804,7 +804,7 @@ public:
 
     std::unique_ptr<Expr> collect_generic_expression(std::unique_ptr<Expr> controlling,
                                                      std::vector<GenericAssociation> associations,
-                                                     SrcLoc loc) const ;
+                                                     SrcLoc loc) ;
 
     // === Utility ===
 
@@ -818,14 +818,14 @@ public:
     std::unique_ptr<Expr> collect_member_initializer_expression(
         std::unique_ptr<Expr> init,
         QualType member_type,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_member_initializer_expression(
         std::vector<std::unique_ptr<Expr>> init_args,
         QualType member_type,
         bool is_list_init,
         SrcLoc loc,
-        bool allow_abstract_object_type_instantiation = false) const ;
+        bool allow_abstract_object_type_instantiation = false) ;
 
     // === Template operations ===
 
@@ -833,7 +833,7 @@ public:
         const FunctionTemplateDecl* function_template,
         QualType specialized_function_type,
         std::vector<TemplateArgument>& deduced_arguments_out,
-        const TemplateArgumentBindings* initial_bindings = nullptr) const ;
+        const TemplateArgumentBindings* initial_bindings = nullptr) ;
 
     bool deduce_function_template_specialization_arguments_from_pattern(
         QualType pattern_function_type,
@@ -843,13 +843,13 @@ public:
         std::vector<TemplateArgument>& deduced_arguments_out,
         const TemplateArgumentBindings* initial_bindings = nullptr,
         uint8_t parsed_trailing_cv_qualifiers = QUAL_NONE,
-        size_t implicit_object_parameter_count = 0) const ;
+        size_t implicit_object_parameter_count = 0) ;
 
     QualType collect_substitute_template_type(
         QualType type,
         const TemplateParameterList& parameters,
         const std::vector<TemplateArgument>& arguments,
-        SrcLoc loc) const {
+        SrcLoc loc) {
         return substitute_template_type(type, parameters, arguments, loc);
     }
 
@@ -857,7 +857,7 @@ public:
         QualType type,
         const TemplateParameterList& parameters,
         const std::vector<TemplateArgument>& arguments,
-        SrcLoc loc) const {
+        SrcLoc loc) {
         return partially_substitute_template_type(
             type,
             parameters,
@@ -903,7 +903,7 @@ private:
 
     class UnevaluatedContextScope {
     public:
-        UnevaluatedContextScope(const Collect* collect, const char* reason)
+        UnevaluatedContextScope(Collect* collect, const char* reason)
             : collect_(collect) {
             if (collect_) {
                 collect_->enter_unevaluated_context(reason);
@@ -917,7 +917,7 @@ private:
         UnevaluatedContextScope(const UnevaluatedContextScope&) = delete;
         UnevaluatedContextScope& operator=(const UnevaluatedContextScope&) = delete;
     private:
-        const Collect* collect_ = nullptr;
+        Collect* collect_ = nullptr;
     };
 
     struct SwitchContext {
@@ -927,7 +927,7 @@ private:
     };
 
     bool finalize_cpp_lambda_semantics(CppLambdaExpr& lambda,
-                                       std::string* error_out = nullptr) const;
+                                       std::string* error_out = nullptr);
 
     void collect_record_register_function_default_arguments(
         const std::shared_ptr<Symbol>& sym,
@@ -936,7 +936,7 @@ private:
 
     void collect_record_resolve_bases(CollectRecordBuildContext& ctx) const;
     void collect_record_walk_virtual_bases(CollectRecordBuildContext& ctx) const;
-    void collect_record_collect_members(CollectRecordBuildContext& ctx) const;
+    void collect_record_collect_members(CollectRecordBuildContext& ctx);
     void collect_record_synthesize_implicit_members(
         CollectRecordBuildContext& ctx) const;
     void collect_record_resolve_virtual_dispatch(
@@ -1164,7 +1164,7 @@ private:
 
     bool contains_typeof_expr_type(const std::shared_ptr<CType>& type) const ;
 
-    QualType resolve_typeof_types(QualType type, SrcLoc loc = SrcLoc()) const ;
+    QualType resolve_typeof_types(QualType type, SrcLoc loc = SrcLoc()) ;
 
     enum class DeferredTypeResolutionMode : uint8_t {
         TryRealize,
@@ -1173,15 +1173,15 @@ private:
 
     bool contains_deferred_semantic_type(const std::shared_ptr<CType>& type) const ;
 
-    QualType try_realize_deferred_semantic_type(QualType type) const ;
+    QualType try_realize_deferred_semantic_type(QualType type) ;
 
     QualType finalize_deferred_semantic_type(QualType type,
-                                             SrcLoc loc = SrcLoc()) const ;
+                                             SrcLoc loc = SrcLoc()) ;
 
     QualType resolve_deferred_semantic_type_impl(
         QualType type,
         SrcLoc loc,
-        DeferredTypeResolutionMode mode) const ;
+        DeferredTypeResolutionMode mode) ;
 
     bool decltype_expression_requires_deferred_resolution(
         const Expr* expr) const ;
@@ -1190,23 +1190,23 @@ private:
         const DecltypeExprType& decltype_type,
         QualType original_type,
         SrcLoc loc,
-        DeferredTypeResolutionMode mode) const ;
+        DeferredTypeResolutionMode mode) ;
 
     void rewrite_deferred_template_arguments_in_place(
         std::vector<TemplateArgument>& arguments,
         SrcLoc loc,
-        DeferredTypeResolutionMode mode) const ;
+        DeferredTypeResolutionMode mode) ;
 
     QualType resolve_deferred_template_specialization_type(
         TemplateSpecializationType& specialization,
         QualType original_type,
         SrcLoc loc,
-        DeferredTypeResolutionMode mode) const ;
+        DeferredTypeResolutionMode mode) ;
 
     QualType lookup_deferred_dependent_name_type(
         const DependentNameType& dependent_name,
         SrcLoc loc,
-        bool* matched_nested_template) const ;
+        bool* matched_nested_template) ;
 
     QualType handle_unresolved_dependent_name_type_lookup(
         const DependentNameType& dependent_name,
@@ -1219,54 +1219,54 @@ private:
         DependentNameType& dependent_name,
         QualType original_type,
         SrcLoc loc,
-        DeferredTypeResolutionMode mode) const ;
+        DeferredTypeResolutionMode mode) ;
 
     ObjectDecl* try_instantiate_class_template_specialization(
         const ClassTemplateDecl* class_template,
         const std::vector<TemplateArgument>& arguments,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     QualType try_instantiate_alias_template_specialization(
         const AliasTemplateDecl* alias_template,
         const std::vector<TemplateArgument>& arguments,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     bool complete_template_argument_bindings_with_substituted_defaults(
         const TemplateDecl* template_decl,
         TemplateArgumentBindings& bindings_out,
         SrcLoc loc,
-        std::string* error_out = nullptr) const ;
+        std::string* error_out = nullptr) ;
 
     bool bind_template_arguments_for_specialization(
         const TemplateDecl* template_decl,
         const std::vector<TemplateArgument>& arguments,
         TemplateArgumentBindings& bindings_out,
         SrcLoc loc,
-        std::string* error_out = nullptr) const ;
+        std::string* error_out = nullptr) ;
 
     struct ClassTemplateSpecializationInstantiator;
 
     ObjectDecl* instantiate_class_template_specialization(
         const ClassTemplateDecl* class_template,
         const std::vector<TemplateArgument>& arguments,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     QualType instantiate_alias_template_specialization(
         const AliasTemplateDecl* alias_template,
         const std::vector<TemplateArgument>& arguments,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     bool deduce_function_template_call_arguments(
         const FunctionTemplateDecl* function_template,
         const std::vector<std::unique_ptr<Expr>>& call_args,
         std::vector<TemplateArgument>& deduced_arguments_out,
-        const TemplateArgumentBindings* initial_bindings = nullptr) const ;
+        const TemplateArgumentBindings* initial_bindings = nullptr) ;
 
     bool deduce_function_template_call_arguments(
         const FunctionTemplateDecl* function_template,
         const std::vector<Expr*>& call_args,
         std::vector<TemplateArgument>& deduced_arguments_out,
-        const TemplateArgumentBindings* initial_bindings = nullptr) const ;
+        const TemplateArgumentBindings* initial_bindings = nullptr) ;
 
     enum class TemplatePartialOrderingResult : uint8_t {
         Unordered,
@@ -1277,62 +1277,62 @@ private:
 
     TemplatePartialOrderingResult compare_function_template_partial_ordering(
         const FunctionTemplateDecl* lhs_template,
-        const FunctionTemplateDecl* rhs_template) const ;
+        const FunctionTemplateDecl* rhs_template) ;
 
     bool is_function_template_more_specialized(
         const FunctionTemplateDecl* lhs_template,
-        const FunctionTemplateDecl* rhs_template) const ;
+        const FunctionTemplateDecl* rhs_template) ;
 
     FuncDecl* instantiate_function_template_specialization(
         const FunctionTemplateDecl* function_template,
         const std::vector<TemplateArgument>& arguments,
         SrcLoc loc,
         std::shared_ptr<Symbol>* specialization_symbol_out = nullptr,
-        bool instantiate_definition = true) const ;
+        bool instantiate_definition = true) ;
 
     QualType substitute_template_type(
         QualType type,
         const TemplateParameterList& parameters,
         const std::vector<TemplateArgument>& arguments,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::vector<TemplateArgument> substitute_template_arguments(
         const std::vector<TemplateArgument>& arguments,
         const TemplateParameterList& parameters,
         const std::vector<TemplateArgument>& specialization_arguments,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     QualType substitute_class_template_type(
         QualType type,
         const ClassTemplateDecl* class_template,
         const std::vector<TemplateArgument>& arguments,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::vector<TemplateArgument> substitute_class_template_arguments(
         const std::vector<TemplateArgument>& arguments,
         const ClassTemplateDecl* class_template,
         const std::vector<TemplateArgument>& specialization_arguments,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     QualType substitute_template_type_with_bindings(
         QualType type,
         const TemplateParameterList& parameters,
         const TemplateArgumentBindings& argument_bindings,
         SrcLoc loc,
-        bool allow_unsubstituted_parameters = false) const ;
+        bool allow_unsubstituted_parameters = false) ;
 
     std::vector<TemplateArgument> substitute_template_arguments_with_bindings(
         const std::vector<TemplateArgument>& arguments,
         const TemplateParameterList& parameters,
         const TemplateArgumentBindings& argument_bindings,
         SrcLoc loc,
-        bool allow_unsubstituted_parameters = false) const ;
+        bool allow_unsubstituted_parameters = false) ;
 
     QualType partially_substitute_template_type(
         QualType type,
         const TemplateParameterList& parameters,
         const std::vector<TemplateArgument>& specialization_arguments,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     struct ResolvedInitPath {
         std::vector<size_t> path;
@@ -1378,19 +1378,19 @@ private:
 
     std::unique_ptr<Expr> process_initializer_for_type(std::unique_ptr<Expr> init,
                                                                QualType declared_type,
-                                                               SrcLoc loc) const ;
+                                                               SrcLoc loc) ;
 
     void resolve_auto_variable_type(QualType& declared_type,
                                     std::unique_ptr<Expr>& init,
                                     const std::shared_ptr<Symbol>& sym,
                                     const std::string& name,
-                                            SrcLoc loc) const ;
+                                            SrcLoc loc) ;
     void resolve_auto_variable_type_from_expr(
         QualType& declared_type,
         const Expr* init_expr,
         const std::shared_ptr<Symbol>& sym,
         const std::string& name,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     void reconcile_array_declared_type_with_symbol(
         QualType& declared_type,
@@ -1411,13 +1411,13 @@ private:
         bool ctor_is_copy_initialization,
         QualType declared_type,
         SrcLoc loc,
-        VariableInitializationSelection& selection) const ;
+        VariableInitializationSelection& selection) ;
 
     ConstructorCandidateEval evaluate_variable_constructor_candidate(
         const RecordSemanticState::Constructor& ctor,
         const ObjectDecl* record_decl,
         const std::vector<std::unique_ptr<Expr>>& ctor_args,
-        bool ctor_is_copy_initialization) const ;
+        bool ctor_is_copy_initialization) ;
 
     std::string describe_variable_constructor_candidate(
         const ConstructorCandidateEval& eval,
@@ -1444,7 +1444,7 @@ private:
         bool ctor_is_list_init,
         QualType declared_type,
         SrcLoc loc,
-        VariableInitializationSelection& selection) const ;
+        VariableInitializationSelection& selection) ;
 
     std::shared_ptr<Symbol> select_destructor_for_variable(
         const std::string& name,
@@ -1473,82 +1473,82 @@ private:
 
     void finalize_sizeof_node(SizeOfExpr* node,
                               const std::shared_ptr<CType>& target_type,
-                              SrcLoc loc) const ;
+                              SrcLoc loc) ;
 
     void finalize_alignof_node(AlignOfExpr* node,
                                const std::shared_ptr<CType>& target_type,
-                               SrcLoc loc) const ;
+                               SrcLoc loc) ;
 
     void report_error(const std::string& message, SrcLoc loc) const ;
 
     void report_warning(const std::string& message, SrcLoc loc) const ;
 
-    void queue_delayed_error(const std::string& message, SrcLoc loc) const ;
+    void queue_delayed_error(const std::string& message, SrcLoc loc) ;
 
-    void queue_delayed_warning(const std::string& message, SrcLoc loc) const ;
+    void queue_delayed_warning(const std::string& message, SrcLoc loc) ;
 
-    void flush_delayed_diagnostics() const ;
+    void flush_delayed_diagnostics() ;
 
-    void enter_unevaluated_context(const char* reason) const ;
+    void enter_unevaluated_context(const char* reason) ;
 
-    void leave_unevaluated_context() const ;
+    void leave_unevaluated_context() ;
 
     bool in_unevaluated_context() const ;
 
     std::unique_ptr<Expr> prepare_unevaluated_operand(std::unique_ptr<Expr> expr,
-                                                               const char* reason) const ;
+                                                               const char* reason) ;
 
     ImplicitConversionSequence build_implicit_conversion_sequence(QualType from,
                                                                   QualType to,
                                                                   ExprUseContext context) const ;
     ImplicitConversionSequence build_cpp_overload_conversion_sequence(Expr* arg,
                                                                       QualType to,
-                                                                      bool allow_user_defined = true) const ;
+                                                                      bool allow_user_defined = true) ;
 
     ImplicitConversionSequence build_cpp_overload_reference_conversion_sequence(
         Expr* arg,
         QualType from,
         QualType to,
-        bool allow_user_defined) const ;
+        bool allow_user_defined) ;
 
     ImplicitConversionSequence build_cpp_overload_nonreference_conversion_sequence(
         Expr* arg,
         QualType from,
         QualType to,
-        bool allow_user_defined) const ;
+        bool allow_user_defined) ;
 
     std::optional<CppConversionConstructorMatch>
     select_cpp_conversion_constructor(Expr* arg,
                                               QualType target_object_type,
-                                              bool allow_explicit_constructors) const ;
+                                              bool allow_explicit_constructors) ;
 
     std::optional<CppUserDefinedConversionMatch>
     select_cpp_user_defined_conversion(
         Expr* arg,
         QualType target_type,
-        bool allow_explicit_constructors = false) const ;
+        bool allow_explicit_constructors = false) ;
 
     std::unique_ptr<Expr> build_cpp_user_defined_conversion_expr(
         std::unique_ptr<Expr> arg,
         QualType target_type,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> convert_cpp_braced_init_argument(
         std::unique_ptr<Expr> arg,
         QualType target_type,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     bool probe_cpp_braced_init_argument_conversion(
         Expr* arg,
         QualType target_type,
         SrcLoc loc,
-        ImplicitConversionSequence& seq_out) const ;
+        ImplicitConversionSequence& seq_out) ;
 
     std::unique_ptr<Expr> build_overload_implicit_object_arg(
         OverloadImplicitObjectArgKind implicit_arg_kind,
         std::unique_ptr<Expr> object_expr,
         bool object_expr_is_pointer,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::shared_ptr<Symbol> make_default_allocation_like_operator_symbol(
         const std::string& operator_name) const ;
@@ -1559,7 +1559,7 @@ private:
         bool force_global_lookup,
         const std::vector<std::unique_ptr<Expr>>& call_args,
         SrcLoc loc,
-        std::shared_ptr<Symbol>& selected_symbol_out) const ;
+        std::shared_ptr<Symbol>& selected_symbol_out) ;
 
     std::unique_ptr<Expr> named_cast_error(
         const std::string& message,
@@ -1656,52 +1656,52 @@ private:
 
     std::unique_ptr<Expr> resolve_overloaded_function_call(FuncCall* call,
                                                                     VarRef* callee_ref,
-                                                                    SrcLoc loc) const ;
+                                                                    SrcLoc loc) ;
 
     std::unique_ptr<Expr> finalize_call_expression(
         std::unique_ptr<FuncCall> call,
         const MemberCallSelection& member_call_selection,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> try_function_object_call_overload(
         std::unique_ptr<FuncCall>& call,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> try_builtin_or_overloaded_varref_call(
         std::unique_ptr<FuncCall>& call,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_explicit_template_call_impl(
         std::unique_ptr<Expr> callee,
         std::vector<TemplateArgument> explicit_template_args,
         std::vector<std::unique_ptr<Expr>> args,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
     std::unique_ptr<Expr> collect_dependent_call_expression(
         std::unique_ptr<Expr> callee,
         std::vector<std::unique_ptr<Expr>> args,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> build_dependent_explicit_template_call(
         std::unique_ptr<Expr> callee,
         std::vector<TemplateArgument> explicit_template_args,
         std::vector<std::unique_ptr<Expr>> args,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
     std::unique_ptr<Expr> materialize_concrete_qualified_lookup_expression(
         const std::string& name,
         const DependentLookupQualifier& qualifier,
         bool looks_like_call,
         SrcLoc loc,
-        QualType implicit_this_type) const ;
+        QualType implicit_this_type) ;
 
     std::unique_ptr<Expr> try_member_function_overload_call(
         std::unique_ptr<FuncCall>& call,
         MemberCallSelection& member_call_selection,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> resolve_call_function_type(
         std::unique_ptr<FuncCall>& call,
         SrcLoc loc,
-        CallFinalizationContext& context_out) const ;
+        CallFinalizationContext& context_out) ;
 
     void capture_call_target_metadata(
         FuncCall* call,
@@ -1724,7 +1724,7 @@ private:
     std::unique_ptr<Expr> prepare_call_finalization(
         std::unique_ptr<FuncCall>& call,
         SrcLoc loc,
-        CallFinalizationContext& context_out) const ;
+        CallFinalizationContext& context_out) ;
 
     std::unique_ptr<Expr> append_missing_call_default_arguments(
         FuncCall* call,
@@ -1734,7 +1734,7 @@ private:
     std::unique_ptr<Expr> convert_call_argument_to_parameter(
         std::unique_ptr<Expr> arg,
         QualType param_type,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     bool is_transparent_union_call_argument_viable(
         Expr* arg,
@@ -1746,7 +1746,7 @@ private:
     void convert_call_arguments(
         FuncCall* call,
         const CallFinalizationContext& context,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> wrap_member_call_expression(
         std::unique_ptr<FuncCall> call,
@@ -1776,12 +1776,12 @@ private:
         bool& saw_private_member_out,
         bool& saw_protected_member_out,
         bool& saw_template_instantiation_out,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     void append_unqualified_overload_candidates(
         std::string_view function_name,
         OverloadImplicitObjectArgKind implicit_arg_kind,
-        std::vector<OverloadCallCandidate>& candidates_out) const ;
+        std::vector<OverloadCallCandidate>& candidates_out) ;
 
     std::unique_ptr<Expr> select_overload_candidate(
         std::string_view callee_name,
@@ -1790,7 +1790,7 @@ private:
         Expr* implicit_object_arg,
         SrcLoc loc,
         std::shared_ptr<Symbol>& selected_symbol_out,
-        OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) const ;
+        OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) ;
 
     std::unique_ptr<Expr> report_inaccessible_member(
         std::string_view member_name,
@@ -1805,13 +1805,13 @@ private:
     std::unique_ptr<Expr> complete_selected_function_template_specialization_symbol(
         std::shared_ptr<Symbol>& selected_symbol,
         SrcLoc loc,
-        std::string_view failure_message) const ;
+        std::string_view failure_message) ;
 
     std::unique_ptr<Expr> try_cpp_binary_operator_overload(
         std::unique_ptr<Expr>& lhs,
         std::unique_ptr<Expr>& rhs,
         BinOpTypes bop,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> resolve_overloaded_call_candidates(
         std::string_view callee_name,
@@ -1820,26 +1820,26 @@ private:
         Expr* implicit_object_arg,
         SrcLoc loc,
         std::shared_ptr<Symbol>& selected_symbol_out,
-        OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) const ;
+        OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) ;
 
     ImplicitConversionSequence evaluate_overload_implicit_object_conversion(
         Expr* object_arg,
         QualType param_type,
         OverloadImplicitObjectArgKind implicit_object_arg_kind,
         FunctionRefQualifierKind ref_qualifier,
-        OverloadConversionMemoCache* conversion_cache = nullptr) const ;
+        OverloadConversionMemoCache* conversion_cache = nullptr) ;
 
     ImplicitConversionSequence build_cpp_overload_conversion_sequence_cached(
         Expr* arg,
         QualType to,
         bool allow_user_defined,
-        OverloadConversionMemoCache* conversion_cache) const ;
+        OverloadConversionMemoCache* conversion_cache) ;
 
     OverloadCandidateEval evaluate_overload_call_candidate(
         const OverloadCallCandidate& candidate_info,
         const std::vector<std::unique_ptr<Expr>>& explicit_args,
         Expr* implicit_object_arg,
-        OverloadConversionMemoCache* conversion_cache = nullptr) const ;
+        OverloadConversionMemoCache* conversion_cache = nullptr) ;
 
     std::string overload_candidate_type_name(
         const OverloadCandidateEval& candidate) const ;
@@ -1860,38 +1860,38 @@ private:
         SrcLoc loc) const ;
 
     bool is_better_overload_candidate(const OverloadCandidateEval& lhs,
-                                              const OverloadCandidateEval& rhs) const ;
+                                              const OverloadCandidateEval& rhs) ;
 
     std::optional<size_t> select_best_overload_candidate_index(
         const std::vector<OverloadCandidateEval>& evaluated,
-        const std::vector<size_t>& viable_indices) const ;
+        const std::vector<size_t>& viable_indices) ;
 
     QualType pick_common_type(QualType lhs, QualType rhs) const ;
 
     // Materialize rollback state lazily on first semantic mutation in a
     // tentative parse context.
-    void materialize_tentative_snapshot(TentativeSnapshot& snapshot) const ;
-    void materialize_tentative_snapshot_if_needed() const ;
-    void record_decl_context_mutation(const std::shared_ptr<DeclContext>& context) const ;
-    void record_scope_mutation(const std::shared_ptr<Scope>& scope) const ;
+    void materialize_tentative_snapshot(TentativeSnapshot& snapshot) ;
+    void materialize_tentative_snapshot_if_needed() ;
+    void record_decl_context_mutation(const std::shared_ptr<DeclContext>& context) ;
+    void record_scope_mutation(const std::shared_ptr<Scope>& scope) ;
     void record_global_scope_mutation(
-        const std::shared_ptr<GlobalIdentTracker>& global_scope) const ;
+        const std::shared_ptr<GlobalIdentTracker>& global_scope) ;
     std::shared_ptr<DeclContext> find_decl_context(const DeclContext* target) const ;
     std::shared_ptr<DeclContext> resolve_scope_decl_context(const std::shared_ptr<Scope>& scope) const ;
     std::shared_ptr<Scope> find_enclosing_scope_with_flags(ScopeFlags flags) const ;
     void bind_symbol_in_scope(const std::shared_ptr<Scope>& scope,
                                       const std::string& name,
-                                      const std::shared_ptr<Symbol>& sym) const ;
+                                      const std::shared_ptr<Symbol>& sym) ;
     void bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
                                      const std::string& name,
                                      const Decl* decl,
-                                     LookupNamespace lookup_namespace) const ;
+                                     LookupNamespace lookup_namespace) ;
     void bind_tag_decl_in_scope(const std::shared_ptr<Scope>& scope,
                                         const std::string& tag,
-                                        TagDecl* decl) const ;
+                                        TagDecl* decl) ;
     void bind_label_in_scope(const std::shared_ptr<Scope>& scope,
                                      const std::string& label,
-                                     SrcLoc loc) const ;
+                                     SrcLoc loc) ;
     void sync_decl_context_from_current_scope() ;
     FunctionDefinitionState capture_current_function_definition_state() const ;
     void restore_current_function_definition_state(FunctionDefinitionState state) ;
@@ -1904,19 +1904,19 @@ private:
     std::shared_ptr<DiagnosticEngine> diag_engine_;
     LangOptions lang_opts_;
 
-    // --- Scope navigation ---
-    std::shared_ptr<Scope> current_scope_ = nullptr;
-    std::shared_ptr<DeclContext> translation_unit_decl_context_ = nullptr;
-    std::shared_ptr<DeclContext> current_decl_context_ = nullptr;
-    std::shared_ptr<GlobalIdentTracker> current_global_scope_ = nullptr;
+    struct CollectSessionState {
+        std::shared_ptr<Scope> current_scope_ = nullptr;
+        std::shared_ptr<DeclContext> translation_unit_decl_context_ = nullptr;
+        std::shared_ptr<DeclContext> current_decl_context_ = nullptr;
+        std::shared_ptr<GlobalIdentTracker> current_global_scope_ = nullptr;
+        FunctionDefinitionState func_state_;
+        std::vector<TentativeSnapshot> tentative_snapshots_;
+        std::vector<FunctionDefinitionState> function_definition_stack_;
+        std::vector<std::vector<TentativeSnapshot>>
+            function_tentative_snapshot_stack_;
+    };
 
-    // --- Function body state ---
-    mutable FunctionDefinitionState func_state_;
-
-    // --- Tentative and nesting ---
-    mutable std::vector<TentativeSnapshot> tentative_snapshots_;
-    std::vector<FunctionDefinitionState> function_definition_stack_;
-    std::vector<std::vector<TentativeSnapshot>> function_tentative_snapshot_stack_;
+    CollectSessionState session_;
 };
 
 #endif // ABURI_COLLECT_H

@@ -14,7 +14,7 @@ void Collect::resolve_auto_variable_type_from_expr(
     const Expr* init_expr,
     const std::shared_ptr<Symbol>& sym,
     const std::string& name,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     bool has_auto_type = declared_type && contains_auto_type(declared_type.get_shared());
     if (!has_auto_type) {
         return;
@@ -31,7 +31,7 @@ void Collect::resolve_auto_variable_type_from_expr(
     }
     bool treat_as_cxx_auto = has_cxx_auto_type && !has_gnu_auto_type;
 
-    if (!treat_as_cxx_auto && !func_state_.in_function) {
+    if (!treat_as_cxx_auto && !session_.func_state_.in_function) {
         report_error("'__auto_type' is not allowed at file scope", loc);
     }
     if (!init_expr) {
@@ -94,10 +94,10 @@ void Collect::resolve_auto_variable_type_from_expr(
 }
 
 void Collect::resolve_auto_variable_type(QualType& declared_type,
-                                                 std::unique_ptr<Expr>& init,
-                                                 const std::shared_ptr<Symbol>& sym,
-                                                 const std::string& name,
-                                                 SrcLoc loc) const {
+                                         std::unique_ptr<Expr>& init,
+                                         const std::shared_ptr<Symbol>& sym,
+                                         const std::string& name,
+                                         SrcLoc loc) {
     resolve_auto_variable_type_from_expr(
         declared_type,
         init.get(),
@@ -210,7 +210,7 @@ Collect::evaluate_variable_constructor_candidate(
     const RecordSemanticState::Constructor& ctor,
     const ObjectDecl* record_decl,
     const std::vector<std::unique_ptr<Expr>>& ctor_args,
-    bool ctor_is_copy_initialization) const {
+    bool ctor_is_copy_initialization) {
 
     ConstructorCandidateEval eval;
     eval.ctor = &ctor;
@@ -491,7 +491,7 @@ bool Collect::materialize_variable_constructor_selection(
     bool ctor_is_list_init,
     QualType declared_type,
     SrcLoc loc,
-    VariableInitializationSelection& selection) const {
+    VariableInitializationSelection& selection) {
 
     if (!chosen.ctor || !chosen.function_type) {
         report_error("internal error: selected constructor is missing semantic symbol", loc);
@@ -637,7 +637,7 @@ bool Collect::select_constructor_for_variable_initialization(
     bool ctor_is_copy_initialization,
     QualType declared_type,
     SrcLoc loc,
-    VariableInitializationSelection& selection) const {
+    VariableInitializationSelection& selection) {
     selection.constructor_symbol = nullptr;
     selection.constructor_args.clear();
     selection.constructor_is_list_init = false;

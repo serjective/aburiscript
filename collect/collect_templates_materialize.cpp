@@ -64,7 +64,7 @@ void Collect::note_specialization_use_for_symbol(
 QualType Collect::instantiate_alias_template_specialization(
     const AliasTemplateDecl* alias_template,
     const std::vector<TemplateArgument>& arguments,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!alias_template) {
         return QualType();
     }
@@ -141,7 +141,7 @@ QualType Collect::collect_lookup_record_nested_template_type(
     const std::string& name,
     const std::vector<TemplateArgument>& arguments,
     SrcLoc loc,
-    bool* matched_template) const {
+    bool* matched_template) {
     if (matched_template) {
         *matched_template = false;
     }
@@ -185,7 +185,7 @@ QualType Collect::substitute_class_template_type(
     QualType type,
     const ClassTemplateDecl* class_template,
     const std::vector<TemplateArgument>& specialization_arguments,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!class_template) {
         return type;
     }
@@ -218,7 +218,7 @@ std::vector<TemplateArgument> Collect::substitute_class_template_arguments(
     const std::vector<TemplateArgument>& arguments,
     const ClassTemplateDecl* class_template,
     const std::vector<TemplateArgument>& specialization_arguments,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!class_template) {
         return arguments;
     }

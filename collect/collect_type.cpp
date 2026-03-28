@@ -1,6 +1,6 @@
 #include "collect.h"
 
-void Collect::finalize_sizeof_node(SizeOfExpr* node, const std::shared_ptr<CType>& target_type, SrcLoc loc) const {
+void Collect::finalize_sizeof_node(SizeOfExpr* node, const std::shared_ptr<CType>& target_type, SrcLoc loc) {
 
     if (!node) {
         return;
@@ -28,7 +28,7 @@ void Collect::finalize_sizeof_node(SizeOfExpr* node, const std::shared_ptr<CType
 }
 
 
-void Collect::finalize_alignof_node(AlignOfExpr* node, const std::shared_ptr<CType>& target_type, SrcLoc loc) const {
+void Collect::finalize_alignof_node(AlignOfExpr* node, const std::shared_ptr<CType>& target_type, SrcLoc loc) {
 
     if (!node) {
         return;

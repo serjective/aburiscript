@@ -19,7 +19,7 @@ using template_sema_internal::TemplateSubstitutionPass;
 namespace {
 
 bool materialize_specialized_fold_expression(
-    const Collect& collect,
+    Collect& collect,
     std::unique_ptr<Expr>& expr,
     QualType implicit_this_type,
     std::shared_ptr<CType> bool_type,
@@ -205,7 +205,7 @@ FuncDecl* Collect::instantiate_function_template_specialization(
     const std::vector<TemplateArgument>& arguments,
     SrcLoc loc,
     std::shared_ptr<Symbol>* specialization_symbol_out,
-    bool instantiate_definition) const {
+    bool instantiate_definition) {
     if (specialization_symbol_out) {
         *specialization_symbol_out = nullptr;
     }
@@ -296,7 +296,7 @@ FuncDecl* Collect::instantiate_function_template_specialization(
         };
     auto lookup_existing_function_symbol_for_decl =
         [&](const FuncDecl* decl) -> std::shared_ptr<Symbol> {
-            if (!decl || !current_global_scope_ || decl->name.empty()) {
+            if (!decl || !session_.current_global_scope_ || decl->name.empty()) {
                 if (!decl || decl->name.empty()) {
                     return nullptr;
                 }
@@ -323,17 +323,17 @@ FuncDecl* Collect::instantiate_function_template_specialization(
                         }
                         return nullptr;
                     };
-            if (translation_unit_decl_context_) {
+            if (session_.translation_unit_decl_context_) {
                 if (auto symbol =
-                        lookup_in_decl_context(translation_unit_decl_context_.get())) {
+                        lookup_in_decl_context(session_.translation_unit_decl_context_.get())) {
                     return symbol;
                 }
             }
-            if (!current_global_scope_) {
+            if (!session_.current_global_scope_) {
                 return nullptr;
             }
-            auto it = current_global_scope_->all_variables.find(decl->name);
-            if (it == current_global_scope_->all_variables.end()) {
+            auto it = session_.current_global_scope_->all_variables.find(decl->name);
+            if (it == session_.current_global_scope_->all_variables.end()) {
                 return nullptr;
             }
             QualType decl_owner_type = get_func_decl_owner_record_type(decl);

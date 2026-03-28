@@ -16,61 +16,61 @@ void Collect::report_warning(const std::string& message, SrcLoc loc) const {
 }
 
 
-void Collect::queue_delayed_error(const std::string& message, SrcLoc loc) const {
+void Collect::queue_delayed_error(const std::string& message, SrcLoc loc) {
 
     materialize_tentative_snapshot_if_needed();
-    func_state_.delayed_diagnostics.push_back(DelayedDiagnostic{true, message, loc});
+    session_.func_state_.delayed_diagnostics.push_back(DelayedDiagnostic{true, message, loc});
 }
 
 
-void Collect::queue_delayed_warning(const std::string& message, SrcLoc loc) const {
+void Collect::queue_delayed_warning(const std::string& message, SrcLoc loc) {
 
     materialize_tentative_snapshot_if_needed();
-    func_state_.delayed_diagnostics.push_back(DelayedDiagnostic{false, message, loc});
+    session_.func_state_.delayed_diagnostics.push_back(DelayedDiagnostic{false, message, loc});
 }
 
 
-void Collect::flush_delayed_diagnostics() const {
+void Collect::flush_delayed_diagnostics() {
 
-    if (!func_state_.delayed_diagnostics.empty()) {
+    if (!session_.func_state_.delayed_diagnostics.empty()) {
         materialize_tentative_snapshot_if_needed();
     }
-    for (const auto& diag : func_state_.delayed_diagnostics) {
+    for (const auto& diag : session_.func_state_.delayed_diagnostics) {
         if (diag.is_error) {
             report_error(diag.message, diag.loc);
         } else {
             report_warning(diag.message, diag.loc);
         }
     }
-    func_state_.delayed_diagnostics.clear();
+    session_.func_state_.delayed_diagnostics.clear();
 }
 
 
-void Collect::enter_unevaluated_context(const char* reason) const {
+void Collect::enter_unevaluated_context(const char* reason) {
 
     materialize_tentative_snapshot_if_needed();
-    ++func_state_.unevaluated_depth;
-    func_state_.unevaluated_context_stack.push_back(reason ? std::string(reason) : std::string());
+    ++session_.func_state_.unevaluated_depth;
+    session_.func_state_.unevaluated_context_stack.push_back(reason ? std::string(reason) : std::string());
 }
 
 
-void Collect::leave_unevaluated_context() const {
+void Collect::leave_unevaluated_context() {
 
-    if (func_state_.unevaluated_depth > 0 || !func_state_.unevaluated_context_stack.empty()) {
+    if (session_.func_state_.unevaluated_depth > 0 || !session_.func_state_.unevaluated_context_stack.empty()) {
         materialize_tentative_snapshot_if_needed();
     }
-    if (func_state_.unevaluated_depth > 0) {
-        --func_state_.unevaluated_depth;
+    if (session_.func_state_.unevaluated_depth > 0) {
+        --session_.func_state_.unevaluated_depth;
     }
-    if (!func_state_.unevaluated_context_stack.empty()) {
-        func_state_.unevaluated_context_stack.pop_back();
+    if (!session_.func_state_.unevaluated_context_stack.empty()) {
+        session_.func_state_.unevaluated_context_stack.pop_back();
     }
 }
 
 
 bool Collect::in_unevaluated_context() const {
 
-    return func_state_.unevaluated_depth > 0;
+    return session_.func_state_.unevaluated_depth > 0;
 }
 
 void Collect::report_conversion_failure(const std::string& context,

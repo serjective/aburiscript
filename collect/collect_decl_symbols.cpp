@@ -13,7 +13,7 @@
 
 using namespace collect_decl_internal;
 
-std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, SrcLoc loc, LanguageLinkage language_linkage) const {
+std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, SrcLoc loc, LanguageLinkage language_linkage) {
 
     if (!scope || name.empty()) {
         return nullptr;
@@ -204,13 +204,13 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, SrcLoc loc, LanguageLinkage language_linkage) const {
+std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, SrcLoc loc, LanguageLinkage language_linkage) {
 
-    return collect_declare_variable_symbol(current_scope_, current_global_scope_, name, type, storage_class, is_constexpr, loc, language_linkage);
+    return collect_declare_variable_symbol(session_.current_scope_, session_.current_global_scope_, name, type, storage_class, is_constexpr, loc, language_linkage);
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function) const {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function) {
 
     if (!scope || name.empty()) {
         return nullptr;
@@ -416,11 +416,11 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function) const {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function) {
 
     return collect_declare_function_symbol(
-        current_scope_,
-        current_global_scope_,
+        session_.current_scope_,
+        session_.current_global_scope_,
         name,
         type,
         storage_class,
@@ -432,7 +432,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::stri
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_typedef_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, SrcLoc loc) const {
+std::shared_ptr<Symbol> Collect::collect_declare_typedef_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, SrcLoc loc) {
 
     if (!scope || name.empty()) {
         return nullptr;
@@ -471,16 +471,16 @@ std::shared_ptr<Symbol> Collect::collect_declare_typedef_symbol(std::shared_ptr<
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_typedef_symbol(const std::string& name, QualType type, SrcLoc loc) const {
+std::shared_ptr<Symbol> Collect::collect_declare_typedef_symbol(const std::string& name, QualType type, SrcLoc loc) {
 
-    return collect_declare_typedef_symbol(current_scope_, current_global_scope_, name, type, loc);
+    return collect_declare_typedef_symbol(session_.current_scope_, session_.current_global_scope_, name, type, loc);
 }
 
 std::shared_ptr<Symbol> Collect::collect_declare_type_name_symbol(
     std::shared_ptr<Scope> scope,
     const std::string& name,
     QualType type,
-    SrcLoc loc) const {
+    SrcLoc loc) {
 
     if (!scope || name.empty()) {
         return nullptr;
@@ -521,7 +521,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_type_name_symbol(
 std::shared_ptr<Symbol> Collect::collect_declare_type_name_symbol(
     const std::string& name,
     QualType type,
-    SrcLoc loc) const {
+    SrcLoc loc) {
 
-    return collect_declare_type_name_symbol(current_scope_, name, std::move(type), loc);
+    return collect_declare_type_name_symbol(session_.current_scope_, name, std::move(type), loc);
 }

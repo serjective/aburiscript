@@ -998,18 +998,18 @@ std::unique_ptr<Expr> Collect::collect_string_literal(const std::string& value, 
 
 std::unique_ptr<Expr> Collect::collect_cpp_this_expression(SrcLoc loc) const {
 
-    if (!func_state_.in_function ||
-        !func_state_.current_function_is_cpp_member ||
-        func_state_.current_function_is_static_cpp_member ||
-        !func_state_.current_function_cpp_this_type) {
+    if (!session_.func_state_.in_function ||
+        !session_.func_state_.current_function_is_cpp_member ||
+        session_.func_state_.current_function_is_static_cpp_member ||
+        !session_.func_state_.current_function_cpp_this_type) {
         report_error("invalid use of 'this' outside of a non-static member function", loc);
         return collect_make<ErrorExpr>("invalid 'this' expression", loc);
     }
-    return collect_make<CppThisExpr>(func_state_.current_function_cpp_this_type, loc);
+    return collect_make<CppThisExpr>(session_.func_state_.current_function_cpp_this_type, loc);
 }
 
 std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
-    const std::string& name, bool looks_like_call, SrcLoc loc) const {
+    const std::string& name, bool looks_like_call, SrcLoc loc) {
 
     auto sym = collect_lookup_variable_symbol(name, true);
     bool symbol_is_local = is_local_variable_or_parameter_symbol(sym);
@@ -1017,16 +1017,16 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
         (name == "__func__" || name == "__FUNCTION__" ||
          name == "__PRETTY_FUNCTION__");
 
-    if (lang_opts_.is_cxx_mode() && func_state_.current_function_is_cpp_member) {
+    if (lang_opts_.is_cxx_mode() && session_.func_state_.current_function_is_cpp_member) {
         auto current_record =
-            current_record_from_this_type(func_state_.current_function_cpp_this_type, ast_ctx_.get());
+            current_record_from_this_type(session_.func_state_.current_function_cpp_this_type, ast_ctx_.get());
         auto member_lookup = lookup_record_member_name(current_record.get(), name);
         if (member_lookup.has_member_match() && !symbol_is_local) {
             size_t static_template_candidate_matches =
                 member_lookup.static_method_template_matches;
             size_t nonstatic_template_candidate_matches =
                 member_lookup.nonstatic_method_template_matches;
-            if (func_state_.current_function_is_static_cpp_member) {
+            if (session_.func_state_.current_function_is_static_cpp_member) {
                 if (member_lookup.field_matches > 0 ||
                     member_lookup.nonstatic_method_matches > 0 ||
                     nonstatic_template_candidate_matches > 0) {
@@ -1095,7 +1095,7 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
                 }
             }
 
-            if (!func_state_.current_function_cpp_this_type) {
+            if (!session_.func_state_.current_function_cpp_this_type) {
                 report_error(
                     "internal error: missing implicit object parameter type",
                     loc);
@@ -1104,7 +1104,7 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
             }
 
             auto this_expr = collect_make<CppThisExpr>(
-                func_state_.current_function_cpp_this_type, loc);
+                session_.func_state_.current_function_cpp_this_type, loc);
             return collect_member_expression(
                 std::move(this_expr), name, true, loc, looks_like_call);
         }
@@ -1131,11 +1131,11 @@ std::unique_ptr<Expr> Collect::collect_identifier_reference(const std::string& n
             kind = PredefinedIdentKind::PrettyFunction;
         }
         std::string value;
-        if (func_state_.in_function) {
+        if (session_.func_state_.in_function) {
             if (kind == PredefinedIdentKind::PrettyFunction) {
-                value = func_state_.current_pretty_function_name;
+                value = session_.func_state_.current_pretty_function_name;
             } else {
-                value = func_state_.current_function_name;
+                value = session_.func_state_.current_function_name;
             }
         }
         size_t len = value.size() + 1;
@@ -1219,7 +1219,7 @@ std::unique_ptr<Expr> Collect::collect_statement_expression(std::unique_ptr<Comp
 
 bool Collect::finalize_cpp_lambda_semantics(
     CppLambdaExpr& lambda,
-    std::string* error_out) const {
+    std::string* error_out) {
     auto fail = [&](const std::string& message, SrcLoc loc) -> bool {
         report_error(message, loc);
         if (error_out && error_out->empty()) {
@@ -1681,7 +1681,7 @@ bool Collect::finalize_cpp_lambda_semantics(
             synthesized_method_type->ret_type.get_shared());
     if (needs_post_clone_auto_return_deduction) {
         std::string finalize_error;
-        if (!const_cast<Collect*>(this)->with_function_definition_state(
+        if (!with_function_definition_state(
                 synthesized_method.get(),
                 [&]() {
                     return template_sema_internal::
@@ -1884,12 +1884,12 @@ bool Collect::finalize_cpp_lambda_semantics(
 }
 
 bool Collect::collect_finalize_cpp_lambda_expression(CppLambdaExpr& lambda,
-                                                     std::string* error_out) const {
+                                                     std::string* error_out) {
     return finalize_cpp_lambda_semantics(lambda, error_out);
 }
 
 bool Collect::collect_finalize_block_expression(BlockExpr& block,
-                                                std::string* error_out) const {
+                                                std::string* error_out) {
     auto fail = [&](const std::string& message, SrcLoc loc) -> bool {
         report_error(message, loc);
         if (error_out && error_out->empty()) {
@@ -2158,7 +2158,7 @@ bool Collect::collect_finalize_block_expression(BlockExpr& block,
     invoke_decl->set_language_linkage(LanguageLinkage::None);
     if (invoke_decl->body) {
         std::string finalize_error;
-        if (!const_cast<Collect*>(this)->with_function_definition_state(
+        if (!with_function_definition_state(
                 invoke_decl.get(),
                 [&]() {
                     return template_sema_internal::
@@ -2201,7 +2201,7 @@ std::unique_ptr<Expr> Collect::collect_cpp_lambda_expression(
     bool has_noexcept,
     bool has_trailing_return,
     bool is_generic,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     auto lambda = collect_make<CppLambdaExpr>(
         std::move(closure_info),
         std::move(semantic_info),
@@ -2230,7 +2230,7 @@ std::unique_ptr<Expr> Collect::collect_block_expression(
     QualType explicit_return_type,
     bool has_parameter_clause,
     bool has_explicit_return_type,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     auto block = collect_make<BlockExpr>(
         std::move(semantic_info),
         std::move(block_type),
@@ -2246,7 +2246,7 @@ std::unique_ptr<Expr> Collect::collect_block_expression(
 }
 
 
-std::unique_ptr<Expr> Collect::collect_compound_literal_expression(QualType type, std::unique_ptr<Expr> init, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_compound_literal_expression(QualType type, std::unique_ptr<Expr> init, SrcLoc loc) {
     if (type && contains_deferred_semantic_type(type.get_shared())) {
         type = resolve_typeof_types(type, loc);
     }
@@ -2261,7 +2261,7 @@ std::unique_ptr<Expr> Collect::collect_compound_literal_expression(QualType type
         init = process_initializer_for_type(std::move(init), type, loc);
     }
     auto node = collect_make<CompoundLiteralExpr>(std::move(type), std::move(init), loc);
-    node->has_static_storage = !func_state_.in_function;
+    node->has_static_storage = !session_.func_state_.in_function;
     return node;
 }
 
@@ -2275,7 +2275,7 @@ std::unique_ptr<Expr> Collect::collect_label_address_expression(const std::strin
 }
 
 
-std::unique_ptr<Expr> Collect::collect_va_arg_expression(std::unique_ptr<Expr> va_list_expr, QualType arg_type, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_va_arg_expression(std::unique_ptr<Expr> va_list_expr, QualType arg_type, SrcLoc loc) {
 
     if (arg_type && contains_deferred_semantic_type(arg_type.get_shared())) {
         arg_type = resolve_typeof_types(arg_type, loc);
@@ -2310,7 +2310,7 @@ std::unique_ptr<Expr> Collect::collect_va_arg_expression(std::unique_ptr<Expr> v
 }
 
 
-std::unique_ptr<Expr> Collect::collect_builtin_types_compatible_expression(QualType lhs, QualType rhs, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_builtin_types_compatible_expression(QualType lhs, QualType rhs, SrcLoc loc) {
 
     if (lhs && contains_deferred_semantic_type(lhs.get_shared())) {
         lhs = resolve_typeof_types(lhs, loc);
@@ -2399,7 +2399,7 @@ std::unique_ptr<Expr> Collect::collect_builtin_choose_expression(std::unique_ptr
     return std::move(false_expr);
 }
 
-std::unique_ptr<Expr> Collect::collect_builtin_convertvector_expression(std::unique_ptr<Expr> vector_expr, QualType target_type, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_builtin_convertvector_expression(std::unique_ptr<Expr> vector_expr, QualType target_type, SrcLoc loc) {
 
     if (target_type && contains_deferred_semantic_type(target_type.get_shared())) {
         target_type = resolve_typeof_types(target_type, loc);
@@ -2430,7 +2430,7 @@ std::unique_ptr<Expr> Collect::collect_builtin_convertvector_expression(std::uni
 }
 
 
-std::unique_ptr<Expr> Collect::collect_offsetof_expression(QualType type_operand, const std::string& member_name, std::vector<OffsetOfComponent> designator_path, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_offsetof_expression(QualType type_operand, const std::string& member_name, std::vector<OffsetOfComponent> designator_path, SrcLoc loc) {
 
     if (contains_deferred_semantic_type(type_operand.get_shared())) {
         type_operand = resolve_typeof_types(type_operand, loc);
@@ -2540,7 +2540,7 @@ std::unique_ptr<Expr> Collect::collect_offsetof_expression(QualType type_operand
 }
 
 
-std::unique_ptr<Expr> Collect::collect_explicit_cast(std::unique_ptr<Expr> expr, QualType target_type, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_explicit_cast(std::unique_ptr<Expr> expr, QualType target_type, SrcLoc loc) {
 
     if (target_type && contains_deferred_semantic_type(target_type.get_shared())) {
         target_type = resolve_typeof_types(target_type, loc);
@@ -2857,7 +2857,7 @@ std::unique_ptr<Expr> Collect::cpp_static_named_cast(
 std::unique_ptr<Expr> Collect::collect_cpp_named_cast(CppNamedCastKind cast_kind,
                                                       std::unique_ptr<Expr> expr,
                                                       QualType target_type,
-                                                      SrcLoc loc) const {
+                                                      SrcLoc loc) {
     if (!expr) {
         return named_cast_error("named cast requires a valid expression operand", loc);
     }
@@ -2954,7 +2954,7 @@ std::unique_ptr<Expr> Collect::select_cpp_allocation_like_function(
     bool force_global_lookup,
     const std::vector<std::unique_ptr<Expr>>& call_args,
     SrcLoc loc,
-    std::shared_ptr<Symbol>& selected_symbol_out) const {
+    std::shared_ptr<Symbol>& selected_symbol_out) {
     selected_symbol_out = nullptr;
 
     std::vector<OverloadCallCandidate> overload_candidates;
@@ -2969,9 +2969,9 @@ std::unique_ptr<Expr> Collect::select_cpp_allocation_like_function(
         }
 
         const ObjectDecl* access_context_decl = nullptr;
-        if (lang_opts_.is_cxx_mode() && func_state_.current_function_is_cpp_member) {
+        if (lang_opts_.is_cxx_mode() && session_.func_state_.current_function_is_cpp_member) {
             access_context_decl =
-                current_record_decl_from_this_type(func_state_.current_function_cpp_this_type);
+                current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
         }
 
         for (const auto& member_match : member_candidates) {
@@ -3082,7 +3082,7 @@ std::unique_ptr<Expr> Collect::collect_cpp_new_expression(
     std::vector<std::unique_ptr<Expr>> placement_args,
     std::unique_ptr<Expr> initializer,
     bool is_global_allocation,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!allocated_type) {
         report_error("new-expression requires a valid allocated type", loc);
         return collect_error_expression("new-expression requires a valid allocated type", loc);
@@ -3345,7 +3345,7 @@ std::unique_ptr<Expr> Collect::collect_cpp_delete_expression(
     std::unique_ptr<Expr> operand,
     bool is_array_form,
     bool is_global_delete,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!operand) {
         report_error("delete-expression requires an operand", loc);
         return collect_error_expression("delete-expression requires an operand", loc);
@@ -3507,7 +3507,7 @@ std::unique_ptr<Expr> Collect::collect_cpp_delete_expression(
 }
 
 std::unique_ptr<Expr> Collect::collect_cpp_typeid_type(QualType type_operand,
-                                                       SrcLoc loc) const {
+                                                       SrcLoc loc) {
     if (!type_operand) {
         report_error("typeid requires a valid type operand", loc);
         return collect_error_expression("typeid requires a valid type operand", loc);
@@ -3533,7 +3533,7 @@ std::unique_ptr<Expr> Collect::collect_cpp_typeid_type(QualType type_operand,
 }
 
 std::unique_ptr<Expr> Collect::collect_cpp_typeid_expression(std::unique_ptr<Expr> expr_operand,
-                                                             SrcLoc loc) const {
+                                                             SrcLoc loc) {
     if (!expr_operand) {
         report_error("typeid requires a valid expression operand", loc);
         return collect_error_expression("typeid requires a valid expression operand", loc);
@@ -3566,7 +3566,7 @@ std::unique_ptr<Expr> Collect::collect_cpp_typeid_expression(std::unique_ptr<Exp
 }
 
 
-std::unique_ptr<Expr> Collect::collect_sizeof_type(QualType type, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_sizeof_type(QualType type, SrcLoc loc) {
 
     auto node = collect_make<SizeOfExpr>(type, loc);
     finalize_sizeof_node(node.get(), type.get_shared(), loc);
@@ -3591,7 +3591,7 @@ std::unique_ptr<Expr> Collect::collect_sizeof_pack_expression(
 }
 
 
-std::unique_ptr<Expr> Collect::collect_sizeof_expression(std::unique_ptr<Expr> expr, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_sizeof_expression(std::unique_ptr<Expr> expr, SrcLoc loc) {
 
     expr = prepare_unevaluated_operand(std::move(expr), "sizeof");
     std::shared_ptr<CType> target_type = nullptr;
@@ -3604,7 +3604,7 @@ std::unique_ptr<Expr> Collect::collect_sizeof_expression(std::unique_ptr<Expr> e
 }
 
 
-std::unique_ptr<Expr> Collect::collect_alignof_type(QualType type, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_alignof_type(QualType type, SrcLoc loc) {
 
     auto node = collect_make<AlignOfExpr>(type.get_shared(), loc);
     finalize_alignof_node(node.get(), type.get_shared(), loc);
@@ -3612,7 +3612,7 @@ std::unique_ptr<Expr> Collect::collect_alignof_type(QualType type, SrcLoc loc) c
 }
 
 
-std::unique_ptr<Expr> Collect::collect_alignof_expression(std::unique_ptr<Expr> expr, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_alignof_expression(std::unique_ptr<Expr> expr, SrcLoc loc) {
 
     expr = prepare_unevaluated_operand(std::move(expr), "_Alignof");
     std::shared_ptr<CType> target_type = nullptr;
@@ -3626,7 +3626,7 @@ std::unique_ptr<Expr> Collect::collect_alignof_expression(std::unique_ptr<Expr> 
 }
 
 
-std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::unique_ptr<Expr> expr, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::unique_ptr<Expr> expr, SrcLoc loc) {
 
     if (lang_opts_.is_cxx_mode() &&
         expr &&
@@ -3846,7 +3846,7 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
 }
 
 
-std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lhs, std::unique_ptr<Expr> rhs, BinOpTypes bop, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lhs, std::unique_ptr<Expr> rhs, BinOpTypes bop, SrcLoc loc) {
 
     if (bop == BinOpTypes::MEMBER_PTR_DOT ||
         bop == BinOpTypes::MEMBER_PTR_ARROW) {
@@ -4349,7 +4349,7 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
     std::unique_ptr<Expr>& lhs,
     std::unique_ptr<Expr>& rhs,
     BinOpTypes bop,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!lang_opts_.is_cxx_mode() ||
         !lhs ||
         !rhs ||
@@ -4628,7 +4628,7 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
 }
 
 
-std::unique_ptr<Expr> Collect::collect_generic_expression(std::unique_ptr<Expr> controlling, std::vector<GenericAssociation> associations, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_generic_expression(std::unique_ptr<Expr> controlling, std::vector<GenericAssociation> associations, SrcLoc loc) {
 
     // C11 6.5.1.1: the controlling expression is unevaluated.
     {
@@ -5113,7 +5113,7 @@ std::unique_ptr<Expr> Collect::builtin_call_expression(
 }
 
 std::unique_ptr<Expr> Collect::prepare_unevaluated_operand(std::unique_ptr<Expr> expr,
-                                                                    const char* reason) const {
+                                                                    const char* reason) {
 
     UnevaluatedContextScope unevaluated_scope(this, reason);
     return collect_apply_standard_conversions(std::move(expr), ExprUseContext::Unevaluated);
@@ -5434,7 +5434,7 @@ Collect::ImplicitConversionSequence Collect::build_implicit_conversion_sequence(
 
 Collect::ImplicitConversionSequence Collect::build_cpp_overload_conversion_sequence(Expr* arg,
                                                                                      QualType to,
-                                                                                     bool allow_user_defined) const {
+                                                                                     bool allow_user_defined) {
 
     ImplicitConversionSequence seq;
     seq.to = to;
@@ -5480,7 +5480,7 @@ Collect::build_cpp_overload_reference_conversion_sequence(
     Expr* arg,
     QualType from,
     QualType to,
-    bool allow_user_defined) const {
+    bool allow_user_defined) {
     ImplicitConversionSequence seq;
     seq.to = to;
 
@@ -5634,7 +5634,7 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
     Expr* arg,
     QualType from,
     QualType to,
-    bool allow_user_defined) const {
+    bool allow_user_defined) {
     ImplicitConversionSequence seq;
     seq.to = to;
 

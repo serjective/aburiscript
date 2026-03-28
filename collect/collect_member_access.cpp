@@ -21,7 +21,7 @@ bool record_has_dependent_bases(const ObjectDecl* record_decl) {
 }
 } // namespace
 
-std::unique_ptr<Expr> Collect::collect_array_subscript(std::unique_ptr<Expr> array, std::unique_ptr<Expr> index, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_array_subscript(std::unique_ptr<Expr> array, std::unique_ptr<Expr> index, SrcLoc loc) {
 
     if (lang_opts_.is_cxx_mode()) {
         auto array_record =
@@ -415,7 +415,7 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
     bool is_arrow,
     SrcLoc loc,
     bool allow_overloaded_method_set,
-    bool suppress_virtual_dispatch) const {
+    bool suppress_virtual_dispatch) {
 
     const std::string* interned_member_name =
         ast_ctx_ ? ast_ctx_->intern_identifier(member_name) : nullptr;
@@ -565,16 +565,16 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
             ? analyze_cpp_member_lookup_base(
                   base_type,
                   is_arrow,
-                  func_state_.current_function_is_cpp_member
-                      ? func_state_.current_function_cpp_this_type
+                  session_.func_state_.current_function_is_cpp_member
+                      ? session_.func_state_.current_function_cpp_this_type
                       : QualType(nullptr),
                   ast_ctx_.get())
             : CppMemberLookupBaseAnalysis{};
     bool dependent_base_type = dependent_base_analysis.is_dependent;
     auto dependent_record_type = dependent_base_analysis.object_record_type;
     const ObjectDecl* current_record_decl =
-        func_state_.current_function_is_cpp_member
-            ? current_record_decl_from_this_type(func_state_.current_function_cpp_this_type)
+        session_.func_state_.current_function_is_cpp_member
+            ? current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type)
             : nullptr;
     bool is_current_instantiation =
         dependent_base_analysis.is_current_instantiation;
@@ -627,9 +627,9 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
 
     const ObjectDecl* object_record_decl = record_decl_from_record_type(record_type.get());
     const ObjectDecl* access_context_decl = nullptr;
-    if (lang_opts_.is_cxx_mode() && func_state_.current_function_is_cpp_member) {
+    if (lang_opts_.is_cxx_mode() && session_.func_state_.current_function_is_cpp_member) {
         access_context_decl =
-            current_record_decl_from_this_type(func_state_.current_function_cpp_this_type);
+            current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
     }
     if (record_type->isIncomplete()) {
         report_error("cannot access member of incomplete type", loc);

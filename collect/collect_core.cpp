@@ -144,26 +144,26 @@ void Collect::set_lang_options(LangOptions lang_opts) {
     lang_opts_ = lang_opts;
 }
 
-void Collect::materialize_tentative_snapshot(TentativeSnapshot& snapshot) const {
+void Collect::materialize_tentative_snapshot(TentativeSnapshot& snapshot) {
     if (snapshot.materialized) {
         return;
     }
     bump_snapshot_materializations();
     snapshot.materialized = true;
-    snapshot.current_scope = current_scope_;
-    snapshot.translation_unit_decl_context = translation_unit_decl_context_;
-    snapshot.current_decl_context = current_decl_context_;
-    snapshot.current_global_scope_ptr = current_global_scope_;
-    snapshot.func_state = func_state_;
-    snapshot.function_definition_stack = function_definition_stack_;
+    snapshot.current_scope = session_.current_scope_;
+    snapshot.translation_unit_decl_context = session_.translation_unit_decl_context_;
+    snapshot.current_decl_context = session_.current_decl_context_;
+    snapshot.current_global_scope_ptr = session_.current_global_scope_;
+    snapshot.func_state = session_.func_state_;
+    snapshot.function_definition_stack = session_.function_definition_stack_;
 }
 
-void Collect::materialize_tentative_snapshot_if_needed() const {
-    if (tentative_snapshots_.empty()) {
+void Collect::materialize_tentative_snapshot_if_needed() {
+    if (session_.tentative_snapshots_.empty()) {
         return;
     }
     bool needs_materialization = false;
-    for (const auto& snapshot : tentative_snapshots_) {
+    for (const auto& snapshot : session_.tentative_snapshots_) {
         if (!snapshot.materialized) {
             needs_materialization = true;
             break;
@@ -172,19 +172,19 @@ void Collect::materialize_tentative_snapshot_if_needed() const {
     if (!needs_materialization) {
         return;
     }
-    for (auto& snapshot : tentative_snapshots_) {
+    for (auto& snapshot : session_.tentative_snapshots_) {
         materialize_tentative_snapshot(snapshot);
     }
 }
 
 void Collect::record_decl_context_mutation(
-    const std::shared_ptr<DeclContext>& context) const {
-    if (!context || tentative_snapshots_.empty()) {
+    const std::shared_ptr<DeclContext>& context) {
+    if (!context || session_.tentative_snapshots_.empty()) {
         return;
     }
     materialize_tentative_snapshot_if_needed();
     const DeclContext* context_key = context.get();
-    for (auto& snapshot : tentative_snapshots_) {
+    for (auto& snapshot : session_.tentative_snapshots_) {
         if (snapshot.decl_context_mutations.contains(context_key)) {
             continue;
         }
@@ -204,13 +204,13 @@ void Collect::record_decl_context_mutation(
     }
 }
 
-void Collect::record_scope_mutation(const std::shared_ptr<Scope>& scope) const {
-    if (!scope || tentative_snapshots_.empty()) {
+void Collect::record_scope_mutation(const std::shared_ptr<Scope>& scope) {
+    if (!scope || session_.tentative_snapshots_.empty()) {
         return;
     }
     materialize_tentative_snapshot_if_needed();
     const Scope* scope_key = scope.get();
-    for (auto& snapshot : tentative_snapshots_) {
+    for (auto& snapshot : session_.tentative_snapshots_) {
         if (snapshot.scope_mutations.contains(scope_key)) {
             continue;
         }
@@ -222,13 +222,13 @@ void Collect::record_scope_mutation(const std::shared_ptr<Scope>& scope) const {
 }
 
 void Collect::record_global_scope_mutation(
-    const std::shared_ptr<GlobalIdentTracker>& global_scope) const {
-    if (!global_scope || tentative_snapshots_.empty()) {
+    const std::shared_ptr<GlobalIdentTracker>& global_scope) {
+    if (!global_scope || session_.tentative_snapshots_.empty()) {
         return;
     }
     materialize_tentative_snapshot_if_needed();
     const GlobalIdentTracker* global_scope_key = global_scope.get();
-    for (auto& snapshot : tentative_snapshots_) {
+    for (auto& snapshot : session_.tentative_snapshots_) {
         if (snapshot.global_scope_mutations.contains(global_scope_key)) {
             continue;
         }
@@ -243,24 +243,24 @@ void Collect::record_global_scope_mutation(
 void Collect::collect_begin_tentative_parse() {
     bump_tentative_begins();
     TentativeSnapshot snapshot;
-    tentative_snapshots_.push_back(std::move(snapshot));
+    session_.tentative_snapshots_.push_back(std::move(snapshot));
 }
 
 void Collect::collect_commit_tentative_parse() {
-    if (tentative_snapshots_.empty()) {
+    if (session_.tentative_snapshots_.empty()) {
         return;
     }
     bump_tentative_commits();
-    tentative_snapshots_.pop_back();
+    session_.tentative_snapshots_.pop_back();
 }
 
 void Collect::collect_rollback_tentative_parse() {
-    if (tentative_snapshots_.empty()) {
+    if (session_.tentative_snapshots_.empty()) {
         return;
     }
     bump_tentative_rollbacks();
-    TentativeSnapshot snapshot = std::move(tentative_snapshots_.back());
-    tentative_snapshots_.pop_back();
+    TentativeSnapshot snapshot = std::move(session_.tentative_snapshots_.back());
+    session_.tentative_snapshots_.pop_back();
     if (!snapshot.materialized) {
         return;
     }
@@ -297,53 +297,53 @@ void Collect::collect_rollback_tentative_parse() {
             checkpoint.next_lookup_event_index);
     }
 
-    current_scope_ = std::move(snapshot.current_scope);
-    translation_unit_decl_context_ = std::move(snapshot.translation_unit_decl_context);
-    current_decl_context_ = std::move(snapshot.current_decl_context);
-    current_global_scope_ = snapshot.current_global_scope_ptr;
-    func_state_ = std::move(snapshot.func_state);
-    function_definition_stack_ = std::move(snapshot.function_definition_stack);
+    session_.current_scope_ = std::move(snapshot.current_scope);
+    session_.translation_unit_decl_context_ = std::move(snapshot.translation_unit_decl_context);
+    session_.current_decl_context_ = std::move(snapshot.current_decl_context);
+    session_.current_global_scope_ = snapshot.current_global_scope_ptr;
+    session_.func_state_ = std::move(snapshot.func_state);
+    session_.function_definition_stack_ = std::move(snapshot.function_definition_stack);
     sync_decl_context_from_current_scope();
 }
 
 bool Collect::collect_is_tentative_parsing() const {
-    return !tentative_snapshots_.empty();
+    return !session_.tentative_snapshots_.empty();
 }
 
 
 void Collect::collect_start_translation_unit() {
 
-    func_state_.in_function = false;
-    current_scope_ = std::make_shared<Scope>();
-    translation_unit_decl_context_ = DeclContext::create_translation_unit();
-    current_decl_context_ = translation_unit_decl_context_;
-    current_scope_->flags = ScopeFlags::FileScope;
-    current_scope_->associated_decl_context = current_decl_context_.get();
-    current_global_scope_ = ast_ctx_ ? ast_ctx_->global_tracker : nullptr;
-    func_state_.current_function_name.clear();
-    func_state_.current_pretty_function_name.clear();
-    func_state_.current_function_type = nullptr;
-    func_state_.current_function_return_type = nullptr;
-    func_state_.current_function_has_return_statement = false;
-    func_state_.current_function_has_cxx_auto_return_deduction = false;
-    func_state_.current_function_has_deferred_cxx_auto_return_deduction = false;
-    func_state_.current_function_cxx_auto_return_pattern = nullptr;
-    func_state_.loop_depth = 0;
-    func_state_.switch_depth = 0;
-    func_state_.delayed_diagnostics.clear();
-    func_state_.unevaluated_depth = 0;
-    func_state_.unevaluated_context_stack.clear();
-    func_state_.switch_context_stack.clear();
-    func_state_.labels_defined.clear();
-    func_state_.labels_referenced.clear();
-    func_state_.label_definition_locs.clear();
-    func_state_.label_reference_locs.clear();
-    func_state_.current_function_is_cpp_member = false;
-    func_state_.current_function_is_static_cpp_member = false;
-    func_state_.current_function_cpp_this_type = nullptr;
-    tentative_snapshots_.clear();
-    function_definition_stack_.clear();
-    function_tentative_snapshot_stack_.clear();
+    session_.func_state_.in_function = false;
+    session_.current_scope_ = std::make_shared<Scope>();
+    session_.translation_unit_decl_context_ = DeclContext::create_translation_unit();
+    session_.current_decl_context_ = session_.translation_unit_decl_context_;
+    session_.current_scope_->flags = ScopeFlags::FileScope;
+    session_.current_scope_->associated_decl_context = session_.current_decl_context_.get();
+    session_.current_global_scope_ = ast_ctx_ ? ast_ctx_->global_tracker : nullptr;
+    session_.func_state_.current_function_name.clear();
+    session_.func_state_.current_pretty_function_name.clear();
+    session_.func_state_.current_function_type = nullptr;
+    session_.func_state_.current_function_return_type = nullptr;
+    session_.func_state_.current_function_has_return_statement = false;
+    session_.func_state_.current_function_has_cxx_auto_return_deduction = false;
+    session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction = false;
+    session_.func_state_.current_function_cxx_auto_return_pattern = nullptr;
+    session_.func_state_.loop_depth = 0;
+    session_.func_state_.switch_depth = 0;
+    session_.func_state_.delayed_diagnostics.clear();
+    session_.func_state_.unevaluated_depth = 0;
+    session_.func_state_.unevaluated_context_stack.clear();
+    session_.func_state_.switch_context_stack.clear();
+    session_.func_state_.labels_defined.clear();
+    session_.func_state_.labels_referenced.clear();
+    session_.func_state_.label_definition_locs.clear();
+    session_.func_state_.label_reference_locs.clear();
+    session_.func_state_.current_function_is_cpp_member = false;
+    session_.func_state_.current_function_is_static_cpp_member = false;
+    session_.func_state_.current_function_cpp_this_type = nullptr;
+    session_.tentative_snapshots_.clear();
+    session_.function_definition_stack_.clear();
+    session_.function_tentative_snapshot_stack_.clear();
     record_semantics_cache_clear(ast_ctx_.get());
     enum_semantics_cache_clear(ast_ctx_.get());
 }
@@ -422,34 +422,34 @@ void Collect::collect_start_function_definition(const std::string& name,
                                                 QualType function_type,
                                                 CppThisContext cpp_this_context) {
 
-    if (func_state_.in_function) {
-        function_definition_stack_.push_back(
+    if (session_.func_state_.in_function) {
+        session_.function_definition_stack_.push_back(
             capture_current_function_definition_state());
-        function_tentative_snapshot_stack_.push_back(
-            std::move(tentative_snapshots_));
-        tentative_snapshots_.clear();
+        session_.function_tentative_snapshot_stack_.push_back(
+            std::move(session_.tentative_snapshots_));
+        session_.tentative_snapshots_.clear();
     }
 
-    func_state_.in_function = true;
-    func_state_.current_function_name = name;
-    func_state_.current_pretty_function_name = name;
-    func_state_.current_function_type = function_type;
-    func_state_.current_function_return_type = nullptr;
-    func_state_.current_function_has_return_statement = false;
-    func_state_.current_function_has_cxx_auto_return_deduction = false;
-    func_state_.current_function_has_deferred_cxx_auto_return_deduction = false;
-    func_state_.current_function_cxx_auto_return_pattern = nullptr;
-    func_state_.current_function_is_cpp_member = cpp_this_context.is_member_function;
-    func_state_.current_function_is_static_cpp_member =
+    session_.func_state_.in_function = true;
+    session_.func_state_.current_function_name = name;
+    session_.func_state_.current_pretty_function_name = name;
+    session_.func_state_.current_function_type = function_type;
+    session_.func_state_.current_function_return_type = nullptr;
+    session_.func_state_.current_function_has_return_statement = false;
+    session_.func_state_.current_function_has_cxx_auto_return_deduction = false;
+    session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction = false;
+    session_.func_state_.current_function_cxx_auto_return_pattern = nullptr;
+    session_.func_state_.current_function_is_cpp_member = cpp_this_context.is_member_function;
+    session_.func_state_.current_function_is_static_cpp_member =
         cpp_this_context.is_static_member_function;
-    func_state_.current_function_cpp_this_type = cpp_this_context.this_type;
+    session_.func_state_.current_function_cpp_this_type = cpp_this_context.this_type;
     if (auto func_ty = function_type.as_shared<FunctionType>()) {
-        func_state_.current_function_return_type = func_ty->ret_type;
-        if (func_state_.current_function_return_type &&
+        session_.func_state_.current_function_return_type = func_ty->ret_type;
+        if (session_.func_state_.current_function_return_type &&
             auto_type_utils::has_cxx_auto_type(
-                func_state_.current_function_return_type.get_shared())) {
-            func_state_.current_function_has_cxx_auto_return_deduction = true;
-            func_state_.current_function_cxx_auto_return_pattern = func_state_.current_function_return_type;
+                session_.func_state_.current_function_return_type.get_shared())) {
+            session_.func_state_.current_function_has_cxx_auto_return_deduction = true;
+            session_.func_state_.current_function_cxx_auto_return_pattern = session_.func_state_.current_function_return_type;
         }
         std::string pretty;
         pretty += func_ty->ret_type ? func_ty->ret_type.to_string() : "int";
@@ -475,38 +475,38 @@ void Collect::collect_start_function_definition(const std::string& name,
             pretty += "...";
         }
         pretty += ")";
-        func_state_.current_pretty_function_name = std::move(pretty);
+        session_.func_state_.current_pretty_function_name = std::move(pretty);
     }
-    func_state_.loop_depth = 0;
-    func_state_.switch_depth = 0;
-    func_state_.delayed_diagnostics.clear();
-    func_state_.unevaluated_depth = 0;
-    func_state_.unevaluated_context_stack.clear();
-    func_state_.switch_context_stack.clear();
-    func_state_.labels_defined.clear();
-    func_state_.labels_referenced.clear();
-    func_state_.label_definition_locs.clear();
-    func_state_.label_reference_locs.clear();
-    tentative_snapshots_.clear();
+    session_.func_state_.loop_depth = 0;
+    session_.func_state_.switch_depth = 0;
+    session_.func_state_.delayed_diagnostics.clear();
+    session_.func_state_.unevaluated_depth = 0;
+    session_.func_state_.unevaluated_context_stack.clear();
+    session_.func_state_.switch_context_stack.clear();
+    session_.func_state_.labels_defined.clear();
+    session_.func_state_.labels_referenced.clear();
+    session_.func_state_.label_definition_locs.clear();
+    session_.func_state_.label_reference_locs.clear();
+    session_.tentative_snapshots_.clear();
 }
 
 
 void Collect::collect_finish_function_definition(const std::shared_ptr<Scope>& function_scope) {
 
-    if (func_state_.current_function_has_cxx_auto_return_deduction &&
-        func_state_.current_function_return_type &&
-        auto_type_utils::has_cxx_auto_type(func_state_.current_function_return_type.get_shared())) {
-        if (func_state_.current_function_has_return_statement &&
-            func_state_.current_function_has_deferred_cxx_auto_return_deduction) {
-            if (auto func_ty = func_state_.current_function_type.as_shared<FunctionType>()) {
-                func_ty->ret_type = func_state_.current_function_return_type;
+    if (session_.func_state_.current_function_has_cxx_auto_return_deduction &&
+        session_.func_state_.current_function_return_type &&
+        auto_type_utils::has_cxx_auto_type(session_.func_state_.current_function_return_type.get_shared())) {
+        if (session_.func_state_.current_function_has_return_statement &&
+            session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction) {
+            if (auto func_ty = session_.func_state_.current_function_type.as_shared<FunctionType>()) {
+                func_ty->ret_type = session_.func_state_.current_function_return_type;
             }
         } else {
             QualType implicit_void(get_builtin_void());
             QualType finalized_return = implicit_void;
 
             auto deduced = auto_type_utils::extract_auto_placeholder_replacement(
-                func_state_.current_function_cxx_auto_return_pattern,
+                session_.func_state_.current_function_cxx_auto_return_pattern,
                 implicit_void);
             bool can_finalize = deduced.has_value() &&
                 deduced->get_shared() &&
@@ -516,31 +516,31 @@ void Collect::collect_finish_function_definition(const std::shared_ptr<Scope>& f
                     desugar_type(*deduced, ast_ctx_.get()).get_shared();
                 if (replacement_raw) {
                     auto finalized_raw = replace_auto_type(
-                        func_state_.current_function_cxx_auto_return_pattern.get_shared(),
+                        session_.func_state_.current_function_cxx_auto_return_pattern.get_shared(),
                         replacement_raw);
                     finalized_return = QualType(
                         finalized_raw,
-                        func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
+                        session_.func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
                 }
             } else {
                 report_error(
                     "cannot deduce return type '" +
-                        func_state_.current_function_cxx_auto_return_pattern.to_string() +
-                        "' for function '" + func_state_.current_function_name +
+                        session_.func_state_.current_function_cxx_auto_return_pattern.to_string() +
+                        "' for function '" + session_.func_state_.current_function_name +
                         "' with no return statements",
                     SrcLoc());
                 auto fallback_raw = replace_auto_type(
-                    func_state_.current_function_cxx_auto_return_pattern.get_shared(),
+                    session_.func_state_.current_function_cxx_auto_return_pattern.get_shared(),
                     implicit_void.get_shared());
                 if (fallback_raw) {
                     finalized_return = QualType(
                         fallback_raw,
-                        func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
+                        session_.func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
                 }
             }
 
-            func_state_.current_function_return_type = finalized_return;
-            if (auto func_ty = func_state_.current_function_type.as_shared<FunctionType>()) {
+            session_.func_state_.current_function_return_type = finalized_return;
+            if (auto func_ty = session_.func_state_.current_function_type.as_shared<FunctionType>()) {
                 func_ty->ret_type = finalized_return;
             }
         }
@@ -549,28 +549,28 @@ void Collect::collect_finish_function_definition(const std::shared_ptr<Scope>& f
     auto label_lookup_scope = function_scope
         ? function_scope
         : find_enclosing_scope_with_flags(ScopeFlags::FunctionScope);
-    for (const auto& label : func_state_.labels_referenced) {
+    for (const auto& label : session_.func_state_.labels_referenced) {
         if (label_lookup_scope &&
             LookupEngine::lookup_label(label, label_lookup_scope, true)) {
             continue;
         }
         SrcLoc loc;
-        auto ref_it = func_state_.label_reference_locs.find(label);
-        if (ref_it != func_state_.label_reference_locs.end()) {
+        auto ref_it = session_.func_state_.label_reference_locs.find(label);
+        if (ref_it != session_.func_state_.label_reference_locs.end()) {
             loc = ref_it->second;
         }
         queue_delayed_error("use of undeclared label '" + label + "'", loc);
     }
     flush_delayed_diagnostics();
-    tentative_snapshots_.clear();
-    if (!function_definition_stack_.empty()) {
+    session_.tentative_snapshots_.clear();
+    if (!session_.function_definition_stack_.empty()) {
         restore_current_function_definition_state(
-            std::move(function_definition_stack_.back()));
-        function_definition_stack_.pop_back();
-        if (!function_tentative_snapshot_stack_.empty()) {
-            tentative_snapshots_ =
-                std::move(function_tentative_snapshot_stack_.back());
-            function_tentative_snapshot_stack_.pop_back();
+            std::move(session_.function_definition_stack_.back()));
+        session_.function_definition_stack_.pop_back();
+        if (!session_.function_tentative_snapshot_stack_.empty()) {
+            session_.tentative_snapshots_ =
+                std::move(session_.function_tentative_snapshot_stack_.back());
+            session_.function_tentative_snapshot_stack_.pop_back();
         }
         return;
     }
@@ -580,15 +580,15 @@ void Collect::collect_finish_function_definition(const std::shared_ptr<Scope>& f
 
 void Collect::collect_abort_function_definition() {
 
-    tentative_snapshots_.clear();
-    if (!function_definition_stack_.empty()) {
+    session_.tentative_snapshots_.clear();
+    if (!session_.function_definition_stack_.empty()) {
         restore_current_function_definition_state(
-            std::move(function_definition_stack_.back()));
-        function_definition_stack_.pop_back();
-        if (!function_tentative_snapshot_stack_.empty()) {
-            tentative_snapshots_ =
-                std::move(function_tentative_snapshot_stack_.back());
-            function_tentative_snapshot_stack_.pop_back();
+            std::move(session_.function_definition_stack_.back()));
+        session_.function_definition_stack_.pop_back();
+        if (!session_.function_tentative_snapshot_stack_.empty()) {
+            session_.tentative_snapshots_ =
+                std::move(session_.function_tentative_snapshot_stack_.back());
+            session_.function_tentative_snapshot_stack_.pop_back();
         }
         return;
     }
@@ -598,17 +598,17 @@ void Collect::collect_abort_function_definition() {
 
 std::shared_ptr<Scope> Collect::collect_current_scope() const {
 
-    return current_scope_;
+    return session_.current_scope_;
 }
 
 std::shared_ptr<DeclContext> Collect::get_translation_unit_decl_context() const {
 
-    return translation_unit_decl_context_;
+    return session_.translation_unit_decl_context_;
 }
 
 std::shared_ptr<DeclContext> Collect::get_current_decl_context() const {
 
-    return current_decl_context_;
+    return session_.current_decl_context_;
 }
 
 void Collect::collect_register_namespace_binding(
@@ -672,9 +672,9 @@ void Collect::collect_set_namespace_inline_metadata(
 CppThisContext Collect::collect_current_cpp_this_context() const {
 
     return CppThisContext{
-        func_state_.current_function_is_cpp_member,
-        func_state_.current_function_is_static_cpp_member,
-        func_state_.current_function_cpp_this_type
+        session_.func_state_.current_function_is_cpp_member,
+        session_.func_state_.current_function_is_static_cpp_member,
+        session_.func_state_.current_function_cpp_this_type
     };
 }
 
@@ -733,13 +733,13 @@ bool Collect::with_function_definition_state(
 Collect::FunctionDefinitionState
 Collect::capture_current_function_definition_state() const {
 
-    return func_state_;
+    return session_.func_state_;
 }
 
 void Collect::restore_current_function_definition_state(
     FunctionDefinitionState state) {
 
-    func_state_ = std::move(state);
+    session_.func_state_ = std::move(state);
 }
 
 void Collect::reset_current_function_definition_state() {
@@ -750,9 +750,9 @@ void Collect::reset_current_function_definition_state() {
 void Collect::set_current_decl_context(std::shared_ptr<DeclContext> decl_context) {
 
     materialize_tentative_snapshot_if_needed();
-    current_decl_context_ = std::move(decl_context);
-    if (current_scope_) {
-        current_scope_->associated_decl_context = current_decl_context_.get();
+    session_.current_decl_context_ = std::move(decl_context);
+    if (session_.current_scope_) {
+        session_.current_scope_->associated_decl_context = session_.current_decl_context_.get();
     }
 }
 
@@ -760,13 +760,13 @@ void Collect::set_current_decl_context(std::shared_ptr<DeclContext> decl_context
 void Collect::collect_set_current_scope(std::shared_ptr<Scope> scope) {
 
     materialize_tentative_snapshot_if_needed();
-    current_scope_ = std::move(scope);
+    session_.current_scope_ = std::move(scope);
     sync_decl_context_from_current_scope();
 }
 
 std::shared_ptr<DeclContext> Collect::find_decl_context(const DeclContext* target) const {
 
-    return find_decl_context_in_subtree(translation_unit_decl_context_, target);
+    return find_decl_context_in_subtree(session_.translation_unit_decl_context_, target);
 }
 
 std::shared_ptr<DeclContext> Collect::resolve_scope_decl_context(const std::shared_ptr<Scope>& scope) const {
@@ -783,15 +783,15 @@ std::shared_ptr<DeclContext> Collect::resolve_scope_decl_context(const std::shar
             return resolved;
         }
     }
-    if (scope.get() == current_scope_.get()) {
-        return current_decl_context_;
+    if (scope.get() == session_.current_scope_.get()) {
+        return session_.current_decl_context_;
     }
-    return translation_unit_decl_context_;
+    return session_.translation_unit_decl_context_;
 }
 
 std::shared_ptr<Scope> Collect::find_enclosing_scope_with_flags(ScopeFlags flags) const {
 
-    for (auto scope = current_scope_; scope; scope = scope->parent) {
+    for (auto scope = session_.current_scope_; scope; scope = scope->parent) {
         if (scope_flags_contains(scope->flags, flags)) {
             return scope;
         }
@@ -800,8 +800,8 @@ std::shared_ptr<Scope> Collect::find_enclosing_scope_with_flags(ScopeFlags flags
 }
 
 void Collect::bind_symbol_in_scope(const std::shared_ptr<Scope>& scope,
-                                           const std::string& name,
-                                           const std::shared_ptr<Symbol>& sym) const {
+                                   const std::string& name,
+                                   const std::shared_ptr<Symbol>& sym) {
 
     if (!scope || name.empty() || !sym) {
         return;
@@ -888,7 +888,7 @@ void Collect::bind_symbol_in_scope(const std::shared_ptr<Scope>& scope,
 void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
                                           const std::string& name,
                                           const Decl* decl,
-                                          LookupNamespace lookup_namespace) const {
+                                          LookupNamespace lookup_namespace) {
 
     if (!scope || name.empty() || !decl) {
         return;
@@ -961,28 +961,28 @@ void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
 
 void Collect::collect_bind_template_decl(const std::string& name,
                                          const Decl* decl,
-                                         LookupNamespace lookup_namespace) const {
-    bind_template_decl_in_scope(current_scope_, name, decl, lookup_namespace);
+                                         LookupNamespace lookup_namespace) {
+    bind_template_decl_in_scope(session_.current_scope_, name, decl, lookup_namespace);
 }
 
 void Collect::collect_add_function_template_decl(const std::string& name,
-                                                 const Decl* decl) const {
+                                                 const Decl* decl) {
     collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);
 }
 
 void Collect::collect_add_class_template_decl(const std::string& name,
-                                              const Decl* decl) const {
+                                              const Decl* decl) {
     collect_bind_template_decl(name, decl, LookupNamespace::Tag);
 }
 
 void Collect::collect_add_alias_template_decl(const std::string& name,
-                                              const Decl* decl) const {
+                                              const Decl* decl) {
     collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);
 }
 
 void Collect::bind_tag_decl_in_scope(const std::shared_ptr<Scope>& scope,
-                                             const std::string& tag,
-                                             TagDecl* decl) const {
+                                     const std::string& tag,
+                                     TagDecl* decl) {
 
     if (!scope || tag.empty() || !decl) {
         return;
@@ -1006,8 +1006,8 @@ void Collect::bind_tag_decl_in_scope(const std::shared_ptr<Scope>& scope,
 }
 
 void Collect::bind_label_in_scope(const std::shared_ptr<Scope>& scope,
-                                          const std::string& label,
-                                          SrcLoc loc) const {
+                                  const std::string& label,
+                                  SrcLoc loc) {
 
     if (!scope || label.empty()) {
         return;
@@ -1031,29 +1031,29 @@ void Collect::bind_label_in_scope(const std::shared_ptr<Scope>& scope,
 
 void Collect::sync_decl_context_from_current_scope() {
 
-    if (!current_scope_) {
-        current_decl_context_ = nullptr;
+    if (!session_.current_scope_) {
+        session_.current_decl_context_ = nullptr;
         return;
     }
-    if (current_scope_->associated_decl_context) {
-        auto resolved = find_decl_context(current_scope_->associated_decl_context);
+    if (session_.current_scope_->associated_decl_context) {
+        auto resolved = find_decl_context(session_.current_scope_->associated_decl_context);
         if (resolved) {
-            current_decl_context_ = resolved;
-            current_scope_->associated_decl_context = current_decl_context_.get();
+            session_.current_decl_context_ = resolved;
+            session_.current_scope_->associated_decl_context = session_.current_decl_context_.get();
             return;
         }
     }
-    if (!current_decl_context_) {
-        current_decl_context_ = translation_unit_decl_context_;
+    if (!session_.current_decl_context_) {
+        session_.current_decl_context_ = session_.translation_unit_decl_context_;
     }
-    current_scope_->associated_decl_context = current_decl_context_.get();
+    session_.current_scope_->associated_decl_context = session_.current_decl_context_.get();
 }
 
 
 bool Collect::collect_is_file_scope() const {
 
-    return current_scope_ &&
-        scope_flags_contains(current_scope_->flags, ScopeFlags::FileScope);
+    return session_.current_scope_ &&
+        scope_flags_contains(session_.current_scope_->flags, ScopeFlags::FileScope);
 }
 
 
@@ -1075,32 +1075,32 @@ Collect::ScopeEnterResult Collect::collect_enter_scope(std::shared_ptr<Scope> cu
 
 Collect::ScopeEnterResult Collect::collect_enter_scope(ScopeFlags scope_flags, std::shared_ptr<Scope> use_scope) {
 
-    auto result = collect_enter_scope(current_scope_, std::move(use_scope));
+    auto result = collect_enter_scope(session_.current_scope_, std::move(use_scope));
     materialize_tentative_snapshot_if_needed();
-    current_scope_ = result.scope;
-    if (!current_scope_) {
-        current_decl_context_ = nullptr;
+    session_.current_scope_ = result.scope;
+    if (!session_.current_scope_) {
+        session_.current_decl_context_ = nullptr;
         return result;
     }
     if (result.created_new) {
-        current_scope_->flags = scope_flags;
-        auto parent_context = current_decl_context_ ? current_decl_context_
-                                                    : translation_unit_decl_context_;
+        session_.current_scope_->flags = scope_flags;
+        auto parent_context = session_.current_decl_context_ ? session_.current_decl_context_
+                                                    : session_.translation_unit_decl_context_;
         if (parent_context) {
             record_decl_context_mutation(parent_context);
             auto entered_context = parent_context->add_lexical_child(
                 context_kind_for_scope_flags(scope_flags));
-            current_decl_context_ = entered_context;
-            current_scope_->associated_decl_context = entered_context.get();
+            session_.current_decl_context_ = entered_context;
+            session_.current_scope_->associated_decl_context = entered_context.get();
         } else {
-            current_scope_->associated_decl_context = nullptr;
+            session_.current_scope_->associated_decl_context = nullptr;
         }
         return result;
     }
 
-    if (current_scope_->flags == ScopeFlags::None) {
-        record_scope_mutation(current_scope_);
-        current_scope_->flags = scope_flags;
+    if (session_.current_scope_->flags == ScopeFlags::None) {
+        record_scope_mutation(session_.current_scope_);
+        session_.current_scope_->flags = scope_flags;
     }
     sync_decl_context_from_current_scope();
     return result;
@@ -1125,21 +1125,21 @@ std::shared_ptr<Scope> Collect::collect_leave_scope(std::shared_ptr<Scope> curre
 std::shared_ptr<Scope> Collect::collect_leave_scope() {
 
     materialize_tentative_snapshot_if_needed();
-    current_scope_ = collect_leave_scope(current_scope_);
+    session_.current_scope_ = collect_leave_scope(session_.current_scope_);
     sync_decl_context_from_current_scope();
-    return current_scope_;
+    return session_.current_scope_;
 }
 
 
 std::shared_ptr<Symbol> Collect::collect_lookup_typedef_symbol(const std::string& name, bool look_parents) const {
 
-    if (!current_scope_) {
+    if (!session_.current_scope_) {
         return nullptr;
     }
     LookupEngine::LookupTrace trace;
     auto* trace_ptr = lookup_trace_enabled() ? &trace : nullptr;
     auto lookup = LookupEngine::lookup_unqualified_ordinary(
-        name, current_scope_, look_parents, LookupEngine::OrdinaryFilter::TypedefOnly, trace_ptr);
+        name, session_.current_scope_, look_parents, LookupEngine::OrdinaryFilter::TypedefOnly, trace_ptr);
     emit_lookup_trace("typedef", name, trace, lookup != nullptr);
     return lookup;
 }
@@ -1165,25 +1165,25 @@ QualType Collect::collect_lookup_type_name(const std::string& name,
 
 std::shared_ptr<Symbol> Collect::collect_lookup_variable_symbol(const std::string& name, bool look_parents) const {
 
-    if (!current_scope_) {
+    if (!session_.current_scope_) {
         return nullptr;
     }
     LookupEngine::LookupTrace trace;
     auto* trace_ptr = lookup_trace_enabled() ? &trace : nullptr;
     auto lookup = LookupEngine::lookup_unqualified_ordinary(
-        name, current_scope_, look_parents, LookupEngine::OrdinaryFilter::Any, trace_ptr);
+        name, session_.current_scope_, look_parents, LookupEngine::OrdinaryFilter::Any, trace_ptr);
     emit_lookup_trace("ordinary", name, trace, lookup != nullptr);
     return lookup;
 }
 
 TagDecl* Collect::collect_lookup_tag_decl(const std::string& tag, bool look_parents) const {
 
-    if (!current_scope_) {
+    if (!session_.current_scope_) {
         return nullptr;
     }
     LookupEngine::LookupTrace trace;
     auto* trace_ptr = lookup_trace_enabled() ? &trace : nullptr;
-    auto* lookup = LookupEngine::lookup_tag_decl(tag, current_scope_, look_parents, trace_ptr);
+    auto* lookup = LookupEngine::lookup_tag_decl(tag, session_.current_scope_, look_parents, trace_ptr);
     emit_lookup_trace("tag", tag, trace, lookup != nullptr);
     return lookup;
 }
@@ -1193,7 +1193,7 @@ std::shared_ptr<CType> Collect::collect_lookup_tag_type(const std::string& tag, 
 
     LookupEngine::LookupTrace trace;
     auto* trace_ptr = lookup_trace_enabled() ? &trace : nullptr;
-    auto lookup = LookupEngine::lookup_tag_type(tag, current_scope_, look_parents, trace_ptr);
+    auto lookup = LookupEngine::lookup_tag_type(tag, session_.current_scope_, look_parents, trace_ptr);
     emit_lookup_trace("tag-type", tag, trace, lookup != nullptr);
     return lookup;
 }
@@ -1262,47 +1262,47 @@ Collect::collect_lookup_record_nested_template(QualType owner_type,
 }
 
 
-void Collect::collect_add_tag_decl(const std::string& tag, TagDecl* decl) const {
+void Collect::collect_add_tag_decl(const std::string& tag, TagDecl* decl) {
 
-    if (!current_scope_ || tag.empty() || !decl) {
+    if (!session_.current_scope_ || tag.empty() || !decl) {
         return;
     }
-    bind_tag_decl_in_scope(current_scope_, tag, decl);
+    bind_tag_decl_in_scope(session_.current_scope_, tag, decl);
 }
 
 
-void Collect::collect_bind_symbol_in_current_scope(const std::string& name, std::shared_ptr<Symbol> sym) const {
+void Collect::collect_bind_symbol_in_current_scope(const std::string& name, std::shared_ptr<Symbol> sym) {
 
-    if (!current_scope_ || name.empty() || !sym) {
+    if (!session_.current_scope_ || name.empty() || !sym) {
         return;
     }
-    bind_symbol_in_scope(current_scope_, name, sym);
+    bind_symbol_in_scope(session_.current_scope_, name, sym);
 }
 
 
-void Collect::collect_add_global_symbol(std::shared_ptr<Symbol> sym) const {
+void Collect::collect_add_global_symbol(std::shared_ptr<Symbol> sym) {
 
-    if (!current_global_scope_ || !sym) {
+    if (!session_.current_global_scope_ || !sym) {
         return;
     }
     materialize_tentative_snapshot_if_needed();
-    record_global_scope_mutation(current_global_scope_);
-    current_global_scope_->add_to_global_scope(std::move(sym));
+    record_global_scope_mutation(session_.current_global_scope_);
+    session_.current_global_scope_->add_to_global_scope(std::move(sym));
 }
 
 
 void Collect::collect_enter_loop() {
 
     materialize_tentative_snapshot_if_needed();
-    ++func_state_.loop_depth;
+    ++session_.func_state_.loop_depth;
 }
 
 
 void Collect::collect_leave_loop() {
 
-    if (func_state_.loop_depth > 0) {
+    if (session_.func_state_.loop_depth > 0) {
         materialize_tentative_snapshot_if_needed();
-        --func_state_.loop_depth;
+        --session_.func_state_.loop_depth;
     }
 }
 
@@ -1310,21 +1310,21 @@ void Collect::collect_leave_loop() {
 void Collect::collect_enter_switch() {
 
     materialize_tentative_snapshot_if_needed();
-    func_state_.switch_context_stack.push_back(SwitchContext{});
-    ++func_state_.switch_depth;
+    session_.func_state_.switch_context_stack.push_back(SwitchContext{});
+    ++session_.func_state_.switch_depth;
 }
 
 
 void Collect::collect_leave_switch() {
 
-    if (!func_state_.switch_context_stack.empty() || func_state_.switch_depth > 0) {
+    if (!session_.func_state_.switch_context_stack.empty() || session_.func_state_.switch_depth > 0) {
         materialize_tentative_snapshot_if_needed();
     }
-    if (!func_state_.switch_context_stack.empty()) {
-        func_state_.switch_context_stack.pop_back();
+    if (!session_.func_state_.switch_context_stack.empty()) {
+        session_.func_state_.switch_context_stack.pop_back();
     }
-    if (func_state_.switch_depth > 0) {
-        --func_state_.switch_depth;
+    if (session_.func_state_.switch_depth > 0) {
+        --session_.func_state_.switch_depth;
     }
 }
 
@@ -1338,9 +1338,9 @@ void Collect::collect_register_label_definition(const std::string& label, SrcLoc
         return;
     }
     materialize_tentative_snapshot_if_needed();
-    func_state_.labels_defined.insert(label);
+    session_.func_state_.labels_defined.insert(label);
     if (!loc.isInvalid()) {
-        func_state_.label_definition_locs[label] = loc;
+        session_.func_state_.label_definition_locs[label] = loc;
     }
     if (function_scope) {
         bind_label_in_scope(function_scope, label, loc);
@@ -1351,8 +1351,8 @@ void Collect::collect_register_label_definition(const std::string& label, SrcLoc
 void Collect::collect_register_label_reference(const std::string& label, SrcLoc loc) {
 
     materialize_tentative_snapshot_if_needed();
-    func_state_.labels_referenced.insert(label);
-    if (!loc.isInvalid() && !func_state_.label_reference_locs.contains(label)) {
-        func_state_.label_reference_locs[label] = loc;
+    session_.func_state_.labels_referenced.insert(label);
+    if (!loc.isInvalid() && !session_.func_state_.label_reference_locs.contains(label)) {
+        session_.func_state_.label_reference_locs[label] = loc;
     }
 }

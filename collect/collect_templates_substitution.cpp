@@ -92,7 +92,7 @@ QualType Collect::substitute_template_type(
     QualType type,
     const TemplateParameterList& parameters,
     const std::vector<TemplateArgument>& specialization_arguments,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     TemplateArgumentBindings argument_bindings;
     std::string binding_error;
     if (!bind_template_arguments_to_parameters(
@@ -118,7 +118,7 @@ QualType Collect::partially_substitute_template_type(
     QualType type,
     const TemplateParameterList& parameters,
     const std::vector<TemplateArgument>& specialization_arguments,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     TemplateArgumentBindings argument_bindings;
     std::string binding_error;
     if (!bind_template_arguments_to_parameters(
@@ -146,7 +146,7 @@ QualType Collect::substitute_template_type_with_bindings(
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& argument_bindings,
     SrcLoc loc,
-    bool allow_unsubstituted_parameters) const {
+    bool allow_unsubstituted_parameters) {
     if (!type) {
         return type;
     }
@@ -601,7 +601,7 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments(
     const std::vector<TemplateArgument>& arguments,
     const TemplateParameterList& parameters,
     const std::vector<TemplateArgument>& specialization_arguments,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     TemplateArgumentBindings argument_bindings;
     std::string binding_error;
     if (!bind_template_arguments_to_parameters(
@@ -628,7 +628,7 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& argument_bindings,
     SrcLoc loc,
-    bool allow_unsubstituted_parameters) const {
+    bool allow_unsubstituted_parameters) {
     std::vector<TemplateArgument> rewritten;
     rewritten.reserve(arguments.size());
     // append_rewritten_argument handles pack expansion inline via recursion.

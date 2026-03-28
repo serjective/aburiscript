@@ -25,7 +25,7 @@ std::unique_ptr<Decl> Collect::collect_typedef_declaration(const std::string& na
 
 
 
-std::unique_ptr<FuncDecl> Collect::collect_function_declaration(const std::string& name, std::shared_ptr<CType> type, StorageClass storage_class, bool is_inline, std::optional<std::string> asm_label, SrcLoc loc, LanguageLinkage language_linkage) const {
+std::unique_ptr<FuncDecl> Collect::collect_function_declaration(const std::string& name, std::shared_ptr<CType> type, StorageClass storage_class, bool is_inline, std::optional<std::string> asm_label, SrcLoc loc, LanguageLinkage language_linkage) {
 
     QualType fn_type(type);
     if (contains_deferred_semantic_type(fn_type.get_shared())) {
@@ -44,7 +44,7 @@ std::unique_ptr<FuncDecl> Collect::collect_function_declaration(const std::strin
 }
 
 
-std::unique_ptr<Decl> Collect::collect_field_declaration(QualType type, const std::string& name, SrcLoc loc) const {
+std::unique_ptr<Decl> Collect::collect_field_declaration(QualType type, const std::string& name, SrcLoc loc) {
 
     if (type && contains_deferred_semantic_type(type.get_shared())) {
         type = resolve_typeof_types(type, loc);
@@ -68,7 +68,7 @@ std::unique_ptr<Decl> Collect::collect_field_declaration(QualType type, const st
 }
 
 
-std::unique_ptr<Decl> Collect::collect_field_declaration(QualType type, const std::string& name, uint32_t bitfield_width, SrcLoc loc) const {
+std::unique_ptr<Decl> Collect::collect_field_declaration(QualType type, const std::string& name, uint32_t bitfield_width, SrcLoc loc) {
 
     if (type && contains_deferred_semantic_type(type.get_shared())) {
         type = resolve_typeof_types(type, loc);

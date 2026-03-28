@@ -81,7 +81,7 @@ std::unique_ptr<Decl> Collect::collect_static_assert_declaration(std::unique_ptr
 }
 
 
-std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_type, const std::string& name, std::unique_ptr<Expr> init, std::shared_ptr<Symbol> sym, StorageClass storage_class, const VariableDeclFlags& flags, SrcLoc loc, LanguageLinkage language_linkage) const {
+std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_type, const std::string& name, std::unique_ptr<Expr> init, std::shared_ptr<Symbol> sym, StorageClass storage_class, const VariableDeclFlags& flags, SrcLoc loc, LanguageLinkage language_linkage) {
 
     bool is_constexpr = flags.is_constexpr;
     bool is_inline = flags.is_inline;
@@ -398,7 +398,7 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
 std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
     std::unique_ptr<Expr> init,
     QualType member_type,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (isa<InitListExpr>(init.get()) &&
         should_defer_template_dependent_initializer_semantics(
             *this, member_type, init.get())) {
@@ -412,7 +412,7 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
     QualType member_type,
     bool is_list_init,
     SrcLoc loc,
-    bool allow_abstract_object_type_instantiation) const {
+    bool allow_abstract_object_type_instantiation) {
     if (!member_type) {
         report_error("constructor member initializer has invalid member type", loc);
         return collect_make<ErrorExpr>("invalid member type", loc);
@@ -468,7 +468,7 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
 }
 
 
-std::unique_ptr<Decl> Collect::collect_parameter_declaration(QualType type, const std::string& name, std::shared_ptr<Symbol> sym, StorageClass storage_class, SrcLoc loc) const {
+std::unique_ptr<Decl> Collect::collect_parameter_declaration(QualType type, const std::string& name, std::shared_ptr<Symbol> sym, StorageClass storage_class, SrcLoc loc) {
 
     QualType original_type = type;
     if (type) {

@@ -229,7 +229,7 @@ bool rebind_member_expr_for_specialized_record(MemberExpr* member,
                                                std::string* error_out);
 
 bool clone_function_parameters_for_specialization(
-    const Collect& collect,
+    Collect& collect,
     const FuncDecl* pattern,
     const TemplateParameterList& template_parameters,
     const TemplateArgumentBindings& specialization_bindings,
@@ -246,7 +246,7 @@ bool clone_function_parameters_for_specialization(
     std::string* error_out);
 
 bool clone_function_body_for_specialization(
-    const Collect& collect,
+    Collect& collect,
     const FuncDecl* pattern,
     FuncDecl* specialization,
     TemplateSubstitutionPass& substitution_pass,
@@ -307,16 +307,16 @@ std::string make_function_template_specialization_name(
 
 QualType implicit_this_type_for_specialized_function(const FuncDecl* decl);
 
-bool finalize_specialized_decl_semantics(const Collect& collect,
+bool finalize_specialized_decl_semantics(Collect& collect,
                                          std::unique_ptr<Decl>& decl,
                                          std::string* error_out);
 
-bool finalize_specialized_stmt_semantics(const Collect& collect,
+bool finalize_specialized_stmt_semantics(Collect& collect,
                                          std::unique_ptr<Stmt>& stmt,
                                          QualType expected_return_type,
                                          std::string* error_out);
 
-bool finalize_specialized_ctor_initializers(const Collect& collect,
+bool finalize_specialized_ctor_initializers(Collect& collect,
                                             CppConstructorDecl* ctor_decl,
                                             std::string* error_out);
 

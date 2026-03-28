@@ -418,7 +418,7 @@ QualType Collect::resolve_deferred_decltype_expr_type(
     const DecltypeExprType& decltype_type,
     QualType original_type,
     SrcLoc loc,
-    DeferredTypeResolutionMode mode) const {
+    DeferredTypeResolutionMode mode) {
     if (!decltype_type.expr) {
         if (mode == DeferredTypeResolutionMode::Finalize) {
             report_error("cannot determine type of expression in decltype", loc);
@@ -468,7 +468,7 @@ QualType Collect::resolve_deferred_decltype_expr_type(
 ObjectDecl* Collect::try_instantiate_class_template_specialization(
     const ClassTemplateDecl* class_template,
     const std::vector<TemplateArgument>& arguments,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!diag_engine_) {
         return instantiate_class_template_specialization(
             class_template,
@@ -487,7 +487,7 @@ ObjectDecl* Collect::try_instantiate_class_template_specialization(
 QualType Collect::try_instantiate_alias_template_specialization(
     const AliasTemplateDecl* alias_template,
     const std::vector<TemplateArgument>& arguments,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!diag_engine_) {
         return instantiate_alias_template_specialization(
             alias_template,
@@ -504,7 +504,7 @@ QualType Collect::try_instantiate_alias_template_specialization(
 void Collect::rewrite_deferred_template_arguments_in_place(
     std::vector<TemplateArgument>& arguments,
     SrcLoc loc,
-    DeferredTypeResolutionMode mode) const {
+    DeferredTypeResolutionMode mode) {
     for (auto& argument : arguments) {
         if (argument.kind == TemplateArgumentKind::Type) {
             argument.type = resolve_deferred_semantic_type_impl(
@@ -524,7 +524,7 @@ QualType Collect::resolve_deferred_template_specialization_type(
     TemplateSpecializationType& specialization,
     QualType original_type,
     SrcLoc loc,
-    DeferredTypeResolutionMode mode) const {
+    DeferredTypeResolutionMode mode) {
     rewrite_deferred_template_arguments_in_place(
         specialization.arguments,
         loc,
@@ -588,7 +588,7 @@ QualType Collect::resolve_deferred_template_specialization_type(
 QualType Collect::lookup_deferred_dependent_name_type(
     const DependentNameType& dependent_name,
     SrcLoc loc,
-    bool* matched_nested_template) const {
+    bool* matched_nested_template) {
     bool has_template_argument_list =
         dependent_name.requires_template_keyword ||
         !dependent_name.template_arguments.empty();
@@ -637,7 +637,7 @@ QualType Collect::resolve_deferred_dependent_name_type(
     DependentNameType& dependent_name,
     QualType original_type,
     SrcLoc loc,
-    DeferredTypeResolutionMode mode) const {
+    DeferredTypeResolutionMode mode) {
     dependent_name.qualifier_type = resolve_deferred_semantic_type_impl(
         dependent_name.qualifier_type,
         loc,
@@ -688,14 +688,14 @@ QualType Collect::resolve_deferred_dependent_name_type(
     return original_type;
 }
 
-QualType Collect::try_realize_deferred_semantic_type(QualType type) const {
+QualType Collect::try_realize_deferred_semantic_type(QualType type) {
     return resolve_deferred_semantic_type_impl(
         type,
         SrcLoc(),
         DeferredTypeResolutionMode::TryRealize);
 }
 
-QualType Collect::finalize_deferred_semantic_type(QualType type, SrcLoc loc) const {
+QualType Collect::finalize_deferred_semantic_type(QualType type, SrcLoc loc) {
     return resolve_deferred_semantic_type_impl(
         type,
         loc,
@@ -705,7 +705,7 @@ QualType Collect::finalize_deferred_semantic_type(QualType type, SrcLoc loc) con
 QualType Collect::resolve_deferred_semantic_type_impl(
     QualType type,
     SrcLoc loc,
-    DeferredTypeResolutionMode mode) const {
+    DeferredTypeResolutionMode mode) {
     if (!type) {
         return type;
     }

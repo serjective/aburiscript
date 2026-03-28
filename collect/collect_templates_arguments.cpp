@@ -1102,7 +1102,7 @@ bool Collect::complete_template_argument_bindings_with_substituted_defaults(
     const TemplateDecl* template_decl,
     TemplateArgumentBindings& bindings_out,
     SrcLoc loc,
-    std::string* error_out) const {
+    std::string* error_out) {
     if (!template_decl) {
         set_template_default_completion_error(
             error_out,
@@ -1186,7 +1186,7 @@ bool Collect::bind_template_arguments_for_specialization(
     const std::vector<TemplateArgument>& arguments,
     TemplateArgumentBindings& bindings_out,
     SrcLoc loc,
-    std::string* error_out) const {
+    std::string* error_out) {
     if (!template_decl) {
         set_template_default_completion_error(
             error_out,

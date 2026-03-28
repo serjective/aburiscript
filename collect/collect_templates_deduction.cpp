@@ -1129,7 +1129,7 @@ bool Collect::deduce_function_template_call_arguments(
     const FunctionTemplateDecl* function_template,
     const std::vector<std::unique_ptr<Expr>>& call_args,
     std::vector<TemplateArgument>& deduced_arguments_out,
-    const TemplateArgumentBindings* initial_bindings) const {
+    const TemplateArgumentBindings* initial_bindings) {
     std::vector<Expr*> raw_call_args;
     raw_call_args.reserve(call_args.size());
     for (const auto& call_arg : call_args) {
@@ -1146,7 +1146,7 @@ bool Collect::deduce_function_template_call_arguments(
     const FunctionTemplateDecl* function_template,
     const std::vector<Expr*>& call_args,
     std::vector<TemplateArgument>& deduced_arguments_out,
-    const TemplateArgumentBindings* initial_bindings) const {
+    const TemplateArgumentBindings* initial_bindings) {
     deduced_arguments_out.clear();
     if (!function_template) {
         return false;
@@ -1296,7 +1296,7 @@ bool Collect::deduce_function_template_specialization_arguments(
     const FunctionTemplateDecl* function_template,
     QualType specialized_function_type,
     std::vector<TemplateArgument>& deduced_arguments_out,
-    const TemplateArgumentBindings* initial_bindings) const {
+    const TemplateArgumentBindings* initial_bindings) {
     deduced_arguments_out.clear();
     if (!function_template || !specialized_function_type) {
         return false;
@@ -1333,7 +1333,7 @@ bool Collect::deduce_function_template_specialization_arguments_from_pattern(
     std::vector<TemplateArgument>& deduced_arguments_out,
     const TemplateArgumentBindings* initial_bindings,
     uint8_t parsed_trailing_cv_qualifiers,
-    size_t implicit_object_parameter_count) const {
+    size_t implicit_object_parameter_count) {
     deduced_arguments_out.clear();
     if (!pattern_function_type || !specialized_function_type) {
         return false;
@@ -1426,7 +1426,7 @@ bool Collect::deduce_function_template_specialization_arguments_from_pattern(
 Collect::TemplatePartialOrderingResult
 Collect::compare_function_template_partial_ordering(
     const FunctionTemplateDecl* lhs_template,
-    const FunctionTemplateDecl* rhs_template) const {
+    const FunctionTemplateDecl* rhs_template) {
     if (!lhs_template || !rhs_template || lhs_template == rhs_template) {
         return TemplatePartialOrderingResult::Unordered;
     }
@@ -1694,7 +1694,7 @@ Collect::compare_function_template_partial_ordering(
 
 bool Collect::is_function_template_more_specialized(
     const FunctionTemplateDecl* lhs_template,
-    const FunctionTemplateDecl* rhs_template) const {
+    const FunctionTemplateDecl* rhs_template) {
     return compare_function_template_partial_ordering(lhs_template, rhs_template) ==
         TemplatePartialOrderingResult::LhsMoreSpecialized;
 }

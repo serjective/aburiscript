@@ -153,7 +153,7 @@ std::unique_ptr<Expr>
 Collect::complete_selected_function_template_specialization_symbol(
     std::shared_ptr<Symbol>& selected_symbol,
     SrcLoc loc,
-    std::string_view failure_message) const {
+    std::string_view failure_message) {
     if (!selected_symbol) {
         return nullptr;
     }
@@ -180,9 +180,9 @@ Collect::complete_selected_function_template_specialization_symbol(
 std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
     FuncCall* call,
     VarRef* callee_ref,
-    SrcLoc loc) const {
+    SrcLoc loc) {
 
-    if (!call || !callee_ref || !lang_opts_.is_cxx_mode() || !current_scope_) {
+    if (!call || !callee_ref || !lang_opts_.is_cxx_mode() || !session_.current_scope_) {
         return nullptr;
     }
 
@@ -201,9 +201,9 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
         std::string display_name =
             format_explicit_template_callee_name(qualified_info, callee_name);
         const ObjectDecl* access_context_decl = nullptr;
-        if (func_state_.current_function_is_cpp_member) {
+        if (session_.func_state_.current_function_is_cpp_member) {
             access_context_decl =
-                current_record_decl_from_this_type(func_state_.current_function_cpp_this_type);
+                current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
         }
 
         std::vector<OverloadCallCandidate> overload_candidates;
@@ -362,14 +362,14 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
                   *qualified_info,
                   current_decl_context.get())
             : LookupEngine::lookup_unqualified_function_candidates(
-                  callee_name, current_scope_, true);
+                  callee_name, session_.current_scope_, true);
     auto template_candidates =
         qualified_info
             ? lookup_qualified_function_templates(
                   callee_name,
                   *qualified_info,
                   current_decl_context.get())
-            : lookup_unqualified_function_templates(callee_name, current_scope_);
+            : lookup_unqualified_function_templates(callee_name, session_.current_scope_);
 
     QualType named_type = nullptr;
     if (!qualified_info) {
@@ -517,7 +517,7 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
 }
 
 
-std::unique_ptr<Expr> Collect::collect_function_call(std::unique_ptr<Expr> callee, std::vector<std::unique_ptr<Expr>> args, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_function_call(std::unique_ptr<Expr> callee, std::vector<std::unique_ptr<Expr>> args, SrcLoc loc) {
     return collect_function_call(
         std::move(callee),
         std::move(args),
@@ -530,7 +530,7 @@ std::unique_ptr<Expr> Collect::collect_function_call(
     std::unique_ptr<Expr> callee,
     std::vector<std::unique_ptr<Expr>> args,
     std::vector<TemplateArgument> explicit_template_args,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     return collect_explicit_template_call_impl(
         std::move(callee),
         std::move(explicit_template_args),
@@ -543,7 +543,7 @@ std::unique_ptr<Expr> Collect::collect_function_call(
     std::vector<std::unique_ptr<Expr>> args,
     std::vector<TemplateArgument> explicit_template_args,
     bool has_explicit_template_args,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (has_explicit_template_args) {
         return collect_explicit_template_call_impl(
             std::move(callee),
@@ -605,7 +605,7 @@ std::unique_ptr<Expr> Collect::collect_explicit_function_template_call(
     std::unique_ptr<Expr> callee,
     std::vector<TemplateArgument> explicit_template_args,
     std::vector<std::unique_ptr<Expr>> args,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     return collect_explicit_template_call_impl(
         std::move(callee),
         std::move(explicit_template_args),
@@ -616,7 +616,7 @@ std::unique_ptr<Expr> Collect::collect_explicit_function_template_call(
 std::unique_ptr<Expr> Collect::collect_dependent_call_expression(
     std::unique_ptr<Expr> callee,
     std::vector<std::unique_ptr<Expr>> args,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     QualType dependent_call_type(
         std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
     return collect_make<DependentCallExpr>(
@@ -654,7 +654,7 @@ std::unique_ptr<Expr> Collect::build_dependent_explicit_template_call(
     std::unique_ptr<Expr> callee,
     std::vector<TemplateArgument> explicit_template_args,
     std::vector<std::unique_ptr<Expr>> args,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!callee) {
         return collect_make<ErrorExpr>(
             "missing callee for dependent explicit template call",
@@ -668,8 +668,8 @@ std::unique_ptr<Expr> Collect::build_dependent_explicit_template_call(
         auto member_base_analysis = analyze_cpp_member_lookup_base(
             member_callee->base ? member_callee->base->get_type() : QualType(nullptr),
             member_callee->isArrow != 0,
-            func_state_.current_function_is_cpp_member
-                ? func_state_.current_function_cpp_this_type
+            session_.func_state_.current_function_is_cpp_member
+                ? session_.func_state_.current_function_cpp_this_type
                 : QualType(nullptr),
             ast_ctx_.get());
 
@@ -726,7 +726,7 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
     std::unique_ptr<Expr> callee,
     std::vector<TemplateArgument> explicit_template_args,
     std::vector<std::unique_ptr<Expr>> args,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!lang_opts_.is_cxx_mode()) {
         report_error("explicit template arguments require C++ mode", loc);
         return collect_make<ErrorExpr>(
@@ -782,8 +782,8 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
             if (analyze_cpp_member_lookup_base(
                     member_base_type,
                     member_callee->isArrow != 0,
-                    func_state_.current_function_is_cpp_member
-                        ? func_state_.current_function_cpp_this_type
+                    session_.func_state_.current_function_is_cpp_member
+                        ? session_.func_state_.current_function_cpp_this_type
                         : QualType(nullptr),
                     ast_ctx_.get())
                     .is_dependent) {
@@ -816,9 +816,9 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
 
         const ObjectDecl* object_record_decl = record_decl_from_record_type(record_type.get());
         const ObjectDecl* access_context_decl = nullptr;
-        if (func_state_.current_function_is_cpp_member) {
+        if (session_.func_state_.current_function_is_cpp_member) {
             access_context_decl =
-                current_record_decl_from_this_type(func_state_.current_function_cpp_this_type);
+                current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
         }
 
         std::vector<OverloadCallCandidate> overload_candidates;
@@ -1069,9 +1069,9 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
         std::string display_name =
             format_explicit_template_callee_name(qualified_info, callee_name);
         const ObjectDecl* access_context_decl = nullptr;
-        if (func_state_.current_function_is_cpp_member) {
+        if (session_.func_state_.current_function_is_cpp_member) {
             access_context_decl =
-                current_record_decl_from_this_type(func_state_.current_function_cpp_this_type);
+                current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
         }
 
         auto method_templates =
@@ -1301,7 +1301,7 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
             loc);
     }
 
-    if (!current_scope_) {
+    if (!session_.current_scope_) {
         report_error("internal error: missing scope for explicit template call", loc);
         return collect_make<ErrorExpr>(
             "missing scope for explicit template call", loc);
@@ -1316,7 +1316,7 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                   callee_name,
                   *qualified_info,
                   get_current_decl_context().get())
-            : lookup_unqualified_function_templates(callee_name, current_scope_);
+            : lookup_unqualified_function_templates(callee_name, session_.current_scope_);
     if (template_candidates.empty()) {
         report_error(
             "no function template named '" + display_name + "'",
@@ -1431,7 +1431,7 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
     const DependentLookupQualifier& qualifier,
     bool looks_like_call,
     SrcLoc loc,
-    QualType implicit_this_type) const {
+    QualType implicit_this_type) {
     auto make_qualified_var_ref =
         [&](std::shared_ptr<Symbol> symbol) -> std::unique_ptr<Expr> {
             auto qualified_ref =
@@ -1576,7 +1576,7 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
 bool Collect::resolve_dependent_expr_after_substitution(
     std::unique_ptr<Expr>& expr,
     QualType implicit_this_type,
-    std::string* error_out) const {
+    std::string* error_out) {
     if (auto* block = dyn_cast<BlockExpr>(expr.get())) {
         if (block->semantic_info.invoke_decl) {
             return true;
@@ -2049,7 +2049,7 @@ bool Collect::resolve_dependent_expr_after_substitution(
 
 std::unique_ptr<Expr> Collect::try_function_object_call_overload(
     std::unique_ptr<FuncCall>& call,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!lang_opts_.is_cxx_mode()) {
         return nullptr;
     }
@@ -2160,7 +2160,7 @@ std::unique_ptr<Expr> Collect::try_function_object_call_overload(
 
 std::unique_ptr<Expr> Collect::try_builtin_or_overloaded_varref_call(
     std::unique_ptr<FuncCall>& call,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     auto* var_ref = dyn_cast<VarRef>(call->func.get());
     if (!var_ref) {
         return nullptr;
@@ -2172,7 +2172,7 @@ std::unique_ptr<Expr> Collect::try_builtin_or_overloaded_varref_call(
             report_error("__builtin_va_start requires exactly 2 arguments", loc);
             return collect_make<ErrorExpr>("invalid __builtin_va_start invocation", loc);
         }
-        auto current_fn = desugar_type(func_state_.current_function_type).as_shared<FunctionType>();
+        auto current_fn = desugar_type(session_.func_state_.current_function_type).as_shared<FunctionType>();
         if (!current_fn || !current_fn->is_variadic) {
             report_error("cannot use __builtin_va_start in a non-variadic function", loc);
         }
@@ -2237,7 +2237,7 @@ std::unique_ptr<Expr> Collect::try_builtin_or_overloaded_varref_call(
 std::unique_ptr<Expr> Collect::try_member_function_overload_call(
     std::unique_ptr<FuncCall>& call,
     MemberCallSelection& member_call_selection,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     auto* member_callee = dyn_cast<MemberExpr>(call->func.get());
     if (!member_callee) {
         return nullptr;
@@ -2376,7 +2376,7 @@ std::unique_ptr<Expr> Collect::try_member_function_overload_call(
 std::unique_ptr<Expr> Collect::resolve_call_function_type(
     std::unique_ptr<FuncCall>& call,
     SrcLoc loc,
-    CallFinalizationContext& context_out) const {
+    CallFinalizationContext& context_out) {
     auto callee_type = desugar_type(call->func->get_type());
     context_out.function_type = callee_type.as_shared<FunctionType>();
     if (!context_out.function_type) {
@@ -2533,7 +2533,7 @@ void Collect::validate_call_argument_count(
 std::unique_ptr<Expr> Collect::prepare_call_finalization(
     std::unique_ptr<FuncCall>& call,
     SrcLoc loc,
-    CallFinalizationContext& context_out) const {
+    CallFinalizationContext& context_out) {
     context_out = CallFinalizationContext{};
 
     Expr* raw_member_pointer_callee = strip_implicit_casts(call->func.get());
@@ -2590,7 +2590,7 @@ std::unique_ptr<Expr> Collect::append_missing_call_default_arguments(
 std::unique_ptr<Expr> Collect::convert_call_argument_to_parameter(
     std::unique_ptr<Expr> arg,
     QualType param_type,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (canonical_type_kind(param_type) == TypeKind::Reference) {
         // References keep value category semantics, so we run C++ overload-style
         // conversion checks instead of flattening through standard conversions.
@@ -2791,7 +2791,7 @@ std::unique_ptr<Expr> Collect::apply_variadic_call_argument_conversions(
 void Collect::convert_call_arguments(
     FuncCall* call,
     const CallFinalizationContext& context,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     for (size_t i = 0; i < call->args.size(); ++i) {
         auto arg = std::move(call->args[i]);
         if (context.function_type->has_prototype) {
@@ -2888,7 +2888,7 @@ std::unique_ptr<Expr> Collect::wrap_member_call_expression(
 std::unique_ptr<Expr> Collect::finalize_call_expression(
     std::unique_ptr<FuncCall> call,
     const MemberCallSelection& member_call_selection,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     CallFinalizationContext context;
     if (auto early_result = prepare_call_finalization(call, loc, context)) {
         return early_result;

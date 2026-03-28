@@ -251,7 +251,7 @@ bool Collect::contains_typeof_expr_type(const std::shared_ptr<CType>& type) cons
 }
 
 
-QualType Collect::resolve_typeof_types(QualType type, SrcLoc loc) const {
+QualType Collect::resolve_typeof_types(QualType type, SrcLoc loc) {
     return finalize_deferred_semantic_type(type, loc);
 }
 
@@ -1100,7 +1100,7 @@ std::unique_ptr<Expr> Collect::process_init_list_expression(std::unique_ptr<Init
 }
 
 
-std::unique_ptr<Expr> Collect::process_initializer_for_type(std::unique_ptr<Expr> init, QualType declared_type, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::process_initializer_for_type(std::unique_ptr<Expr> init, QualType declared_type, SrcLoc loc) {
 
     if (!init) {
         return nullptr;

@@ -280,7 +280,7 @@ std::unique_ptr<Decl> Collect::collect_build_cpp_record_semantic_decl(
     const CppRecordDecl& record,
     std::optional<std::string> semantic_tag_name,
     std::vector<std::unique_ptr<Decl>>* transient_decls_out,
-    CppRecordDeferredBodyCallback deferred_body_callback) const {
+    CppRecordDeferredBodyCallback deferred_body_callback) {
     if (record.name.empty()) {
         return nullptr;
     }
@@ -590,7 +590,7 @@ void Collect::collect_record_walk_virtual_bases(
     }
 }
 
-void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) const {
+void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
     if (!ctx.record) {
         report_error(
             "internal error: record member collection requires parsed record syntax",
