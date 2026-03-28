@@ -281,6 +281,7 @@ QualType remap_lambda_template_parameter_types(
     assert(raw->kind == TypeKind::Builtin ||
            raw->kind == TypeKind::Object ||
            raw->kind == TypeKind::Enum ||
+           raw->kind == TypeKind::CppTypeInfo ||
            raw->kind == TypeKind::Auto ||
            raw->kind == TypeKind::Complex ||
            raw->kind == TypeKind::Vector ||

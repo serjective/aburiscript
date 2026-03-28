@@ -2118,10 +2118,14 @@ static void init_builtins(std::unordered_map<BuiltinTypes, std::shared_ptr<Built
 TypeContext::TypeContext() {
     target = TargetInfo::create_host();
     init_builtins(builtins);
+    cpp_type_info_type = std::make_shared<CppTypeInfoType>(
+        target && target->pointer_width > 0 ? target->pointer_width : 64);
 }
 
 TypeContext::TypeContext(std::shared_ptr<TargetInfo> ti) : target(std::move(ti)) {
     init_builtins(builtins);
+    cpp_type_info_type = std::make_shared<CppTypeInfoType>(
+        target && target->pointer_width > 0 ? target->pointer_width : 64);
 }
 
 // using Mac os definitions for now
@@ -2299,6 +2303,7 @@ std::string to_string_type_kind(TypeKind tkind) {
         case TypeKind::Function: return "Function";
         case TypeKind::Object: return "Record";
         case TypeKind::Enum: return "Enum";
+        case TypeKind::CppTypeInfo: return "CppTypeInfo";
         case TypeKind::Typedef: return "Typedef";
         case TypeKind::Vector: return "Vector";
         case TypeKind::Complex: return "Complex";

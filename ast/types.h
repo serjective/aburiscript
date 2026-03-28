@@ -48,6 +48,7 @@ using TemplateParameterList = std::vector<std::unique_ptr<TemplateParameterDecl>
 
 enum class TypeKind {
     Builtin, Pointer, MemberPointer, Reference, Array, Function, Object, Enum,
+    CppTypeInfo,
     Typedef, Vector, Complex, BlockPointer, TemplateTypeParm,
     TemplateSpecialization, DependentName, Other, Placeholder, Auto,
     TypeofExpr, DecltypeExpr
@@ -754,6 +755,38 @@ struct ReferenceType : CType {
 
     static bool classof(const CType* t) { return t->kind == TypeKind::Reference; }
     std::string to_string() const override;
+};
+
+// Compiler-owned RTTI surface type used for `typeid` until stdlib headers are
+// available. The expression-level surface is `const __aburi_type_info&`.
+struct CppTypeInfoType : CType {
+    int64_t descriptor_width_bits = 64;
+
+    explicit CppTypeInfoType(int64_t descriptor_width_bits = 64)
+        : CType(TypeKind::CppTypeInfo),
+          descriptor_width_bits(descriptor_width_bits > 0
+                                    ? descriptor_width_bits
+                                    : 64) {}
+
+    bool equals(const CType& other) override {
+        if (other.kind != TypeKind::CppTypeInfo) {
+            return false;
+        }
+        const auto& rhs = static_cast<const CppTypeInfoType&>(other);
+        return descriptor_width_bits == rhs.descriptor_width_bits;
+    }
+
+    int64_t getWidth() override {
+        return descriptor_width_bits;
+    }
+
+    std::string to_string() const override {
+        return "__aburi_type_info";
+    }
+
+    static bool classof(const CType* t) {
+        return t->kind == TypeKind::CppTypeInfo;
+    }
 };
 // Apple Block pointer type: void (^)(int, float)
 // The pointed_type is always a FunctionType describing the block's signature.
@@ -1583,6 +1616,7 @@ std::shared_ptr<CType> convert_arr_to_pointer(std::shared_ptr<ArrayType> arr_typ
 struct TypeContext {
     std::unordered_map<BuiltinTypes, std::shared_ptr<BuiltinType>> builtins;
     std::unordered_map<BuiltinTypes, std::shared_ptr<ComplexType>> complex_types;
+    std::shared_ptr<CppTypeInfoType> cpp_type_info_type;
     std::shared_ptr<TargetInfo> target;
 
     TypeContext();
@@ -1603,6 +1637,10 @@ struct TypeContext {
         auto ct = std::make_shared<ComplexType>(real_type);
         complex_types[real_kind] = ct;
         return ct;
+    }
+
+    std::shared_ptr<CppTypeInfoType> get_cpp_type_info() {
+        return cpp_type_info_type;
     }
 };
 // Narrow helper: remove typedef sugar only.

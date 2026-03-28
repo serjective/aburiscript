@@ -557,6 +557,12 @@ void append_type_semantic_fingerprint(std::string& out, QualType type) {
             out += enum_type->to_string();
             return;
         }
+        case TypeKind::CppTypeInfo: {
+            auto type_info = static_cast<const CppTypeInfoType*>(raw.get());
+            out += "TI";
+            out += std::to_string(type_info->descriptor_width_bits);
+            return;
+        }
         case TypeKind::Vector: {
             auto vec = static_cast<const VectorType*>(raw.get());
             out += "V(";

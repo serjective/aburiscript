@@ -526,6 +526,22 @@ llvm::Value* ASTToLLVM::lower_lvalue_to_rvalue(ImplicitCast *expr) {
     if (auto cptr = dyn_cast_shared<PointerType>(ctype)) {
         (void)cptr; // pointer lvalues: keep original type for opaque-ptr load
     }
+
+    if (ctype &&
+        canonical_type_kind(QualType(ctype), ast_ctx.get()) ==
+            TypeKind::CppTypeInfo) {
+        llvm::Type* handle_type = convert_type(expr->ctype);
+        if (!handle_type) {
+            error("lower_lvalue_to_rvalue(): failed to lower RTTI handle type",
+                  expr->location);
+            return nullptr;
+        }
+        if (ptr->getType() != handle_type) {
+            ptr = cast_llvm_type(ptr, handle_type, false);
+        }
+        return ptr;
+    }
+
     llvm::Type* valType = convert_type(ctype);
 
     // Global/static constant initialization: evaluate lvalue reads without IR

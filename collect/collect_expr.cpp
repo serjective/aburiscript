@@ -3532,15 +3532,17 @@ std::unique_ptr<Expr> Collect::collect_cpp_typeid_type(QualType type_operand,
         type_operand = finalize_deferred_semantic_type(type_operand, loc);
     }
 
-    auto void_ty = ast_ctx_ && ast_ctx_->type_ctx
-        ? ast_ctx_->type_ctx->get_builtin(BuiltinTypes::Void)
+    auto typeinfo_ty = ast_ctx_ && ast_ctx_->type_ctx
+        ? ast_ctx_->type_ctx->get_cpp_type_info()
         : nullptr;
-    if (!void_ty) {
-        report_error("typeid requires builtin void type support", loc);
-        return collect_error_expression("typeid requires builtin void type support", loc);
+    if (!typeinfo_ty) {
+        report_error("typeid requires compiler RTTI type support", loc);
+        return collect_error_expression("typeid requires compiler RTTI type support", loc);
     }
 
-    QualType result_type(std::make_shared<PointerType>(QualType(void_ty, QUAL_CONST)));
+    QualType result_type(std::make_shared<ReferenceType>(
+        QualType(typeinfo_ty, QUAL_CONST),
+        ReferenceKind::LValue));
     return collect_make<CppTypeIdExpr>(type_operand, result_type, loc);
 }
 
@@ -3563,15 +3565,17 @@ std::unique_ptr<Expr> Collect::collect_cpp_typeid_expression(std::unique_ptr<Exp
         }
     }
 
-    auto void_ty = ast_ctx_ && ast_ctx_->type_ctx
-        ? ast_ctx_->type_ctx->get_builtin(BuiltinTypes::Void)
+    auto typeinfo_ty = ast_ctx_ && ast_ctx_->type_ctx
+        ? ast_ctx_->type_ctx->get_cpp_type_info()
         : nullptr;
-    if (!void_ty) {
-        report_error("typeid requires builtin void type support", loc);
-        return collect_error_expression("typeid requires builtin void type support", loc);
+    if (!typeinfo_ty) {
+        report_error("typeid requires compiler RTTI type support", loc);
+        return collect_error_expression("typeid requires compiler RTTI type support", loc);
     }
 
-    QualType result_type(std::make_shared<PointerType>(QualType(void_ty, QUAL_CONST)));
+    QualType result_type(std::make_shared<ReferenceType>(
+        QualType(typeinfo_ty, QUAL_CONST),
+        ReferenceKind::LValue));
     return collect_make<CppTypeIdExpr>(std::move(expr_operand), result_type, loc);
 }
 
@@ -4062,6 +4066,29 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 bop == BinOpTypes::GREATER_EQUAL_THAN);
             bool lhs_nullptr = is_nullptr_type(lhs_ty, ast_ctx_.get());
             bool rhs_nullptr = is_nullptr_type(rhs_ty, ast_ctx_.get());
+            auto lhs_cmp_type = remove_reference(lhs_ty, ast_ctx_.get());
+            auto rhs_cmp_type = remove_reference(rhs_ty, ast_ctx_.get());
+            auto lhs_cmp_kind = canonical_type_kind(lhs_cmp_type, ast_ctx_.get());
+            auto rhs_cmp_kind = canonical_type_kind(rhs_cmp_type, ast_ctx_.get());
+            if (lhs_ty && rhs_ty &&
+                lhs_cmp_kind == TypeKind::CppTypeInfo &&
+                rhs_cmp_kind == TypeKind::CppTypeInfo) {
+                if (lhs_kind == TypeKind::Reference) {
+                    node->left = collect_apply_standard_conversions(
+                        std::move(node->left), ExprUseContext::RValue);
+                }
+                if (rhs_kind == TypeKind::Reference) {
+                    node->right = collect_apply_standard_conversions(
+                        std::move(node->right), ExprUseContext::RValue);
+                }
+                refresh_types();
+                if (ordered) {
+                    report_invalid_binary_operands(
+                        "binary expression", lhs_ty, rhs_ty, loc);
+                }
+                node->ctype = comparison_result_type();
+                break;
+            }
             if ((lhs_ty && lhs_ty->isComplex()) || (rhs_ty && rhs_ty->isComplex())) {
                 if (ordered) {
                     report_error("invalid operands to binary expression (have '" +

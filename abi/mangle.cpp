@@ -681,6 +681,12 @@ void append_type_substitution_key(std::string& out, QualType qt) {
             out += pointer_identity_string(enum_identity);
             return;
         }
+        case TypeKind::CppTypeInfo: {
+            auto type_info = static_cast<CppTypeInfoType*>(raw.get());
+            out += "cpp-type-info:";
+            out += std::to_string(type_info->descriptor_width_bits);
+            return;
+        }
         case TypeKind::Vector: {
             auto vec = static_cast<VectorType*>(raw.get());
             out += "vector(";

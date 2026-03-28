@@ -581,6 +581,19 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
             ptr = convert_function_call(call);
             ctype = ref_type->referred_type.get_shared();
         }
+    } else if (auto* typeid_expr = dyn_cast<CppTypeIdExpr>(expr)) {
+        if (canonical_type_kind(typeid_expr->get_type(), ast_ctx.get()) ==
+            TypeKind::Reference) {
+            auto ref_type =
+                desugar_type(typeid_expr->get_type(), ast_ctx.get())
+                    .as_shared<ReferenceType>();
+            if (!ref_type || !ref_type->referred_type) {
+                error("get_lvalue(): invalid typeid reference type", expr->location);
+                return {};
+            }
+            ptr = convert_cpp_typeid_expression(typeid_expr);
+            ctype = ref_type->referred_type.get_shared();
+        }
     } else if (auto* dynamic_cast_expr = dyn_cast<CppDynamicCastExpr>(expr)) {
         if (canonical_type_kind(dynamic_cast_expr->get_type(), ast_ctx.get()) ==
             TypeKind::Reference) {

@@ -1560,6 +1560,10 @@ struct CppTypeIdExpr: Expr {
         return ctype;
     }
 
+    bool isLValue() override {
+        return true;
+    }
+
     static bool classof(const Stmt *s) {
         return s->get_kind() == StmtKind::CppTypeIdExpr;
     }

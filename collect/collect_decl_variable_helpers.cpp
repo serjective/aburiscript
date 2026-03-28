@@ -71,6 +71,12 @@ void Collect::resolve_auto_variable_type_from_expr(
         return;
     }
 
+    if (treat_as_cxx_auto) {
+        // C++ auto deduction strips top-level references and cv-qualifiers
+        // from the initializer's type before replacing the placeholder.
+        deduced_qt = remove_reference(deduced_qt, ast_ctx_.get()).without_qualifiers();
+    }
+
     auto deduced = desugar_type(deduced_qt, ast_ctx_.get()).get_shared();
     auto deduced_kind = deduced ? deduced->kind : TypeKind::Other;
     if (deduced_kind == TypeKind::Array) {

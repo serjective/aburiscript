@@ -1125,6 +1125,11 @@ llvm::Type* ASTToLLVM::convert_type(std::shared_ptr<CType> ctype) {
         return llvm::PointerType::get(*context, 0);
     }
 
+    if (auto cpp_type_info = dyn_cast_shared<CppTypeInfoType>(ctype)) {
+        (void)cpp_type_info;
+        return llvm::PointerType::get(*context, 0);
+    }
+
     if (auto blk = dyn_cast_shared<BlockPointerType>(ctype)) {
         return llvm::PointerType::get(*context, 0);
     }
