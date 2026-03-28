@@ -1506,6 +1506,16 @@ bool has_unambiguous_record_base_path(const ObjectDecl* derived_decl,
                                       const ObjectDecl* target_base_decl,
                                       bool require_public_path,
                                       const ASTContext* ast_ctx = nullptr);
+struct RecordBasePathSummary {
+    size_t public_nonvirtual_paths = 0;
+    size_t nonpublic_nonvirtual_paths = 0;
+    size_t public_nonvirtual_offset = 0;
+    bool has_virtual_path = false;
+};
+RecordBasePathSummary summarize_record_base_paths(
+    const ObjectDecl* derived_decl,
+    const ObjectDecl* target_base_decl,
+    const ASTContext* ast_ctx = nullptr);
 RecordSemanticState compute_record_semantics(std::vector<ObjectType::Field> fields,
                                              bool is_union,
                                              bool is_packed,

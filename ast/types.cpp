@@ -1816,6 +1816,103 @@ bool has_unambiguous_record_base_path(const ObjectDecl* derived_decl,
     return path_count == 1;
 }
 
+namespace {
+
+void accumulate_record_base_paths(
+    const ObjectDecl* current_decl,
+    const ObjectDecl* target_base_decl,
+    bool path_is_public,
+    bool saw_virtual_edge,
+    size_t current_offset,
+    RecordBasePathSummary& summary,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const ObjectDecl*>& active_stack) {
+    current_decl = canonical_record_semantics_decl(current_decl);
+    target_base_decl = canonical_record_semantics_decl(target_base_decl);
+    if (!current_decl || !target_base_decl) {
+        return;
+    }
+    if (current_decl == target_base_decl) {
+        if (saw_virtual_edge) {
+            summary.has_virtual_path = true;
+            return;
+        }
+        if (path_is_public) {
+            if (summary.public_nonvirtual_paths == 0) {
+                summary.public_nonvirtual_offset = current_offset;
+            }
+            ++summary.public_nonvirtual_paths;
+        } else {
+            ++summary.nonpublic_nonvirtual_paths;
+        }
+        return;
+    }
+
+    const RecordSemanticState* state =
+        record_semantics_cache_lookup(current_decl, ast_ctx);
+    if (!state) {
+        return;
+    }
+
+    for (const auto& base : state->bases) {
+        const ObjectDecl* base_decl =
+            canonical_record_semantics_decl(base.record_decl);
+        if (!base_decl || active_stack.contains(base_decl)) {
+            continue;
+        }
+
+        bool next_path_public =
+            path_is_public && base.declared_access == RecordMemberAccess::Public;
+        bool next_saw_virtual_edge = saw_virtual_edge || base.is_virtual;
+        size_t next_offset = current_offset;
+        if (!base.is_virtual) {
+            if (!base.has_non_virtual_offset ||
+                current_offset >
+                    std::numeric_limits<size_t>::max() - base.non_virtual_offset) {
+                continue;
+            }
+            next_offset += base.non_virtual_offset;
+        }
+
+        active_stack.insert(base_decl);
+        accumulate_record_base_paths(base_decl,
+                                     target_base_decl,
+                                     next_path_public,
+                                     next_saw_virtual_edge,
+                                     next_offset,
+                                     summary,
+                                     ast_ctx,
+                                     active_stack);
+        active_stack.erase(base_decl);
+    }
+}
+
+} // namespace
+
+RecordBasePathSummary summarize_record_base_paths(
+    const ObjectDecl* derived_decl,
+    const ObjectDecl* target_base_decl,
+    const ASTContext* ast_ctx) {
+    RecordBasePathSummary summary;
+    derived_decl = canonical_record_semantics_decl(derived_decl);
+    target_base_decl = canonical_record_semantics_decl(target_base_decl);
+    if (!derived_decl || !target_base_decl || derived_decl == target_base_decl) {
+        return summary;
+    }
+
+    std::unordered_set<const ObjectDecl*> active_stack;
+    active_stack.insert(derived_decl);
+    accumulate_record_base_paths(derived_decl,
+                                 target_base_decl,
+                                 true,
+                                 false,
+                                 0,
+                                 summary,
+                                 ast_ctx,
+                                 active_stack);
+    return summary;
+}
+
 void enum_semantics_cache_clear(ASTContext* ast_ctx) {
     if (!ast_ctx) {
         return;

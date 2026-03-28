@@ -13,253 +13,6 @@ const ObjectDecl* canonical_record_decl(const ObjectDecl* decl) {
     return decl;
 }
 
-using BasePathStep = std::pair<const ObjectDecl*, bool>; // bool = via virtual edge
-
-std::string encode_base_path_key(const std::vector<BasePathStep>& path) {
-    std::string key;
-    key.reserve(path.size() * 24);
-    for (const auto& step : path) {
-        key += step.second ? "V:" : "N:";
-        key += std::to_string(reinterpret_cast<uintptr_t>(step.first));
-        key.push_back(';');
-    }
-    return key;
-}
-
-size_t count_public_base_subobjects(const ObjectDecl* derived_decl,
-                                    const ObjectDecl* target_base_decl) {
-    derived_decl = canonical_record_decl(derived_decl);
-    target_base_decl = canonical_record_decl(target_base_decl);
-    if (!derived_decl || !target_base_decl || derived_decl == target_base_decl) {
-        return 0;
-    }
-
-    std::unordered_set<std::string> matched_subobjects;
-    std::vector<BasePathStep> path;
-    std::unordered_set<const ObjectDecl*> active_stack;
-    active_stack.insert(derived_decl);
-
-    std::function<void(const ObjectDecl*)> walk =
-        [&](const ObjectDecl* current_decl) {
-        current_decl = canonical_record_decl(current_decl);
-        if (!current_decl) {
-            return;
-        }
-        if (current_decl == target_base_decl) {
-            if (!path.empty()) {
-                matched_subobjects.insert(encode_base_path_key(path));
-            }
-            return;
-        }
-
-        const RecordSemanticState* state = record_semantics_cache_lookup(current_decl);
-        if (!state) {
-            return;
-        }
-
-        for (const auto& base : state->bases) {
-            const ObjectDecl* base_decl = canonical_record_decl(base.record_decl);
-            if (!base_decl ||
-                base.declared_access != RecordMemberAccess::Public ||
-                active_stack.contains(base_decl)) {
-                continue;
-            }
-
-            auto saved_path = path;
-            if (base.is_virtual) {
-                path.clear();
-                path.emplace_back(base_decl, true);
-            } else {
-                path.emplace_back(base_decl, false);
-            }
-
-            active_stack.insert(base_decl);
-            walk(base_decl);
-            active_stack.erase(base_decl);
-            path = std::move(saved_path);
-        }
-    };
-
-    walk(derived_decl);
-    return matched_subobjects.size();
-}
-
-bool has_public_unambiguous_base_path(const ObjectDecl* derived_decl,
-                                      const ObjectDecl* target_base_decl) {
-    derived_decl = canonical_record_decl(derived_decl);
-    target_base_decl = canonical_record_decl(target_base_decl);
-    if (!derived_decl || !target_base_decl || derived_decl == target_base_decl) {
-        return false;
-    }
-    size_t path_count = count_public_base_subobjects(
-        derived_decl, target_base_decl);
-    if (path_count == 0 && target_base_decl) {
-        std::function<size_t(const ObjectDecl*,
-                             std::unordered_set<const ObjectDecl*>&)>
-            count_by_name = [&](const ObjectDecl* current_decl,
-                                std::unordered_set<const ObjectDecl*>& seen)
-        -> size_t {
-            if (!current_decl || seen.contains(current_decl)) {
-                return 0;
-            }
-            seen.insert(current_decl);
-            const RecordSemanticState* state =
-                record_semantics_cache_lookup(current_decl);
-            if (!state) {
-                return 0;
-            }
-            size_t matches = 0;
-            for (const auto& base : state->bases) {
-                const ObjectDecl* base_decl =
-                    canonical_record_decl(base.record_decl);
-                if (!base_decl ||
-                    base.declared_access != RecordMemberAccess::Public) {
-                    continue;
-                }
-                if (base.name == target_base_decl->tag ||
-                    base_decl->tag == target_base_decl->tag) {
-                    ++matches;
-                    continue;
-                }
-                matches += count_by_name(base_decl, seen);
-            }
-            return matches;
-        };
-        std::unordered_set<const ObjectDecl*> by_name_seen;
-        path_count = count_by_name(derived_decl, by_name_seen);
-    }
-    return path_count == 1;
-}
-
-struct NonVirtualMemberBasePathSummary {
-    size_t public_paths = 0;
-    size_t nonpublic_paths = 0;
-    size_t public_offset = 0;
-};
-
-void accumulate_nonvirtual_member_base_paths(
-    const ObjectDecl* current_decl,
-    const ObjectDecl* target_base_decl,
-    bool path_is_public,
-    size_t current_offset,
-    NonVirtualMemberBasePathSummary& summary,
-    std::unordered_set<const ObjectDecl*>& active_stack) {
-
-    current_decl = canonical_record_decl(current_decl);
-    target_base_decl = canonical_record_decl(target_base_decl);
-    if (!current_decl || !target_base_decl) {
-        return;
-    }
-    if (current_decl == target_base_decl) {
-        if (path_is_public) {
-            if (summary.public_paths == 0) {
-                summary.public_offset = current_offset;
-            }
-            ++summary.public_paths;
-        } else {
-            ++summary.nonpublic_paths;
-        }
-        return;
-    }
-
-    const RecordSemanticState* state = record_semantics_cache_lookup(current_decl);
-    if (!state) {
-        return;
-    }
-
-    for (const auto& base : state->bases) {
-        if (!base.record_decl || base.is_virtual || !base.has_non_virtual_offset) {
-            continue;
-        }
-        const ObjectDecl* base_decl = canonical_record_decl(base.record_decl);
-        if (!base_decl || active_stack.contains(base_decl)) {
-            continue;
-        }
-        if (current_offset >
-            std::numeric_limits<size_t>::max() - base.non_virtual_offset) {
-            continue;
-        }
-        bool next_path_public =
-            path_is_public && base.declared_access == RecordMemberAccess::Public;
-        size_t next_offset = current_offset + base.non_virtual_offset;
-        active_stack.insert(base_decl);
-        accumulate_nonvirtual_member_base_paths(
-            base_decl,
-            target_base_decl,
-            next_path_public,
-            next_offset,
-            summary,
-            active_stack);
-        active_stack.erase(base_decl);
-    }
-}
-
-NonVirtualMemberBasePathSummary summarize_nonvirtual_member_base_paths(
-    const ObjectDecl* derived_decl,
-    const ObjectDecl* target_base_decl) {
-
-    NonVirtualMemberBasePathSummary summary;
-    derived_decl = canonical_record_decl(derived_decl);
-    target_base_decl = canonical_record_decl(target_base_decl);
-    if (!derived_decl || !target_base_decl || derived_decl == target_base_decl) {
-        return summary;
-    }
-    std::unordered_set<const ObjectDecl*> active_stack;
-    active_stack.insert(derived_decl);
-    accumulate_nonvirtual_member_base_paths(
-        derived_decl,
-        target_base_decl,
-        true,
-        0,
-        summary,
-        active_stack);
-    return summary;
-}
-
-bool has_virtual_base_path(const ObjectDecl* derived_decl,
-                           const ObjectDecl* target_base_decl) {
-    derived_decl = canonical_record_decl(derived_decl);
-    target_base_decl = canonical_record_decl(target_base_decl);
-    if (!derived_decl || !target_base_decl || derived_decl == target_base_decl) {
-        return false;
-    }
-
-    std::unordered_set<const ObjectDecl*> active_stack;
-    std::function<bool(const ObjectDecl*, bool)> walk =
-        [&](const ObjectDecl* current_decl, bool saw_virtual_edge) {
-        current_decl = canonical_record_decl(current_decl);
-        if (!current_decl) {
-            return false;
-        }
-        if (current_decl == target_base_decl) {
-            return saw_virtual_edge;
-        }
-
-        const RecordSemanticState* state = record_semantics_cache_lookup(current_decl);
-        if (!state) {
-            return false;
-        }
-
-        for (const auto& base : state->bases) {
-            const ObjectDecl* base_decl = canonical_record_decl(base.record_decl);
-            if (!base_decl || active_stack.contains(base_decl)) {
-                continue;
-            }
-            bool next_saw_virtual = saw_virtual_edge || base.is_virtual;
-            active_stack.insert(base_decl);
-            bool found = walk(base_decl, next_saw_virtual);
-            active_stack.erase(base_decl);
-            if (found) {
-                return true;
-            }
-        }
-        return false;
-    };
-
-    active_stack.insert(derived_decl);
-    return walk(derived_decl, false);
-}
-
 bool is_incomplete_array_bound(const std::shared_ptr<ArrayType>& arr) {
     if (!arr) {
         return false;
@@ -324,8 +77,10 @@ bool are_compatible_pointer_targets(QualType lhs,
         const auto* rhs_decl = canonical_record_decl(
             dyn_cast<ObjectDecl>(rhs_obj->get_decl()));
         if (lhs_decl && rhs_decl) {
-            if (has_public_unambiguous_base_path(lhs_decl, rhs_decl) ||
-                has_public_unambiguous_base_path(rhs_decl, lhs_decl)) {
+            if (has_unambiguous_record_base_path(
+                    lhs_decl, rhs_decl, true, ast_ctx) ||
+                has_unambiguous_record_base_path(
+                    rhs_decl, lhs_decl, true, ast_ctx)) {
                 return true;
             }
         }
@@ -469,29 +224,31 @@ Collect::MemberPointerConversionResult Collect::analyze_member_pointer_conversio
         return result;
     }
 
-    auto path_summary = summarize_nonvirtual_member_base_paths(
+    auto path_summary = summarize_record_base_paths(
         /*derived=*/to_owner_decl,
-        /*base=*/from_owner_decl);
-    if (has_virtual_base_path(to_owner_decl, from_owner_decl)) {
+        /*base=*/from_owner_decl,
+        ast_ctx_.get());
+    if (path_summary.has_virtual_path) {
         result.issue = MemberPointerConversionIssue::VirtualBase;
         return result;
     }
-    if (path_summary.public_paths > 1) {
+    if (path_summary.public_nonvirtual_paths > 1) {
         result.issue = MemberPointerConversionIssue::AmbiguousBase;
         return result;
     }
-    if (path_summary.public_paths == 1) {
-        if (path_summary.public_offset >
+    if (path_summary.public_nonvirtual_paths == 1) {
+        if (path_summary.public_nonvirtual_offset >
             static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
             result.issue = MemberPointerConversionIssue::UnrelatedClass;
             return result;
         }
         result.viable = true;
         result.issue = MemberPointerConversionIssue::None;
-        result.owner_adjustment = static_cast<int64_t>(path_summary.public_offset);
+        result.owner_adjustment =
+            static_cast<int64_t>(path_summary.public_nonvirtual_offset);
         return result;
     }
-    if (path_summary.nonpublic_paths > 0) {
+    if (path_summary.nonpublic_nonvirtual_paths > 0) {
         result.issue = MemberPointerConversionIssue::InaccessibleBase;
         return result;
     }
