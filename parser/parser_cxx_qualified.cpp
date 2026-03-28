@@ -780,7 +780,7 @@ bool Parser::starts_with_cpp_dependent_qualified_call_expression() {
             RevertingTentativeParsingAction template_args(*this);
             auto parsed_arguments = parse_cpp_template_argument_list();
             if (is_cpp_scope_resolution_here()) {
-                template_args.Commit();
+                template_args.commit();
                 component.has_template_argument_list = true;
                 component.template_arguments = std::move(parsed_arguments);
             }

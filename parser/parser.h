@@ -226,9 +226,9 @@ public:
         TentativeParsingAction& operator=(const TentativeParsingAction&) = delete;
         ~TentativeParsingAction();
 
-        void Commit();
-        void Revert();
-        bool IsActive() const { return active_; }
+        void commit();
+        void revert();
+        bool is_active() const { return active_; }
 
     protected:
         Parser& parser_;
@@ -240,7 +240,7 @@ public:
     public:
         explicit RevertingTentativeParsingAction(Parser& parser)
             : TentativeParsingAction(parser) {}
-        ~RevertingTentativeParsingAction() { Revert(); }
+        ~RevertingTentativeParsingAction() { revert(); }
     };
 
     TokenMgnt tok_mgnt;

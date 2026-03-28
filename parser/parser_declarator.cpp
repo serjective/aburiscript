@@ -269,7 +269,7 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                                     t.loc);
                             }
                             if (!tentative_cpp_record->name.empty()) {
-                                tentative.Commit();
+                                tentative.commit();
                                 cpp_record_obj = std::move(tentative_record);
                             }
                         }
@@ -883,7 +883,7 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                         qualifiers = nested_decl.qualifiers;
                         is_parameter_pack = nested_decl.is_parameter_pack;
                         result_type = nested_type;
-                        tentative.Commit();
+                        tentative.commit();
                         return nested_type;
                     }
                 } catch (ParseError&) {

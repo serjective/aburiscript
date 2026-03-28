@@ -169,10 +169,10 @@ Parser::TentativeParsingAction::TentativeParsingAction(Parser& parser)
 }
 
 Parser::TentativeParsingAction::~TentativeParsingAction() {
-    Revert();
+    revert();
 }
 
-void Parser::TentativeParsingAction::Commit() {
+void Parser::TentativeParsingAction::commit() {
     if (!active_) {
         return;
     }
@@ -180,7 +180,7 @@ void Parser::TentativeParsingAction::Commit() {
     active_ = false;
 }
 
-void Parser::TentativeParsingAction::Revert() {
+void Parser::TentativeParsingAction::revert() {
     if (!active_) {
         return;
     }

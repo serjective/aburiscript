@@ -152,7 +152,7 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
             TentativeParsingAction tentative(*this);
             try {
                 auto decl = parse_declaration();
-                tentative.Commit();
+                tentative.commit();
                 return collect_->collect_decl_statement(std::move(decl));
             } catch (const ParseError&) {
             } catch (const FatalErrorLimitReached&) {
@@ -230,7 +230,7 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
                 TentativeParsingAction tentative(*this);
                 try {
                     auto decl = parse_declaration();
-                    tentative.Commit();
+                    tentative.commit();
                     return collect_->collect_decl_statement(std::move(decl));
                 } catch (const ParseError&) {
                 } catch (const FatalErrorLimitReached&) {

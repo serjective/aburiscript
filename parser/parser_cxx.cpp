@@ -351,7 +351,7 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
         has_global_qualifier,
         qualifiers,
         terminal_name);
-    tentative.Commit();
+    tentative.commit();
 
     if (auto* template_parameter = dyn_cast<TemplateTemplateParmDecl>(
             const_cast<Decl*>(resolved_template))) {
@@ -562,7 +562,7 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_typed_braced_template_argument_expr(
             return nullptr;
         }
 
-        tentative.Commit();
+        tentative.commit();
         QualType target_type(parsed_type, type_parser.qualifiers);
         SrcLoc literal_loc = current_token().loc;
         auto initializer = parse_init_list();
@@ -679,7 +679,7 @@ TemplateArgument Parser::parse_cpp_template_argument() {
                 type_parser.str_class == StorageClass::NONE &&
                 (is_cpp_template_argument_boundary_here() ||
                  gentle_check(TokenType::ELLIPSIS))) {
-                tentative.Commit();
+                tentative.commit();
                 parsed_argument_type = QualType(parsed_type, type_parser.qualifiers);
                 parsed_type_argument = true;
             }
@@ -2675,7 +2675,7 @@ bool Parser::is_cpp_qualified_id_start() {
             RevertingTentativeParsingAction template_args(*this);
             parse_cpp_template_argument_list();
             if (is_cpp_scope_resolution_here()) {
-                template_args.Commit();
+                template_args.commit();
             }
         }
         return has_global_qualifier || is_cpp_scope_resolution_here();
@@ -3697,7 +3697,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_new_expression(bool is_global_allocation
                 return false;
             }
             out_type = QualType(parsed_type_raw, type_parser.qualifiers);
-            tentative.Commit();
+            tentative.commit();
             return true;
         } catch (const ParseError&) {
             return false;
@@ -4068,7 +4068,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_typeid_expression() {
                 type_parser.name.empty() &&
                 type_parser.str_class == StorageClass::NONE &&
                 gentle_check_and_consume(TokenType::RIGHT_PAREN)) {
-                tentative.Commit();
+                tentative.commit();
                 return collect_->collect_cpp_typeid_type(
                     QualType(parsed_type, type_parser.qualifiers),
                     typeid_tok.loc);
@@ -4098,7 +4098,7 @@ Parser::TPResult Parser::try_parse_cpp_qualified_id() {
                 RevertingTentativeParsingAction template_args(*this);
                 parse_cpp_template_argument_list();
                 if (is_cpp_scope_resolution_here()) {
-                    template_args.Commit();
+                    template_args.commit();
                 }
             }
             return true;

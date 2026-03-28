@@ -278,7 +278,7 @@ std::unique_ptr<Expr> Parser::try_parse_fold_expression(SrcLoc lparen_loc) {
                         "fold expression is only supported in template patterns",
                         lparen_loc);
                 }
-                tentative.Commit();
+                tentative.commit();
                 return collect_->collect_fold_expression(
                     op,
                     direction,
@@ -423,7 +423,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
                 auto parsed_arguments = parse_cpp_template_argument_list();
                 bool scope_after_template_id = is_cpp_scope_resolution_here();
                 if (scope_after_template_id) {
-                    tentative.Commit();
+                    tentative.commit();
                     component.has_template_argument_list = true;
                     component.template_arguments = std::move(parsed_arguments);
                 }
@@ -1827,7 +1827,7 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                     auto init_list = parse_init_list();
                     expr = collect_->collect_compound_literal_expression(
                         new_type, std::move(init_list), start_tok.loc);
-                    tentative.Commit();
+                    tentative.commit();
                 }
             }
         } catch (const ParseError&) {
@@ -1860,7 +1860,7 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                     auto explicit_template_args =
                         parse_cpp_template_argument_list();
                     if (gentle_check(TokenType::LEFT_PAREN)) {
-                        tentative.Commit();
+                        tentative.commit();
                         advance();
                         std::vector<std::unique_ptr<Expr>> args;
                         if (!gentle_check(TokenType::RIGHT_PAREN)) {
@@ -2083,7 +2083,7 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
                             gentle_check_and_consume(TokenType::RIGHT_PAREN) &&
                             !gentle_check(TokenType::LEFT_BRACE)) {
                             retain_type_specifier_decl_if_needed(parse_decl);
-                            tentative.Commit();
+                            tentative.commit();
                             return collect_->collect_sizeof_type(type, tok.loc);
                         }
                     }
@@ -2218,7 +2218,7 @@ std::unique_ptr<Expr> Parser::parse_cast_expression() {
                     retain_type_specifier_decl_if_needed(parse_decl);
                     auto exp = parse_cast_expression();
                     auto cast_expr = collect_->collect_explicit_cast(std::move(exp), new_type, t.loc);
-                    tentative.Commit();
+                    tentative.commit();
                     return cast_expr;
                 }
             }

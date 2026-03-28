@@ -1513,7 +1513,7 @@ std::optional<std::vector<std::unique_ptr<Decl>>> Parser::try_parse_cpp_standalo
     try {
         auto cpp_record = parse_cpp_record_specifier();
         if (gentle_check(TokenType::SEMICOLON)) {
-            tentative.Commit();
+            tentative.commit();
             auto* cpp_record_decl = dyn_cast<CppRecordDecl>(cpp_record.get());
             ret_vec.push_back(std::move(cpp_record));
             if (cpp_record_decl) {
