@@ -5343,6 +5343,7 @@ Collect::ImplicitConversionSequence Collect::build_implicit_conversion_sequence(
             }
             seq.kind = member_seq.kind;
             seq.rank = member_seq.rank;
+            seq.detail_kind = member_seq.detail_kind;
             seq.exact_subrank = member_seq.exact_subrank;
             seq.note = member_seq.note;
             return seq;
@@ -5380,6 +5381,7 @@ Collect::ImplicitConversionSequence Collect::build_implicit_conversion_sequence(
     if (from_is_nullptr && is_null_pointer_like_type(to, ast_ctx_.get()) && !to_is_nullptr) {
         seq.kind = ConversionSequenceKind::Pointer;
         seq.rank = ConversionSequenceRank::Conversion;
+        seq.detail_kind = ConversionSequenceDetailKind::NullPointerConstant;
         return seq;
     }
 
@@ -5415,6 +5417,7 @@ Collect::ImplicitConversionSequence Collect::build_implicit_conversion_sequence(
                 ? ConversionSequenceKind::Qualification
                 : ConversionSequenceKind::Pointer;
             seq.rank = ConversionSequenceRank::Conversion;
+            seq.detail_kind = ConversionSequenceDetailKind::MemberPointer;
             return seq;
         }
     }
@@ -5488,6 +5491,7 @@ Collect::build_cpp_overload_reference_conversion_sequence(
     if (!to_ref || !to_ref->referred_type) {
         seq.kind = ConversionSequenceKind::Failed;
         seq.rank = ConversionSequenceRank::NoMatch;
+        seq.detail_kind = ConversionSequenceDetailKind::None;
         seq.viable = false;
         seq.note = "reference parameter has invalid referred type";
         return seq;
@@ -5503,6 +5507,8 @@ Collect::build_cpp_overload_reference_conversion_sequence(
     auto fail_binding = [&](const std::string& reason) {
         seq.kind = ConversionSequenceKind::Failed;
         seq.rank = ConversionSequenceRank::NoMatch;
+        seq.detail_kind =
+            ConversionSequenceDetailKind::ReferenceRefQualifierMismatch;
         seq.viable = false;
         seq.note = reason;
         return seq;
@@ -5518,6 +5524,7 @@ Collect::build_cpp_overload_reference_conversion_sequence(
         if (same_qualified_type) {
             seq.kind = ConversionSequenceKind::Identity;
             seq.rank = ConversionSequenceRank::ExactMatch;
+            seq.detail_kind = ConversionSequenceDetailKind::ReferenceDirectBinding;
             seq.exact_subrank = identity_subrank;
             return true;
         }
@@ -5530,12 +5537,14 @@ Collect::build_cpp_overload_reference_conversion_sequence(
             target_type.has_all_qualifiers_of(source_type)) {
             seq.kind = ConversionSequenceKind::Qualification;
             seq.rank = ConversionSequenceRank::ExactMatch;
+            seq.detail_kind = ConversionSequenceDetailKind::ReferenceDirectBinding;
             seq.exact_subrank = qualification_subrank;
             return true;
         }
         if (can_convert_derived_to_base_object(source_type, target_type)) {
             seq.kind = ConversionSequenceKind::Pointer;
             seq.rank = ConversionSequenceRank::Conversion;
+            seq.detail_kind = ConversionSequenceDetailKind::ReferenceDirectBinding;
             seq.exact_subrank = -1;
             return true;
         }
@@ -5552,6 +5561,7 @@ Collect::build_cpp_overload_reference_conversion_sequence(
         }
         seq.kind = converted.kind;
         seq.rank = converted.rank;
+        seq.detail_kind = ConversionSequenceDetailKind::ReferenceTemporaryBinding;
         seq.note = converted.note;
         return true;
     };
@@ -5567,6 +5577,7 @@ Collect::build_cpp_overload_reference_conversion_sequence(
         }
         seq.kind = ConversionSequenceKind::UserDefined;
         seq.rank = ConversionSequenceRank::Conversion;
+        seq.detail_kind = ConversionSequenceDetailKind::ReferenceTemporaryBinding;
         seq.exact_subrank = -1;
         seq.note = "user-defined conversion sequence";
         return true;
@@ -5643,6 +5654,7 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
     if (!from_for_conversion) {
         seq.kind = ConversionSequenceKind::Failed;
         seq.rank = ConversionSequenceRank::NoMatch;
+        seq.detail_kind = ConversionSequenceDetailKind::None;
         seq.viable = false;
         seq.note = "argument expression has invalid source type";
         return seq;
@@ -5708,27 +5720,32 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
     if (from_is_nullptr && is_null_pointer_like_type(to, ast_ctx_.get()) && !to_is_nullptr) {
         seq.kind = ConversionSequenceKind::Pointer;
         seq.rank = ConversionSequenceRank::Conversion;
+        seq.detail_kind = ConversionSequenceDetailKind::NullPointerConstant;
         return seq;
     }
     if (to_is_nullptr && is_null_pointer_constant_expr(arg)) {
         seq.kind = ConversionSequenceKind::Pointer;
         seq.rank = ConversionSequenceRank::Conversion;
+        seq.detail_kind = ConversionSequenceDetailKind::NullPointerConstant;
         return seq;
     }
 
     if (to_kind == TypeKind::Pointer && is_null_pointer_constant_expr(arg)) {
         seq.kind = ConversionSequenceKind::Pointer;
         seq.rank = ConversionSequenceRank::Conversion;
+        seq.detail_kind = ConversionSequenceDetailKind::NullPointerConstant;
         return seq;
     }
     if (to_kind == TypeKind::MemberPointer && is_null_pointer_constant_expr(arg)) {
         seq.kind = ConversionSequenceKind::Pointer;
         seq.rank = ConversionSequenceRank::Conversion;
+        seq.detail_kind = ConversionSequenceDetailKind::NullPointerConstant;
         return seq;
     }
     if (to_kind == TypeKind::BlockPointer && is_null_pointer_constant_expr(arg)) {
         seq.kind = ConversionSequenceKind::Pointer;
         seq.rank = ConversionSequenceRank::Conversion;
+        seq.detail_kind = ConversionSequenceDetailKind::NullPointerConstant;
         return seq;
     }
 
@@ -5788,6 +5805,7 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
                 ? ConversionSequenceKind::Qualification
                 : ConversionSequenceKind::Pointer;
             seq.rank = ConversionSequenceRank::Conversion;
+            seq.detail_kind = ConversionSequenceDetailKind::MemberPointer;
             return seq;
         }
     }
@@ -5817,6 +5835,11 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
         if (conversion_match.has_value()) {
             seq.kind = ConversionSequenceKind::UserDefined;
             seq.rank = ConversionSequenceRank::Conversion;
+            seq.detail_kind =
+                conversion_match->kind ==
+                        CppUserDefinedConversionKind::LambdaFunctionPointer
+                    ? ConversionSequenceDetailKind::LambdaFunctionPointer
+                    : ConversionSequenceDetailKind::None;
             seq.note = "user-defined conversion sequence";
             return seq;
         }
@@ -5824,6 +5847,7 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
 
     seq.kind = ConversionSequenceKind::Failed;
     seq.rank = ConversionSequenceRank::NoMatch;
+    seq.detail_kind = ConversionSequenceDetailKind::None;
     seq.viable = false;
     seq.note = "no C++ overload conversion sequence";
     return seq;

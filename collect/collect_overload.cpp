@@ -14,6 +14,10 @@ struct OverloadMetrics {
     uint64_t resolve_calls = 0;
     uint64_t candidate_evaluations = 0;
     uint64_t best_candidate_pairwise_comparisons = 0;
+    uint64_t best_candidate_frontier_prunes = 0;
+    uint64_t viable_candidates = 0;
+    uint64_t conversion_cache_hits = 0;
+    uint64_t conversion_cache_misses = 0;
 };
 
 bool refactor_metrics_enabled() {
@@ -39,6 +43,10 @@ void emit_overload_metrics_at_exit() {
         << "resolve_calls=" << metrics.resolve_calls
         << " candidate_evals=" << metrics.candidate_evaluations
         << " pairwise_compares=" << metrics.best_candidate_pairwise_comparisons
+        << " frontier_prunes=" << metrics.best_candidate_frontier_prunes
+        << " viable_candidates=" << metrics.viable_candidates
+        << " conversion_cache_hits=" << metrics.conversion_cache_hits
+        << " conversion_cache_misses=" << metrics.conversion_cache_misses
         << '\n';
 }
 
@@ -69,6 +77,34 @@ void bump_overload_pairwise_comparisons() {
         return;
     }
     ++overload_metrics().best_candidate_pairwise_comparisons;
+}
+
+void bump_overload_frontier_prunes() {
+    if (!refactor_metrics_enabled()) {
+        return;
+    }
+    ++overload_metrics().best_candidate_frontier_prunes;
+}
+
+void bump_overload_viable_candidates(size_t count) {
+    if (!refactor_metrics_enabled()) {
+        return;
+    }
+    overload_metrics().viable_candidates += count;
+}
+
+void bump_overload_conversion_cache_hit() {
+    if (!refactor_metrics_enabled()) {
+        return;
+    }
+    ++overload_metrics().conversion_cache_hits;
+}
+
+void bump_overload_conversion_cache_miss() {
+    if (!refactor_metrics_enabled()) {
+        return;
+    }
+    ++overload_metrics().conversion_cache_misses;
 }
 
 size_t hash_combine(size_t seed, size_t value) {
@@ -209,8 +245,10 @@ Collect::build_cpp_overload_conversion_sequence_cached(
     key.allow_user_defined = allow_user_defined;
     auto it = conversion_cache->find(key);
     if (it != conversion_cache->end()) {
+        bump_overload_conversion_cache_hit();
         return it->second;
     }
+    bump_overload_conversion_cache_miss();
     auto seq = build_cpp_overload_conversion_sequence(
         arg, to, allow_user_defined);
     conversion_cache->emplace(key, seq);
@@ -518,6 +556,93 @@ std::unique_ptr<Expr> Collect::make_hidden_overload_callee(
     return collect_make<VarRef>(std::move(selected_symbol), loc);
 }
 
+Collect::OverloadCandidateEval Collect::evaluate_conversion_constructor_candidate(
+    const RecordSemanticState::Constructor& ctor,
+    Expr* arg,
+    bool allow_explicit_constructors,
+    OverloadConversionMemoCache* conversion_cache) {
+
+    bump_overload_candidate_evaluations();
+    OverloadCandidateEval eval;
+    eval.candidate_kind = OverloadCandidateKind::ConversionConstructor;
+    eval.symbol = ctor.symbol;
+    eval.constructor = &ctor;
+    eval.function_type =
+        desugar_type(ctor.type, ast_ctx_.get()).as_shared<FunctionType>();
+    if (!eval.function_type || !ctor.symbol) {
+        eval.failure.kind = OverloadFailureKind::InvalidCandidateState;
+        eval.failure.note = "conversion constructor is missing type or symbol";
+        return eval;
+    }
+
+    CppConstructorUserParamInfo param_info =
+        cpp_compute_constructor_user_param_info(ctor);
+    eval.user_param_start = param_info.user_param_start;
+    eval.max_user_param_count = param_info.max_user_param_count;
+    eval.required_user_param_count = param_info.required_user_param_count;
+
+    if (ctor.is_deleted) {
+        eval.failure.kind = OverloadFailureKind::DeletedCandidate;
+        eval.failure.note = "conversion constructor is deleted";
+        return eval;
+    }
+    if (!allow_explicit_constructors && ctor.is_explicit) {
+        eval.failure.kind = OverloadFailureKind::InaccessibleCandidate;
+        eval.failure.note = "explicit conversion constructor is not allowed";
+        return eval;
+    }
+    if (!cpp_access_allows_member(ctor.declared_access, false)) {
+        eval.failure.kind = OverloadFailureKind::InaccessibleCandidate;
+        eval.failure.note = "conversion constructor is not accessible";
+        return eval;
+    }
+
+    constexpr size_t provided_arg_count = 1;
+    if (provided_arg_count < eval.required_user_param_count) {
+        eval.failure.kind = OverloadFailureKind::ArityTooFew;
+        eval.failure.required_arg_count = eval.required_user_param_count;
+        eval.failure.provided_arg_count = provided_arg_count;
+        eval.failure.arity_is_minimum =
+            eval.required_user_param_count != eval.max_user_param_count;
+        return eval;
+    }
+    if (provided_arg_count > eval.max_user_param_count) {
+        eval.failure.kind = OverloadFailureKind::ArityTooMany;
+        eval.failure.required_arg_count = eval.max_user_param_count;
+        eval.failure.provided_arg_count = provided_arg_count;
+        return eval;
+    }
+
+    eval.viable = true;
+    eval.conversions.reserve(provided_arg_count);
+    size_t param_index = eval.user_param_start;
+    if (param_index >= eval.function_type->parameters.size()) {
+        eval.viable = false;
+        eval.failure.kind = OverloadFailureKind::InvalidCandidateState;
+        eval.failure.note = "conversion constructor parameter index out of range";
+        return eval;
+    }
+
+    QualType param_type =
+        decay_parameter_type(eval.function_type->parameters[param_index]);
+    auto seq = build_cpp_overload_conversion_sequence_cached(
+        arg,
+        param_type,
+        /*allow_user_defined=*/false,
+        conversion_cache);
+    eval.conversions.push_back(seq);
+    if (!seq.viable) {
+        eval.viable = false;
+        eval.failure.kind = OverloadFailureKind::ArgumentConversionFailure;
+        eval.failure.argument_index = 1;
+        eval.failure.from = seq.from ? seq.from : (arg ? arg->get_type() : QualType());
+        eval.failure.to = param_type;
+        eval.failure.note = seq.note;
+    }
+
+    return eval;
+}
+
 std::optional<Collect::CppConversionConstructorMatch>
 Collect::select_cpp_conversion_constructor(Expr* arg,
                                                    QualType target_object_type,
@@ -544,117 +669,36 @@ Collect::select_cpp_conversion_constructor(Expr* arg,
         return std::nullopt;
     }
 
-    struct ConstructorCandidateEval {
-        const RecordSemanticState::Constructor* ctor = nullptr;
-        std::shared_ptr<FunctionType> function_type = nullptr;
-        size_t user_param_start = 0;
-        size_t max_user_param_count = 0;
-        size_t required_user_param_count = 0;
-        std::vector<ImplicitConversionSequence> conversions;
-        bool viable = false;
-    };
+    OverloadConversionMemoCache conversion_cache;
+    conversion_cache.reserve(record_state->constructors.size());
 
-    std::vector<ConstructorCandidateEval> evaluated;
-    evaluated.reserve(record_state->constructors.size());
+    OverloadCandidateSet candidate_set;
+    candidate_set.evaluated.reserve(record_state->constructors.size());
     for (const auto& ctor : record_state->constructors) {
-        ConstructorCandidateEval eval;
-        eval.ctor = &ctor;
-        eval.function_type =
-            desugar_type(ctor.type, ast_ctx_.get()).as_shared<FunctionType>();
-        if (!eval.function_type || !ctor.symbol) {
-            evaluated.push_back(std::move(eval));
-            continue;
-        }
-        CppConstructorUserParamInfo param_info =
-            cpp_compute_constructor_user_param_info(ctor);
-        eval.user_param_start = param_info.user_param_start;
-        eval.max_user_param_count = param_info.max_user_param_count;
-        eval.required_user_param_count = param_info.required_user_param_count;
-
-        if (ctor.is_deleted ||
-            (!allow_explicit_constructors && ctor.is_explicit) ||
-            !cpp_access_allows_member(ctor.declared_access, false)) {
-            evaluated.push_back(std::move(eval));
-            continue;
-        }
-
-        constexpr size_t provided_arg_count = 1;
-        if (provided_arg_count < eval.required_user_param_count ||
-            provided_arg_count > eval.max_user_param_count) {
-            evaluated.push_back(std::move(eval));
-            continue;
-        }
-
-        eval.viable = true;
-        eval.conversions.reserve(provided_arg_count);
-        size_t param_idx = eval.user_param_start;
-        if (param_idx >= eval.function_type->parameters.size()) {
-            eval.viable = false;
-        } else {
-            QualType param_type =
-                decay_parameter_type(eval.function_type->parameters[param_idx]);
-            auto seq = build_cpp_overload_conversion_sequence(
-                arg, param_type, /*allow_user_defined=*/false);
-            if (!seq.viable) {
-                eval.viable = false;
-            }
-            eval.conversions.push_back(seq);
-        }
-        evaluated.push_back(std::move(eval));
+        candidate_set.evaluated.push_back(evaluate_conversion_constructor_candidate(
+            ctor,
+            arg,
+            allow_explicit_constructors,
+            &conversion_cache));
     }
 
-    std::vector<size_t> viable_indices;
-    viable_indices.reserve(evaluated.size());
-    for (size_t idx = 0; idx < evaluated.size(); ++idx) {
-        if (evaluated[idx].viable) {
-            viable_indices.push_back(idx);
-        }
-    }
-    if (viable_indices.empty()) {
+    collect_viable_overload_candidates(candidate_set);
+    if (candidate_set.viable_indices.empty()) {
         return std::nullopt;
     }
 
-    auto is_better_candidate = [&](size_t lhs_idx, size_t rhs_idx) {
-        const auto& lhs = evaluated[lhs_idx];
-        const auto& rhs = evaluated[rhs_idx];
-        return is_strictly_better_conversion_profile(
-            lhs.conversions,
-            lhs.function_type,
-            rhs.conversions,
-            rhs.function_type);
-    };
-
-    size_t best_index = std::numeric_limits<size_t>::max();
-    for (size_t idx : viable_indices) {
-        bool better_than_all = true;
-        for (size_t other : viable_indices) {
-            if (idx == other) {
-                continue;
-            }
-            if (!is_better_candidate(idx, other)) {
-                better_than_all = false;
-                break;
-            }
-        }
-        if (!better_than_all) {
-            continue;
-        }
-        if (best_index != std::numeric_limits<size_t>::max()) {
-            return std::nullopt;
-        }
-        best_index = idx;
-    }
-    if (best_index == std::numeric_limits<size_t>::max()) {
+    auto best_index = select_best_overload_candidate_index(candidate_set);
+    if (!best_index.has_value()) {
         return std::nullopt;
     }
 
-    const auto& chosen = evaluated[best_index];
-    if (!chosen.ctor || !chosen.ctor->symbol || !chosen.function_type) {
+    const auto& chosen = candidate_set.evaluated[*best_index];
+    if (!chosen.constructor || !chosen.constructor->symbol || !chosen.function_type) {
         return std::nullopt;
     }
 
     CppConversionConstructorMatch result;
-    result.ctor_symbol = chosen.ctor->symbol;
+    result.ctor_symbol = chosen.constructor->symbol;
     result.ctor_function_type = chosen.function_type;
     result.user_param_start = chosen.user_param_start;
     result.max_user_param_count = chosen.max_user_param_count;
@@ -980,6 +1024,7 @@ bool Collect::probe_cpp_braced_init_argument_conversion(
     if (!cloned) {
         seq_out.kind = ConversionSequenceKind::Failed;
         seq_out.rank = ConversionSequenceRank::NoMatch;
+        seq_out.detail_kind = ConversionSequenceDetailKind::BracedInit;
         seq_out.viable = false;
         seq_out.note = clone_error.empty()
             ? "braced-init argument clone failed"
@@ -990,6 +1035,7 @@ bool Collect::probe_cpp_braced_init_argument_conversion(
     if (!diag_engine_) {
         seq_out.kind = ConversionSequenceKind::Failed;
         seq_out.rank = ConversionSequenceRank::NoMatch;
+        seq_out.detail_kind = ConversionSequenceDetailKind::BracedInit;
         seq_out.viable = false;
         seq_out.note = "missing diagnostic engine for braced-init conversion probe";
         return true;
@@ -1003,6 +1049,7 @@ bool Collect::probe_cpp_braced_init_argument_conversion(
     if (!converted || isa<ErrorExpr>(converted.get())) {
         seq_out.kind = ConversionSequenceKind::Failed;
         seq_out.rank = ConversionSequenceRank::NoMatch;
+        seq_out.detail_kind = ConversionSequenceDetailKind::BracedInit;
         seq_out.viable = false;
         seq_out.note = "braced-init argument cannot initialize target type";
         return true;
@@ -1011,10 +1058,12 @@ bool Collect::probe_cpp_braced_init_argument_conversion(
     if (isa<CppConstructExpr>(converted.get())) {
         seq_out.kind = ConversionSequenceKind::UserDefined;
         seq_out.rank = ConversionSequenceRank::Conversion;
+        seq_out.detail_kind = ConversionSequenceDetailKind::BracedInit;
         seq_out.exact_subrank = -1;
     } else {
         seq_out.kind = ConversionSequenceKind::Identity;
         seq_out.rank = ConversionSequenceRank::ExactMatch;
+        seq_out.detail_kind = ConversionSequenceDetailKind::BracedInit;
         seq_out.exact_subrank = 0;
     }
     seq_out.viable = true;
@@ -1107,6 +1156,8 @@ Collect::evaluate_overload_implicit_object_conversion(
         ImplicitConversionSequence rejected;
         rejected.kind = ConversionSequenceKind::Numeric;
         rejected.rank = ConversionSequenceRank::NoMatch;
+        rejected.detail_kind =
+            ConversionSequenceDetailKind::ReferenceRefQualifierMismatch;
         rejected.from = object_arg ? object_arg->get_type() : QualType();
         rejected.to = param_type;
         rejected.viable = false;
@@ -1119,6 +1170,8 @@ Collect::evaluate_overload_implicit_object_conversion(
         ImplicitConversionSequence rejected;
         rejected.kind = ConversionSequenceKind::Numeric;
         rejected.rank = ConversionSequenceRank::NoMatch;
+        rejected.detail_kind =
+            ConversionSequenceDetailKind::ReferenceRefQualifierMismatch;
         rejected.from = object_arg ? object_arg->get_type() : QualType();
         rejected.to = param_type;
         rejected.viable = false;
@@ -1159,6 +1212,7 @@ Collect::evaluate_overload_implicit_object_conversion(
         seq.from = object_type;
         seq.to = param_type;
         seq.viable = true;
+        seq.detail_kind = ConversionSequenceDetailKind::ReferenceDirectBinding;
         seq.exact_subrank = (seq.kind == ConversionSequenceKind::Identity) ? 0 : 1;
         seq.note.clear();
         return seq;
@@ -1166,6 +1220,7 @@ Collect::evaluate_overload_implicit_object_conversion(
     if (can_convert_derived_to_base_object(object_type, pointed_type)) {
         seq.kind = ConversionSequenceKind::Pointer;
         seq.rank = ConversionSequenceRank::Conversion;
+        seq.detail_kind = ConversionSequenceDetailKind::ReferenceDirectBinding;
         seq.from = object_type;
         seq.to = param_type;
         seq.viable = true;
@@ -1184,12 +1239,14 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
 
     bump_overload_candidate_evaluations();
     OverloadCandidateEval eval;
+    eval.candidate_kind = OverloadCandidateKind::Function;
     eval.symbol = candidate_info.symbol;
     eval.implicit_object_arg_kind = candidate_info.implicit_object_arg_kind;
 
     if (!candidate_info.symbol ||
         candidate_info.symbol->kind != SymbolKind::FUNCTION) {
-        eval.failure_reason = "candidate is not a function";
+        eval.failure.kind = OverloadFailureKind::NotCallable;
+        eval.failure.note = "candidate is not a function";
         return eval;
     }
 
@@ -1205,7 +1262,8 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
         }
     }
     if (!candidate_fn) {
-        eval.failure_reason = "candidate has non-callable type";
+        eval.failure.kind = OverloadFailureKind::NotCallable;
+        eval.failure.note = "candidate has non-callable type";
         return eval;
     }
 
@@ -1235,32 +1293,25 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
         if (candidate_fn->is_variadic) {
             if (provided_arg_count < min_required_param_count) {
                 eval.viable = false;
-                eval.failure_reason =
-                    "requires at least " +
-                    std::to_string(min_required_param_count) +
-                    " argument(s), but " + std::to_string(provided_arg_count) +
-                    " provided";
+                eval.failure.kind = OverloadFailureKind::ArityTooFew;
+                eval.failure.required_arg_count = min_required_param_count;
+                eval.failure.provided_arg_count = provided_arg_count;
+                eval.failure.arity_is_minimum = true;
             }
         } else if (provided_arg_count < min_required_param_count) {
             eval.viable = false;
-            if (trailing_default_arg_count == 0) {
-                eval.failure_reason =
-                    "requires " + std::to_string(named_param_count) +
-                    " argument(s), but " + std::to_string(provided_arg_count) +
-                    " provided";
-            } else {
-                eval.failure_reason =
-                    "requires at least " +
-                    std::to_string(min_required_param_count) +
-                    " argument(s), but " + std::to_string(provided_arg_count) +
-                    " provided";
-            }
+            eval.failure.kind = OverloadFailureKind::ArityTooFew;
+            eval.failure.required_arg_count =
+                trailing_default_arg_count == 0
+                    ? named_param_count
+                    : min_required_param_count;
+            eval.failure.provided_arg_count = provided_arg_count;
+            eval.failure.arity_is_minimum = trailing_default_arg_count != 0;
         } else if (provided_arg_count > named_param_count) {
             eval.viable = false;
-            eval.failure_reason =
-                "requires " + std::to_string(named_param_count) +
-                " argument(s), but " + std::to_string(provided_arg_count) +
-                " provided";
+            eval.failure.kind = OverloadFailureKind::ArityTooMany;
+            eval.failure.required_arg_count = named_param_count;
+            eval.failure.provided_arg_count = provided_arg_count;
         }
     }
 
@@ -1273,7 +1324,9 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
     if (has_implicit_object_arg) {
         if (!implicit_object_arg) {
             eval.viable = false;
-            eval.failure_reason = "missing implicit object argument";
+            eval.failure.kind = OverloadFailureKind::ImplicitObjectMissing;
+            eval.failure.argument_index = 1;
+            eval.failure.note = "missing implicit object argument";
         } else if (candidate_fn->has_prototype && named_param_count > 0) {
             QualType param_type = decay_parameter_type(candidate_fn->parameters[0]);
             // Member-object calls use stricter object-parameter compatibility
@@ -1292,19 +1345,25 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
                       /*allow_user_defined=*/true,
                       conversion_cache);
             if (!seq.viable) {
-                std::string from_name = seq.from ? seq.from.to_string() : "<unknown>";
-                std::string to_name =
-                    param_type ? param_type.to_string() : "<unknown>";
                 eval.viable = false;
-                eval.failure_reason =
-                    "cannot convert argument 1 from '" + from_name + "' to '" +
-                    to_name + "'";
+                eval.failure.kind =
+                    seq.detail_kind ==
+                            ConversionSequenceDetailKind::ReferenceRefQualifierMismatch
+                        ? OverloadFailureKind::ImplicitObjectRefQualifierMismatch
+                        : OverloadFailureKind::ImplicitObjectConversionFailure;
+                eval.failure.argument_index = 1;
+                eval.failure.from =
+                    seq.from ? seq.from : implicit_object_arg->get_type();
+                eval.failure.to = param_type;
+                eval.failure.ref_qualifier = candidate_fn->member_ref_qualifier;
+                eval.failure.note = seq.note;
             }
             eval.conversions.push_back(seq);
         } else {
             ImplicitConversionSequence seq;
             seq.kind = ConversionSequenceKind::Numeric;
             seq.rank = ConversionSequenceRank::Conversion;
+            seq.detail_kind = ConversionSequenceDetailKind::None;
             seq.from = implicit_object_arg->get_type();
             seq.to = nullptr;
             seq.viable = true;
@@ -1323,14 +1382,15 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
                 /*allow_user_defined=*/true,
                 conversion_cache);
             if (!seq.viable) {
-                std::string from_name = seq.from ? seq.from.to_string() : "<unknown>";
-                std::string to_name =
-                    param_type ? param_type.to_string() : "<unknown>";
                 eval.viable = false;
-                eval.failure_reason =
-                    "cannot convert argument " +
-                    std::to_string(param_index + 1) + " from '" + from_name +
-                    "' to '" + to_name + "'";
+                eval.failure.kind = OverloadFailureKind::ArgumentConversionFailure;
+                eval.failure.argument_index = param_index + 1;
+                eval.failure.from =
+                    seq.from ? seq.from
+                             : (explicit_args[i] ? explicit_args[i]->get_type()
+                                                 : QualType());
+                eval.failure.to = param_type;
+                eval.failure.note = seq.note;
                 eval.conversions.push_back(seq);
                 break;
             }
@@ -1341,6 +1401,7 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
             ImplicitConversionSequence seq;
             seq.kind = ConversionSequenceKind::Numeric;
             seq.rank = ConversionSequenceRank::Conversion;
+            seq.detail_kind = ConversionSequenceDetailKind::None;
             seq.from = explicit_args[i] ? explicit_args[i]->get_type() : QualType();
             seq.to = nullptr;
             seq.viable = true;
@@ -1351,6 +1412,62 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
     return eval;
 }
 
+void Collect::collect_viable_overload_candidates(
+    OverloadCandidateSet& candidate_set) const {
+
+    candidate_set.viable_indices.clear();
+    candidate_set.viable_indices.reserve(candidate_set.evaluated.size());
+    for (size_t idx = 0; idx < candidate_set.evaluated.size(); ++idx) {
+        if (candidate_set.evaluated[idx].viable) {
+            candidate_set.viable_indices.push_back(idx);
+        }
+    }
+    bump_overload_viable_candidates(candidate_set.viable_indices.size());
+}
+
+std::string Collect::overload_failure_reason(
+    const OverloadFailure& failure) const {
+
+    switch (failure.kind) {
+    case OverloadFailureKind::None:
+        return "not viable";
+    case OverloadFailureKind::NotCallable:
+    case OverloadFailureKind::InvalidCandidateState:
+    case OverloadFailureKind::DeletedCandidate:
+    case OverloadFailureKind::InaccessibleCandidate:
+        return failure.note.empty() ? "not viable" : failure.note;
+    case OverloadFailureKind::ArityTooFew:
+    case OverloadFailureKind::ArityTooMany: {
+        std::string requirement_text =
+            failure.arity_is_minimum ? "requires at least "
+                                     : "requires ";
+        return requirement_text +
+            std::to_string(failure.required_arg_count) +
+            " argument(s), but " + std::to_string(failure.provided_arg_count) +
+            " provided";
+    }
+    case OverloadFailureKind::ImplicitObjectMissing:
+        return failure.note.empty()
+            ? "missing implicit object argument"
+            : failure.note;
+    case OverloadFailureKind::ImplicitObjectRefQualifierMismatch:
+    case OverloadFailureKind::ImplicitObjectConversionFailure:
+    case OverloadFailureKind::ArgumentConversionFailure: {
+        size_t argument_number =
+            failure.argument_index == std::numeric_limits<size_t>::max()
+                ? 0
+                : failure.argument_index;
+        std::string from_name =
+            failure.from ? failure.from.to_string() : "<unknown>";
+        std::string to_name =
+            failure.to ? failure.to.to_string() : "<unknown>";
+        return "cannot convert argument " + std::to_string(argument_number) +
+            " from '" + from_name + "' to '" + to_name + "'";
+    }
+    }
+    return failure.note.empty() ? "not viable" : failure.note;
+}
+
 std::string Collect::overload_candidate_type_name(
     const OverloadCandidateEval& candidate) const {
 
@@ -1359,48 +1476,35 @@ std::string Collect::overload_candidate_type_name(
         : std::string("<unknown>");
 }
 
-int Collect::overload_failure_reason_category(
-    const std::string& reason) const {
+int Collect::overload_failure_category(const OverloadFailure& failure) const {
 
-    if (reason.rfind("requires", 0) == 0) {
-        return 0; // arity/prototype mismatch
+    switch (failure.kind) {
+    case OverloadFailureKind::ArityTooFew:
+    case OverloadFailureKind::ArityTooMany:
+        return 0;
+    case OverloadFailureKind::ImplicitObjectMissing:
+    case OverloadFailureKind::ImplicitObjectRefQualifierMismatch:
+    case OverloadFailureKind::ImplicitObjectConversionFailure:
+    case OverloadFailureKind::ArgumentConversionFailure:
+        return 1;
+    case OverloadFailureKind::DeletedCandidate:
+    case OverloadFailureKind::InaccessibleCandidate:
+        return 2;
+    case OverloadFailureKind::NotCallable:
+    case OverloadFailureKind::InvalidCandidateState:
+    case OverloadFailureKind::None:
+        return 3;
     }
-    if (reason.rfind("cannot convert argument ", 0) == 0) {
-        return 1; // conversion mismatch
-    }
-    return 2; // generic failure
-}
-
-int Collect::overload_failure_reason_argument_index(
-    const std::string& reason) const {
-
-    constexpr std::string_view kPrefix = "cannot convert argument ";
-    if (reason.rfind(kPrefix, 0) != 0) {
-        return std::numeric_limits<int>::max();
-    }
-    size_t idx_begin = kPrefix.size();
-    size_t idx_end = idx_begin;
-    while (idx_end < reason.size() &&
-           std::isdigit(static_cast<unsigned char>(reason[idx_end]))) {
-        ++idx_end;
-    }
-    if (idx_end == idx_begin) {
-        return std::numeric_limits<int>::max();
-    }
-    try {
-        return std::stoi(reason.substr(idx_begin, idx_end - idx_begin));
-    } catch (...) {
-        return std::numeric_limits<int>::max();
-    }
+    return 3;
 }
 
 bool Collect::overload_note_order_less(
-    const std::vector<OverloadCandidateEval>& evaluated,
+    const OverloadCandidateSet& candidate_set,
     size_t lhs_idx,
     size_t rhs_idx) const {
 
-    const auto& lhs = evaluated[lhs_idx];
-    const auto& rhs = evaluated[rhs_idx];
+    const auto& lhs = candidate_set.evaluated[lhs_idx];
+    const auto& rhs = candidate_set.evaluated[rhs_idx];
 
     if (lhs.viable != rhs.viable) {
         return lhs.viable && !rhs.viable;
@@ -1455,18 +1559,14 @@ bool Collect::overload_note_order_less(
                 rhs_is_template_specialization;
         }
     } else {
-        int lhs_reason_category =
-            overload_failure_reason_category(lhs.failure_reason);
-        int rhs_reason_category =
-            overload_failure_reason_category(rhs.failure_reason);
+        int lhs_reason_category = overload_failure_category(lhs.failure);
+        int rhs_reason_category = overload_failure_category(rhs.failure);
         if (lhs_reason_category != rhs_reason_category) {
             return lhs_reason_category < rhs_reason_category;
         }
         if (lhs_reason_category == 1) {
-            int lhs_arg_idx =
-                overload_failure_reason_argument_index(lhs.failure_reason);
-            int rhs_arg_idx =
-                overload_failure_reason_argument_index(rhs.failure_reason);
+            size_t lhs_arg_idx = lhs.failure.argument_index;
+            size_t rhs_arg_idx = rhs.failure.argument_index;
             if (lhs_arg_idx != rhs_arg_idx) {
                 return lhs_arg_idx < rhs_arg_idx;
             }
@@ -1483,7 +1583,7 @@ bool Collect::overload_note_order_less(
 
 void Collect::emit_overload_candidate_notes(
     std::string_view callee_name,
-    const std::vector<OverloadCandidateEval>& evaluated,
+    const OverloadCandidateSet& candidate_set,
     bool include_non_viable,
     SrcLoc loc) const {
 
@@ -1491,9 +1591,9 @@ void Collect::emit_overload_candidate_notes(
         return;
     }
     std::vector<size_t> note_indices;
-    note_indices.reserve(evaluated.size());
-    for (size_t idx = 0; idx < evaluated.size(); ++idx) {
-        if (!include_non_viable && !evaluated[idx].viable) {
+    note_indices.reserve(candidate_set.evaluated.size());
+    for (size_t idx = 0; idx < candidate_set.evaluated.size(); ++idx) {
+        if (!include_non_viable && !candidate_set.evaluated[idx].viable) {
             continue;
         }
         note_indices.push_back(idx);
@@ -1502,11 +1602,11 @@ void Collect::emit_overload_candidate_notes(
         note_indices.begin(),
         note_indices.end(),
         [&](size_t lhs_idx, size_t rhs_idx) {
-            return overload_note_order_less(evaluated, lhs_idx, rhs_idx);
+            return overload_note_order_less(candidate_set, lhs_idx, rhs_idx);
         });
     std::string callee_name_str(callee_name);
     for (size_t idx : note_indices) {
-        const auto& candidate = evaluated[idx];
+        const auto& candidate = candidate_set.evaluated[idx];
         std::string type_name = overload_candidate_type_name(candidate);
         if (candidate.viable) {
             diag_engine_->report_note(
@@ -1515,8 +1615,7 @@ void Collect::emit_overload_candidate_notes(
                 loc);
             continue;
         }
-        std::string reason =
-            candidate.failure_reason.empty() ? "not viable" : candidate.failure_reason;
+        std::string reason = overload_failure_reason(candidate.failure);
         diag_engine_->report_note(
             "candidate function '" + callee_name_str + "' has type '" + type_name +
                 "' (" + reason + ")",
@@ -1573,32 +1672,47 @@ bool Collect::is_better_overload_candidate(
 }
 
 std::optional<size_t> Collect::select_best_overload_candidate_index(
-    const std::vector<OverloadCandidateEval>& evaluated,
-    const std::vector<size_t>& viable_indices) {
+    const OverloadCandidateSet& candidate_set) {
 
-    std::optional<size_t> best_index;
-    for (size_t idx : viable_indices) {
-        bool better_than_all = true;
-        for (size_t other : viable_indices) {
-            if (idx == other) {
+    if (candidate_set.viable_indices.empty()) {
+        return std::nullopt;
+    }
+
+    std::vector<size_t> frontier;
+    frontier.reserve(candidate_set.viable_indices.size());
+    for (size_t idx : candidate_set.viable_indices) {
+        bool dominated = false;
+        for (auto it = frontier.begin(); it != frontier.end();) {
+            size_t other = *it;
+            bump_overload_pairwise_comparisons();
+            bool idx_better = is_better_overload_candidate(
+                candidate_set.evaluated[idx],
+                candidate_set.evaluated[other]);
+            if (idx_better) {
+                bump_overload_frontier_prunes();
+                it = frontier.erase(it);
                 continue;
             }
+
             bump_overload_pairwise_comparisons();
-            if (!is_better_overload_candidate(
-                    evaluated[idx], evaluated[other])) {
-                better_than_all = false;
+            bool other_better = is_better_overload_candidate(
+                candidate_set.evaluated[other],
+                candidate_set.evaluated[idx]);
+            if (other_better) {
+                dominated = true;
                 break;
             }
+            ++it;
         }
-        if (!better_than_all) {
-            continue;
+        if (!dominated) {
+            frontier.push_back(idx);
         }
-        if (best_index.has_value()) {
-            return std::nullopt;
-        }
-        best_index = idx;
     }
-    return best_index;
+
+    if (frontier.size() != 1) {
+        return std::nullopt;
+    }
+    return frontier.front();
 }
 
 std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
@@ -1620,39 +1734,32 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
     OverloadConversionMemoCache conversion_cache;
     conversion_cache.reserve(candidates.size() * 2);
 
-    std::vector<OverloadCandidateEval> evaluated;
-    evaluated.reserve(candidates.size());
+    OverloadCandidateSet candidate_set;
+    candidate_set.evaluated.reserve(candidates.size());
     for (const auto& candidate_info : candidates) {
-        evaluated.push_back(evaluate_overload_call_candidate(
+        candidate_set.evaluated.push_back(evaluate_overload_call_candidate(
             candidate_info, explicit_args, implicit_object_arg, &conversion_cache));
     }
 
-    std::vector<size_t> viable_indices;
-    viable_indices.reserve(evaluated.size());
-    for (size_t idx = 0; idx < evaluated.size(); ++idx) {
-        if (evaluated[idx].viable) {
-            viable_indices.push_back(idx);
-        }
-    }
+    collect_viable_overload_candidates(candidate_set);
 
-    if (viable_indices.empty()) {
+    if (candidate_set.viable_indices.empty()) {
         report_error(
             "no matching function for call to '" + std::string(callee_name) + "'",
             loc);
-        emit_overload_candidate_notes(callee_name, evaluated, true, loc);
+        emit_overload_candidate_notes(callee_name, candidate_set, true, loc);
         return collect_make<ErrorExpr>("no matching overload", loc);
     }
 
-    auto best_index =
-        select_best_overload_candidate_index(evaluated, viable_indices);
+    auto best_index = select_best_overload_candidate_index(candidate_set);
     if (!best_index.has_value()) {
         report_error("call to '" + std::string(callee_name) + "' is ambiguous", loc);
-        emit_overload_candidate_notes(callee_name, evaluated, false, loc);
+        emit_overload_candidate_notes(callee_name, candidate_set, false, loc);
         return collect_make<ErrorExpr>("ambiguous overload", loc);
     }
 
-    selected_symbol_out = evaluated[*best_index].symbol;
+    selected_symbol_out = candidate_set.evaluated[*best_index].symbol;
     selected_implicit_object_arg_kind_out =
-        evaluated[*best_index].implicit_object_arg_kind;
+        candidate_set.evaluated[*best_index].implicit_object_arg_kind;
     return nullptr;
 }

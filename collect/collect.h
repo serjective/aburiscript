@@ -105,9 +105,22 @@ public:
         NoMatch = 3
     };
 
+    enum class ConversionSequenceDetailKind : uint8_t {
+        None,
+        ReferenceDirectBinding,
+        ReferenceTemporaryBinding,
+        ReferenceRefQualifierMismatch,
+        NullPointerConstant,
+        MemberPointer,
+        LambdaFunctionPointer,
+        BracedInit
+    };
+
     struct ImplicitConversionSequence {
         ConversionSequenceKind kind = ConversionSequenceKind::Identity;
         ConversionSequenceRank rank = ConversionSequenceRank::ExactMatch;
+        ConversionSequenceDetailKind detail_kind =
+            ConversionSequenceDetailKind::None;
         QualType from = nullptr;
         QualType to = nullptr;
         bool viable = true;
@@ -1046,14 +1059,60 @@ private:
             OverloadImplicitObjectArgKind::None;
     };
 
+    enum class OverloadCandidateKind : uint8_t {
+        Function,
+        ConversionConstructor
+    };
+
+    enum class OverloadFailureKind : uint8_t {
+        None,
+        NotCallable,
+        ArityTooFew,
+        ArityTooMany,
+        ImplicitObjectMissing,
+        ImplicitObjectRefQualifierMismatch,
+        ImplicitObjectConversionFailure,
+        ArgumentConversionFailure,
+        DeletedCandidate,
+        InaccessibleCandidate,
+        InvalidCandidateState
+    };
+
+    struct OverloadFailure {
+        OverloadFailureKind kind = OverloadFailureKind::None;
+        size_t argument_index = std::numeric_limits<size_t>::max();
+        size_t required_arg_count = 0;
+        size_t provided_arg_count = 0;
+        bool arity_is_minimum = false;
+        QualType from = nullptr;
+        QualType to = nullptr;
+        FunctionRefQualifierKind ref_qualifier =
+            FunctionRefQualifierKind::None;
+        std::string note;
+
+        bool has_failure() const {
+            return kind != OverloadFailureKind::None;
+        }
+    };
+
     struct OverloadCandidateEval {
+        OverloadCandidateKind candidate_kind = OverloadCandidateKind::Function;
         std::shared_ptr<Symbol> symbol = nullptr;
         std::shared_ptr<FunctionType> function_type = nullptr;
         std::vector<ImplicitConversionSequence> conversions;
         bool viable = false;
         OverloadImplicitObjectArgKind implicit_object_arg_kind =
             OverloadImplicitObjectArgKind::None;
-        std::string failure_reason;
+        OverloadFailure failure;
+        const RecordSemanticState::Constructor* constructor = nullptr;
+        size_t user_param_start = 0;
+        size_t max_user_param_count = 0;
+        size_t required_user_param_count = 0;
+    };
+
+    struct OverloadCandidateSet {
+        std::vector<OverloadCandidateEval> evaluated;
+        std::vector<size_t> viable_indices;
     };
 
     struct OverloadConversionMemoKey {
@@ -1841,21 +1900,31 @@ private:
         Expr* implicit_object_arg,
         OverloadConversionMemoCache* conversion_cache = nullptr) ;
 
+    OverloadCandidateEval evaluate_conversion_constructor_candidate(
+        const RecordSemanticState::Constructor& ctor,
+        Expr* arg,
+        bool allow_explicit_constructors,
+        OverloadConversionMemoCache* conversion_cache = nullptr) ;
+
+    void collect_viable_overload_candidates(
+        OverloadCandidateSet& candidate_set) const ;
+
+    std::string overload_failure_reason(
+        const OverloadFailure& failure) const ;
+
     std::string overload_candidate_type_name(
         const OverloadCandidateEval& candidate) const ;
 
-    int overload_failure_reason_category(const std::string& reason) const ;
-    int overload_failure_reason_argument_index(
-        const std::string& reason) const ;
+    int overload_failure_category(const OverloadFailure& failure) const ;
 
     bool overload_note_order_less(
-        const std::vector<OverloadCandidateEval>& evaluated,
+        const OverloadCandidateSet& candidate_set,
         size_t lhs_idx,
         size_t rhs_idx) const ;
 
     void emit_overload_candidate_notes(
         std::string_view callee_name,
-        const std::vector<OverloadCandidateEval>& evaluated,
+        const OverloadCandidateSet& candidate_set,
         bool include_non_viable,
         SrcLoc loc) const ;
 
@@ -1863,8 +1932,7 @@ private:
                                               const OverloadCandidateEval& rhs) ;
 
     std::optional<size_t> select_best_overload_candidate_index(
-        const std::vector<OverloadCandidateEval>& evaluated,
-        const std::vector<size_t>& viable_indices) ;
+        const OverloadCandidateSet& candidate_set) ;
 
     QualType pick_common_type(QualType lhs, QualType rhs) const ;
 
