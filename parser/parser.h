@@ -251,6 +251,7 @@ private:
     void rollback_tentative_context(size_t context_id);
     bool is_in_tentative_context() const;
 
+    void restore_tentative_context_frame(const TentativeContextFrame& frame);
     TentativeParserState capture_tentative_state();
     void restore_tentative_state(const TentativeParserState& state);
 
@@ -429,6 +430,9 @@ private:
 
     std::unique_ptr<Decl> parse_parameter_declaration();
 
+    // === Record and declarator parsing ===
+    // Owns struct/union/class declarations, class-member declaration matching,
+    // and the semantic record-build pipeline hooks.
     std::unique_ptr<Decl> parse_struct_specifier();
     std::unique_ptr<Decl> parse_cpp_record_specifier(
         std::vector<TemplateArgument>* specialization_arguments_out = nullptr,
@@ -439,7 +443,31 @@ private:
         const CppRecordDecl& record,
         std::optional<std::string> semantic_tag_name = std::nullopt);
 
-    struct CppRecordBuildContext;
+    struct CppRecordBuildContext {
+        const CppRecordDecl& record;
+        const std::string& record_name;
+        const std::string& tag;
+        bool is_union_record;
+        std::shared_ptr<ObjectType> record_type;
+        ObjectDecl* semantic_decl;
+
+        std::vector<RecordSemanticState::Base> bases;
+        std::vector<RecordSemanticState::VirtualBase> virtual_bases;
+
+        std::vector<ObjectType::Field> fields;
+        std::vector<RecordSemanticState::Method> methods;
+        std::vector<RecordSemanticState::MethodTemplate> method_templates;
+        std::vector<RecordSemanticState::StaticDataMember> static_data_members;
+        std::vector<RecordSemanticState::NestedType> nested_types;
+        std::vector<RecordSemanticState::NestedTemplate> nested_templates;
+        std::unordered_set<std::string> seen_static_data_member_names;
+        std::vector<RecordSemanticState::Constructor> constructors;
+        std::vector<RecordSemanticState::Destructor> destructors;
+        std::vector<const FieldDecl*> required_ctor_member_init_fields;
+
+        std::vector<RecordSemanticState::VirtualSlot> semantic_virtual_slots;
+        RecordSemanticState semantic_state;
+    };
     void build_cpp_record_resolve_bases(CppRecordBuildContext& ctx);
     void build_cpp_record_walk_virtual_bases(CppRecordBuildContext& ctx);
     void build_cpp_record_collect_members(CppRecordBuildContext& ctx);
@@ -466,6 +494,11 @@ private:
     bool is_in_template_pattern_context() const;
     bool is_parsing_cpp_record_body() const;
     std::string current_cpp_record_qualifier_prefix() const;
+
+    // === Template and qualified-name parsing ===
+    // These helpers are parser-owned classification/resolution seams used by
+    // both declaration and expression parsing. Keep semantic construction in
+    // Collect, but keep qualified/dependent-name parsing decisions here.
     std::vector<std::unique_ptr<Decl>> parse_cpp_template_declaration();
     std::vector<std::unique_ptr<Decl>> parse_cpp_explicit_specialization_declaration(
         Token template_tok,
@@ -524,6 +557,7 @@ private:
 
     std::unique_ptr<Decl> parse_enum_specifier();
 
+    // === Shared C/C++ declaration and parser control ===
     bool isTokenDeclarationSpec(Token s);
     bool is_c23_constexpr_enabled() const;
     bool is_cxx_mode_active() const;
@@ -573,7 +607,9 @@ private:
                               std::string_view future_work_item,
                               SrcLoc loc);
 
-    // Tentative parsing probes (syntax classification only).
+    // === Tentative parsing and syntax probes ===
+    // These APIs may classify syntax and rewind parser state, but they must
+    // not mutate the long-lived parser/collect state on success or failure.
     TPResult try_parse_type_name();
     TPResult try_parse_declarator();
     TPResult try_parse_simple_declaration();

@@ -103,6 +103,17 @@ size_t Parser::begin_tentative_context() {
     return tentative_context_stack_.back().id;
 }
 
+void Parser::restore_tentative_context_frame(const TentativeContextFrame& frame) {
+    if (collect_) {
+        collect_->collect_rollback_tentative_parse();
+    }
+    restore_tentative_state(frame.parser_checkpoint);
+    cxx_tentative_state_ = frame.cxx_disambiguation_state;
+    if (diag_engine) {
+        diag_engine->restore(frame.diag_checkpoint);
+    }
+}
+
 void Parser::commit_tentative_context(size_t context_id) {
     if (tentative_context_stack_.empty()) {
         assert(false && "commit_tentative_context with empty stack");
@@ -113,14 +124,7 @@ void Parser::commit_tentative_context(size_t context_id) {
         assert(false && "tentative commit order violation");
         auto stray = std::move(tentative_context_stack_.back());
         tentative_context_stack_.pop_back();
-        if (collect_) {
-            collect_->collect_rollback_tentative_parse();
-        }
-        restore_tentative_state(stray.parser_checkpoint);
-        cxx_tentative_state_ = stray.cxx_disambiguation_state;
-        if (diag_engine) {
-            diag_engine->restore(stray.diag_checkpoint);
-        }
+        restore_tentative_context_frame(stray);
     }
     if (tentative_context_stack_.empty()) {
         return;
@@ -143,14 +147,7 @@ void Parser::rollback_tentative_context(size_t context_id) {
         assert(false && "tentative rollback order violation");
         auto stray = std::move(tentative_context_stack_.back());
         tentative_context_stack_.pop_back();
-        if (collect_) {
-            collect_->collect_rollback_tentative_parse();
-        }
-        restore_tentative_state(stray.parser_checkpoint);
-        cxx_tentative_state_ = stray.cxx_disambiguation_state;
-        if (diag_engine) {
-            diag_engine->restore(stray.diag_checkpoint);
-        }
+        restore_tentative_context_frame(stray);
     }
     if (tentative_context_stack_.empty()) {
         return;
@@ -159,14 +156,7 @@ void Parser::rollback_tentative_context(size_t context_id) {
     auto frame = std::move(tentative_context_stack_.back());
     tentative_context_stack_.pop_back();
     bump_tentative_context_rollbacks();
-    if (collect_) {
-        collect_->collect_rollback_tentative_parse();
-    }
-    restore_tentative_state(frame.parser_checkpoint);
-    cxx_tentative_state_ = frame.cxx_disambiguation_state;
-    if (diag_engine) {
-        diag_engine->restore(frame.diag_checkpoint);
-    }
+    restore_tentative_context_frame(frame);
 }
 
 bool Parser::is_in_tentative_context() const {

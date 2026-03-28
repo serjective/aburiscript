@@ -91,6 +91,9 @@ set(PARSER_SOURCES
         parser/parser_expr.cpp
         parser/parser_decl.cpp
         parser/parser_record.cpp
+        parser/parser_record_deferred.cpp
+        parser/parser_cxx_qualified.cpp
+        parser/parser_cxx_out_of_line.cpp
         parser/parser_declarator.cpp
         parser/parser_stmt.cpp
         parser/parser_cxx.cpp
