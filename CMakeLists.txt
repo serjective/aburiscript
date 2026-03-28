@@ -123,6 +123,8 @@ set(ABURI_LIBRARY_SOURCES
         ast/expr_clone.h
         ast/ast_context.cpp
         ast/ast_context.h
+        ast/semantic_store.cpp
+        ast/semantic_store.h
         ast/ast_memory_report.cpp
         ast/ast_memory_report.h
         ast/attributes.cpp

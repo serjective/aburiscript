@@ -29,14 +29,14 @@
 //
 // external_semantic_owner_id:
 //   A mutable uint32_t present on TemplateParameterDecl, FuncDecl, FieldDecl,
-//   and Symbol.  It records the registry_id() of the ASTContext that owns
-//   side-table entries (qualifier prefixes, owner record types, template
-//   specialization info) for this node.  When an ASTContext is destroyed,
-//   entries whose owner_id matches are cleared.  A value of 0 means "no
-//   external semantic owner"; side-table accessors must then rely on an
-//   explicit active ASTContext or return no data.  The field is mutable
-//   because it is updated by const ASTContext methods during side-table
-//   bookkeeping.
+//   and Symbol.  It records the registry_id() of the owning
+//   CollectSemanticStore, reached through the owning ASTContext.  The store
+//   owns semantic side-table entries such as qualifier prefixes, owner record
+//   types, template specialization info, and record/enum semantic caches.
+//   A value of 0 means "no external semantic owner"; side-table accessors must
+//   then rely on an explicit active ASTContext or return no data.  The field
+//   is mutable because semantic store bookkeeping may update it through const
+//   AST-facing APIs.
 // ============================================================================
 
 #include <string>

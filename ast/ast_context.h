@@ -29,6 +29,7 @@ struct ClassTemplateDecl;
 struct FunctionTemplateDecl;
 struct TemplateParameterDecl;
 struct EnumDecl;
+class CollectSemanticStore;
 
 // Bitfield layout info stored in the side table, keyed by MemberExpr node_id.
 struct BitfieldInfo {
@@ -285,6 +286,8 @@ public:
     explicit ASTContext(std::shared_ptr<TargetInfo> ti);
     ~ASTContext();
     uint32_t registry_id() const { return registry_id_; }
+    CollectSemanticStore& semantic_store();
+    const CollectSemanticStore& semantic_store() const;
 
     // --- Node ID allocation ---
     uint32_t next_node_id() {
@@ -472,9 +475,7 @@ public:
     void erase_record_semantics(const ObjectDecl* record_decl);
     const RecordSemanticState* lookup_record_semantics(
         const ObjectDecl* record_decl) const;
-    uint64_t record_semantics_cache_epoch() const {
-        return record_semantics_cache_epoch_;
-    }
+    uint64_t record_semantics_cache_epoch() const;
 
     void clear_enum_semantics_cache();
     void set_enum_semantics(const EnumDecl* enum_decl,
@@ -499,9 +500,7 @@ public:
         std::shared_ptr<ObjectType> specialization_type,
         std::unique_ptr<ObjectDecl> specialization_decl);
     const std::vector<std::unique_ptr<ClassTemplateSpecializationEntry>>&
-    class_template_specializations() const {
-        return class_template_specializations_;
-    }
+    class_template_specializations() const;
 
     FunctionTemplateSpecializationEntry* lookup_function_template_specialization(
         const FunctionTemplateDecl* primary_template,
@@ -515,17 +514,14 @@ public:
         std::unique_ptr<FuncDecl> specialization_decl,
         std::shared_ptr<Symbol> specialization_symbol);
     const std::vector<std::unique_ptr<FunctionTemplateSpecializationEntry>>&
-    function_template_specializations() const {
-        return function_template_specializations_;
-    }
+    function_template_specializations() const;
 
     bool push_template_instantiation_frame(size_t max_depth = 64);
     void pop_template_instantiation_frame();
-    size_t template_instantiation_depth() const {
-        return template_instantiation_depth_;
-    }
+    size_t template_instantiation_depth() const;
 
     void clear_external_semantic_side_tables();
+    void clear_all_semantic_state();
 
     // Retain declaration nodes that are only needed for semantic/type
     // ownership and are not inserted into the traversed AST.
@@ -562,31 +558,7 @@ private:
     DenseMap<CppLambdaInvokerInfo> cpp_lambda_invoker_info_table_;
     std::unordered_set<std::string> identifier_pool_;
     size_t identifier_pool_string_storage_bytes_ = 0;
-    std::unordered_set<std::string> external_qualifier_pool_;
-    FuncExternalSemanticInfoMap func_decl_semantic_info_map_;
-    std::unordered_set<const TemplateDecl*> tracked_template_decls_;
-    std::unordered_set<const TemplateParameterDecl*> tracked_template_parameter_decls_;
-    ParamExternalSemanticInfoMap param_decl_semantic_info_map_;
-    SymbolExternalSemanticInfoMap symbol_semantic_info_map_;
-    TemplateSpecializationResolvedTypeMap template_specialization_resolved_type_map_;
-    DependentNameResolvedTypeMap dependent_name_resolved_type_map_;
-    RecordSemanticsCacheMap record_semantics_cache_;
-    EnumSemanticsCacheMap enum_semantics_cache_;
-    std::unordered_map<
-        TemplateSpecializationSemanticKey,
-        size_t,
-        TemplateSpecializationSemanticKeyHash> class_template_specialization_lookup_;
-    std::vector<std::unique_ptr<ClassTemplateSpecializationEntry>>
-        class_template_specializations_;
-    std::unordered_map<
-        TemplateSpecializationSemanticKey,
-        size_t,
-        TemplateSpecializationSemanticKeyHash> function_template_specialization_lookup_;
-    std::vector<std::unique_ptr<FunctionTemplateSpecializationEntry>>
-        function_template_specializations_;
-    std::vector<std::unique_ptr<Decl>> retained_external_decls_;
-    uint64_t record_semantics_cache_epoch_ = 1;
-    size_t template_instantiation_depth_ = 0;
+    std::unique_ptr<CollectSemanticStore> semantic_store_;
     uint32_t registry_id_ = 0;
 };
 
@@ -609,6 +581,7 @@ public:
 
 private:
     ASTContext* previous_context_ = nullptr;
+    CollectSemanticStore* previous_semantic_store_ = nullptr;
 };
 
 // Helper to create an AST node and assign it a node_id from the context.

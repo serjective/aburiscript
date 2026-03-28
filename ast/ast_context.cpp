@@ -1,5 +1,6 @@
 #include "ast_context.h"
 #include "ast.h"
+#include "semantic_store.h"
 #include "abi/target_info.h"
 
 #include <limits>
@@ -17,135 +18,6 @@ namespace {
 thread_local ASTContext* g_active_side_table_ast_context = nullptr;
 std::unordered_map<uint32_t, ASTContext*> g_registered_ast_contexts;
 uint32_t g_next_ast_context_registry_id = 1;
-
-ASTContext* lookup_registered_ast_context(uint32_t registry_id) {
-    if (registry_id == 0) {
-        return nullptr;
-    }
-    auto it = g_registered_ast_contexts.find(registry_id);
-    if (it == g_registered_ast_contexts.end()) {
-        return nullptr;
-    }
-    return it->second;
-}
-
-template<typename Map, typename Key>
-typename Map::mapped_type* find_external_semantic_info(Map& map, const Key* key) {
-    if (!key) {
-        return nullptr;
-    }
-    auto it = map.find(key);
-    if (it == map.end()) {
-        return nullptr;
-    }
-    return &it->second;
-}
-
-template<typename Map, typename Key>
-const typename Map::mapped_type* find_external_semantic_info(const Map& map,
-                                                             const Key* key) {
-    if (!key) {
-        return nullptr;
-    }
-    auto it = map.find(key);
-    if (it == map.end()) {
-        return nullptr;
-    }
-    return &it->second;
-}
-
-template<typename Map, typename Key>
-void erase_external_semantic_info_if_empty(Map& map, const Key* key) {
-    if (!key) {
-        return;
-    }
-    auto it = map.find(key);
-    if (it != map.end() && it->second.empty()) {
-        map.erase(it);
-    }
-}
-
-void erase_func_decl_owner_if_unused(const ASTContext* context, const FuncDecl* decl) {
-    if (!context || !decl) {
-        return;
-    }
-    if (context->get_func_decl_cxx_qualifier_prefix(decl) != nullptr) {
-        return;
-    }
-    if (context->get_func_decl_owner_record_type(decl)) {
-        return;
-    }
-    if (context->get_func_decl_function_template_specialization(decl) != nullptr) {
-        return;
-    }
-    if (decl->external_semantic_owner_id == context->registry_id()) {
-        decl->external_semantic_owner_id = 0;
-    }
-}
-
-void erase_symbol_owner_if_unused(const ASTContext* context, const Symbol* sym) {
-    if (!context || !sym) {
-        return;
-    }
-    if (context->get_symbol_cxx_qualifier_prefix(sym) != nullptr) {
-        return;
-    }
-    if (context->get_symbol_owner_record_type(sym)) {
-        return;
-    }
-    if (context->get_symbol_function_template_specialization(sym) != nullptr) {
-        return;
-    }
-    if (context->get_symbol_cpp_default_arguments(sym) != nullptr) {
-        return;
-    }
-    if (sym->external_semantic_owner_id == context->registry_id()) {
-        sym->external_semantic_owner_id = 0;
-    }
-}
-
-void erase_template_decl_owner_if_unused(const ASTContext* context,
-                                         const TemplateDecl* decl) {
-    if (!context || !decl) {
-        return;
-    }
-    if (!decl->merged_default_arguments.empty()) {
-        return;
-    }
-    const TemplateDecl* canonical = context->get_template_decl_canonical_decl(decl);
-    if (canonical && canonical != decl) {
-        return;
-    }
-    if (decl->external_semantic_owner_id == context->registry_id()) {
-        decl->external_semantic_owner_id = 0;
-    }
-}
-
-void erase_template_parameter_decl_owner_if_unused(const ASTContext* context,
-                                                   const TemplateParameterDecl* decl) {
-    if (!context || !decl) {
-        return;
-    }
-    if (decl->default_argument.has_value()) {
-        return;
-    }
-    if (decl->external_semantic_owner_id == context->registry_id()) {
-        decl->external_semantic_owner_id = 0;
-    }
-}
-
-void erase_param_decl_owner_if_unused(const ASTContext* context,
-                                      const ParamDecl* decl) {
-    if (!context || !decl) {
-        return;
-    }
-    if (context->get_param_decl_default_argument(decl) != nullptr) {
-        return;
-    }
-    if (decl->external_semantic_owner_id == context->registry_id()) {
-        decl->external_semantic_owner_id = 0;
-    }
-}
 
 std::string pointer_identity_string(const void* ptr) {
     return std::to_string(reinterpret_cast<uintptr_t>(ptr));
@@ -744,47 +616,100 @@ ASTContext* get_active_side_table_ast_context() {
 }
 
 ASTContext* get_side_table_ast_context_for(const FuncDecl* decl) {
-    return decl ? lookup_registered_ast_context(decl->external_semantic_owner_id)
-                : nullptr;
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto* store =
+            lookup_registered_collect_semantic_store(
+                decl->external_semantic_owner_id)) {
+        return store->ast_context();
+    }
+    return nullptr;
 }
 
 ASTContext* get_side_table_ast_context_for(const TemplateDecl* decl) {
-    return decl ? lookup_registered_ast_context(decl->external_semantic_owner_id)
-                : nullptr;
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto* store =
+            lookup_registered_collect_semantic_store(
+                decl->external_semantic_owner_id)) {
+        return store->ast_context();
+    }
+    return nullptr;
 }
 
 ASTContext* get_side_table_ast_context_for(const TemplateParameterDecl* decl) {
-    return decl ? lookup_registered_ast_context(decl->external_semantic_owner_id)
-                : nullptr;
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto* store =
+            lookup_registered_collect_semantic_store(
+                decl->external_semantic_owner_id)) {
+        return store->ast_context();
+    }
+    return nullptr;
 }
 
 ASTContext* get_side_table_ast_context_for(const ParamDecl* decl) {
-    return decl ? lookup_registered_ast_context(decl->external_semantic_owner_id)
-                : nullptr;
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto* store =
+            lookup_registered_collect_semantic_store(
+                decl->external_semantic_owner_id)) {
+        return store->ast_context();
+    }
+    return nullptr;
 }
 
 ASTContext* get_side_table_ast_context_for(const ObjectDecl* decl) {
-    return decl ? lookup_registered_ast_context(decl->external_semantic_owner_id)
-                : nullptr;
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto* store =
+            lookup_registered_collect_semantic_store(
+                decl->external_semantic_owner_id)) {
+        return store->ast_context();
+    }
+    return nullptr;
 }
 
 ASTContext* get_side_table_ast_context_for(const EnumDecl* decl) {
-    return decl ? lookup_registered_ast_context(decl->external_semantic_owner_id)
-                : nullptr;
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto* store =
+            lookup_registered_collect_semantic_store(
+                decl->external_semantic_owner_id)) {
+        return store->ast_context();
+    }
+    return nullptr;
 }
 
 ASTContext* get_side_table_ast_context_for(const Symbol* sym) {
-    return sym ? lookup_registered_ast_context(sym->external_semantic_owner_id)
-               : nullptr;
+    if (!sym) {
+        return nullptr;
+    }
+    if (auto* store =
+            lookup_registered_collect_semantic_store(
+                sym->external_semantic_owner_id)) {
+        return store->ast_context();
+    }
+    return nullptr;
 }
 
 ASTContextSideTableScope::ASTContextSideTableScope(ASTContext* context)
-    : previous_context_(g_active_side_table_ast_context) {
+    : previous_context_(g_active_side_table_ast_context),
+      previous_semantic_store_(get_active_collect_semantic_store()) {
     g_active_side_table_ast_context = context;
+    set_active_collect_semantic_store(
+        context ? &context->semantic_store() : nullptr);
 }
 
 ASTContextSideTableScope::~ASTContextSideTableScope() {
     g_active_side_table_ast_context = previous_context_;
+    set_active_collect_semantic_store(previous_semantic_store_);
 }
 
 ASTContext::ASTContext()
@@ -793,6 +718,7 @@ ASTContext::ASTContext()
       abi_policy(std::make_shared<AbiPolicy>()) {
     registry_id_ = g_next_ast_context_registry_id++;
     g_registered_ast_contexts[registry_id_] = this;
+    semantic_store_ = std::make_unique<CollectSemanticStore>(this);
     if (type_ctx && type_ctx->target) {
         *abi_policy = abi_policy_for_target(*type_ctx->target);
     }
@@ -804,6 +730,7 @@ ASTContext::ASTContext(std::shared_ptr<TargetInfo> ti)
       abi_policy(std::make_shared<AbiPolicy>()) {
     registry_id_ = g_next_ast_context_registry_id++;
     g_registered_ast_contexts[registry_id_] = this;
+    semantic_store_ = std::make_unique<CollectSemanticStore>(this);
     if (type_ctx && type_ctx->target) {
         *abi_policy = abi_policy_for_target(*type_ctx->target);
     }
@@ -813,12 +740,23 @@ ASTContext::~ASTContext() {
     if (g_active_side_table_ast_context == this) {
         g_active_side_table_ast_context = nullptr;
     }
+    if (get_active_collect_semantic_store() == semantic_store_.get()) {
+        set_active_collect_semantic_store(nullptr);
+    }
     if (registry_id_ != 0) {
         auto it = g_registered_ast_contexts.find(registry_id_);
         if (it != g_registered_ast_contexts.end() && it->second == this) {
             g_registered_ast_contexts.erase(it);
         }
     }
+}
+
+CollectSemanticStore& ASTContext::semantic_store() {
+    return *semantic_store_;
+}
+
+const CollectSemanticStore& ASTContext::semantic_store() const {
+    return *semantic_store_;
 }
 
 const std::string* ASTContext::intern_identifier(std::string_view spelling) {
@@ -839,689 +777,249 @@ size_t ASTContext::identifier_pool_memory_usage_bytes() const {
 void ASTContext::set_func_decl_cxx_qualifier_prefix(
     const FuncDecl* decl,
     std::optional<std::string> prefix) {
-    if (!decl) {
-        return;
-    }
-    auto& info = func_decl_semantic_info_map_[decl];
-    if (!prefix.has_value() || prefix->empty()) {
-        info.cxx_qualifier_prefix = nullptr;
-        erase_external_semantic_info_if_empty(func_decl_semantic_info_map_, decl);
-        erase_func_decl_owner_if_unused(this, decl);
-        return;
-    }
-    auto [it, _] = external_qualifier_pool_.emplace(std::move(*prefix));
-    info.cxx_qualifier_prefix = &(*it);
-    decl->external_semantic_owner_id = registry_id_;
+    semantic_store_->set_func_decl_cxx_qualifier_prefix(decl, std::move(prefix));
 }
 
 const std::string* ASTContext::get_func_decl_cxx_qualifier_prefix(
     const FuncDecl* decl) const {
-    const auto* info = find_external_semantic_info(func_decl_semantic_info_map_, decl);
-    if (!info) {
-        return nullptr;
-    }
-    return info->cxx_qualifier_prefix;
+    return semantic_store_->get_func_decl_cxx_qualifier_prefix(decl);
 }
 
 void ASTContext::clear_func_decl_cxx_qualifier_prefixes() {
-    std::vector<const FuncDecl*> decls;
-    decls.reserve(func_decl_semantic_info_map_.size());
-    for (const auto& [decl, info] : func_decl_semantic_info_map_) {
-        if (info.cxx_qualifier_prefix != nullptr) {
-            decls.push_back(decl);
-        }
-    }
-    for (const FuncDecl* decl : decls) {
-        auto* info = find_external_semantic_info(func_decl_semantic_info_map_, decl);
-        if (info) {
-            info->cxx_qualifier_prefix = nullptr;
-        }
-        erase_external_semantic_info_if_empty(func_decl_semantic_info_map_, decl);
-        erase_func_decl_owner_if_unused(this, decl);
-    }
+    semantic_store_->clear_func_decl_cxx_qualifier_prefixes();
 }
 
 void ASTContext::set_func_decl_owner_record_type(const FuncDecl* decl,
                                                  QualType owner_type) {
-    if (!decl) {
-        return;
-    }
-    auto& info = func_decl_semantic_info_map_[decl];
-    if (!owner_type) {
-        info.owner_record_type = QualType();
-        erase_external_semantic_info_if_empty(func_decl_semantic_info_map_, decl);
-        erase_func_decl_owner_if_unused(this, decl);
-        return;
-    }
-    info.owner_record_type = owner_type;
-    decl->external_semantic_owner_id = registry_id_;
+    semantic_store_->set_func_decl_owner_record_type(decl, owner_type);
 }
 
 QualType ASTContext::get_func_decl_owner_record_type(const FuncDecl* decl) const {
-    const auto* info = find_external_semantic_info(func_decl_semantic_info_map_, decl);
-    if (!info) {
-        return QualType();
-    }
-    return info->owner_record_type;
+    return semantic_store_->get_func_decl_owner_record_type(decl);
 }
 
 void ASTContext::clear_func_decl_owner_record_types() {
-    std::vector<const FuncDecl*> decls;
-    decls.reserve(func_decl_semantic_info_map_.size());
-    for (const auto& [decl, info] : func_decl_semantic_info_map_) {
-        if (info.owner_record_type) {
-            decls.push_back(decl);
-        }
-    }
-    for (const FuncDecl* decl : decls) {
-        auto* info = find_external_semantic_info(func_decl_semantic_info_map_, decl);
-        if (info) {
-            info->owner_record_type = QualType();
-        }
-        erase_external_semantic_info_if_empty(func_decl_semantic_info_map_, decl);
-        erase_func_decl_owner_if_unused(this, decl);
-    }
+    semantic_store_->clear_func_decl_owner_record_types();
 }
 
 void ASTContext::set_func_decl_function_template_specialization(
     const FuncDecl* decl,
     FunctionTemplateSpecializationInfo info) {
-    if (!decl) {
-        return;
-    }
-    auto& decl_info = func_decl_semantic_info_map_[decl];
-    if (!info.primary_template) {
-        decl_info.function_template_specialization.reset();
-        erase_external_semantic_info_if_empty(func_decl_semantic_info_map_, decl);
-        erase_func_decl_owner_if_unused(this, decl);
-        return;
-    }
-    decl_info.function_template_specialization =
-        canonicalize_function_template_specialization_info(std::move(info));
-    decl->external_semantic_owner_id = registry_id_;
+    semantic_store_->set_func_decl_function_template_specialization(
+        decl,
+        std::move(info));
 }
 
 const FunctionTemplateSpecializationInfo*
 ASTContext::get_func_decl_function_template_specialization(
     const FuncDecl* decl) const {
-    const auto* info = find_external_semantic_info(func_decl_semantic_info_map_, decl);
-    if (!info || !info->function_template_specialization.has_value()) {
-        return nullptr;
-    }
-    return &(*info->function_template_specialization);
+    return semantic_store_->get_func_decl_function_template_specialization(decl);
 }
 
 void ASTContext::clear_func_decl_function_template_specializations() {
-    std::vector<const FuncDecl*> decls;
-    decls.reserve(func_decl_semantic_info_map_.size());
-    for (const auto& [decl, info] : func_decl_semantic_info_map_) {
-        if (info.function_template_specialization.has_value()) {
-            decls.push_back(decl);
-        }
-    }
-    for (const FuncDecl* decl : decls) {
-        auto* info = find_external_semantic_info(func_decl_semantic_info_map_, decl);
-        if (info) {
-            info->function_template_specialization.reset();
-        }
-        erase_external_semantic_info_if_empty(func_decl_semantic_info_map_, decl);
-        erase_func_decl_owner_if_unused(this, decl);
-    }
+    semantic_store_->clear_func_decl_function_template_specializations();
 }
 
 void ASTContext::set_template_decl_canonical_decl(
     const TemplateDecl* decl,
     const TemplateDecl* canonical_decl) {
-    if (!decl) {
-        return;
-    }
-    tracked_template_decls_.insert(decl);
-    if (canonical_decl) {
-        tracked_template_decls_.insert(canonical_decl);
-    }
-    if (!canonical_decl) {
-        decl->canonical_decl = nullptr;
-        erase_template_decl_owner_if_unused(this, decl);
-        return;
-    }
-    decl->canonical_decl = canonical_decl;
-    decl->external_semantic_owner_id = registry_id_;
-    canonical_decl->external_semantic_owner_id = registry_id_;
+    semantic_store_->set_template_decl_canonical_decl(decl, canonical_decl);
 }
 
 const TemplateDecl* ASTContext::get_template_decl_canonical_decl(
     const TemplateDecl* decl) const {
-    if (!decl) {
-        return nullptr;
-    }
-    const TemplateDecl* current = decl;
-    for (size_t depth = 0; depth < 64; ++depth) {
-        const TemplateDecl* next = current->canonical_decl;
-        if (!next) {
-            return current;
-        }
-        if (next == current) {
-            return current;
-        }
-        current = next;
-    }
-    return current;
+    return semantic_store_->get_template_decl_canonical_decl(decl);
 }
 
 void ASTContext::clear_template_decl_canonical_decls() {
-    std::vector<const TemplateDecl*> decls(
-        tracked_template_decls_.begin(),
-        tracked_template_decls_.end());
-    for (const TemplateDecl* decl : decls) {
-        if (decl) {
-            decl->canonical_decl = nullptr;
-        }
-    }
-    for (const TemplateDecl* decl : decls) {
-        erase_template_decl_owner_if_unused(this, decl);
-    }
+    semantic_store_->clear_template_decl_canonical_decls();
 }
 
 void ASTContext::set_template_parameter_default_argument(
     const TemplateParameterDecl* decl,
     std::optional<TemplateArgument> argument) {
-    if (!decl) {
-        return;
-    }
-    tracked_template_parameter_decls_.insert(decl);
-    if (!argument.has_value()) {
-        decl->default_argument.reset();
-        erase_template_parameter_decl_owner_if_unused(this, decl);
-        return;
-    }
-    decl->default_argument = std::move(*argument);
-    decl->external_semantic_owner_id = registry_id_;
+    semantic_store_->set_template_parameter_default_argument(
+        decl,
+        std::move(argument));
 }
 
 const TemplateArgument* ASTContext::get_template_parameter_default_argument(
     const TemplateParameterDecl* decl) const {
-    if (!decl) {
-        return nullptr;
-    }
-    if (!decl->default_argument.has_value()) {
-        return nullptr;
-    }
-    return &(*decl->default_argument);
+    return semantic_store_->get_template_parameter_default_argument(decl);
 }
 
 void ASTContext::clear_template_parameter_default_arguments() {
-    std::vector<const TemplateParameterDecl*> decls(
-        tracked_template_parameter_decls_.begin(),
-        tracked_template_parameter_decls_.end());
-    for (const TemplateParameterDecl* decl : decls) {
-        if (decl) {
-            decl->default_argument.reset();
-        }
-    }
-    for (const TemplateParameterDecl* decl : decls) {
-        erase_template_parameter_decl_owner_if_unused(this, decl);
-    }
+    semantic_store_->clear_template_parameter_default_arguments();
 }
 
 bool ASTContext::merge_template_decl_default_arguments(
     const TemplateDecl* decl,
     size_t* conflict_param_index) {
-    if (!decl) {
-        return true;
-    }
-
-    const TemplateDecl* canonical = get_template_decl_canonical_decl(decl);
-    if (!canonical) {
-        canonical = decl;
-    }
-
-    tracked_template_decls_.insert(canonical);
-    canonical->external_semantic_owner_id = registry_id_;
-    auto& merged_defaults = canonical->merged_default_arguments;
-    if (merged_defaults.size() < decl->parameters.size()) {
-        merged_defaults.resize(decl->parameters.size());
-    }
-
-    for (size_t index = 0; index < decl->parameters.size(); ++index) {
-        const auto* parameter = decl->parameters[index].get();
-        const TemplateArgument* incoming_default =
-            parameter ? get_template_parameter_default_argument(parameter) : nullptr;
-        if (!incoming_default) {
-            continue;
-        }
-        if (merged_defaults[index].has_value()) {
-            if (conflict_param_index) {
-                *conflict_param_index = index;
-            }
-            return false;
-        }
-        merged_defaults[index] = *incoming_default;
-    }
-    return true;
+    return semantic_store_->merge_template_decl_default_arguments(
+        decl,
+        conflict_param_index);
 }
 
 const std::vector<std::optional<TemplateArgument>>*
 ASTContext::get_template_decl_default_arguments(const TemplateDecl* decl) const {
-    if (!decl) {
-        return nullptr;
-    }
-    const TemplateDecl* canonical = get_template_decl_canonical_decl(decl);
-    const TemplateDecl* owner = canonical ? canonical : decl;
-    if (!owner || owner->merged_default_arguments.empty()) {
-        return nullptr;
-    }
-    return &owner->merged_default_arguments;
+    return semantic_store_->get_template_decl_default_arguments(decl);
 }
 
 void ASTContext::clear_template_decl_default_arguments() {
-    for (const TemplateDecl* decl : tracked_template_decls_) {
-        if (decl) {
-            decl->merged_default_arguments.clear();
-        }
-    }
-    for (const TemplateDecl* decl : tracked_template_decls_) {
-        erase_template_decl_owner_if_unused(this, decl);
-    }
+    semantic_store_->clear_template_decl_default_arguments();
 }
 
 void ASTContext::set_param_decl_default_argument(const ParamDecl* decl,
                                                  std::unique_ptr<Expr> expr) {
-    if (!decl) {
-        return;
-    }
-    auto& info = param_decl_semantic_info_map_[decl];
-    if (!expr) {
-        info.default_argument.reset();
-        erase_external_semantic_info_if_empty(param_decl_semantic_info_map_, decl);
-        erase_param_decl_owner_if_unused(this, decl);
-        return;
-    }
-    info.default_argument = std::move(expr);
-    decl->external_semantic_owner_id = registry_id_;
+    semantic_store_->set_param_decl_default_argument(decl, std::move(expr));
 }
 
 const Expr* ASTContext::get_param_decl_default_argument(
     const ParamDecl* decl) const {
-    const auto* info = find_external_semantic_info(param_decl_semantic_info_map_, decl);
-    if (!info || !info->default_argument) {
-        return nullptr;
-    }
-    return info->default_argument.get();
+    return semantic_store_->get_param_decl_default_argument(decl);
 }
 
 void ASTContext::clear_param_decl_default_arguments() {
-    std::vector<const ParamDecl*> decls;
-    decls.reserve(param_decl_semantic_info_map_.size());
-    for (const auto& [decl, info] : param_decl_semantic_info_map_) {
-        if (info.default_argument) {
-            decls.push_back(decl);
-        }
-    }
-    for (const ParamDecl* decl : decls) {
-        auto* info = find_external_semantic_info(param_decl_semantic_info_map_, decl);
-        if (info) {
-            info->default_argument.reset();
-        }
-        erase_external_semantic_info_if_empty(param_decl_semantic_info_map_, decl);
-        erase_param_decl_owner_if_unused(this, decl);
-    }
+    semantic_store_->clear_param_decl_default_arguments();
 }
 
 void ASTContext::set_symbol_cxx_qualifier_prefix(
     const Symbol* sym,
     std::optional<std::string> prefix) {
-    if (!sym) {
-        return;
-    }
-    auto& info = symbol_semantic_info_map_[sym];
-    if (!prefix.has_value() || prefix->empty()) {
-        info.cxx_qualifier_prefix = nullptr;
-        erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
-        erase_symbol_owner_if_unused(this, sym);
-        return;
-    }
-    auto [it, _] = external_qualifier_pool_.emplace(std::move(*prefix));
-    info.cxx_qualifier_prefix = &(*it);
-    sym->external_semantic_owner_id = registry_id_;
+    semantic_store_->set_symbol_cxx_qualifier_prefix(sym, std::move(prefix));
 }
 
 const std::string* ASTContext::get_symbol_cxx_qualifier_prefix(
     const Symbol* sym) const {
-    const auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
-    if (!info) {
-        return nullptr;
-    }
-    return info->cxx_qualifier_prefix;
+    return semantic_store_->get_symbol_cxx_qualifier_prefix(sym);
 }
 
 void ASTContext::clear_symbol_cxx_qualifier_prefixes() {
-    std::vector<const Symbol*> symbols;
-    symbols.reserve(symbol_semantic_info_map_.size());
-    for (const auto& [sym, info] : symbol_semantic_info_map_) {
-        if (info.cxx_qualifier_prefix != nullptr) {
-            symbols.push_back(sym);
-        }
-    }
-    for (const Symbol* sym : symbols) {
-        auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
-        if (info) {
-            info->cxx_qualifier_prefix = nullptr;
-        }
-        erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
-        erase_symbol_owner_if_unused(this, sym);
-    }
+    semantic_store_->clear_symbol_cxx_qualifier_prefixes();
 }
 
 void ASTContext::set_symbol_owner_record_type(const Symbol* sym,
                                               QualType owner_type) {
-    if (!sym) {
-        return;
-    }
-    auto& info = symbol_semantic_info_map_[sym];
-    if (!owner_type) {
-        info.owner_record_type = QualType();
-        erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
-        erase_symbol_owner_if_unused(this, sym);
-        return;
-    }
-    info.owner_record_type = owner_type;
-    sym->external_semantic_owner_id = registry_id_;
+    semantic_store_->set_symbol_owner_record_type(sym, owner_type);
 }
 
 QualType ASTContext::get_symbol_owner_record_type(const Symbol* sym) const {
-    const auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
-    if (!info) {
-        return QualType();
-    }
-    return info->owner_record_type;
+    return semantic_store_->get_symbol_owner_record_type(sym);
 }
 
 void ASTContext::clear_symbol_owner_record_types() {
-    std::vector<const Symbol*> symbols;
-    symbols.reserve(symbol_semantic_info_map_.size());
-    for (const auto& [sym, info] : symbol_semantic_info_map_) {
-        if (info.owner_record_type) {
-            symbols.push_back(sym);
-        }
-    }
-    for (const Symbol* sym : symbols) {
-        auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
-        if (info) {
-            info->owner_record_type = QualType();
-        }
-        erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
-        erase_symbol_owner_if_unused(this, sym);
-    }
+    semantic_store_->clear_symbol_owner_record_types();
 }
 
 void ASTContext::set_symbol_function_template_specialization(
     const Symbol* sym,
     FunctionTemplateSpecializationInfo info) {
-    if (!sym) {
-        return;
-    }
-    auto& sym_info = symbol_semantic_info_map_[sym];
-    if (!info.primary_template) {
-        sym_info.function_template_specialization.reset();
-        erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
-        erase_symbol_owner_if_unused(this, sym);
-        return;
-    }
-    sym_info.function_template_specialization =
-        canonicalize_function_template_specialization_info(std::move(info));
-    sym->external_semantic_owner_id = registry_id_;
+    semantic_store_->set_symbol_function_template_specialization(
+        sym,
+        std::move(info));
 }
 
 const FunctionTemplateSpecializationInfo*
 ASTContext::get_symbol_function_template_specialization(const Symbol* sym) const {
-    const auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
-    if (!info || !info->function_template_specialization.has_value()) {
-        return nullptr;
-    }
-    return &(*info->function_template_specialization);
+    return semantic_store_->get_symbol_function_template_specialization(sym);
 }
 
 void ASTContext::clear_symbol_function_template_specializations() {
-    std::vector<const Symbol*> symbols;
-    symbols.reserve(symbol_semantic_info_map_.size());
-    for (const auto& [sym, info] : symbol_semantic_info_map_) {
-        if (info.function_template_specialization.has_value()) {
-            symbols.push_back(sym);
-        }
-    }
-    for (const Symbol* sym : symbols) {
-        auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
-        if (info) {
-            info->function_template_specialization.reset();
-        }
-        erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
-        erase_symbol_owner_if_unused(this, sym);
-    }
+    semantic_store_->clear_symbol_function_template_specializations();
 }
 
 bool ASTContext::merge_symbol_cpp_default_arguments(
     const Symbol* sym,
     const std::vector<const Expr*>& defaults,
     size_t* conflict_param_index) {
-    if (!sym) {
-        return true;
-    }
-
-    auto [it, inserted] = symbol_semantic_info_map_.try_emplace(sym);
-    sym->external_semantic_owner_id = registry_id_;
-    auto& merged_defaults = it->second.cpp_default_arguments;
-    if (inserted) {
-        merged_defaults.assign(defaults.begin(), defaults.end());
-        return true;
-    }
-
-    if (merged_defaults.size() < defaults.size()) {
-        merged_defaults.resize(defaults.size(), nullptr);
-    }
-
-    for (size_t index = 0; index < defaults.size(); ++index) {
-        const Expr* incoming_default = defaults[index];
-        if (!incoming_default) {
-            continue;
-        }
-        if (merged_defaults[index]) {
-            if (conflict_param_index) {
-                *conflict_param_index = index;
-            }
-            return false;
-        }
-        merged_defaults[index] = incoming_default;
-    }
-
-    return true;
+    return semantic_store_->merge_symbol_cpp_default_arguments(
+        sym,
+        defaults,
+        conflict_param_index);
 }
 
 const std::vector<const Expr*>* ASTContext::get_symbol_cpp_default_arguments(
     const Symbol* sym) const {
-    const auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
-    if (!info || info->cpp_default_arguments.empty()) {
-        return nullptr;
-    }
-    return &info->cpp_default_arguments;
+    return semantic_store_->get_symbol_cpp_default_arguments(sym);
 }
 
 void ASTContext::clear_symbol_cpp_default_arguments() {
-    std::vector<const Symbol*> symbols;
-    symbols.reserve(symbol_semantic_info_map_.size());
-    for (const auto& [sym, info] : symbol_semantic_info_map_) {
-        if (!info.cpp_default_arguments.empty()) {
-            symbols.push_back(sym);
-        }
-    }
-    for (const Symbol* sym : symbols) {
-        auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
-        if (info) {
-            info->cpp_default_arguments.clear();
-        }
-        erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
-        erase_symbol_owner_if_unused(this, sym);
-    }
+    semantic_store_->clear_symbol_cpp_default_arguments();
 }
 
 void ASTContext::set_template_specialization_resolved_type(
     const TemplateSpecializationType* type,
     std::shared_ptr<CType> resolved_type) {
-    if (!type) {
-        return;
-    }
-    if (!resolved_type) {
-        template_specialization_resolved_type_map_.erase(type);
-        return;
-    }
-    template_specialization_resolved_type_map_[type] = std::move(resolved_type);
+    semantic_store_->set_template_specialization_resolved_type(
+        type,
+        std::move(resolved_type));
 }
 
 std::shared_ptr<CType> ASTContext::get_template_specialization_resolved_type(
     const TemplateSpecializationType* type) const {
-    if (!type) {
-        return nullptr;
-    }
-    auto it = template_specialization_resolved_type_map_.find(type);
-    if (it == template_specialization_resolved_type_map_.end()) {
-        return nullptr;
-    }
-    return it->second;
+    return semantic_store_->get_template_specialization_resolved_type(type);
 }
 
 void ASTContext::clear_template_specialization_resolved_types() {
-    template_specialization_resolved_type_map_.clear();
+    semantic_store_->clear_template_specialization_resolved_types();
 }
 
 void ASTContext::set_dependent_name_resolved_type(
     const DependentNameType* type,
     std::shared_ptr<CType> resolved_type) {
-    if (!type) {
-        return;
-    }
-    if (!resolved_type) {
-        dependent_name_resolved_type_map_.erase(type);
-        return;
-    }
-    dependent_name_resolved_type_map_[type] = std::move(resolved_type);
+    semantic_store_->set_dependent_name_resolved_type(
+        type,
+        std::move(resolved_type));
 }
 
 std::shared_ptr<CType> ASTContext::get_dependent_name_resolved_type(
     const DependentNameType* type) const {
-    if (!type) {
-        return nullptr;
-    }
-    auto it = dependent_name_resolved_type_map_.find(type);
-    if (it == dependent_name_resolved_type_map_.end()) {
-        return nullptr;
-    }
-    return it->second;
+    return semantic_store_->get_dependent_name_resolved_type(type);
 }
 
 void ASTContext::clear_dependent_name_resolved_types() {
-    dependent_name_resolved_type_map_.clear();
+    semantic_store_->clear_dependent_name_resolved_types();
 }
 
 void ASTContext::clear_record_semantics_cache() {
-    std::vector<const ObjectDecl*> decls;
-    decls.reserve(record_semantics_cache_.size());
-    for (const auto& [decl, state] : record_semantics_cache_) {
-        (void)state;
-        if (decl) {
-            decls.push_back(decl);
-        }
-    }
-    record_semantics_cache_.clear();
-    ++record_semantics_cache_epoch_;
-    if (record_semantics_cache_epoch_ == 0) {
-        record_semantics_cache_epoch_ = 1;
-    }
-    for (const ObjectDecl* decl : decls) {
-        if (decl->external_semantic_owner_id == registry_id_) {
-            decl->external_semantic_owner_id = 0;
-        }
-    }
+    semantic_store_->clear_record_semantics_cache();
 }
 
 void ASTContext::set_record_semantics(const ObjectDecl* record_decl,
                                       RecordSemanticState state) {
-    if (!record_decl) {
-        return;
-    }
-    record_semantics_cache_[record_decl] = std::move(state);
-    record_decl->external_semantic_owner_id = registry_id_;
-    ++record_semantics_cache_epoch_;
-    if (record_semantics_cache_epoch_ == 0) {
-        record_semantics_cache_epoch_ = 1;
-    }
+    semantic_store_->set_record_semantics(record_decl, std::move(state));
 }
 
 void ASTContext::erase_record_semantics(const ObjectDecl* record_decl) {
-    if (!record_decl) {
-        return;
-    }
-    if (record_semantics_cache_.erase(record_decl) > 0) {
-        if (record_decl->external_semantic_owner_id == registry_id_) {
-            record_decl->external_semantic_owner_id = 0;
-        }
-        ++record_semantics_cache_epoch_;
-        // in case of overflowws (seems highly unlikely)
-        if (record_semantics_cache_epoch_ == 0) {
-            record_semantics_cache_epoch_ = 1;
-        }
-    }
+    semantic_store_->erase_record_semantics(record_decl);
 }
 
 const RecordSemanticState* ASTContext::lookup_record_semantics(
     const ObjectDecl* record_decl) const {
-    if (!record_decl) {
-        return nullptr;
-    }
-    auto it = record_semantics_cache_.find(record_decl);
-    if (it == record_semantics_cache_.end()) {
-        return nullptr;
-    }
-    return &it->second;
+    return semantic_store_->lookup_record_semantics(record_decl);
+}
+
+uint64_t ASTContext::record_semantics_cache_epoch() const {
+    return semantic_store_->record_semantics_cache_epoch();
 }
 
 void ASTContext::clear_enum_semantics_cache() {
-    std::vector<const EnumDecl*> decls;
-    decls.reserve(enum_semantics_cache_.size());
-    for (const auto& [decl, state] : enum_semantics_cache_) {
-        (void)state;
-        if (decl) {
-            decls.push_back(decl);
-        }
-    }
-    enum_semantics_cache_.clear();
-    for (const EnumDecl* decl : decls) {
-        if (decl->external_semantic_owner_id == registry_id_) {
-            decl->external_semantic_owner_id = 0;
-        }
-    }
+    semantic_store_->clear_enum_semantics_cache();
 }
 
 void ASTContext::set_enum_semantics(const EnumDecl* enum_decl,
                                     bool is_incomplete,
                                     std::shared_ptr<CType> underlying_type,
                                     bool has_negative_values) {
-    if (!enum_decl) {
-        return;
-    }
-    auto& entry = enum_semantics_cache_[enum_decl];
-    entry.is_incomplete = is_incomplete;
-    entry.underlying_type = std::move(underlying_type);
-    entry.has_negative_values = has_negative_values;
-    enum_decl->external_semantic_owner_id = registry_id_;
+    semantic_store_->set_enum_semantics(
+        enum_decl,
+        is_incomplete,
+        std::move(underlying_type),
+        has_negative_values);
 }
 
 void ASTContext::erase_enum_semantics(const EnumDecl* enum_decl) {
-    if (!enum_decl) {
-        return;
-    }
-    if (enum_semantics_cache_.erase(enum_decl) > 0 &&
-        enum_decl->external_semantic_owner_id == registry_id_) {
-        enum_decl->external_semantic_owner_id = 0;
-    }
+    semantic_store_->erase_enum_semantics(enum_decl);
 }
 
 bool ASTContext::lookup_enum_semantics(
@@ -1529,46 +1027,28 @@ bool ASTContext::lookup_enum_semantics(
     bool& is_incomplete_out,
     std::shared_ptr<CType>& underlying_type_out,
     bool& has_negative_values_out) const {
-    if (!enum_decl) {
-        return false;
-    }
-    auto it = enum_semantics_cache_.find(enum_decl);
-    if (it == enum_semantics_cache_.end()) {
-        return false;
-    }
-    is_incomplete_out = it->second.is_incomplete;
-    underlying_type_out = it->second.underlying_type;
-    has_negative_values_out = it->second.has_negative_values;
-    return true;
+    return semantic_store_->lookup_enum_semantics(
+        enum_decl,
+        is_incomplete_out,
+        underlying_type_out,
+        has_negative_values_out);
 }
 
 ClassTemplateSpecializationEntry* ASTContext::lookup_class_template_specialization(
     const ClassTemplateDecl* primary_template,
     const std::vector<TemplateArgument>& arguments) {
-    auto key = make_template_specialization_semantic_key(primary_template, arguments);
-    auto it = class_template_specialization_lookup_.find(key);
-    if (it == class_template_specialization_lookup_.end()) {
-        return nullptr;
-    }
-    if (it->second >= class_template_specializations_.size()) {
-        return nullptr;
-    }
-    return class_template_specializations_[it->second].get();
+    return semantic_store_->lookup_class_template_specialization(
+        primary_template,
+        arguments);
 }
 
 const ClassTemplateSpecializationEntry*
 ASTContext::lookup_class_template_specialization(
     const ClassTemplateDecl* primary_template,
     const std::vector<TemplateArgument>& arguments) const {
-    auto key = make_template_specialization_semantic_key(primary_template, arguments);
-    auto it = class_template_specialization_lookup_.find(key);
-    if (it == class_template_specialization_lookup_.end()) {
-        return nullptr;
-    }
-    if (it->second >= class_template_specializations_.size()) {
-        return nullptr;
-    }
-    return class_template_specializations_[it->second].get();
+    return semantic_store_->lookup_class_template_specialization(
+        primary_template,
+        arguments);
 }
 
 ClassTemplateSpecializationEntry&
@@ -1577,56 +1057,34 @@ ASTContext::get_or_create_class_template_specialization(
     std::vector<TemplateArgument> arguments,
     std::shared_ptr<ObjectType> specialization_type,
     std::unique_ptr<ObjectDecl> specialization_decl) {
-    auto semantic_key =
-        make_template_specialization_semantic_key(primary_template, arguments);
-    auto existing_it = class_template_specialization_lookup_.find(semantic_key);
-    if (existing_it != class_template_specialization_lookup_.end() &&
-        existing_it->second < class_template_specializations_.size()) {
-        return *class_template_specializations_[existing_it->second];
-    }
+    return semantic_store_->get_or_create_class_template_specialization(
+        primary_template,
+        std::move(arguments),
+        std::move(specialization_type),
+        std::move(specialization_decl));
+}
 
-    auto entry = std::make_unique<ClassTemplateSpecializationEntry>();
-    entry->primary_template = dyn_cast<ClassTemplateDecl>(
-        const_cast<TemplateDecl*>(semantic_key.primary_template));
-    entry->semantic_key = std::move(semantic_key);
-    entry->arguments = entry->semantic_key.arguments;
-    entry->specialization_type = std::move(specialization_type);
-    entry->specialization_decl = std::move(specialization_decl);
-
-    size_t index = class_template_specializations_.size();
-    class_template_specialization_lookup_.emplace(entry->semantic_key, index);
-    class_template_specializations_.push_back(std::move(entry));
-    return *class_template_specializations_.back();
+const std::vector<std::unique_ptr<ClassTemplateSpecializationEntry>>&
+ASTContext::class_template_specializations() const {
+    return semantic_store_->class_template_specializations();
 }
 
 FunctionTemplateSpecializationEntry*
 ASTContext::lookup_function_template_specialization(
     const FunctionTemplateDecl* primary_template,
     const std::vector<TemplateArgument>& arguments) {
-    auto key = make_template_specialization_semantic_key(primary_template, arguments);
-    auto it = function_template_specialization_lookup_.find(key);
-    if (it == function_template_specialization_lookup_.end()) {
-        return nullptr;
-    }
-    if (it->second >= function_template_specializations_.size()) {
-        return nullptr;
-    }
-    return function_template_specializations_[it->second].get();
+    return semantic_store_->lookup_function_template_specialization(
+        primary_template,
+        arguments);
 }
 
 const FunctionTemplateSpecializationEntry*
 ASTContext::lookup_function_template_specialization(
     const FunctionTemplateDecl* primary_template,
     const std::vector<TemplateArgument>& arguments) const {
-    auto key = make_template_specialization_semantic_key(primary_template, arguments);
-    auto it = function_template_specialization_lookup_.find(key);
-    if (it == function_template_specialization_lookup_.end()) {
-        return nullptr;
-    }
-    if (it->second >= function_template_specializations_.size()) {
-        return nullptr;
-    }
-    return function_template_specializations_[it->second].get();
+    return semantic_store_->lookup_function_template_specialization(
+        primary_template,
+        arguments);
 }
 
 FunctionTemplateSpecializationEntry&
@@ -1635,66 +1093,40 @@ ASTContext::get_or_create_function_template_specialization(
     std::vector<TemplateArgument> arguments,
     std::unique_ptr<FuncDecl> specialization_decl,
     std::shared_ptr<Symbol> specialization_symbol) {
-    auto semantic_key =
-        make_template_specialization_semantic_key(primary_template, arguments);
-    auto existing_it = function_template_specialization_lookup_.find(semantic_key);
-    if (existing_it != function_template_specialization_lookup_.end() &&
-        existing_it->second < function_template_specializations_.size()) {
-        return *function_template_specializations_[existing_it->second];
-    }
+    return semantic_store_->get_or_create_function_template_specialization(
+        primary_template,
+        std::move(arguments),
+        std::move(specialization_decl),
+        std::move(specialization_symbol));
+}
 
-    auto entry = std::make_unique<FunctionTemplateSpecializationEntry>();
-    entry->primary_template = dyn_cast<FunctionTemplateDecl>(
-        const_cast<TemplateDecl*>(semantic_key.primary_template));
-    entry->semantic_key = std::move(semantic_key);
-    entry->arguments = entry->semantic_key.arguments;
-    entry->specialization_decl = std::move(specialization_decl);
-    entry->specialization_symbol = std::move(specialization_symbol);
-
-    size_t index = function_template_specializations_.size();
-    function_template_specialization_lookup_.emplace(entry->semantic_key, index);
-    function_template_specializations_.push_back(std::move(entry));
-    return *function_template_specializations_.back();
+const std::vector<std::unique_ptr<FunctionTemplateSpecializationEntry>>&
+ASTContext::function_template_specializations() const {
+    return semantic_store_->function_template_specializations();
 }
 
 bool ASTContext::push_template_instantiation_frame(size_t max_depth) {
-    if (template_instantiation_depth_ >= max_depth) {
-        return false;
-    }
-    ++template_instantiation_depth_;
-    return true;
+    return semantic_store_->push_template_instantiation_frame(max_depth);
 }
 
 void ASTContext::pop_template_instantiation_frame() {
-    if (template_instantiation_depth_ > 0) {
-        --template_instantiation_depth_;
-    }
+    semantic_store_->pop_template_instantiation_frame();
+}
+
+size_t ASTContext::template_instantiation_depth() const {
+    return semantic_store_->template_instantiation_depth();
 }
 
 void ASTContext::clear_external_semantic_side_tables() {
-    clear_func_decl_cxx_qualifier_prefixes();
-    clear_func_decl_owner_record_types();
-    clear_func_decl_function_template_specializations();
-    clear_template_decl_canonical_decls();
-    clear_template_parameter_default_arguments();
-    clear_template_decl_default_arguments();
-    clear_symbol_cxx_qualifier_prefixes();
-    clear_symbol_owner_record_types();
-    clear_symbol_function_template_specializations();
-    clear_param_decl_default_arguments();
-    clear_symbol_cpp_default_arguments();
-    clear_template_specialization_resolved_types();
-    clear_dependent_name_resolved_types();
-    clear_record_semantics_cache();
-    clear_enum_semantics_cache();
-    external_qualifier_pool_.clear();
+    semantic_store_->clear_translation_unit_semantic_state();
+}
+
+void ASTContext::clear_all_semantic_state() {
+    semantic_store_->clear_all_semantic_state();
 }
 
 void ASTContext::retain_external_decl(std::unique_ptr<Decl> decl) {
-    if (!decl) {
-        return;
-    }
-    retained_external_decls_.push_back(std::move(decl));
+    semantic_store_->retain_external_decl(std::move(decl));
 }
 
 // --- Attribute side table ---
