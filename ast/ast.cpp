@@ -2,60 +2,36 @@
 #include "ast_context.h"
 
 namespace {
-// Threading: this compiler assumes single-threaded compilation per process.
-// fallback_side_table_context provides a default ASTContext for side-table
-// lookups when no explicit context is active.  It is NOT thread-safe.
-// If parallel compilation is introduced, move into a session-owned context.
-ASTContext& fallback_side_table_context() {
-    static ASTContext fallback;
-    return fallback;
+ASTContext* current_side_table_context() {
+    return get_active_side_table_ast_context();
 }
 
-ASTContext& current_side_table_context() {
-    if (ASTContext* active = get_active_side_table_ast_context()) {
-        return *active;
-    }
-    return fallback_side_table_context();
-}
-
-ASTContext& side_table_context_for(const FuncDecl* decl) {
-    if (ASTContext* active = get_active_side_table_ast_context()) {
-        return *active;
-    }
+ASTContext* side_table_context_for(const FuncDecl* decl) {
     if (ASTContext* owner = get_side_table_ast_context_for(decl)) {
-        return *owner;
+        return owner;
     }
-    return fallback_side_table_context();
+    return get_active_side_table_ast_context();
 }
 
-ASTContext& side_table_context_for(const TemplateDecl* decl) {
-    if (ASTContext* active = get_active_side_table_ast_context()) {
-        return *active;
-    }
+ASTContext* side_table_context_for(const TemplateDecl* decl) {
     if (ASTContext* owner = get_side_table_ast_context_for(decl)) {
-        return *owner;
+        return owner;
     }
-    return fallback_side_table_context();
+    return get_active_side_table_ast_context();
 }
 
-ASTContext& side_table_context_for(const TemplateParameterDecl* decl) {
-    if (ASTContext* active = get_active_side_table_ast_context()) {
-        return *active;
-    }
+ASTContext* side_table_context_for(const TemplateParameterDecl* decl) {
     if (ASTContext* owner = get_side_table_ast_context_for(decl)) {
-        return *owner;
+        return owner;
     }
-    return fallback_side_table_context();
+    return get_active_side_table_ast_context();
 }
 
-ASTContext& side_table_context_for(const ParamDecl* decl) {
-    if (ASTContext* active = get_active_side_table_ast_context()) {
-        return *active;
-    }
+ASTContext* side_table_context_for(const ParamDecl* decl) {
     if (ASTContext* owner = get_side_table_ast_context_for(decl)) {
-        return *owner;
+        return owner;
     }
-    return fallback_side_table_context();
+    return get_active_side_table_ast_context();
 }
 } // namespace
 
@@ -124,105 +100,149 @@ BlockSemanticInfo make_block_semantic_info(ASTContext& ctx, SrcLoc loc) {
 
 void set_func_decl_cxx_qualifier_prefix(const FuncDecl* decl,
                                         std::optional<std::string> prefix) {
-    side_table_context_for(decl).set_func_decl_cxx_qualifier_prefix(decl, std::move(prefix));
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_func_decl_cxx_qualifier_prefix(decl, std::move(prefix));
+    }
 }
 
 const std::string* get_func_decl_cxx_qualifier_prefix(const FuncDecl* decl) {
-    return side_table_context_for(decl).get_func_decl_cxx_qualifier_prefix(decl);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_func_decl_cxx_qualifier_prefix(decl);
+    }
+    return nullptr;
 }
 
 void clear_func_decl_cxx_qualifier_prefixes() {
-    current_side_table_context().clear_func_decl_cxx_qualifier_prefixes();
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_func_decl_cxx_qualifier_prefixes();
+    }
 }
 
 void set_func_decl_owner_record_type(const FuncDecl* decl, QualType owner_type) {
-    side_table_context_for(decl).set_func_decl_owner_record_type(decl, owner_type);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_func_decl_owner_record_type(decl, owner_type);
+    }
 }
 
 QualType get_func_decl_owner_record_type(const FuncDecl* decl) {
-    return side_table_context_for(decl).get_func_decl_owner_record_type(decl);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_func_decl_owner_record_type(decl);
+    }
+    return QualType();
 }
 
 void clear_func_decl_owner_record_types() {
-    current_side_table_context().clear_func_decl_owner_record_types();
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_func_decl_owner_record_types();
+    }
 }
 
 void set_func_decl_function_template_specialization(
     const FuncDecl* decl,
     const FunctionTemplateSpecializationInfo& info) {
-    side_table_context_for(decl).set_func_decl_function_template_specialization(
-        decl, info);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_func_decl_function_template_specialization(decl, info);
+    }
 }
 
 const FunctionTemplateSpecializationInfo*
 get_func_decl_function_template_specialization(const FuncDecl* decl) {
-    return side_table_context_for(decl)
-        .get_func_decl_function_template_specialization(decl);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_func_decl_function_template_specialization(decl);
+    }
+    return nullptr;
 }
 
 void clear_func_decl_function_template_specializations() {
-    current_side_table_context().clear_func_decl_function_template_specializations();
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_func_decl_function_template_specializations();
+    }
 }
 
 void set_template_decl_canonical_decl(const TemplateDecl* decl,
                                       const TemplateDecl* canonical_decl) {
-    side_table_context_for(decl).set_template_decl_canonical_decl(
-        decl, canonical_decl);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_template_decl_canonical_decl(decl, canonical_decl);
+    }
 }
 
 const TemplateDecl* get_template_decl_canonical_decl(const TemplateDecl* decl) {
-    return side_table_context_for(decl).get_template_decl_canonical_decl(decl);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_template_decl_canonical_decl(decl);
+    }
+    return nullptr;
 }
 
 void clear_template_decl_canonical_decls() {
-    current_side_table_context().clear_template_decl_canonical_decls();
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_template_decl_canonical_decls();
+    }
 }
 
 void set_template_parameter_default_argument(
     const TemplateParameterDecl* decl,
     std::optional<TemplateArgument> argument) {
-    side_table_context_for(decl).set_template_parameter_default_argument(
-        decl, std::move(argument));
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_template_parameter_default_argument(decl, std::move(argument));
+    }
 }
 
 const TemplateArgument* get_template_parameter_default_argument(
     const TemplateParameterDecl* decl) {
-    return side_table_context_for(decl).get_template_parameter_default_argument(
-        decl);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_template_parameter_default_argument(decl);
+    }
+    return nullptr;
 }
 
 void clear_template_parameter_default_arguments() {
-    current_side_table_context().clear_template_parameter_default_arguments();
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_template_parameter_default_arguments();
+    }
 }
 
 bool merge_template_decl_default_arguments(
     const TemplateDecl* decl,
     size_t* conflict_param_index) {
-    return side_table_context_for(decl).merge_template_decl_default_arguments(
-        decl, conflict_param_index);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->merge_template_decl_default_arguments(
+            decl, conflict_param_index);
+    }
+    return false;
 }
 
 const std::vector<std::optional<TemplateArgument>>*
 get_template_decl_default_arguments(const TemplateDecl* decl) {
-    return side_table_context_for(decl).get_template_decl_default_arguments(
-        decl);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_template_decl_default_arguments(decl);
+    }
+    return nullptr;
 }
 
 void clear_template_decl_default_arguments() {
-    current_side_table_context().clear_template_decl_default_arguments();
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_template_decl_default_arguments();
+    }
 }
 
 void set_param_decl_default_argument(const ParamDecl* decl,
                                      std::unique_ptr<Expr> expr) {
-    side_table_context_for(decl).set_param_decl_default_argument(decl, std::move(expr));
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_param_decl_default_argument(decl, std::move(expr));
+    }
 }
 
 const Expr* get_param_decl_default_argument(const ParamDecl* decl) {
-    return side_table_context_for(decl).get_param_decl_default_argument(decl);
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_param_decl_default_argument(decl);
+    }
+    return nullptr;
 }
 
 void clear_param_decl_default_arguments() {
-    current_side_table_context().clear_param_decl_default_arguments();
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_param_decl_default_arguments();
+    }
 }
 
 bool is_unary_operator(std::string& c) {

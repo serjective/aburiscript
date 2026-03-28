@@ -422,7 +422,7 @@ uint32_t g_record_member_lookup_cache_ast_context_id = 0;
 void invalidate_record_member_lookup_caches_if_needed() {
     const ASTContext* active_ast_ctx = get_active_side_table_ast_context();
     uint32_t active_ast_ctx_id = active_ast_ctx ? active_ast_ctx->registry_id() : 0;
-    uint64_t current_epoch = record_semantics_cache_epoch();
+    uint64_t current_epoch = record_semantics_cache_epoch(active_ast_ctx);
     if (current_epoch == g_record_member_lookup_cache_epoch &&
         active_ast_ctx_id == g_record_member_lookup_cache_ast_context_id) {
         return;

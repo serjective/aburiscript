@@ -1475,7 +1475,6 @@ struct RecordSemanticState {
 };
 
 void record_semantics_cache_clear(ASTContext* ast_ctx);
-void record_semantics_cache_clear();
 void record_semantics_cache_set(ASTContext* ast_ctx,
                                 const ObjectDecl* record_decl,
                                 RecordSemanticState state);
@@ -1490,7 +1489,6 @@ const RecordSemanticState* record_semantics_cache_lookup(
 const RecordSemanticState* record_semantics_cache_lookup(
     const ObjectDecl* record_decl);
 uint64_t record_semantics_cache_epoch(const ASTContext* ast_ctx);
-uint64_t record_semantics_cache_epoch();
 std::string make_cpp_virtual_slot_key(const std::string& method_name,
                                       QualType method_type,
                                       const ASTContext* ast_ctx = nullptr);
@@ -1528,7 +1526,6 @@ size_t object_field_storage_alignment(const ObjectType::Field& field);
 std::vector<ObjectType::Field> get_record_fields_for_type_matching(
     const ObjectType* record_type);
 void enum_semantics_cache_clear(ASTContext* ast_ctx);
-void enum_semantics_cache_clear();
 void enum_semantics_cache_set(ASTContext* ast_ctx,
                               const EnumDecl* enum_decl,
                               bool is_incomplete,

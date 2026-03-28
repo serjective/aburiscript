@@ -38,7 +38,7 @@ const ASTContext* record_semantics_ast_context(const ObjectDecl* record_decl,
     if (const auto* owner = get_side_table_ast_context_for(record_decl)) {
         return owner;
     }
-    return get_active_side_table_ast_context();
+    return nullptr;
 }
 
 ASTContext* record_semantics_ast_context(const ObjectDecl* record_decl,
@@ -49,7 +49,7 @@ ASTContext* record_semantics_ast_context(const ObjectDecl* record_decl,
     if (auto* owner = get_side_table_ast_context_for(record_decl)) {
         return owner;
     }
-    return get_active_side_table_ast_context();
+    return nullptr;
 }
 
 const ASTContext* enum_semantics_ast_context(const EnumDecl* enum_decl,
@@ -60,7 +60,7 @@ const ASTContext* enum_semantics_ast_context(const EnumDecl* enum_decl,
     if (const auto* owner = get_side_table_ast_context_for(enum_decl)) {
         return owner;
     }
-    return get_active_side_table_ast_context();
+    return nullptr;
 }
 
 ASTContext* enum_semantics_ast_context(const EnumDecl* enum_decl,
@@ -71,7 +71,7 @@ ASTContext* enum_semantics_ast_context(const EnumDecl* enum_decl,
     if (auto* owner = get_side_table_ast_context_for(enum_decl)) {
         return owner;
     }
-    return get_active_side_table_ast_context();
+    return nullptr;
 }
 
 bool is_builtin_nullptr_type_impl(QualType type, const ASTContext* ast_ctx) {
@@ -1449,10 +1449,6 @@ void record_semantics_cache_clear(ASTContext* ast_ctx) {
     ast_ctx->clear_record_semantics_cache();
 }
 
-void record_semantics_cache_clear() {
-    record_semantics_cache_clear(get_active_side_table_ast_context());
-}
-
 void record_semantics_cache_set(ASTContext* ast_ctx,
                                 const ObjectDecl* record_decl,
                                 RecordSemanticState state) {
@@ -1501,17 +1497,7 @@ const RecordSemanticState* record_semantics_cache_lookup(
 }
 
 uint64_t record_semantics_cache_epoch(const ASTContext* ast_ctx) {
-    if (ast_ctx) {
-        return ast_ctx->record_semantics_cache_epoch();
-    }
-    if (const auto* active = get_active_side_table_ast_context()) {
-        return active->record_semantics_cache_epoch();
-    }
-    return 0;
-}
-
-uint64_t record_semantics_cache_epoch() {
-    return record_semantics_cache_epoch(get_active_side_table_ast_context());
+    return ast_ctx ? ast_ctx->record_semantics_cache_epoch() : 0;
 }
 
 std::string make_cpp_virtual_slot_key(const std::string& method_name,
@@ -1918,10 +1904,6 @@ void enum_semantics_cache_clear(ASTContext* ast_ctx) {
         return;
     }
     ast_ctx->clear_enum_semantics_cache();
-}
-
-void enum_semantics_cache_clear() {
-    enum_semantics_cache_clear(get_active_side_table_ast_context());
 }
 
 void enum_semantics_cache_set(ASTContext* ast_ctx,

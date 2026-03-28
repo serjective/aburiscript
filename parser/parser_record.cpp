@@ -603,7 +603,8 @@ std::unique_ptr<Decl> Parser::build_cpp_record_semantic_decl(
         record_type->set_decl(semantic_decl.get());
     }
 
-    record_semantics_cache_set(semantic_decl.get(), std::move(semantic_state));
+    record_semantics_cache_set(
+        ast_ctx.get(), semantic_decl.get(), std::move(semantic_state));
     collect_->collect_add_tag_decl(tag, semantic_decl.get());
     return semantic_decl;
 }
@@ -2099,7 +2100,7 @@ void Parser::build_cpp_record_assemble_state(CppRecordBuildContext& ctx) {
 
     // Publish complete class semantics before rebinding inline method bodies
     // so member lookups can see declarations that appear later in class text.
-    record_semantics_cache_set(ctx.semantic_decl, ctx.semantic_state);
+    record_semantics_cache_set(ast_ctx.get(), ctx.semantic_decl, ctx.semantic_state);
 }
 
 // Reparse deferred inline method/ctor/dtor bodies.
@@ -2595,7 +2596,8 @@ void Parser::ensure_cpp_class_placeholder_type(const std::string& name, SrcLoc l
     if (!placeholder_decl) {
         return;
     }
-    record_semantics_cache_set(placeholder_decl.get(), RecordSemanticState{});
+    record_semantics_cache_set(
+        ast_ctx.get(), placeholder_decl.get(), RecordSemanticState{});
     collect_->collect_add_tag_decl(name, placeholder_decl.get());
     cpp_transient_semantic_decls_.push_back(std::move(placeholder_decl));
 }
@@ -3114,7 +3116,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
     if (auto* definition_data = record->get_definition_data()) {
         *definition_data = semantic_state.definition_data;
     }
-    record_semantics_cache_set(placeholder_decl, semantic_state);
+    record_semantics_cache_set(ast_ctx.get(), placeholder_decl, semantic_state);
 
     struct DeferredInlineParserState {
         size_t token_idx = 0;
@@ -4942,6 +4944,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                     }
                 }
                 record_semantics_cache_set(
+                    ast_ctx.get(),
                     qualified_declarator.owner_record_decl,
                     std::move(updated_state));
             }
@@ -5279,6 +5282,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
                 break;
             }
             record_semantics_cache_set(
+                ast_ctx.get(),
                 qualified_declarator.owner_record_decl,
                 std::move(updated_state));
         }
@@ -6331,7 +6335,7 @@ std::unique_ptr<Decl> Parser::parse_struct_specifier() {
         return state;
     };
     auto write_record_state = [&](const ObjectDecl* record_decl, RecordSemanticState state) {
-        record_semantics_cache_set(record_decl, std::move(state));
+        record_semantics_cache_set(ast_ctx.get(), record_decl, std::move(state));
     };
     auto extract_record_decl = [&](TagDecl* existing_tag_decl,
                                    const std::string& existing_tag) -> ObjectDecl* {

@@ -33,9 +33,10 @@
 //   side-table entries (qualifier prefixes, owner record types, template
 //   specialization info) for this node.  When an ASTContext is destroyed,
 //   entries whose owner_id matches are cleared.  A value of 0 means "no
-//   external semantic owner" (side-table lookups fall back to the active
-//   context).  The field is mutable because it is updated by const ASTContext
-//   methods during side-table bookkeeping.
+//   external semantic owner"; side-table accessors must then rely on an
+//   explicit active ASTContext or return no data.  The field is mutable
+//   because it is updated by const ASTContext methods during side-table
+//   bookkeeping.
 // ============================================================================
 
 #include <string>
@@ -54,6 +55,8 @@
 #include "helpers/casting.h"
 
 class ASTContext;
+ASTContext* get_side_table_ast_context_for(const ObjectDecl* decl);
+ASTContext* get_side_table_ast_context_for(const EnumDecl* decl);
 struct FuncDecl;
 struct FieldDecl;
 struct ObjectDecl;
@@ -2881,7 +2884,8 @@ struct ObjectDecl: TagDecl {
     }
 
     bool is_complete_definition() const override {
-        const RecordSemanticState* state = record_semantics_cache_lookup(this);
+        const RecordSemanticState* state =
+            record_semantics_cache_lookup(this, get_side_table_ast_context_for(this));
         return state && !state->is_incomplete;
     }
 
@@ -3238,7 +3242,11 @@ struct EnumDecl: TagDecl {
         bool is_incomplete = true;
         bool has_negative_values = false;
         std::shared_ptr<CType> underlying_type;
-        if (enum_semantics_cache_lookup(this, is_incomplete, underlying_type, has_negative_values)) {
+        if (enum_semantics_cache_lookup(this,
+                                        is_incomplete,
+                                        underlying_type,
+                                        has_negative_values,
+                                        get_side_table_ast_context_for(this))) {
             return !is_incomplete;
         }
         return false;
