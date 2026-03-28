@@ -140,49 +140,51 @@ bool Parser::is_cpp_out_of_line_constructor_declaration_start() {
     }
 
     RevertingTentativeParsingAction tentative(*this);
-    try {
-        consume_cpp_scope_resolution(); // Allow optional leading '::'.
+    consume_cpp_scope_resolution(); // Allow optional leading '::'.
 
-        std::vector<CppQualifiedNameComponent> components;
-        auto parse_component = [&]() -> CppQualifiedNameComponent {
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error_custloc(
-                    "expected identifier in out-of-line constructor definition",
-                    current_token().loc);
-            }
-            CppQualifiedNameComponent component;
-            component.name = current_token().value;
-            advance();
-            if (gentle_check(TokenType::LESS_THAN)) {
-                component.has_template_argument_list = true;
-                component.template_arguments = parse_cpp_template_argument_list();
-            }
-            return component;
-        };
-
-        components.push_back(parse_component());
-        bool saw_scope_resolution = false;
-        while (is_cpp_scope_resolution_here()) {
-            saw_scope_resolution = true;
-            consume_cpp_scope_resolution();
-            components.push_back(parse_component());
+    std::vector<CppQualifiedNameComponent> components;
+    auto parse_component = [&]() -> std::optional<CppQualifiedNameComponent> {
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            return std::nullopt;
         }
-
-        if (!saw_scope_resolution || components.size() < 2) {
-            return false;
+        CppQualifiedNameComponent component;
+        component.name = current_token().value;
+        advance();
+        if (gentle_check(TokenType::LESS_THAN)) {
+            component.has_template_argument_list = true;
+            component.template_arguments = parse_cpp_template_argument_list();
         }
-        if (components.back().has_template_argument_list ||
-            gentle_check(TokenType::BITWISE_NOT) ||
-            !gentle_check(TokenType::LEFT_PAREN)) {
-            return false;
-        }
+        return component;
+    };
 
-        const auto& final_name = components.back().name;
-        const auto& owner_name = components[components.size() - 2].name;
-        return final_name == owner_name;
-    } catch (const ParseError&) {
+    auto first_component = parse_component();
+    if (!first_component) {
         return false;
     }
+    components.push_back(std::move(*first_component));
+    bool saw_scope_resolution = false;
+    while (is_cpp_scope_resolution_here()) {
+        saw_scope_resolution = true;
+        consume_cpp_scope_resolution();
+        auto component = parse_component();
+        if (!component) {
+            return false;
+        }
+        components.push_back(std::move(*component));
+    }
+
+    if (!saw_scope_resolution || components.size() < 2) {
+        return false;
+    }
+    if (components.back().has_template_argument_list ||
+        gentle_check(TokenType::BITWISE_NOT) ||
+        !gentle_check(TokenType::LEFT_PAREN)) {
+        return false;
+    }
+
+    const auto& final_name = components.back().name;
+    const auto& owner_name = components[components.size() - 2].name;
+    return final_name == owner_name;
 }
 
 bool Parser::is_cpp_out_of_line_destructor_declaration_start() {
@@ -191,57 +193,59 @@ bool Parser::is_cpp_out_of_line_destructor_declaration_start() {
     }
 
     RevertingTentativeParsingAction tentative(*this);
-    try {
-        consume_cpp_scope_resolution(); // Allow optional leading '::'.
+    consume_cpp_scope_resolution(); // Allow optional leading '::'.
 
-        std::vector<CppQualifiedNameComponent> owner_components;
-        auto parse_component = [&]() -> CppQualifiedNameComponent {
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error_custloc(
-                    "expected identifier in out-of-line destructor definition",
-                    current_token().loc);
-            }
-            CppQualifiedNameComponent component;
-            component.name = current_token().value;
-            advance();
-            if (gentle_check(TokenType::LESS_THAN)) {
-                component.has_template_argument_list = true;
-                component.template_arguments = parse_cpp_template_argument_list();
-            }
-            return component;
-        };
-
-        owner_components.push_back(parse_component());
-        bool saw_scope_resolution = false;
-        while (is_cpp_scope_resolution_here()) {
-            saw_scope_resolution = true;
-            consume_cpp_scope_resolution();
-            if (gentle_check(TokenType::BITWISE_NOT)) {
-                break;
-            }
-            owner_components.push_back(parse_component());
-        }
-
-        if (!saw_scope_resolution || owner_components.empty()) {
-            return false;
-        }
-        if (!gentle_check_and_consume(TokenType::BITWISE_NOT)) {
-            return false;
-        }
+    std::vector<CppQualifiedNameComponent> owner_components;
+    auto parse_component = [&]() -> std::optional<CppQualifiedNameComponent> {
         if (!gentle_check(TokenType::IDENTIFIER)) {
-            return false;
+            return std::nullopt;
         }
-        std::string destructor_name = current_token().value;
+        CppQualifiedNameComponent component;
+        component.name = current_token().value;
         advance();
-        if (!gentle_check(TokenType::LEFT_PAREN)) {
-            return false;
+        if (gentle_check(TokenType::LESS_THAN)) {
+            component.has_template_argument_list = true;
+            component.template_arguments = parse_cpp_template_argument_list();
         }
+        return component;
+    };
 
-        const std::string& owner_name = owner_components.back().name;
-        return destructor_name == owner_name;
-    } catch (const ParseError&) {
+    auto first_component = parse_component();
+    if (!first_component) {
         return false;
     }
+    owner_components.push_back(std::move(*first_component));
+    bool saw_scope_resolution = false;
+    while (is_cpp_scope_resolution_here()) {
+        saw_scope_resolution = true;
+        consume_cpp_scope_resolution();
+        if (gentle_check(TokenType::BITWISE_NOT)) {
+            break;
+        }
+        auto component = parse_component();
+        if (!component) {
+            return false;
+        }
+        owner_components.push_back(std::move(*component));
+    }
+
+    if (!saw_scope_resolution || owner_components.empty()) {
+        return false;
+    }
+    if (!gentle_check_and_consume(TokenType::BITWISE_NOT)) {
+        return false;
+    }
+    if (!gentle_check(TokenType::IDENTIFIER)) {
+        return false;
+    }
+    std::string destructor_name = current_token().value;
+    advance();
+    if (!gentle_check(TokenType::LEFT_PAREN)) {
+        return false;
+    }
+
+    const std::string& owner_name = owner_components.back().name;
+    return destructor_name == owner_name;
 }
 
 std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_definition() {

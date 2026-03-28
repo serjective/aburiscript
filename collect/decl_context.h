@@ -6,16 +6,30 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "../source_mgnt.h"
 #include "../ast/symbols.h"
 #include "../ast/types.h"
 
 struct Decl;
+class ASTContext;
 class DeclContext;
+using InternedName = const std::string*;
 
 struct NamespaceBindingEntry {
+    NamespaceBindingEntry() = default;
+    NamespaceBindingEntry(std::string local_name,
+                          std::shared_ptr<DeclContext> target_context,
+                          std::shared_ptr<Scope> target_scope,
+                          InternedName interned_local_name = nullptr)
+        : local_name(std::move(local_name)),
+          interned_local_name(interned_local_name),
+          target_context(std::move(target_context)),
+          target_scope(std::move(target_scope)) {}
+
     std::string local_name;
+    InternedName interned_local_name = nullptr;
     std::shared_ptr<DeclContext> target_context = nullptr;
     std::shared_ptr<Scope> target_scope = nullptr;
 };
@@ -90,6 +104,7 @@ enum class OrdinaryEntryKind : uint8_t {
 
 struct DeclBinding {
     std::string name;
+    InternedName interned_name = nullptr;
     LookupNamespace lookup_namespace = LookupNamespace::Ordinary;
     SymbolKind symbol_kind = SymbolKind::VARIABLE;
     OrdinaryEntryKind ordinary_entry_kind = OrdinaryEntryKind::SingleSymbol;
@@ -116,12 +131,15 @@ struct DeclBinding {
 class DeclContext : public std::enable_shared_from_this<DeclContext> {
 public:
     DeclContext(DeclContextKind kind,
+                std::shared_ptr<ASTContext> ast_ctx = nullptr,
+                std::shared_ptr<std::unordered_set<std::string>> local_intern_pool = nullptr,
                 DeclContext* lexical_parent = nullptr,
                 DeclContext* semantic_parent = nullptr,
                 const Decl* owner_decl = nullptr,
                 std::string lookup_name = "");
 
-    static std::shared_ptr<DeclContext> create_translation_unit();
+    static std::shared_ptr<DeclContext> create_translation_unit(
+        std::shared_ptr<ASTContext> ast_ctx = nullptr);
 
     std::shared_ptr<DeclContext> add_lexical_child(DeclContextKind kind,
                                                    DeclContext* semantic_parent = nullptr,
@@ -139,8 +157,11 @@ public:
     }
     const Decl* owner_decl() const { return owner_decl_; }
     const std::string& lookup_name() const { return lookup_name_; }
+    InternedName interned_lookup_name() const { return interned_lookup_name_; }
+    InternedName intern_name(std::string_view spelling) const;
     void set_lookup_name(std::string lookup_name);
     DeclContext* find_named_lexical_child(std::string_view lookup_name) const;
+    DeclContext* find_named_lexical_child(InternedName lookup_name) const;
 
     const std::vector<std::shared_ptr<DeclContext>>& lexical_children() const {
         return lexical_children_;
@@ -171,14 +192,24 @@ public:
 
     const DeclBinding* lookup_local(const std::string& name,
                                     LookupNamespace ns) const;
+    const DeclBinding* lookup_local(InternedName name,
+                                    LookupNamespace ns) const;
     std::vector<const DeclBinding*> lookup_local_all(const std::string& name,
+                                                     LookupNamespace ns) const;
+    std::vector<const DeclBinding*> lookup_local_all(InternedName name,
                                                      LookupNamespace ns) const;
     const NamespaceBindingEntry* lookup_local_namespace(
         std::string_view local_name) const;
+    const NamespaceBindingEntry* lookup_local_namespace(
+        InternedName local_name) const;
     const NamespaceBindingEntry* lookup_local_namespace_alias(
         std::string_view local_name) const;
+    const NamespaceBindingEntry* lookup_local_namespace_alias(
+        InternedName local_name) const;
     NamespaceBindingLookup lookup_local_namespace_binding(
         std::string_view local_name) const;
+    NamespaceBindingLookup lookup_local_namespace_binding(
+        InternedName local_name) const;
     void add_namespace_binding(NamespaceBindingEntry binding);
     void add_namespace_alias(NamespaceBindingEntry alias);
     const std::vector<NamespaceNominationRecord>& namespace_nominations() const {
@@ -187,17 +218,35 @@ public:
     void add_namespace_nomination(NamespaceNominationRecord nomination);
 
 private:
+    static constexpr size_t k_no_decl_index = static_cast<size_t>(-1);
+
+    struct BindingSlot {
+        InternedName interned_name = nullptr;
+        std::string spelled_name;
+        LookupNamespace lookup_namespace = LookupNamespace::Ordinary;
+        size_t visible_decl_index = k_no_decl_index;
+        size_t last_update_decl_index = k_no_decl_index;
+        std::vector<std::shared_ptr<Symbol>> overload_candidates;
+        std::vector<const Decl*> template_candidates;
+        DeclBinding cached_binding;
+    };
+
     void index_lexical_child_name(DeclContext* child);
-    void remove_lexical_child_name(DeclContext* child, std::string_view lookup_name);
-    void index_binding(const DeclBinding& binding, size_t idx);
+    void remove_lexical_child_name(DeclContext* child, InternedName lookup_name);
+    BindingSlot* lookup_slot(InternedName name, LookupNamespace ns);
+    const BindingSlot* lookup_slot(InternedName name, LookupNamespace ns) const;
+    BindingSlot& ensure_slot(InternedName name,
+                             std::string_view spelled_name,
+                             LookupNamespace ns);
+    void replay_binding_into_slot(const DeclBinding& binding, size_t idx);
+    void refresh_cached_binding(BindingSlot& slot);
+    void rebuild_binding_slots();
     uint64_t allocate_lookup_event_index() { return next_lookup_event_index_++; }
     void reindex_namespace_bindings();
     void reindex_namespace_aliases();
-    const std::unordered_map<std::string, std::vector<size_t>>&
-    map_for_namespace(LookupNamespace ns) const;
-    std::unordered_map<std::string, std::vector<size_t>>&
-    map_for_namespace(LookupNamespace ns);
 
+    std::shared_ptr<ASTContext> ast_ctx_ = nullptr;
+    std::shared_ptr<std::unordered_set<std::string>> local_intern_pool_;
     DeclContextKind kind_ = DeclContextKind::Block;
     DeclContext* lexical_parent_ = nullptr;
     DeclContext* semantic_parent_ = nullptr;
@@ -205,22 +254,23 @@ private:
     uint64_t stable_id_ = 0;
     const Decl* owner_decl_ = nullptr;
     std::string lookup_name_;
+    InternedName interned_lookup_name_ = nullptr;
 
     std::vector<std::shared_ptr<DeclContext>> lexical_children_;
-    std::unordered_map<std::string, std::vector<DeclContext*>> named_lexical_children_;
+    std::unordered_map<InternedName, std::vector<DeclContext*>> named_lexical_children_;
     std::vector<DeclBinding> declarations_;
     std::vector<NamespaceBindingEntry> namespace_bindings_;
-    std::unordered_map<std::string, size_t> namespace_binding_indices_;
+    std::unordered_map<InternedName, size_t> namespace_binding_indices_;
     std::vector<NamespaceBindingEntry> namespace_aliases_;
-    std::unordered_map<std::string, size_t> namespace_alias_indices_;
+    std::unordered_map<InternedName, size_t> namespace_alias_indices_;
     std::vector<NamespaceNominationRecord> namespace_nominations_;
     bool is_inline_namespace_ = false;
     DeclContext* inline_enclosing_namespace_ = nullptr;
     uint64_t next_lookup_event_index_ = 1;
 
-    std::unordered_map<std::string, std::vector<size_t>> ordinary_lookup_;
-    std::unordered_map<std::string, std::vector<size_t>> tag_lookup_;
-    std::unordered_map<std::string, std::vector<size_t>> label_lookup_;
+    std::unordered_map<InternedName, std::unique_ptr<BindingSlot>> ordinary_slots_;
+    std::unordered_map<InternedName, std::unique_ptr<BindingSlot>> tag_slots_;
+    std::unordered_map<InternedName, std::unique_ptr<BindingSlot>> label_slots_;
 };
 
 #endif // ABURI_DECL_CONTEXT_H

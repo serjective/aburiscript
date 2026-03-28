@@ -4594,12 +4594,20 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
             return state;
         }
         enum_semantics_cache_lookup(
-            enum_decl, state.is_incomplete, state.underlying_type, state.has_negative_values);
+            enum_decl,
+            state.is_incomplete,
+            state.underlying_type,
+            state.has_negative_values,
+            ast_ctx.get());
         return state;
     };
     auto write_enum_state = [&](const EnumDecl* enum_decl, const EnumSemanticState& state) {
         enum_semantics_cache_set(
-            enum_decl, state.is_incomplete, state.underlying_type, state.has_negative_values);
+            ast_ctx.get(),
+            enum_decl,
+            state.is_incomplete,
+            state.underlying_type,
+            state.has_negative_values);
     };
 
     auto reconcile_tag_decl = [&](EnumDecl* enum_decl, SrcLoc loc) {

@@ -315,7 +315,8 @@ void Collect::collect_start_translation_unit() {
 
     session_.func_state_.in_function = false;
     session_.current_scope_ = std::make_shared<Scope>();
-    session_.translation_unit_decl_context_ = DeclContext::create_translation_unit();
+    session_.translation_unit_decl_context_ =
+        DeclContext::create_translation_unit(ast_ctx_);
     session_.current_decl_context_ = session_.translation_unit_decl_context_;
     session_.current_scope_->flags = ScopeFlags::FileScope;
     session_.current_scope_->associated_decl_context = session_.current_decl_context_.get();
@@ -812,32 +813,6 @@ void Collect::bind_symbol_in_scope(const std::shared_ptr<Scope>& scope,
     if (!context) {
         return;
     }
-    auto append_unique_function_candidate = [](
-        std::vector<std::shared_ptr<Symbol>>& candidates,
-        const std::shared_ptr<Symbol>& candidate) {
-        if (!candidate || candidate->kind != SymbolKind::FUNCTION) {
-            return;
-        }
-        for (const auto& existing : candidates) {
-            if (existing == candidate) {
-                return;
-            }
-        }
-        candidates.push_back(candidate);
-    };
-    auto append_unique_template_candidate = [](
-        std::vector<const Decl*>& candidates,
-        const Decl* candidate) {
-        if (!candidate) {
-            return;
-        }
-        for (const auto* existing : candidates) {
-            if (existing == candidate) {
-                return;
-            }
-        }
-        candidates.push_back(candidate);
-    };
     DeclBinding binding;
     binding.name = name;
     binding.lookup_namespace = LookupNamespace::Ordinary;
@@ -847,40 +822,6 @@ void Collect::bind_symbol_in_scope(const std::shared_ptr<Scope>& scope,
     binding.type = sym->type;
     binding.is_definition = (sym->kind == SymbolKind::FUNCTION) ? sym->is_defined : false;
     binding.symbol = sym;
-    if (const auto* existing_binding =
-            context->lookup_local(name, LookupNamespace::Ordinary)) {
-        if (existing_binding->template_decl) {
-            append_unique_template_candidate(
-                binding.template_overload_candidates,
-                existing_binding->template_decl);
-        }
-        for (const auto* candidate : existing_binding->template_overload_candidates) {
-            append_unique_template_candidate(
-                binding.template_overload_candidates,
-                candidate);
-        }
-        if (binding.template_overload_candidates.size() == 1) {
-            binding.template_decl = binding.template_overload_candidates.front();
-        }
-    }
-    if (sym->kind == SymbolKind::FUNCTION) {
-        auto* existing_binding = context->lookup_local(name, LookupNamespace::Ordinary);
-        if (existing_binding && existing_binding->symbol_kind == SymbolKind::FUNCTION &&
-            existing_binding->symbol != sym) {
-            binding.ordinary_entry_kind = OrdinaryEntryKind::OverloadSet;
-            if (existing_binding->has_overload_set()) {
-                for (const auto& candidate : existing_binding->overload_candidates) {
-                    append_unique_function_candidate(binding.overload_candidates, candidate);
-                }
-            } else {
-                append_unique_function_candidate(binding.overload_candidates, existing_binding->symbol);
-            }
-            append_unique_function_candidate(binding.overload_candidates, sym);
-            if (!binding.overload_candidates.empty()) {
-                binding.symbol = binding.overload_candidates.front();
-            }
-        }
-    }
     record_decl_context_mutation(context);
     context->add_declaration(std::move(binding));
 }
@@ -900,19 +841,6 @@ void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
         return;
     }
 
-    auto append_unique_template_candidate =
-        [](std::vector<const Decl*>& candidates, const Decl* candidate) {
-            if (!candidate) {
-                return;
-            }
-            for (const auto* existing : candidates) {
-                if (existing == candidate) {
-                    return;
-                }
-            }
-            candidates.push_back(candidate);
-        };
-
     DeclBinding binding;
     binding.name = name;
     binding.lookup_namespace = lookup_namespace;
@@ -924,36 +852,6 @@ void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
                    : SymbolKind::FUNCTION);
     binding.ast_decl = decl;
     binding.template_decl = decl;
-
-    if (const auto* existing_binding =
-            context->lookup_local(name, lookup_namespace)) {
-        binding.symbol_kind = existing_binding->symbol_kind;
-        binding.ordinary_entry_kind = existing_binding->ordinary_entry_kind;
-        binding.type = existing_binding->type;
-        binding.storage_class = existing_binding->storage_class;
-        binding.linkage = existing_binding->linkage;
-        binding.is_definition = existing_binding->is_definition;
-        if (!binding.ast_decl) {
-            binding.ast_decl = existing_binding->ast_decl;
-        }
-        binding.symbol = existing_binding->symbol;
-        binding.overload_candidates = existing_binding->overload_candidates;
-        if (existing_binding->template_decl) {
-            append_unique_template_candidate(
-                binding.template_overload_candidates,
-                existing_binding->template_decl);
-        }
-        for (const auto* candidate : existing_binding->template_overload_candidates) {
-            append_unique_template_candidate(
-                binding.template_overload_candidates,
-                candidate);
-        }
-    }
-
-    append_unique_template_candidate(binding.template_overload_candidates, decl);
-    if (binding.template_overload_candidates.size() == 1) {
-        binding.template_decl = binding.template_overload_candidates.front();
-    }
 
     record_decl_context_mutation(context);
     context->add_declaration(std::move(binding));
