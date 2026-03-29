@@ -246,8 +246,7 @@ const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
         return nullptr;
     }
 
-    record_semantics_cache_set(
-        ast_ctx.get(),
+    collect_->query_publish_record_semantics(
         placeholder_decl.get(),
         RecordSemanticState{});
     collect_->collect_add_tag_decl(specialization_name, placeholder_decl.get());

@@ -590,10 +590,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
         RecordSemanticState placeholder_state;
         placeholder_state.is_incomplete = true;
-        record_semantics_cache_set(
-            ast_ctx(),
-            specialization_decl.get(),
-            placeholder_state);
+        collect.query_publish_record_semantics(specialization_decl.get(),
+                                               std::move(placeholder_state));
 
         auto& specialization_entry =
             ast_ctx()->get_or_create_class_template_specialization(
@@ -608,7 +606,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
     void build_pattern_symbol_maps() {
         pattern_state = pattern_semantic_decl
-            ? record_semantics_cache_lookup(pattern_semantic_decl, ast_ctx())
+            ? collect.query_lookup_record_semantics(pattern_semantic_decl)
             : nullptr;
         pattern_method_symbols.clear();
         pattern_constructor_symbols.clear();
@@ -756,7 +754,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     base_loc);
             }
             const RecordSemanticState* base_state =
-                record_semantics_cache_lookup(canonical_base_decl, ast_ctx());
+                collect.query_lookup_record_semantics(canonical_base_decl);
             if (!base_state || base_state->is_incomplete) {
                 return fail_instantiation(
                     "base class '" + specialized_base.name + "' is incomplete",
@@ -794,7 +792,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
             visited_base_graph.insert(current_decl);
             const RecordSemanticState* current_state =
-                record_semantics_cache_lookup(current_decl, ast_ctx());
+                collect.query_lookup_record_semantics(current_decl);
             if (!current_state) {
                 return;
             }
@@ -1246,18 +1244,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     void publish_provisional_nested_members() {
         RecordSemanticState provisional_state;
         if (const auto* existing_state =
-                record_semantics_cache_lookup(
-                    entry->specialization_decl.get(),
-                    ast_ctx())) {
+                collect.query_lookup_record_semantics(
+                    entry->specialization_decl.get())) {
             provisional_state = *existing_state;
         }
         provisional_state.is_incomplete = true;
         provisional_state.nested_types = nested_types;
         provisional_state.nested_templates = nested_templates;
-        record_semantics_cache_set(
-            ast_ctx(),
-            entry->specialization_decl.get(),
-            provisional_state);
+        collect.query_publish_record_semantics(entry->specialization_decl.get(),
+                                               std::move(provisional_state));
     }
 
     bool instantiate_members() {
@@ -2087,7 +2082,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     continue;
                 }
                 const RecordSemanticState* base_state =
-                    record_semantics_cache_lookup(base.record_decl, ast_ctx());
+                    collect.query_lookup_record_semantics(base.record_decl);
                 if (!base_state) {
                     continue;
                 }
@@ -2101,7 +2096,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 continue;
             }
             const RecordSemanticState* base_state =
-                record_semantics_cache_lookup(base.record_decl, ast_ctx());
+                collect.query_lookup_record_semantics(base.record_decl);
             if (!base_state) {
                 continue;
             }

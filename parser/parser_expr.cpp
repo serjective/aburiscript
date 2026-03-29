@@ -680,7 +680,8 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             }
             visited.insert(current_decl);
             const RecordSemanticState* state =
-                record_semantics_cache_lookup(current_decl);
+                collect_ ? collect_->query_lookup_record_semantics(current_decl)
+                         : record_semantics_cache_lookup(current_decl);
             if (!state) {
                 return;
             }

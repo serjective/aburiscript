@@ -19,7 +19,10 @@
 #include "../diagnostics.h"
 #include "../lang_options.h"
 #include "../source_mgnt.h"
+#include "query_context.h"
 #include "decl_context.h"
+
+class CollectRecordBuilder;
 
 // Bundles the boolean mode flags for collect_variable_declaration.
 // Using a struct avoids long chains of positional booleans at call sites.
@@ -157,12 +160,8 @@ public:
     Collect(std::shared_ptr<ASTContext> ast_ctx,
             std::shared_ptr<SourceManager> sm,
             std::shared_ptr<DiagnosticEngine> diag_engine,
-            LangOptions lang_opts)
-        : ast_ctx_(std::move(ast_ctx)),
-          side_table_scope_(ast_ctx_.get()),
-          sm_(std::move(sm)),
-          diag_engine_(std::move(diag_engine)),
-          lang_opts_(lang_opts) {}
+            LangOptions lang_opts);
+    ~Collect();
 
     void set_lang_options(LangOptions lang_opts) ;
 
@@ -879,6 +878,8 @@ public:
     }
 
 private:
+    friend class CollectRecordBuilder;
+
     struct CollectRecordBuildContext {
         const CppRecordDecl* record = nullptr;
         SrcLoc loc;
@@ -939,6 +940,7 @@ private:
         QualType switch_type = nullptr;
     };
 
+public:
     bool finalize_cpp_lambda_semantics(CppLambdaExpr& lambda,
                                        std::string* error_out = nullptr);
 
@@ -955,10 +957,38 @@ private:
     void collect_record_resolve_virtual_dispatch(
         CollectRecordBuildContext& ctx) const;
     void collect_record_compute_layout(CollectRecordBuildContext& ctx) const;
+    const RecordSemanticState* query_lookup_record_semantics(
+        const ObjectDecl* record_decl) const;
+    const RecordSemanticState* query_publish_record_semantics(
+        const ObjectDecl* record_decl,
+        RecordSemanticState state);
+    void query_erase_record_semantics(const ObjectDecl* record_decl);
+    bool query_lookup_enum_semantics(
+        const EnumDecl* enum_decl,
+        bool& is_incomplete_out,
+        std::shared_ptr<CType>& underlying_type_out,
+        bool& has_negative_values_out) const;
+    void query_publish_enum_semantics(
+        const EnumDecl* enum_decl,
+        bool is_incomplete,
+        std::shared_ptr<CType> underlying_type,
+        bool has_negative_values);
+    std::shared_ptr<CType> query_lookup_template_specialization_resolved_type(
+        const TemplateSpecializationType* type) const;
+    void query_publish_template_specialization_resolved_type(
+        const TemplateSpecializationType* type,
+        std::shared_ptr<CType> resolved_type);
+    std::shared_ptr<CType> query_lookup_dependent_name_resolved_type(
+        const DependentNameType* type) const;
+    void query_publish_dependent_name_resolved_type(
+        const DependentNameType* type,
+        std::shared_ptr<CType> resolved_type);
+
+private:
     void collect_record_publish_state(ObjectDecl* semantic_decl,
                                       const std::shared_ptr<ObjectType>& record_type,
-                                      const RecordSemanticState& state) const;
-    void collect_record_publish_semantics(CollectRecordBuildContext& ctx) const;
+                                      const RecordSemanticState& state);
+    void collect_record_publish_semantics(CollectRecordBuildContext& ctx);
 
     struct FunctionDefinitionState {
         bool in_function = false;
@@ -1967,6 +1997,8 @@ private:
 
     // --- Context (immutable) ---
     std::shared_ptr<ASTContext> ast_ctx_;
+    CollectQueryContext query_context_;
+    CollectQueryContext* previous_active_query_context_ = nullptr;
     ASTContextSideTableScope side_table_scope_;
     std::shared_ptr<SourceManager> sm_;
     std::shared_ptr<DiagnosticEngine> diag_engine_;

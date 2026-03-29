@@ -4,6 +4,7 @@
 #include "abi/abi_policy.h"
 #include "ast.h"
 #include "ast_context.h"
+#include "collect/query_context.h"
 #include "helpers/casting.h"
 #include "helpers/auto_type_utils.h"
 #include <algorithm>
@@ -895,8 +896,16 @@ std::shared_ptr<CType> lookup_template_specialization_resolved_type(
     }
     auto effective_ast_ctx = effective_ast_context(ast_ctx);
     if (effective_ast_ctx) {
-        if (auto resolved_type =
-                effective_ast_ctx->get_template_specialization_resolved_type(type)) {
+        if (auto* query_context = get_active_collect_query_context()) {
+            if (auto resolved_type =
+                    query_context->lookup_template_specialization_resolved_type(
+                        type,
+                        effective_ast_ctx->semantic_store())) {
+                return resolved_type;
+            }
+        } else if (auto resolved_type =
+                       effective_ast_ctx->get_template_specialization_resolved_type(
+                           type)) {
             return resolved_type;
         }
     }
@@ -912,9 +921,16 @@ void cache_template_specialization_resolved_type(
     }
     auto effective_ast_ctx = effective_ast_context(ast_ctx);
     if (effective_ast_ctx) {
-        effective_ast_ctx->set_template_specialization_resolved_type(
-            type,
-            resolved_type);
+        if (auto* query_context = get_active_collect_query_context()) {
+            query_context->publish_template_specialization_resolved_type(
+                type,
+                std::move(resolved_type),
+                effective_ast_ctx->semantic_store());
+        } else {
+            effective_ast_ctx->set_template_specialization_resolved_type(
+                type,
+                std::move(resolved_type));
+        }
     }
 }
 
@@ -926,8 +942,15 @@ std::shared_ptr<CType> lookup_dependent_name_resolved_type(
     }
     auto effective_ast_ctx = effective_ast_context(ast_ctx);
     if (effective_ast_ctx) {
-        if (auto resolved_type =
-                effective_ast_ctx->get_dependent_name_resolved_type(type)) {
+        if (auto* query_context = get_active_collect_query_context()) {
+            if (auto resolved_type =
+                    query_context->lookup_dependent_name_resolved_type(
+                        type,
+                        effective_ast_ctx->semantic_store())) {
+                return resolved_type;
+            }
+        } else if (auto resolved_type =
+                       effective_ast_ctx->get_dependent_name_resolved_type(type)) {
             return resolved_type;
         }
     }
@@ -942,9 +965,16 @@ void cache_dependent_name_resolved_type(ASTContext* ast_ctx,
     }
     auto effective_ast_ctx = effective_ast_context(ast_ctx);
     if (effective_ast_ctx) {
-        effective_ast_ctx->set_dependent_name_resolved_type(
-            type,
-            resolved_type);
+        if (auto* query_context = get_active_collect_query_context()) {
+            query_context->publish_dependent_name_resolved_type(
+                type,
+                std::move(resolved_type),
+                effective_ast_ctx->semantic_store());
+        } else {
+            effective_ast_ctx->set_dependent_name_resolved_type(
+                type,
+                std::move(resolved_type));
+        }
     }
 }
 
@@ -1456,7 +1486,14 @@ void record_semantics_cache_set(ASTContext* ast_ctx,
         return;
     }
     if (auto* cache_ctx = record_semantics_ast_context(record_decl, ast_ctx)) {
-        cache_ctx->set_record_semantics(record_decl, std::move(state));
+        if (auto* query_context = get_active_collect_query_context()) {
+            query_context->publish_record_semantics(
+                record_decl,
+                std::move(state),
+                cache_ctx->semantic_store());
+        } else {
+            cache_ctx->set_record_semantics(record_decl, std::move(state));
+        }
     }
 }
 
@@ -1471,7 +1508,13 @@ void record_semantics_cache_erase(ASTContext* ast_ctx,
         return;
     }
     if (auto* cache_ctx = record_semantics_ast_context(record_decl, ast_ctx)) {
-        cache_ctx->erase_record_semantics(record_decl);
+        if (auto* query_context = get_active_collect_query_context()) {
+            query_context->erase_record_semantics(
+                record_decl,
+                cache_ctx->semantic_store());
+        } else {
+            cache_ctx->erase_record_semantics(record_decl);
+        }
     }
 }
 
@@ -1486,6 +1529,11 @@ const RecordSemanticState* record_semantics_cache_lookup(
         return nullptr;
     }
     if (const auto* cache_ctx = record_semantics_ast_context(record_decl, ast_ctx)) {
+        if (auto* query_context = get_active_collect_query_context()) {
+            return query_context->lookup_record_semantics(
+                record_decl,
+                cache_ctx->semantic_store());
+        }
         return cache_ctx->lookup_record_semantics(record_decl);
     }
     return nullptr;
@@ -1915,11 +1963,20 @@ void enum_semantics_cache_set(ASTContext* ast_ctx,
         return;
     }
     if (auto* cache_ctx = enum_semantics_ast_context(enum_decl, ast_ctx)) {
-        cache_ctx->set_enum_semantics(
-            enum_decl,
-            is_incomplete,
-            std::move(underlying_type),
-            has_negative_values);
+        if (auto* query_context = get_active_collect_query_context()) {
+            query_context->publish_enum_semantics(
+                enum_decl,
+                is_incomplete,
+                std::move(underlying_type),
+                has_negative_values,
+                cache_ctx->semantic_store());
+        } else {
+            cache_ctx->set_enum_semantics(
+                enum_decl,
+                is_incomplete,
+                std::move(underlying_type),
+                has_negative_values);
+        }
     }
 }
 
@@ -1940,7 +1997,13 @@ void enum_semantics_cache_erase(ASTContext* ast_ctx, const EnumDecl* enum_decl) 
         return;
     }
     if (auto* cache_ctx = enum_semantics_ast_context(enum_decl, ast_ctx)) {
-        cache_ctx->erase_enum_semantics(enum_decl);
+        if (auto* query_context = get_active_collect_query_context()) {
+            query_context->erase_enum_semantics(
+                enum_decl,
+                cache_ctx->semantic_store());
+        } else {
+            cache_ctx->erase_enum_semantics(enum_decl);
+        }
     }
 }
 
@@ -1957,6 +2020,14 @@ bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
         return false;
     }
     if (const auto* cache_ctx = enum_semantics_ast_context(enum_decl, ast_ctx)) {
+        if (auto* query_context = get_active_collect_query_context()) {
+            return query_context->lookup_enum_semantics(
+                enum_decl,
+                is_incomplete_out,
+                underlying_type_out,
+                has_negative_values_out,
+                cache_ctx->semantic_store());
+        }
         return cache_ctx->lookup_enum_semantics(
             enum_decl,
             is_incomplete_out,

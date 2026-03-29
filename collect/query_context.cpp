@@ -1,0 +1,482 @@
+#include "query_context.h"
+
+#include <cstdlib>
+#include <iostream>
+#include <utility>
+
+#include "collect.h"
+
+namespace {
+thread_local CollectQueryContext* g_active_collect_query_context = nullptr;
+
+bool refactor_metrics_enabled() {
+    static const bool enabled = []() {
+        const char* env = std::getenv("ABURI_REFACTOR_METRICS");
+        return env && env[0] != '\0' && env[0] != '0';
+    }();
+    return enabled;
+}
+} // namespace
+
+CollectQueryContext* get_active_collect_query_context() {
+    return g_active_collect_query_context;
+}
+
+void set_active_collect_query_context(CollectQueryContext* context) {
+    g_active_collect_query_context = context;
+}
+
+void CollectQueryContext::clear() {
+    tentative_overlays_.clear();
+    metrics_ = Metrics{};
+}
+
+void CollectQueryContext::begin_tentative_overlay() {
+    tentative_overlays_.emplace_back();
+    ++metrics_.overlay_begins;
+}
+
+void CollectQueryContext::merge_overlay_into_parent(TentativeOverlay& parent,
+                                                    TentativeOverlay child) {
+    for (auto* record_decl : child.erased_record_semantics) {
+        parent.record_semantics.erase(record_decl);
+        parent.erased_record_semantics.insert(record_decl);
+    }
+    for (auto& [record_decl, state] : child.record_semantics) {
+        parent.erased_record_semantics.erase(record_decl);
+        parent.record_semantics[record_decl] = std::move(state);
+    }
+
+    for (auto* enum_decl : child.erased_enum_semantics) {
+        parent.enum_semantics.erase(enum_decl);
+        parent.erased_enum_semantics.insert(enum_decl);
+    }
+    for (auto& [enum_decl, state] : child.enum_semantics) {
+        parent.erased_enum_semantics.erase(enum_decl);
+        parent.enum_semantics[enum_decl] = std::move(state);
+    }
+
+    for (auto& [type, resolved_type] :
+         child.template_specialization_resolved_types) {
+        parent.template_specialization_resolved_types[type] =
+            std::move(resolved_type);
+    }
+    for (auto& [type, resolved_type] : child.dependent_name_resolved_types) {
+        parent.dependent_name_resolved_types[type] = std::move(resolved_type);
+    }
+}
+
+void CollectQueryContext::apply_overlay_to_store(TentativeOverlay& overlay,
+                                                 CollectSemanticStore& store) {
+    for (auto* record_decl : overlay.erased_record_semantics) {
+        store.erase_record_semantics(record_decl);
+    }
+    for (auto& [record_decl, state] : overlay.record_semantics) {
+        if (state) {
+            store.set_record_semantics(record_decl, std::move(*state));
+        }
+    }
+
+    for (auto* enum_decl : overlay.erased_enum_semantics) {
+        store.erase_enum_semantics(enum_decl);
+    }
+    for (auto& [enum_decl, state] : overlay.enum_semantics) {
+        store.set_enum_semantics(enum_decl,
+                                 state.is_incomplete,
+                                 state.underlying_type,
+                                 state.has_negative_values);
+    }
+
+    for (auto& [type, resolved_type] :
+         overlay.template_specialization_resolved_types) {
+        store.set_template_specialization_resolved_type(type,
+                                                        std::move(resolved_type));
+    }
+    for (auto& [type, resolved_type] : overlay.dependent_name_resolved_types) {
+        store.set_dependent_name_resolved_type(type, std::move(resolved_type));
+    }
+}
+
+void CollectQueryContext::commit_tentative_overlay(CollectSemanticStore& store) {
+    if (tentative_overlays_.empty()) {
+        return;
+    }
+    TentativeOverlay overlay = std::move(tentative_overlays_.back());
+    tentative_overlays_.pop_back();
+    ++metrics_.overlay_commits;
+    if (!tentative_overlays_.empty()) {
+        merge_overlay_into_parent(tentative_overlays_.back(), std::move(overlay));
+        ++metrics_.overlay_merges;
+        return;
+    }
+    apply_overlay_to_store(overlay, store);
+}
+
+void CollectQueryContext::rollback_tentative_overlay() {
+    if (tentative_overlays_.empty()) {
+        return;
+    }
+    tentative_overlays_.pop_back();
+    ++metrics_.overlay_rollbacks;
+}
+
+const RecordSemanticState* CollectQueryContext::lookup_record_semantics(
+    const ObjectDecl* record_decl,
+    const CollectSemanticStore& store) const {
+    if (!record_decl) {
+        return nullptr;
+    }
+    for (auto it = tentative_overlays_.rbegin();
+         it != tentative_overlays_.rend();
+         ++it) {
+        if (it->erased_record_semantics.contains(record_decl)) {
+            ++metrics_.record_semantics_misses;
+            return nullptr;
+        }
+        auto overlay_it = it->record_semantics.find(record_decl);
+        if (overlay_it != it->record_semantics.end()) {
+            ++metrics_.record_semantics_hits;
+            return overlay_it->second.get();
+        }
+    }
+    if (const auto* state = store.lookup_record_semantics(record_decl)) {
+        ++metrics_.record_semantics_hits;
+        return state;
+    }
+    ++metrics_.record_semantics_misses;
+    return nullptr;
+}
+
+const RecordSemanticState* CollectQueryContext::publish_record_semantics(
+    const ObjectDecl* record_decl,
+    RecordSemanticState state,
+    CollectSemanticStore& store) {
+    if (!record_decl) {
+        return nullptr;
+    }
+    ++metrics_.record_semantics_publications;
+    if (tentative_overlays_.empty()) {
+        store.set_record_semantics(record_decl, std::move(state));
+        return store.lookup_record_semantics(record_decl);
+    }
+    auto& overlay = tentative_overlays_.back();
+    overlay.erased_record_semantics.erase(record_decl);
+    auto& slot = overlay.record_semantics[record_decl];
+    slot = std::make_unique<RecordSemanticState>(std::move(state));
+    return slot.get();
+}
+
+void CollectQueryContext::erase_record_semantics(const ObjectDecl* record_decl,
+                                                 CollectSemanticStore& store) {
+    if (!record_decl) {
+        return;
+    }
+    if (tentative_overlays_.empty()) {
+        store.erase_record_semantics(record_decl);
+        return;
+    }
+    auto& overlay = tentative_overlays_.back();
+    overlay.record_semantics.erase(record_decl);
+    overlay.erased_record_semantics.insert(record_decl);
+}
+
+bool CollectQueryContext::lookup_enum_semantics(
+    const EnumDecl* enum_decl,
+    bool& is_incomplete_out,
+    std::shared_ptr<CType>& underlying_type_out,
+    bool& has_negative_values_out,
+    const CollectSemanticStore& store) const {
+    if (!enum_decl) {
+        return false;
+    }
+    for (auto it = tentative_overlays_.rbegin();
+         it != tentative_overlays_.rend();
+         ++it) {
+        if (it->erased_enum_semantics.contains(enum_decl)) {
+            ++metrics_.enum_semantics_misses;
+            return false;
+        }
+        auto overlay_it = it->enum_semantics.find(enum_decl);
+        if (overlay_it != it->enum_semantics.end()) {
+            is_incomplete_out = overlay_it->second.is_incomplete;
+            underlying_type_out = overlay_it->second.underlying_type;
+            has_negative_values_out = overlay_it->second.has_negative_values;
+            ++metrics_.enum_semantics_hits;
+            return true;
+        }
+    }
+    if (store.lookup_enum_semantics(enum_decl,
+                                    is_incomplete_out,
+                                    underlying_type_out,
+                                    has_negative_values_out)) {
+        ++metrics_.enum_semantics_hits;
+        return true;
+    }
+    ++metrics_.enum_semantics_misses;
+    return false;
+}
+
+void CollectQueryContext::publish_enum_semantics(
+    const EnumDecl* enum_decl,
+    bool is_incomplete,
+    std::shared_ptr<CType> underlying_type,
+    bool has_negative_values,
+    CollectSemanticStore& store) {
+    if (!enum_decl) {
+        return;
+    }
+    ++metrics_.enum_semantics_publications;
+    if (tentative_overlays_.empty()) {
+        store.set_enum_semantics(enum_decl,
+                                 is_incomplete,
+                                 std::move(underlying_type),
+                                 has_negative_values);
+        return;
+    }
+    auto& overlay = tentative_overlays_.back();
+    overlay.erased_enum_semantics.erase(enum_decl);
+    overlay.enum_semantics[enum_decl] = EnumSemanticsCacheEntry{
+        is_incomplete,
+        has_negative_values,
+        std::move(underlying_type)};
+}
+
+void CollectQueryContext::erase_enum_semantics(const EnumDecl* enum_decl,
+                                               CollectSemanticStore& store) {
+    if (!enum_decl) {
+        return;
+    }
+    if (tentative_overlays_.empty()) {
+        store.erase_enum_semantics(enum_decl);
+        return;
+    }
+    auto& overlay = tentative_overlays_.back();
+    overlay.enum_semantics.erase(enum_decl);
+    overlay.erased_enum_semantics.insert(enum_decl);
+}
+
+std::shared_ptr<CType>
+CollectQueryContext::lookup_template_specialization_resolved_type(
+    const TemplateSpecializationType* type,
+    const CollectSemanticStore& store) const {
+    if (!type) {
+        return nullptr;
+    }
+    for (auto it = tentative_overlays_.rbegin();
+         it != tentative_overlays_.rend();
+         ++it) {
+        auto overlay_it = it->template_specialization_resolved_types.find(type);
+        if (overlay_it != it->template_specialization_resolved_types.end()) {
+            ++metrics_.template_specialization_type_hits;
+            return overlay_it->second;
+        }
+    }
+    if (auto resolved_type = store.get_template_specialization_resolved_type(type)) {
+        ++metrics_.template_specialization_type_hits;
+        return resolved_type;
+    }
+    ++metrics_.template_specialization_type_misses;
+    return nullptr;
+}
+
+void CollectQueryContext::publish_template_specialization_resolved_type(
+    const TemplateSpecializationType* type,
+    std::shared_ptr<CType> resolved_type,
+    CollectSemanticStore& store) {
+    if (!type) {
+        return;
+    }
+    ++metrics_.template_specialization_type_publications;
+    if (tentative_overlays_.empty()) {
+        store.set_template_specialization_resolved_type(type,
+                                                        std::move(resolved_type));
+        return;
+    }
+    tentative_overlays_.back().template_specialization_resolved_types[type] =
+        std::move(resolved_type);
+}
+
+std::shared_ptr<CType> CollectQueryContext::lookup_dependent_name_resolved_type(
+    const DependentNameType* type,
+    const CollectSemanticStore& store) const {
+    if (!type) {
+        return nullptr;
+    }
+    for (auto it = tentative_overlays_.rbegin();
+         it != tentative_overlays_.rend();
+         ++it) {
+        auto overlay_it = it->dependent_name_resolved_types.find(type);
+        if (overlay_it != it->dependent_name_resolved_types.end()) {
+            ++metrics_.dependent_name_type_hits;
+            return overlay_it->second;
+        }
+    }
+    if (auto resolved_type = store.get_dependent_name_resolved_type(type)) {
+        ++metrics_.dependent_name_type_hits;
+        return resolved_type;
+    }
+    ++metrics_.dependent_name_type_misses;
+    return nullptr;
+}
+
+void CollectQueryContext::publish_dependent_name_resolved_type(
+    const DependentNameType* type,
+    std::shared_ptr<CType> resolved_type,
+    CollectSemanticStore& store) {
+    if (!type) {
+        return;
+    }
+    ++metrics_.dependent_name_type_publications;
+    if (tentative_overlays_.empty()) {
+        store.set_dependent_name_resolved_type(type, std::move(resolved_type));
+        return;
+    }
+    tentative_overlays_.back().dependent_name_resolved_types[type] =
+        std::move(resolved_type);
+}
+
+void CollectQueryContext::emit_metrics(std::ostream& os) const {
+    os << "[refactor-metrics] collect.query "
+       << "record_hits=" << metrics_.record_semantics_hits
+       << " record_misses=" << metrics_.record_semantics_misses
+       << " record_publishes=" << metrics_.record_semantics_publications
+       << " enum_hits=" << metrics_.enum_semantics_hits
+       << " enum_misses=" << metrics_.enum_semantics_misses
+       << " enum_publishes=" << metrics_.enum_semantics_publications
+       << " tstype_hits=" << metrics_.template_specialization_type_hits
+       << " tstype_misses=" << metrics_.template_specialization_type_misses
+       << " tstype_publishes=" << metrics_.template_specialization_type_publications
+       << " depname_hits=" << metrics_.dependent_name_type_hits
+       << " depname_misses=" << metrics_.dependent_name_type_misses
+       << " depname_publishes=" << metrics_.dependent_name_type_publications
+       << " overlay_begins=" << metrics_.overlay_begins
+       << " overlay_commits=" << metrics_.overlay_commits
+       << " overlay_rollbacks=" << metrics_.overlay_rollbacks
+       << " overlay_merges=" << metrics_.overlay_merges
+       << '\n';
+}
+
+Collect::Collect(std::shared_ptr<ASTContext> ast_ctx,
+                 std::shared_ptr<SourceManager> sm,
+                 std::shared_ptr<DiagnosticEngine> diag_engine,
+                 LangOptions lang_opts)
+    : ast_ctx_(std::move(ast_ctx)),
+      previous_active_query_context_(get_active_collect_query_context()),
+      side_table_scope_(ast_ctx_.get()),
+      sm_(std::move(sm)),
+      diag_engine_(std::move(diag_engine)),
+      lang_opts_(lang_opts) {
+    set_active_collect_query_context(&query_context_);
+}
+
+Collect::~Collect() {
+    if (refactor_metrics_enabled()) {
+        query_context_.emit_metrics(std::cerr);
+    }
+    if (get_active_collect_query_context() == &query_context_) {
+        set_active_collect_query_context(previous_active_query_context_);
+    }
+}
+
+const RecordSemanticState* Collect::query_lookup_record_semantics(
+    const ObjectDecl* record_decl) const {
+    if (!ast_ctx_ || !record_decl) {
+        return nullptr;
+    }
+    return query_context_.lookup_record_semantics(
+        record_decl,
+        ast_ctx_->semantic_store());
+}
+
+const RecordSemanticState* Collect::query_publish_record_semantics(
+    const ObjectDecl* record_decl,
+    RecordSemanticState state) {
+    if (!ast_ctx_ || !record_decl) {
+        return nullptr;
+    }
+    return query_context_.publish_record_semantics(
+        record_decl,
+        std::move(state),
+        ast_ctx_->semantic_store());
+}
+
+void Collect::query_erase_record_semantics(const ObjectDecl* record_decl) {
+    if (!ast_ctx_ || !record_decl) {
+        return;
+    }
+    query_context_.erase_record_semantics(record_decl, ast_ctx_->semantic_store());
+}
+
+bool Collect::query_lookup_enum_semantics(
+    const EnumDecl* enum_decl,
+    bool& is_incomplete_out,
+    std::shared_ptr<CType>& underlying_type_out,
+    bool& has_negative_values_out) const {
+    if (!ast_ctx_ || !enum_decl) {
+        return false;
+    }
+    return query_context_.lookup_enum_semantics(enum_decl,
+                                                is_incomplete_out,
+                                                underlying_type_out,
+                                                has_negative_values_out,
+                                                ast_ctx_->semantic_store());
+}
+
+void Collect::query_publish_enum_semantics(const EnumDecl* enum_decl,
+                                           bool is_incomplete,
+                                           std::shared_ptr<CType> underlying_type,
+                                           bool has_negative_values) {
+    if (!ast_ctx_ || !enum_decl) {
+        return;
+    }
+    query_context_.publish_enum_semantics(enum_decl,
+                                          is_incomplete,
+                                          std::move(underlying_type),
+                                          has_negative_values,
+                                          ast_ctx_->semantic_store());
+}
+
+std::shared_ptr<CType>
+Collect::query_lookup_template_specialization_resolved_type(
+    const TemplateSpecializationType* type) const {
+    if (!ast_ctx_ || !type) {
+        return nullptr;
+    }
+    return query_context_.lookup_template_specialization_resolved_type(
+        type,
+        ast_ctx_->semantic_store());
+}
+
+void Collect::query_publish_template_specialization_resolved_type(
+    const TemplateSpecializationType* type,
+    std::shared_ptr<CType> resolved_type) {
+    if (!ast_ctx_ || !type) {
+        return;
+    }
+    query_context_.publish_template_specialization_resolved_type(
+        type,
+        std::move(resolved_type),
+        ast_ctx_->semantic_store());
+}
+
+std::shared_ptr<CType> Collect::query_lookup_dependent_name_resolved_type(
+    const DependentNameType* type) const {
+    if (!ast_ctx_ || !type) {
+        return nullptr;
+    }
+    return query_context_.lookup_dependent_name_resolved_type(
+        type,
+        ast_ctx_->semantic_store());
+}
+
+void Collect::query_publish_dependent_name_resolved_type(
+    const DependentNameType* type,
+    std::shared_ptr<CType> resolved_type) {
+    if (!ast_ctx_ || !type) {
+        return;
+    }
+    query_context_.publish_dependent_name_resolved_type(
+        type,
+        std::move(resolved_type),
+        ast_ctx_->semantic_store());
+}

@@ -279,9 +279,9 @@ bool Collect::contains_deferred_semantic_type(
             typedef_type->underlying_type.get_shared());
     }
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(type)) {
-        auto resolved_type = lookup_template_specialization_resolved_type(
-            specialization.get(),
-            ast_ctx_.get());
+        auto resolved_type =
+            query_lookup_template_specialization_resolved_type(
+                specialization.get());
         if (!resolved_type && !specialization->is_dependent) {
             return true;
         }
@@ -302,9 +302,8 @@ bool Collect::contains_deferred_semantic_type(
         return false;
     }
     if (auto dependent_name = dyn_cast_shared<DependentNameType>(type)) {
-        auto resolved_type = lookup_dependent_name_resolved_type(
-            dependent_name.get(),
-            ast_ctx_.get());
+        auto resolved_type =
+            query_lookup_dependent_name_resolved_type(dependent_name.get());
         if (!resolved_type) {
             return true;
         }
@@ -529,9 +528,8 @@ QualType Collect::resolve_deferred_template_specialization_type(
         specialization.arguments,
         loc,
         mode);
-    auto resolved_type = lookup_template_specialization_resolved_type(
-        &specialization,
-        ast_ctx_.get());
+    auto resolved_type =
+        query_lookup_template_specialization_resolved_type(&specialization);
     if (specialization.is_dependent || resolved_type) {
         return original_type;
     }
@@ -550,8 +548,7 @@ QualType Collect::resolve_deferred_template_specialization_type(
                       specialization.arguments,
                       loc);
         if (specialization_decl && specialization_decl->get_record_type()) {
-            cache_template_specialization_resolved_type(
-                ast_ctx_.get(),
+            query_publish_template_specialization_resolved_type(
                 &specialization,
                 specialization_decl->get_record_type());
         }
@@ -577,8 +574,7 @@ QualType Collect::resolve_deferred_template_specialization_type(
     resolved_alias_type =
         resolve_deferred_semantic_type_impl(resolved_alias_type, loc, mode);
     if (resolved_alias_type) {
-        cache_template_specialization_resolved_type(
-            ast_ctx_.get(),
+        query_publish_template_specialization_resolved_type(
             &specialization,
             resolved_alias_type.get_shared());
     }
@@ -646,9 +642,8 @@ QualType Collect::resolve_deferred_dependent_name_type(
         dependent_name.template_arguments,
         loc,
         mode);
-    auto resolved_type = lookup_dependent_name_resolved_type(
-        &dependent_name,
-        ast_ctx_.get());
+    auto resolved_type =
+        query_lookup_dependent_name_resolved_type(&dependent_name);
     if (resolved_type) {
         auto rewritten_resolved_type =
             resolve_deferred_semantic_type_impl(
@@ -656,8 +651,7 @@ QualType Collect::resolve_deferred_dependent_name_type(
                 loc,
                 mode)
                 .get_shared();
-        cache_dependent_name_resolved_type(
-            ast_ctx_.get(),
+        query_publish_dependent_name_resolved_type(
             &dependent_name,
             rewritten_resolved_type);
         return original_type;
@@ -681,8 +675,7 @@ QualType Collect::resolve_deferred_dependent_name_type(
         resolved_nested_type,
         loc,
         mode);
-    cache_dependent_name_resolved_type(
-        ast_ctx_.get(),
+    query_publish_dependent_name_resolved_type(
         &dependent_name,
         resolved_nested_type.get_shared());
     return original_type;

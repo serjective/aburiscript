@@ -312,6 +312,7 @@ bool Collect::collect_is_tentative_parsing() const {
 
 
 void Collect::collect_start_translation_unit() {
+    query_context_.clear();
 
     session_.func_state_.in_function = false;
     session_.current_scope_ = std::make_shared<Scope>();

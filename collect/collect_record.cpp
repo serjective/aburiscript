@@ -276,128 +276,158 @@ struct VirtualSlotState {
 
 } // namespace
 
+class CollectRecordBuilder {
+public:
+    CollectRecordBuilder(
+        Collect& collect,
+        const CppRecordDecl& record,
+        std::optional<std::string> semantic_tag_name,
+        std::vector<std::unique_ptr<Decl>>* transient_decls_out,
+        Collect::CppRecordDeferredBodyCallback deferred_body_callback)
+        : collect_(collect),
+          record_(record),
+          semantic_tag_name_(std::move(semantic_tag_name)),
+          transient_decls_out_(transient_decls_out),
+          deferred_body_callback_(std::move(deferred_body_callback)) {}
+
+    std::unique_ptr<Decl> build() {
+        if (record_.name.empty()) {
+            return nullptr;
+        }
+
+        bool is_union_record = record_.record_kind == CppRecordKind::Union;
+        const std::string& record_name = record_.name;
+        std::string semantic_tag = semantic_tag_name_.has_value()
+            ? std::move(*semantic_tag_name_)
+            : record_name;
+        const std::string& tag = semantic_tag;
+
+        ObjectDecl* existing_obj_decl = nullptr;
+        if (auto* existing_tag_decl = collect_.collect_lookup_tag_decl(tag, false)) {
+            existing_obj_decl = dyn_cast<ObjectDecl>(existing_tag_decl);
+            if (!existing_obj_decl) {
+                collect_.report_error(
+                    "tag '" + tag + "' was previously declared with a different kind",
+                    record_.location);
+            }
+        }
+
+        std::shared_ptr<ObjectType> record_type = existing_obj_decl
+            ? existing_obj_decl->get_record_type()
+            : std::make_shared<ObjectType>(
+                  tag, is_union_record, !record_.is_definition);
+        if (!record_type) {
+            collect_.report_error(
+                "failed to build semantic record type for " +
+                    std::string(cpp_record_kind_spelling(record_.record_kind)) +
+                    " '" + tag + "'",
+                record_.location);
+        }
+        if (record_type && record_type->is_union != is_union_record) {
+            collect_.report_error(
+                "tag '" + tag + "' was previously declared as a different kind",
+                record_.location);
+        }
+        if (record_.is_definition && existing_obj_decl && record_type &&
+            !record_type->isIncomplete()) {
+            collect_.report_error(
+                "redefinition of " +
+                    std::string(cpp_record_kind_spelling(record_.record_kind)) +
+                    " '" + tag + "'",
+                record_.location);
+        }
+
+        auto semantic_decl = collect_.collect_record_declaration(
+            tag,
+            record_type,
+            is_union_record,
+            record_.location);
+        if (!semantic_decl) {
+            return nullptr;
+        }
+
+        RecordSemanticState semantic_state;
+        if (record_.is_definition) {
+            Collect::CollectRecordBuildContext ctx{
+                &record_,
+                record_.location,
+                record_name,
+                tag,
+                is_union_record,
+                record_type,
+                semantic_decl.get(),
+                transient_decls_out_,
+                std::move(deferred_body_callback_)};
+            ctx.semantic_state.is_incomplete = false;
+            ctx.semantic_state.alignment = 1;
+            ctx.semantic_state.non_virtual_alignment = 1;
+            if (const auto* definition_data = record_.get_definition_data()) {
+                ctx.semantic_state.definition_data = *definition_data;
+            }
+            ctx.fields.reserve(record_.members.size());
+            ctx.methods.reserve(record_.members.size());
+            ctx.method_templates.reserve(record_.members.size());
+            ctx.static_data_members.reserve(record_.members.size());
+            ctx.nested_types.reserve(record_.members.size());
+            ctx.nested_templates.reserve(record_.members.size());
+            ctx.seen_static_data_member_names.reserve(record_.members.size());
+            ctx.constructors.reserve(record_.members.size());
+            ctx.destructors.reserve(record_.members.size());
+            ctx.required_ctor_member_init_fields.reserve(record_.members.size());
+
+            collect_.collect_record_resolve_bases(ctx);
+            collect_.collect_record_walk_virtual_bases(ctx);
+            collect_.collect_record_collect_members(ctx);
+            collect_.collect_record_synthesize_implicit_members(ctx);
+            collect_.collect_record_resolve_virtual_dispatch(ctx);
+            collect_.collect_record_compute_layout(ctx);
+            collect_.collect_record_publish_semantics(ctx);
+
+            if (ctx.deferred_body_callback) {
+                ctx.deferred_body_callback(
+                    *ctx.record,
+                    ctx.record_type,
+                    ctx.semantic_state);
+            }
+
+            semantic_state = std::move(ctx.semantic_state);
+        } else if (existing_obj_decl) {
+            if (const auto* existing_state =
+                    collect_.query_lookup_record_semantics(existing_obj_decl)) {
+                semantic_state = *existing_state;
+            }
+        } else {
+            semantic_state = RecordSemanticState{};
+            if (record_type) {
+                record_type->set_decl(semantic_decl.get());
+            }
+        }
+
+        collect_.query_publish_record_semantics(semantic_decl.get(),
+                                                std::move(semantic_state));
+        collect_.collect_add_tag_decl(tag, semantic_decl.get());
+        return semantic_decl;
+    }
+
+private:
+    Collect& collect_;
+    const CppRecordDecl& record_;
+    std::optional<std::string> semantic_tag_name_;
+    std::vector<std::unique_ptr<Decl>>* transient_decls_out_ = nullptr;
+    Collect::CppRecordDeferredBodyCallback deferred_body_callback_;
+};
+
 std::unique_ptr<Decl> Collect::collect_build_cpp_record_semantic_decl(
     const CppRecordDecl& record,
     std::optional<std::string> semantic_tag_name,
     std::vector<std::unique_ptr<Decl>>* transient_decls_out,
     CppRecordDeferredBodyCallback deferred_body_callback) {
-    if (record.name.empty()) {
-        return nullptr;
-    }
-
-    bool is_union_record = record.record_kind == CppRecordKind::Union;
-    const std::string& record_name = record.name;
-    std::string semantic_tag = semantic_tag_name.has_value()
-        ? std::move(*semantic_tag_name)
-        : record_name;
-    const std::string& tag = semantic_tag;
-
-    ObjectDecl* existing_obj_decl = nullptr;
-    if (auto* existing_tag_decl = collect_lookup_tag_decl(tag, false)) {
-        existing_obj_decl = dyn_cast<ObjectDecl>(existing_tag_decl);
-        if (!existing_obj_decl) {
-            report_error(
-                "tag '" + tag + "' was previously declared with a different kind",
-                record.location);
-        }
-    }
-
-    std::shared_ptr<ObjectType> record_type = existing_obj_decl
-        ? existing_obj_decl->get_record_type()
-        : std::make_shared<ObjectType>(tag, is_union_record, !record.is_definition);
-    if (!record_type) {
-        report_error(
-            "failed to build semantic record type for " +
-                std::string(cpp_record_kind_spelling(record.record_kind)) +
-                " '" + tag + "'",
-            record.location);
-    }
-    if (record_type && record_type->is_union != is_union_record) {
-        report_error(
-            "tag '" + tag + "' was previously declared as a different kind",
-            record.location);
-    }
-    if (record.is_definition && existing_obj_decl && record_type &&
-        !record_type->isIncomplete()) {
-        report_error(
-            "redefinition of " +
-                std::string(cpp_record_kind_spelling(record.record_kind)) +
-                " '" + tag + "'",
-            record.location);
-    }
-
-    auto semantic_decl = collect_record_declaration(
-        tag,
-        record_type,
-        is_union_record,
-        record.location);
-    if (!semantic_decl) {
-        return nullptr;
-    }
-
-    RecordSemanticState semantic_state;
-    if (record.is_definition) {
-        CollectRecordBuildContext ctx{
-            &record,
-            record.location,
-            record_name,
-            tag,
-            is_union_record,
-            record_type,
-            semantic_decl.get(),
-            transient_decls_out,
-            std::move(deferred_body_callback)};
-        ctx.semantic_state.is_incomplete = false;
-        ctx.semantic_state.alignment = 1;
-        ctx.semantic_state.non_virtual_alignment = 1;
-        if (const auto* definition_data = record.get_definition_data()) {
-            ctx.semantic_state.definition_data = *definition_data;
-        }
-        ctx.fields.reserve(record.members.size());
-        ctx.methods.reserve(record.members.size());
-        ctx.method_templates.reserve(record.members.size());
-        ctx.static_data_members.reserve(record.members.size());
-        ctx.nested_types.reserve(record.members.size());
-        ctx.nested_templates.reserve(record.members.size());
-        ctx.seen_static_data_member_names.reserve(record.members.size());
-        ctx.constructors.reserve(record.members.size());
-        ctx.destructors.reserve(record.members.size());
-        ctx.required_ctor_member_init_fields.reserve(record.members.size());
-
-        collect_record_resolve_bases(ctx);
-        collect_record_walk_virtual_bases(ctx);
-        collect_record_collect_members(ctx);
-        collect_record_synthesize_implicit_members(ctx);
-        collect_record_resolve_virtual_dispatch(ctx);
-        collect_record_compute_layout(ctx);
-        collect_record_publish_semantics(ctx);
-
-        if (ctx.deferred_body_callback) {
-            ctx.deferred_body_callback(
-                *ctx.record,
-                ctx.record_type,
-                ctx.semantic_state);
-        }
-
-        semantic_state = std::move(ctx.semantic_state);
-    } else if (existing_obj_decl) {
-        if (const auto* existing_state =
-                record_semantics_cache_lookup(existing_obj_decl)) {
-            semantic_state = *existing_state;
-        }
-    } else {
-        semantic_state = RecordSemanticState{};
-        if (record_type) {
-            record_type->set_decl(semantic_decl.get());
-        }
-    }
-
-    record_semantics_cache_set(
-        ast_ctx_.get(),
-        semantic_decl.get(),
-        std::move(semantic_state));
-    collect_add_tag_decl(tag, semantic_decl.get());
-    return semantic_decl;
+    CollectRecordBuilder builder(*this,
+                                 record,
+                                 std::move(semantic_tag_name),
+                                 transient_decls_out,
+                                 std::move(deferred_body_callback));
+    return builder.build();
 }
 
 void Collect::collect_record_register_function_default_arguments(
@@ -1939,15 +1969,15 @@ void Collect::collect_record_compute_layout(CollectRecordBuildContext& ctx) cons
 void Collect::collect_record_publish_state(
     ObjectDecl* semantic_decl,
     const std::shared_ptr<ObjectType>& record_type,
-    const RecordSemanticState& state) const {
+    const RecordSemanticState& state) {
     if (record_type) {
         record_type->set_decl(semantic_decl);
     }
-    record_semantics_cache_set(ast_ctx_.get(), semantic_decl, state);
+    query_publish_record_semantics(semantic_decl, state);
 }
 
 void Collect::collect_record_publish_semantics(
-    CollectRecordBuildContext& ctx) const {
+    CollectRecordBuildContext& ctx) {
     ctx.semantic_state.bases = std::move(ctx.bases);
     ctx.semantic_state.virtual_bases = std::move(ctx.virtual_bases);
     ctx.semantic_state.methods = std::move(ctx.methods);

@@ -536,8 +536,8 @@ void Parser::ensure_cpp_class_placeholder_type(const std::string& name, SrcLoc l
     if (!placeholder_decl) {
         return;
     }
-    record_semantics_cache_set(
-        ast_ctx.get(), placeholder_decl.get(), RecordSemanticState{});
+    collect_->query_publish_record_semantics(placeholder_decl.get(),
+                                             RecordSemanticState{});
     collect_->collect_add_tag_decl(name, placeholder_decl.get());
     cpp_transient_semantic_decls_.push_back(std::move(placeholder_decl));
 }
@@ -694,7 +694,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 base_spec.location);
         }
         const RecordSemanticState* base_state =
-            record_semantics_cache_lookup(canonical_base_decl);
+            collect_->query_lookup_record_semantics(canonical_base_decl);
         if (!base_state || base_state->is_incomplete) {
             error_custloc(
                 "base class '" + base_name +
@@ -1056,7 +1056,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
     if (auto* definition_data = record->get_definition_data()) {
         *definition_data = semantic_state.definition_data;
     }
-    record_semantics_cache_set(ast_ctx.get(), placeholder_decl, semantic_state);
+    collect_->query_publish_record_semantics(placeholder_decl,
+                                             std::move(semantic_state));
 
     struct DeferredInlineParserState {
         size_t token_idx = 0;
@@ -2194,7 +2195,8 @@ void Parser::resolve_qualified_declarator_match(
     }
 
     const RecordSemanticState* owner_state =
-        record_semantics_cache_lookup(qualified_declarator.owner_record_decl);
+        collect_->query_lookup_record_semantics(
+            qualified_declarator.owner_record_decl);
     if (!owner_state || owner_state->is_incomplete) {
         std::vector<std::string> owner_qualifiers = qualified_declarator.qualifiers;
         std::string owner_terminal;
@@ -2867,7 +2869,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             }
 
             if (const auto* owner_state =
-                    record_semantics_cache_lookup(
+                    collect_->query_lookup_record_semantics(
                         qualified_declarator.owner_record_decl)) {
                 RecordSemanticState updated_state = *owner_state;
                 if (!matched_member_template) {
@@ -2883,8 +2885,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                         break;
                     }
                 }
-                record_semantics_cache_set(
-                    ast_ctx.get(),
+                collect_->query_publish_record_semantics(
                     qualified_declarator.owner_record_decl,
                     std::move(updated_state));
             }
@@ -3208,7 +3209,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
         }
 
         if (const auto* owner_state =
-                record_semantics_cache_lookup(
+                collect_->query_lookup_record_semantics(
                     qualified_declarator.owner_record_decl)) {
             RecordSemanticState updated_state = *owner_state;
             for (auto& static_member : updated_state.static_data_members) {
@@ -3221,8 +3222,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
                 static_member.symbol = declared_sym;
                 break;
             }
-            record_semantics_cache_set(
-                ast_ctx.get(),
+            collect_->query_publish_record_semantics(
                 qualified_declarator.owner_record_decl,
                 std::move(updated_state));
         }
@@ -4269,12 +4269,20 @@ std::unique_ptr<Decl> Parser::parse_struct_specifier() {
         if (!record_decl) {
             return state;
         }
-        if (const RecordSemanticState* cached = record_semantics_cache_lookup(record_decl)) {
+        const RecordSemanticState* cached =
+            collect_ ? collect_->query_lookup_record_semantics(record_decl)
+                     : record_semantics_cache_lookup(record_decl);
+        if (cached) {
             state = *cached;
         }
         return state;
     };
     auto write_record_state = [&](const ObjectDecl* record_decl, RecordSemanticState state) {
+        if (collect_) {
+            collect_->query_publish_record_semantics(record_decl,
+                                                     std::move(state));
+            return;
+        }
         record_semantics_cache_set(ast_ctx.get(), record_decl, std::move(state));
     };
     auto extract_record_decl = [&](TagDecl* existing_tag_decl,
@@ -4293,7 +4301,10 @@ std::unique_ptr<Decl> Parser::parse_struct_specifier() {
         if (!src || !dst) {
             return;
         }
-        if (const RecordSemanticState* src_state = record_semantics_cache_lookup(src)) {
+        const RecordSemanticState* src_state =
+            collect_ ? collect_->query_lookup_record_semantics(src)
+                     : record_semantics_cache_lookup(src);
+        if (src_state) {
             write_record_state(dst, *src_state);
         }
     };
@@ -4593,15 +4604,29 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
         if (!enum_decl) {
             return state;
         }
-        enum_semantics_cache_lookup(
-            enum_decl,
-            state.is_incomplete,
-            state.underlying_type,
-            state.has_negative_values,
-            ast_ctx.get());
+        if (collect_) {
+            collect_->query_lookup_enum_semantics(enum_decl,
+                                                  state.is_incomplete,
+                                                  state.underlying_type,
+                                                  state.has_negative_values);
+        } else {
+            enum_semantics_cache_lookup(
+                enum_decl,
+                state.is_incomplete,
+                state.underlying_type,
+                state.has_negative_values,
+                ast_ctx.get());
+        }
         return state;
     };
     auto write_enum_state = [&](const EnumDecl* enum_decl, const EnumSemanticState& state) {
+        if (collect_) {
+            collect_->query_publish_enum_semantics(enum_decl,
+                                                   state.is_incomplete,
+                                                   state.underlying_type,
+                                                   state.has_negative_values);
+            return;
+        }
         enum_semantics_cache_set(
             ast_ctx.get(),
             enum_decl,
