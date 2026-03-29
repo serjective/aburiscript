@@ -165,15 +165,23 @@ public:
 
     void set_lang_options(LangOptions lang_opts) ;
 
-    // === Tentative parsing ===
+    // === Speculation and session isolation ===
 
-    void collect_begin_tentative_parse() ;
+    void collect_begin_session_isolation() ;
 
-    void collect_commit_tentative_parse() ;
+    void collect_commit_session_isolation() ;
 
-    void collect_rollback_tentative_parse() ;
+    void collect_rollback_session_isolation() ;
 
-    bool collect_is_tentative_parsing() const ;
+    bool collect_is_session_isolating() const ;
+
+    void collect_begin_speculative_parse() ;
+
+    void collect_commit_speculative_parse() ;
+
+    void collect_rollback_speculative_parse() ;
+
+    bool collect_is_speculative_parsing() const ;
 
     void collect_start_translation_unit() ;
 

@@ -240,25 +240,22 @@ void Collect::record_global_scope_mutation(
     }
 }
 
-void Collect::collect_begin_tentative_parse() {
-    bump_tentative_begins();
+void Collect::collect_begin_session_isolation() {
     TentativeSnapshot snapshot;
     session_.tentative_snapshots_.push_back(std::move(snapshot));
 }
 
-void Collect::collect_commit_tentative_parse() {
+void Collect::collect_commit_session_isolation() {
     if (session_.tentative_snapshots_.empty()) {
         return;
     }
-    bump_tentative_commits();
     session_.tentative_snapshots_.pop_back();
 }
 
-void Collect::collect_rollback_tentative_parse() {
+void Collect::collect_rollback_session_isolation() {
     if (session_.tentative_snapshots_.empty()) {
         return;
     }
-    bump_tentative_rollbacks();
     TentativeSnapshot snapshot = std::move(session_.tentative_snapshots_.back());
     session_.tentative_snapshots_.pop_back();
     if (!snapshot.materialized) {
@@ -306,8 +303,38 @@ void Collect::collect_rollback_tentative_parse() {
     sync_decl_context_from_current_scope();
 }
 
-bool Collect::collect_is_tentative_parsing() const {
+bool Collect::collect_is_session_isolating() const {
     return !session_.tentative_snapshots_.empty();
+}
+
+void Collect::collect_begin_speculative_parse() {
+    bump_tentative_begins();
+    collect_begin_session_isolation();
+    query_context_.begin_tentative_overlay();
+}
+
+void Collect::collect_commit_speculative_parse() {
+    if (session_.tentative_snapshots_.empty() ||
+        !query_context_.has_tentative_overlay()) {
+        return;
+    }
+    bump_tentative_commits();
+    query_context_.commit_tentative_overlay(ast_ctx_->semantic_store());
+    collect_commit_session_isolation();
+}
+
+void Collect::collect_rollback_speculative_parse() {
+    if (session_.tentative_snapshots_.empty() ||
+        !query_context_.has_tentative_overlay()) {
+        return;
+    }
+    bump_tentative_rollbacks();
+    query_context_.rollback_tentative_overlay();
+    collect_rollback_session_isolation();
+}
+
+bool Collect::collect_is_speculative_parsing() const {
+    return query_context_.has_tentative_overlay();
 }
 
 

@@ -97,7 +97,7 @@ size_t Parser::begin_tentative_context() {
         frame.diag_checkpoint = diag_engine->checkpoint();
     }
     if (collect_) {
-        collect_->collect_begin_tentative_parse();
+        collect_->collect_begin_speculative_parse();
     }
     tentative_context_stack_.push_back(std::move(frame));
     return tentative_context_stack_.back().id;
@@ -105,7 +105,7 @@ size_t Parser::begin_tentative_context() {
 
 void Parser::restore_tentative_context_frame(const TentativeContextFrame& frame) {
     if (collect_) {
-        collect_->collect_rollback_tentative_parse();
+        collect_->collect_rollback_speculative_parse();
     }
     restore_tentative_state(frame.parser_checkpoint);
     cxx_tentative_state_ = frame.cxx_disambiguation_state;
@@ -133,7 +133,7 @@ void Parser::commit_tentative_context(size_t context_id) {
     tentative_context_stack_.pop_back();
     bump_tentative_context_commits();
     if (collect_) {
-        collect_->collect_commit_tentative_parse();
+        collect_->collect_commit_speculative_parse();
     }
 }
 

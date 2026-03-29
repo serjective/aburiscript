@@ -1528,7 +1528,15 @@ const RecordSemanticState* record_semantics_cache_lookup(
     if (!record_decl) {
         return nullptr;
     }
-    if (const auto* cache_ctx = record_semantics_ast_context(record_decl, ast_ctx)) {
+    const ASTContext* cache_ctx = record_semantics_ast_context(record_decl, ast_ctx);
+    if (!cache_ctx) {
+        // Speculative query overlays can publish semantics for transient
+        // declarations before durable side-table ownership is assigned.
+        // Fall back to the active ASTContext so those overlay-backed facts stay
+        // visible during the same semantic action.
+        cache_ctx = effective_ast_context(static_cast<const ASTContext*>(nullptr));
+    }
+    if (cache_ctx) {
         if (auto* query_context = get_active_collect_query_context()) {
             return query_context->lookup_record_semantics(
                 record_decl,
@@ -2019,7 +2027,11 @@ bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
     if (!enum_decl) {
         return false;
     }
-    if (const auto* cache_ctx = enum_semantics_ast_context(enum_decl, ast_ctx)) {
+    const ASTContext* cache_ctx = enum_semantics_ast_context(enum_decl, ast_ctx);
+    if (!cache_ctx) {
+        cache_ctx = effective_ast_context(static_cast<const ASTContext*>(nullptr));
+    }
+    if (cache_ctx) {
         if (auto* query_context = get_active_collect_query_context()) {
             return query_context->lookup_enum_semantics(
                 enum_decl,

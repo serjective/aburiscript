@@ -2241,13 +2241,16 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
             true);
     }
 
-    collect_->collect_begin_tentative_parse();
-    struct TentativeCollectRollbackGuard {
+    // Class-template pattern parsing needs temporary template-parameter scope
+    // state, but the accepted pattern's semantic owner and published pattern
+    // semantics are durable and must survive the rollback below.
+    collect_->collect_begin_session_isolation();
+    struct SessionIsolationRollbackGuard {
         Collect* collect = nullptr;
         bool active = true;
-        ~TentativeCollectRollbackGuard() {
+        ~SessionIsolationRollbackGuard() {
             if (active && collect) {
-                collect->collect_rollback_tentative_parse();
+                collect->collect_rollback_session_isolation();
             }
         }
     } collect_rollback_guard{collect_.get(), true};
@@ -2351,7 +2354,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
         }
     }
 
-    collect_->collect_rollback_tentative_parse();
+    collect_->collect_rollback_session_isolation();
     collect_rollback_guard.active = false;
     collect_->collect_leave_scope();
     template_scope_guard.active = false;
