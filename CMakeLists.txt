@@ -164,6 +164,8 @@ set(ABURI_LIBRARY_SOURCES
         preprocessor.h
         builtin_registry.cpp
         builtin_registry.h
+        toolchain_profile.cpp
+        toolchain_profile.h
         numeric_utils.h
         diagnostics.cpp
         diagnostics.h

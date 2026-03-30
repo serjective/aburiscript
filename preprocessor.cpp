@@ -2257,8 +2257,7 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
     }
     new_file = resolve_include_file(sm.get(), curr_file, file_name, isSystem, is_next);
     if (!new_file) {
-        error("couldn't find file " + file_name, def_loc);
-        // todo: list search paths
+        error(sm->formatIncludeLookupFailure(file_name), def_loc);
     }
     detect_include_guard(new_file);
     if (import_once_included.contains(new_file->file_id)) {

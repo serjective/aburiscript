@@ -111,6 +111,30 @@ std::string SourceManager::makeIncludeSearchCacheKey(const std::string& name, si
     return key;
 }
 
+std::string SourceManager::formatIncludeLookupFailure(const std::string& name) const {
+    std::string message = "couldn't find file " + name;
+    if (!cxx_stdlib_lookup_active) {
+        return message;
+    }
+
+    message += "\nnote: C++ stdlib selection: requested '" +
+               (requested_cxx_stdlib.empty() ? "auto" : requested_cxx_stdlib) + "'";
+    if (!resolved_cxx_stdlib.empty() && resolved_cxx_stdlib != requested_cxx_stdlib) {
+        message += ", resolved '" + resolved_cxx_stdlib + "'";
+    }
+
+    if (attempted_cxx_stdlib_paths.empty()) {
+        message += "\nnote: no auto-discovered C++ stdlib roots were found";
+        return message;
+    }
+
+    message += "\nnote: searched C++ stdlib roots:";
+    for (const auto& path : attempted_cxx_stdlib_paths) {
+        message += "\nnote:   " + path;
+    }
+    return message;
+}
+
 std::shared_ptr<FileSrc> SourceManager::lookThroughPaths(const std::string& name) {
     ensureIncludeSearchCacheFresh();
     auto cache_it = include_search_cache.find(name);

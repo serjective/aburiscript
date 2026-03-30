@@ -16,6 +16,7 @@
 #include "abi/darwin_blocks.h"
 #include "abi/target_info.h"
 #include "target_feature_gate.h"
+#include "toolchain_profile.h"
 #include <llvm/Config/llvm-config.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
@@ -29,6 +30,9 @@ static cl::list<std::string> InputFilenames(cl::Positional, cl::desc("<input fil
 static cl::opt<std::string> OutputFilename("o", cl::desc("Output filename"), cl::value_desc("filename"), cl::cat(AburiCategory));
 static cl::opt<bool> CompileOnly("c", cl::desc("Compile only; do not link"), cl::cat(AburiCategory));
 static cl::opt<bool> PreprocessOnly("E", cl::desc("Preprocess only; print post-preprocessed output"), cl::cat(AburiCategory));
+static cl::opt<bool> FSyntaxOnly("fsyntax-only",
+    cl::desc("Run preprocessing, parsing, and semantic analysis only"),
+    cl::init(false), cl::cat(AburiCategory));
 static cl::opt<bool> DumpMacroDefinitions("dM",
     cl::desc("With -E, emit macro definitions instead of preprocessed text"),
     cl::init(false), cl::cat(AburiCategory));
@@ -58,6 +62,9 @@ static cl::opt<std::string> TargetTriple("target", cl::desc("Target triple"),
     cl::value_desc("triple"), cl::init(""), cl::cat(AburiCategory));
 static cl::opt<std::string> StdOption("std", cl::desc("Language standard (e.g. c89, gnu89, c99, c11, gnu11)"),
     cl::value_desc("standard"), cl::init(""), cl::cat(AburiCategory));
+static cl::opt<std::string> StdLibOption("stdlib",
+    cl::desc("C++ standard library family (auto|libc++|libstdc++)"),
+    cl::value_desc("library"), cl::init("auto"), cl::cat(AburiCategory));
 static cl::opt<std::string> LanguageOption("x",
     cl::desc("Treat input files as having this language (c|c++)"),
     cl::value_desc("language"), cl::init(""), cl::cat(AburiCategory));
@@ -1349,6 +1356,13 @@ int main(int argc, char** argv) {
         if (MNoMsBitfields) {
             driver_abi_options.bitfield_abi = BitfieldABI::ITANIUM;
         }
+        auto parsed_stdlib = parse_stdlib_kind(StdLibOption);
+        if (!parsed_stdlib.has_value()) {
+            std::cerr << "Error: invalid value for '-stdlib': '" << StdLibOption
+                      << "' (expected: auto|libc++|libstdc++)" << std::endl;
+            return 1;
+        }
+        StdLibKind requested_stdlib = *parsed_stdlib;
         std::optional<LanguageMode> forced_language_mode;
         if (!LanguageOption.empty()) {
             LangOptions probe;
@@ -1384,6 +1398,10 @@ int main(int argc, char** argv) {
                 return 0;
             }
             std::cerr << "Error: no input files" << std::endl;
+            return 1;
+        }
+        if (FSyntaxOnly && (PreprocessOnly || EmitAssembly || EmitLLVM)) {
+            std::cerr << "Error: cannot combine '-fsyntax-only' with '-E', '-S', or '--emit-llvm'" << std::endl;
             return 1;
         }
         if (PreprocessOnly && !OutputFilename.empty() && InputFilenames.size() != 1) {
@@ -1455,6 +1473,13 @@ int main(int argc, char** argv) {
                         ccArgs.push_back("-o");
                         ccArgs.push_back(OutputFilename);
                     }
+                    run_command("/usr/bin/cc", ccArgs);
+                    continue;
+                }
+                if (FSyntaxOnly) {
+                    std::vector<std::string> ccArgs = passthrough_compile_flags;
+                    ccArgs.push_back("-fsyntax-only");
+                    ccArgs.push_back(inputFilename);
                     run_command("/usr/bin/cc", ccArgs);
                     continue;
                 }
@@ -1534,12 +1559,24 @@ int main(int argc, char** argv) {
             if (main_file) {
                 main_file->directory = inputPath.parent_path().string();
             }
+            auto cxx_stdlib_paths = discover_cxx_stdlib_include_paths(
+                argc > 0 ? argv[0] : nullptr,
+                target_triple,
+                lang_opts.is_cxx_mode(),
+                requested_stdlib);
+            pp.sm->cxx_stdlib_lookup_active = lang_opts.is_cxx_mode();
+            pp.sm->requested_cxx_stdlib = stdlib_kind_name(requested_stdlib);
+            pp.sm->resolved_cxx_stdlib = stdlib_kind_name(cxx_stdlib_paths.resolved);
+            pp.sm->attempted_cxx_stdlib_paths = cxx_stdlib_paths.attempted_paths;
             std::vector<std::string> include_paths;
             std::unordered_set<std::string> seen_paths;
             for (const auto& path : IncludePaths) {
                 try_add_include_path(path, include_paths, seen_paths);
             }
             for (const auto& path : SystemIncludePaths) {
+                try_add_include_path(path, include_paths, seen_paths);
+            }
+            for (const auto& path : cxx_stdlib_paths.include_paths) {
                 try_add_include_path(path, include_paths, seen_paths);
             }
             std::vector<std::string> quote_include_paths;
@@ -1607,6 +1644,9 @@ int main(int argc, char** argv) {
             if (AstMemoryReport) {
                 print_ast_memory_report(std::cout, ast.get(), *parser.ast_ctx);
             }
+            if (FSyntaxOnly) {
+                continue;
+            }
 
             // 3. CodeGen (Parser::parse() already performs semantic analysis)
             ASTToLLVM codegen;
@@ -1662,7 +1702,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (!CompileOnly && !EmitAssembly && !EmitLLVM && !PreprocessOnly) {
+        if (!CompileOnly && !EmitAssembly && !EmitLLVM && !PreprocessOnly && !FSyntaxOnly) {
             // Linking stage
             std::string exeOut = OutputFilename.empty() ? "a.out" : std::string(OutputFilename);
             std::vector<std::string> linkerArgs;
