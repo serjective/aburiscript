@@ -5091,12 +5091,28 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     error_custloc("record declarations cannot be declared 'virtual'",
                                   current_token().loc);
                 }
-                auto nested = parse_cpp_record_specifier();
-                check_and_consume(TokenType::SEMICOLON);
-                members.push_back(std::move(nested));
-                diag_engine->sync_point_reached();
-                last_recovery_idx = std::numeric_limits<size_t>::max();
-                continue;
+
+                bool consumed_nested_record_decl = false;
+                RevertingTentativeParsingAction tentative(*this);
+                try {
+                    auto nested = parse_cpp_record_specifier();
+                    if (gentle_check(TokenType::SEMICOLON)) {
+                        tentative.commit();
+                        check_and_consume(TokenType::SEMICOLON);
+                        members.push_back(std::move(nested));
+                        diag_engine->sync_point_reached();
+                        last_recovery_idx = std::numeric_limits<size_t>::max();
+                        consumed_nested_record_decl = true;
+                    }
+                } catch (const ParseError& e) {
+                    if (e.message.find("C++ parser unsupported syntax:") == 0) {
+                        throw;
+                    }
+                }
+
+                if (consumed_nested_record_decl) {
+                    continue;
+                }
             }
 
             auto parsed_members = parse_struct_declaration(member_leading_virtual);
