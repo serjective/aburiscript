@@ -2366,23 +2366,34 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
     } else {
         error("Invalid argument for include directive, expected \" or < but got " + tokens[0].value, tokens[0].loc);
     }
-    // Check for built-in headers (e.g., <stdarg.h>)
-    if (isSystem) {
+    const bool use_builtin_header_first = isSystem && !lang_opts.is_cxx_mode();
+    if (use_builtin_header_first) {
         auto it = builtin_headers.find(file_name);
         if (it != builtin_headers.end()) {
             auto builtin_sloc = sm->createFileEntry(file_name, std::string(it->second));
-            tok_stack.push_back(std::make_unique<FileTokenSrc>(builtin_sloc, builtin_sloc->offset, sm.get(), lang_opts));
+            tok_stack.push_back(
+                std::make_unique<FileTokenSrc>(builtin_sloc, builtin_sloc->offset, sm.get(), lang_opts));
             current_file_id = builtin_sloc->file_id;
             return;
         }
     }
-
     std::shared_ptr<FileSrc> new_file;
     auto curr_file = sm->getFileWithId(current_file_id);
     if (!isSystem && !is_next && !curr_file) {
         error("Internal error: couldn't find file_id in handleIncludeDirective", def_loc);
     }
     new_file = resolve_include_file(sm.get(), curr_file, file_name, isSystem, is_next);
+    // dup code but its fine because dependence on custom headers should be temporary
+    if (!new_file && isSystem && lang_opts.is_cxx_mode()) {
+        auto it = builtin_headers.find(file_name);
+        if (it != builtin_headers.end()) {
+            auto builtin_sloc = sm->createFileEntry(file_name, std::string(it->second));
+            tok_stack.push_back(
+                std::make_unique<FileTokenSrc>(builtin_sloc, builtin_sloc->offset, sm.get(), lang_opts));
+            current_file_id = builtin_sloc->file_id;
+            return;
+        }
+    }
     if (!new_file) {
         error(sm->formatIncludeLookupFailure(file_name), def_loc);
     }
