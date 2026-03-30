@@ -86,6 +86,46 @@ void maybe_record_candidate(const std::filesystem::path& candidate,
     }
 }
 
+void add_latest_darwin_sdk_candidate(const std::filesystem::path& sdk_dir,
+                                     std::vector<std::string>& attempted_paths,
+                                     std::unordered_set<std::string>& attempted_seen,
+                                     std::vector<std::string>& include_paths,
+                                     std::unordered_set<std::string>& include_seen) {
+    std::error_code ec;
+    if (!std::filesystem::exists(sdk_dir, ec) || !std::filesystem::is_directory(sdk_dir, ec)) {
+        return;
+    }
+
+    const std::filesystem::path default_sdk = sdk_dir / "MacOSX.sdk";
+    if (std::filesystem::exists(default_sdk, ec)) {
+        maybe_record_candidate(default_sdk / "usr" / "include" / "c++" / "v1",
+            attempted_paths, attempted_seen, include_paths, include_seen);
+        return;
+    }
+
+    std::vector<std::filesystem::path> candidates;
+    for (const auto& entry : std::filesystem::directory_iterator(sdk_dir, ec)) {
+        if (ec) {
+            break;
+        }
+        if (!entry.is_directory(ec)) {
+            continue;
+        }
+        auto path = entry.path();
+        const std::string name = path.filename().string();
+        if (name.rfind("MacOSX", 0) == 0 && path.extension() == ".sdk") {
+            candidates.push_back(path);
+        }
+    }
+    if (candidates.empty()) {
+        return;
+    }
+
+    std::sort(candidates.begin(), candidates.end());
+    maybe_record_candidate(candidates.back() / "usr" / "include" / "c++" / "v1",
+        attempted_paths, attempted_seen, include_paths, include_seen);
+}
+
 void add_darwin_libcxx_candidates(const char* argv0,
                                   std::vector<std::string>& attempted_paths,
                                   std::unordered_set<std::string>& attempted_seen,
@@ -101,6 +141,14 @@ void add_darwin_libcxx_candidates(const char* argv0,
         maybe_record_candidate(std::filesystem::path(sdkroot) / "usr" / "include" / "c++" / "v1",
             attempted_paths, attempted_seen, include_paths, include_seen);
     }
+    add_latest_darwin_sdk_candidate("/Library/Developer/CommandLineTools/SDKs",
+        attempted_paths, attempted_seen, include_paths, include_seen);
+    add_latest_darwin_sdk_candidate(
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs",
+        attempted_paths,
+        attempted_seen,
+        include_paths,
+        include_seen);
 
     maybe_record_candidate("/Library/Developer/CommandLineTools/usr/include/c++/v1",
         attempted_paths, attempted_seen, include_paths, include_seen);

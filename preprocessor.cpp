@@ -476,35 +476,102 @@ static bool is_builtin_defined_name(const std::string& name) {
 }
 
 static std::string canonicalize_attribute_name(const std::string& name) {
-    if (name.size() >= 4 && name.starts_with("__") && name.ends_with("__")) {
-        return name.substr(2, name.size() - 4);
+    std::string canonical = name;
+    size_t scope_pos = canonical.rfind("::");
+    if (scope_pos != std::string::npos) {
+        canonical = canonical.substr(scope_pos + 2);
     }
-    return name;
+    if (canonical.size() >= 4 && canonical.starts_with("__") && canonical.ends_with("__")) {
+        return canonical.substr(2, canonical.size() - 4);
+    }
+    return canonical;
 }
 
-static std::optional<std::string> extract_has_query_name(const std::vector<Token>& tokens) {
-    std::string name;
-    for (const auto& tok : tokens) {
-        if (tok.type == TokenType::Whitespace) {
-            continue;
+struct HasQueryOperand {
+    std::string query;
+    std::vector<std::string> scope_segments;
+    std::string leaf_name;
+    bool is_string_literal = false;
+};
+
+static std::optional<HasQueryOperand> extract_has_query_operand(const std::vector<Token>& tokens) {
+    auto skip_whitespace = [&](size_t& index) {
+        while (index < tokens.size() && tokens[index].type == TokenType::Whitespace) {
+            ++index;
         }
-        if (!name.empty()) {
+    };
+
+    size_t index = 0;
+    skip_whitespace(index);
+    if (index >= tokens.size()) {
+        return std::nullopt;
+    }
+
+    HasQueryOperand operand;
+    if (tokens[index].type == TokenType::STRING_LITERAL) {
+        operand.query = tokens[index].value;
+        operand.leaf_name = tokens[index].value;
+        operand.is_string_literal = true;
+        ++index;
+        skip_whitespace(index);
+        if (index != tokens.size()) {
             return std::nullopt;
         }
-        if (tok.isIdentifierLike()) {
-            name = tok.value;
-            continue;
-        }
-        if (tok.type == TokenType::STRING_LITERAL) {
-            name = tok.value;
-            continue;
-        }
+        return operand;
+    }
+
+    std::vector<std::string> segments;
+    if (!tokens[index].isIdentifierLike()) {
         return std::nullopt;
     }
-    if (name.empty()) {
+
+    while (true) {
+        segments.push_back(tokens[index].value);
+        ++index;
+        skip_whitespace(index);
+        if (index >= tokens.size()) {
+            break;
+        }
+
+        bool has_scope_resolution = false;
+        size_t scope_token_count = 0;
+        if (tokens[index].type == TokenType::SCOPE_RESOLUTION) {
+            has_scope_resolution = true;
+            scope_token_count = 1;
+        } else if (index + 1 < tokens.size() &&
+                   tokens[index].type == TokenType::COLON &&
+                   tokens[index + 1].type == TokenType::COLON) {
+            has_scope_resolution = true;
+            scope_token_count = 2;
+        }
+
+        if (!has_scope_resolution) {
+            return std::nullopt;
+        }
+
+        index += scope_token_count;
+        skip_whitespace(index);
+        if (index >= tokens.size() || !tokens[index].isIdentifierLike()) {
+            return std::nullopt;
+        }
+    }
+
+    if (segments.empty()) {
         return std::nullopt;
     }
-    return name;
+
+    operand.leaf_name = segments.back();
+    if (segments.size() > 1) {
+        operand.scope_segments.assign(segments.begin(), segments.end() - 1);
+    }
+
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (i != 0) {
+            operand.query += "::";
+        }
+        operand.query += segments[i];
+    }
+    return operand;
 }
 
 static bool has_feature_name(const std::string& name,
@@ -3275,9 +3342,9 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                         sm.get(), curr_file, header, is_system, name == "__has_include_next");
                     result = found ? 1 : 0;
                 } else {
-                    auto arg_name = extract_has_query_name(arg_tokens);
+                    auto arg_name = extract_has_query_operand(arg_tokens);
                     if (arg_name.has_value()) {
-                        const std::string query = arg_name.value();
+                        const std::string& query = arg_name->query;
                         if (name == "__has_attribute") {
                             const std::string canon = canonicalize_attribute_name(query);
                             result = AttributeRegistry::instance().find(canon) ? 1 : 0;
