@@ -468,6 +468,7 @@ static std::string basename_from_path(const std::string& path) {
 static bool is_builtin_defined_name(const std::string& name) {
     return name == "__has_attribute" ||
            name == "__has_builtin" ||
+           name == "__has_cpp_attribute" ||
            name == "__has_extension" ||
            name == "__has_feature" ||
            name == "__has_warning" ||
@@ -572,6 +573,65 @@ static std::optional<HasQueryOperand> extract_has_query_operand(const std::vecto
         operand.query += segments[i];
     }
     return operand;
+}
+
+static std::string canonicalize_attribute_namespace(const std::string& ns) {
+    if (ns == "__gnu__") {
+        return "gnu";
+    }
+    if (ns == "_Clang" || ns == "__clang__") {
+        return "clang";
+    }
+    return ns;
+}
+
+static uint64_t cpp_standard_attribute_value(const std::string& canonical_name) {
+    static const std::unordered_map<std::string, uint64_t> values = {
+        {"noreturn", 200809ULL},
+        {"deprecated", 201309ULL},
+        {"fallthrough", 201603ULL},
+        {"nodiscard", 201907ULL},
+        {"maybe_unused", 201603ULL},
+        {"no_unique_address", 201803ULL},
+        {"likely", 201803ULL},
+        {"unlikely", 201803ULL},
+        {"assume", 202207ULL},
+    };
+    auto it = values.find(canonical_name);
+    return it != values.end() ? it->second : 0;
+}
+
+static uint64_t has_cpp_attribute_value(const HasQueryOperand& operand) {
+    if (operand.is_string_literal) {
+        return 0;
+    }
+
+    const std::string canonical_name = canonicalize_attribute_name(operand.query);
+    if (operand.scope_segments.empty()) {
+        return cpp_standard_attribute_value(canonical_name);
+    }
+
+    if (operand.scope_segments.size() != 1) {
+        return 0;
+    }
+
+    const std::string canonical_ns =
+        canonicalize_attribute_namespace(operand.scope_segments.front());
+    if (canonical_ns == "msvc") {
+        return 0;
+    }
+    if (canonical_ns == "clang") {
+        static const std::unordered_set<std::string> supported_clang_attributes = {
+            "lifetimebound",
+            "noescape",
+            "ptrauth_vtable_pointer",
+        };
+        return supported_clang_attributes.contains(canonical_name) ? 1 : 0;
+    }
+    if (canonical_ns == "gnu") {
+        return AttributeRegistry::instance().find(canonical_name) ? 1 : 0;
+    }
+    return 0;
 }
 
 static bool has_feature_name(const std::string& name,
@@ -3300,9 +3360,9 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
         if (tokens[i].type == TokenType::IDENTIFIER) {
             const std::string& name = tokens[i].value;
             bool is_has = (name == "__has_attribute" || name == "__has_builtin" ||
-                name == "__has_extension" || name == "__has_feature" ||
-                name == "__has_warning" || name == "__has_include" ||
-                name == "__has_include_next");
+                name == "__has_cpp_attribute" || name == "__has_extension" ||
+                name == "__has_feature" || name == "__has_warning" ||
+                name == "__has_include" || name == "__has_include_next");
             if (is_has) {
                 if (i + 1 >= tokens.size() || tokens[i + 1].type != TokenType::LEFT_PAREN) {
                     after_has.push_back(tokens[i]);
@@ -3348,6 +3408,8 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                         if (name == "__has_attribute") {
                             const std::string canon = canonicalize_attribute_name(query);
                             result = AttributeRegistry::instance().find(canon) ? 1 : 0;
+                        } else if (name == "__has_cpp_attribute") {
+                            result = static_cast<int>(has_cpp_attribute_value(*arg_name));
                         } else if (name == "__has_feature") {
                             result = has_feature_name(query, lang_opts, target_info.get()) ? 1 : 0;
                         } else if (name == "__has_extension") {
@@ -3372,7 +3434,7 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                         }
                     }
                 }
-                after_has.emplace_back(TokenType::INTEGER_CONST, result ? "1" : "0", tokens[i].loc);
+                after_has.emplace_back(TokenType::INTEGER_CONST, std::to_string(result), tokens[i].loc);
                 i = j;
                 continue;
             }
