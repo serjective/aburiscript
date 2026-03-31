@@ -271,6 +271,15 @@ bool is_class_template_partial_specialization_more_specialized(
     const ClassTemplatePartialSpecializationDecl* lhs_partial,
     const ClassTemplatePartialSpecializationDecl* rhs_partial);
 
+bool deduce_variable_template_partial_specialization_bindings(
+    const VariableTemplatePartialSpecializationDecl* partial_specialization,
+    const std::vector<TemplateArgument>& actual_arguments,
+    TemplateArgumentBindings& deduced_bindings_out);
+
+bool is_variable_template_partial_specialization_more_specialized(
+    const VariableTemplatePartialSpecializationDecl* lhs_partial,
+    const VariableTemplatePartialSpecializationDecl* rhs_partial);
+
 std::optional<size_t> find_template_parameter_index_by_decl(
     const TemplateParameterDecl* parameter,
     const TemplateParameterList& parameters);

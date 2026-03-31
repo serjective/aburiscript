@@ -168,6 +168,12 @@ void append_itanium_unqualified_function_name(
     const FunctionTemplateSpecializationInfo* specialization,
     ItaniumMangleContext& ctx);
 
+void append_itanium_unqualified_variable_name(
+    std::string& out,
+    std::string_view name,
+    const VariableTemplateSpecializationInfo* specialization,
+    ItaniumMangleContext& ctx);
+
 std::shared_ptr<ObjectType> owner_object_type_for_naming(QualType owner_type) {
     return desugar_type(owner_type).as_shared<ObjectType>();
 }
@@ -417,6 +423,18 @@ std::string function_template_prefix_substitution_key(
     return key;
 }
 
+std::string variable_template_prefix_substitution_key(
+    const VariableTemplateSpecializationInfo* specialization,
+    std::string_view name) {
+    std::string key = "variable-template-prefix:";
+    if (specialization && specialization->primary_template) {
+        key += pointer_identity_string(specialization->primary_template);
+    } else {
+        key.append(name.data(), name.size());
+    }
+    return key;
+}
+
 void append_itanium_unqualified_function_name(
     std::string& out,
     std::string_view name,
@@ -428,6 +446,24 @@ void append_itanium_unqualified_function_name(
     }
     ctx.remember_substitution(
         function_template_prefix_substitution_key(specialization, name));
+    out += 'I';
+    for (const auto& argument : specialization->arguments) {
+        append_template_argument_encoding(out, argument, ctx);
+    }
+    out += 'E';
+}
+
+void append_itanium_unqualified_variable_name(
+    std::string& out,
+    std::string_view name,
+    const VariableTemplateSpecializationInfo* specialization,
+    ItaniumMangleContext& ctx) {
+    append_itanium_unqualified_name(out, name);
+    if (!specialization || !specialization->primary_template) {
+        return;
+    }
+    ctx.remember_substitution(
+        variable_template_prefix_substitution_key(specialization, name));
     out += 'I';
     for (const auto& argument : specialization->arguments) {
         append_template_argument_encoding(out, argument, ctx);
@@ -1269,21 +1305,23 @@ std::string mangle_function_entity_itanium(const std::string& name,
     return out;
 }
 
-std::string mangle_variable_entity_itanium(const std::string& name,
-                                           std::string_view qualifier_prefix,
-                                           QualType owner_type) {
+std::string mangle_variable_entity_itanium(
+    const std::string& name,
+    std::string_view qualifier_prefix,
+    QualType owner_type,
+    const VariableTemplateSpecializationInfo* specialization) {
     std::string out = "_Z";
     ItaniumMangleContext ctx;
     auto owner_object = owner_object_type_for_naming(owner_type);
     if (qualifier_prefix.empty() && !owner_object) {
-        append_itanium_unqualified_name(out, name);
+        append_itanium_unqualified_variable_name(out, name, specialization, ctx);
         return out;
     }
 
     auto components =
         normalized_member_qualifier_components(qualifier_prefix, owner_type);
     if (components.empty() && !owner_object) {
-        append_itanium_unqualified_name(out, name);
+        append_itanium_unqualified_variable_name(out, name, specialization, ctx);
         return out;
     }
 
@@ -1294,7 +1332,7 @@ std::string mangle_variable_entity_itanium(const std::string& name,
     if (owner_object) {
         append_object_name_encoding(out, *owner_object, ctx);
     }
-    append_itanium_unqualified_name(out, name);
+    append_itanium_unqualified_variable_name(out, name, specialization, ctx);
     out += 'E';
     return out;
 }
@@ -1526,10 +1564,13 @@ std::string mangle_variable_decl_name_for_policy(const VariableDecl& decl,
                 }
                 owner_type = get_symbol_owner_record_type(decl.sym.get());
             }
+            const auto* specialization =
+                get_variable_decl_variable_template_specialization(&decl);
             return mangle_variable_entity_itanium(
                 spelling,
                 qualifier_prefix,
-                owner_type);
+                owner_type,
+                specialization);
         }
         case ManglingKind::Msvc:
         case ManglingKind::C:
@@ -1547,12 +1588,17 @@ std::string mangle_variable_symbol_name_for_policy(const Symbol& sym,
     }
     switch (policy.mangling) {
         case ManglingKind::Itanium:
+            {
+            const auto* specialization =
+                get_symbol_variable_template_specialization(&sym);
             return mangle_variable_entity_itanium(
                 spelling,
                 get_symbol_cxx_qualifier_prefix(&sym)
                     ? std::string_view(*get_symbol_cxx_qualifier_prefix(&sym))
                     : std::string_view{},
-                get_symbol_owner_record_type(&sym));
+                get_symbol_owner_record_type(&sym),
+                specialization);
+            }
         case ManglingKind::Msvc:
         case ManglingKind::C:
         default:

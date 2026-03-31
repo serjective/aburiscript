@@ -146,12 +146,19 @@ void set_symbol_owner_record_type(const Symbol* sym, QualType owner_type);
 QualType get_symbol_owner_record_type(const Symbol* sym);
 void clear_symbol_owner_record_types();
 struct FunctionTemplateSpecializationInfo;
+struct VariableTemplateSpecializationInfo;
 void set_symbol_function_template_specialization(
     const Symbol* sym,
     const FunctionTemplateSpecializationInfo& info);
 const FunctionTemplateSpecializationInfo*
 get_symbol_function_template_specialization(const Symbol* sym);
 void clear_symbol_function_template_specializations();
+void set_symbol_variable_template_specialization(
+    const Symbol* sym,
+    const VariableTemplateSpecializationInfo& info);
+const VariableTemplateSpecializationInfo*
+get_symbol_variable_template_specialization(const Symbol* sym);
+void clear_symbol_variable_template_specializations();
 bool merge_symbol_cpp_default_arguments(
     const Symbol* sym,
     const std::vector<const Expr*>& defaults,

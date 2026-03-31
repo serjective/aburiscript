@@ -3154,7 +3154,8 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
             declaration_is_constexpr,
             decl_parser.is_inline,
             declarator_token.loc,
-            declaration_language_linkage);
+            declaration_language_linkage,
+            true);
     }
     if (declared_sym) {
         declared_sym->is_constexpr = declaration_is_constexpr;
@@ -3214,6 +3215,10 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
     var_decl->is_thread_local = decl_parser.is_thread_local;
     var_decl->is_block_byref = decl_parser.is_block_byref;
     var_decl->is_constexpr = declaration_is_constexpr;
+    var_decl->explicit_specialization_arguments =
+        decl_parser.explicit_specialization_arguments;
+    var_decl->has_explicit_specialization_argument_list =
+        decl_parser.has_explicit_specialization_argument_list;
     var_decl->set_asm_label(decl_parser.asm_label);
     if (decl_parser.asm_label.has_value() &&
         !is_file_scope &&

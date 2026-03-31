@@ -393,6 +393,7 @@ public:
 
     std::unique_ptr<Expr> collect_unqualified_identifier_expression(const std::string& name,
                                                                     bool looks_like_call,
+                                                                    bool might_be_template_id,
                                                                     SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_identifier_reference(const std::string& name,
@@ -580,6 +581,11 @@ public:
         std::vector<std::unique_ptr<Expr>> args,
         SrcLoc loc) ;
 
+    std::unique_ptr<Expr> collect_explicit_template_id_expression(
+        std::unique_ptr<Expr> callee,
+        std::vector<TemplateArgument> explicit_template_args,
+        SrcLoc loc) ;
+
     std::unique_ptr<Expr> collect_pack_expansion_expression(
         std::unique_ptr<Expr> pattern,
         SrcLoc loc) const ;
@@ -753,7 +759,8 @@ public:
                                                             bool is_constexpr,
                                                             bool is_inline,
                                                             SrcLoc loc,
-                                                            LanguageLinkage language_linkage = LanguageLinkage::None) ;
+                                                            LanguageLinkage language_linkage = LanguageLinkage::None,
+                                                            bool skip_template_parameter_scopes = false) ;
 
     std::shared_ptr<Symbol> collect_declare_variable_symbol(std::shared_ptr<Scope> scope,
                                                             std::shared_ptr<GlobalIdentTracker> global_scope,
@@ -770,7 +777,8 @@ public:
                                                             bool is_constexpr,
                                                             bool is_inline,
                                                             SrcLoc loc,
-                                                            LanguageLinkage language_linkage = LanguageLinkage::None) ;
+                                                            LanguageLinkage language_linkage = LanguageLinkage::None,
+                                                            bool skip_template_parameter_scopes = false) ;
 
     std::shared_ptr<Symbol> collect_declare_variable_symbol(const std::string& name,
                                                             QualType type,
@@ -832,6 +840,9 @@ public:
 
     void collect_add_alias_template_decl(const std::string& name,
                                          const Decl* decl) ;
+
+    void collect_add_variable_template_decl(const std::string& name,
+                                            const Decl* decl) ;
 
     std::unique_ptr<Expr> collect_binary_operation(std::unique_ptr<Expr> lhs,
                                                    std::unique_ptr<Expr> rhs,
@@ -1390,6 +1401,7 @@ private:
 
     struct ClassTemplateSpecializationInstantiator;
     struct FunctionTemplateSpecializationInstantiator;
+    struct VariableTemplateSpecializationInstantiator;
 
     ObjectDecl* instantiate_class_template_specialization(
         const ClassTemplateDecl* class_template,
@@ -1434,6 +1446,12 @@ private:
         SrcLoc loc,
         std::shared_ptr<Symbol>* specialization_symbol_out = nullptr,
         bool instantiate_definition = true) ;
+
+    VariableDecl* instantiate_variable_template_specialization(
+        const VariableTemplateDecl* variable_template,
+        const std::vector<TemplateArgument>& arguments,
+        SrcLoc loc,
+        std::shared_ptr<Symbol>* specialization_symbol_out = nullptr) ;
 
     QualType substitute_template_type(
         QualType type,
@@ -1828,6 +1846,11 @@ private:
         std::unique_ptr<Expr> callee,
         std::vector<TemplateArgument> explicit_template_args,
         std::vector<std::unique_ptr<Expr>> args,
+        SrcLoc loc,
+        QualType implicit_this_type = QualType()) ;
+    std::unique_ptr<Expr> collect_explicit_template_id_impl(
+        std::unique_ptr<Expr> callee,
+        std::vector<TemplateArgument> explicit_template_args,
         SrcLoc loc) ;
     std::unique_ptr<Expr> collect_dependent_call_expression(
         std::unique_ptr<Expr> callee,

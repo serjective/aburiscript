@@ -13,7 +13,7 @@
 
 using namespace collect_decl_internal;
 
-std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, SrcLoc loc, LanguageLinkage language_linkage) {
+std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, SrcLoc loc, LanguageLinkage language_linkage, bool skip_template_parameter_scopes) {
 
     if (!scope || name.empty()) {
         return nullptr;
@@ -26,7 +26,17 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
     if (is_constexpr && type) {
         type = type.with_const();
     }
-    bool is_file_scope = is_file_or_namespace_scope(scope);
+    auto decl_scope = scope;
+    if (skip_template_parameter_scopes) {
+        while (decl_scope &&
+               scope_flags_contains(
+                   decl_scope->flags,
+                   ScopeFlags::TemplateParameterScope) &&
+               decl_scope->parent) {
+            decl_scope = decl_scope->parent;
+        }
+    }
+    bool is_file_scope = is_file_or_namespace_scope(decl_scope);
     if (is_file_scope && storage_class == StorageClass::AUTO) {
         report_error("illegal storage class 'auto' for file-scope declaration", loc);
     }
@@ -120,7 +130,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
             new_type = existing_type;
         }
     };
-    auto existing = lookup_ordinary_symbol(scope, name, false);
+    auto existing = lookup_ordinary_symbol(decl_scope, name, false);
     if (existing) {
         if (existing->kind == SymbolKind::VARIABLE) {
             bool same_type = false;
@@ -159,7 +169,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
                 existing->storage_class = storage_class;
             }
             if (is_file_scope) {
-                if (auto ns_prefix = namespace_prefix_for_scope(scope)) {
+                if (auto ns_prefix = namespace_prefix_for_scope(decl_scope)) {
                     if (!get_symbol_cxx_qualifier_prefix(existing.get())) {
                         set_symbol_cxx_qualifier_prefix(existing.get(), *ns_prefix);
                     }
@@ -223,7 +233,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
     sym->is_constexpr = is_constexpr;
     sym->set_language_linkage(requested_language_linkage);
     if (is_file_scope) {
-        if (auto ns_prefix = namespace_prefix_for_scope(scope)) {
+        if (auto ns_prefix = namespace_prefix_for_scope(decl_scope)) {
             set_symbol_cxx_qualifier_prefix(sym.get(), *ns_prefix);
         }
     }
@@ -231,7 +241,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
         record_global_scope_mutation(global_scope);
         global_scope->add_to_global_scope(sym);
     }
-    bind_symbol_in_scope(scope, name, sym);
+    bind_symbol_in_scope(decl_scope, name, sym);
     return sym;
 }
 
@@ -246,11 +256,12 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
         is_constexpr,
         false,
         loc,
-        language_linkage);
+        language_linkage,
+        false);
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, SrcLoc loc, LanguageLinkage language_linkage) {
+std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, SrcLoc loc, LanguageLinkage language_linkage, bool skip_template_parameter_scopes) {
 
     return collect_declare_variable_symbol(
         session_.current_scope_,
@@ -261,7 +272,8 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::stri
         is_constexpr,
         is_inline,
         loc,
-        language_linkage);
+        language_linkage,
+        skip_template_parameter_scopes);
 }
 
 std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, SrcLoc loc, LanguageLinkage language_linkage) {
@@ -273,7 +285,8 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::stri
         is_constexpr,
         false,
         loc,
-        language_linkage);
+        language_linkage,
+        false);
 }
 
 

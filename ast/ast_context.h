@@ -24,9 +24,11 @@ struct ObjectDecl;
 struct CppRecordDecl;
 struct ParamDecl;
 struct FuncDecl;
+struct VariableDecl;
 struct TemplateDecl;
 struct ClassTemplateDecl;
 struct FunctionTemplateDecl;
+struct VariableTemplateDecl;
 struct TemplateParameterDecl;
 struct EnumDecl;
 class CollectSemanticStore;
@@ -219,11 +221,34 @@ struct FunctionTemplateSpecializationInfo {
     std::vector<TemplateArgument> arguments;
 };
 
+struct VariableTemplateSpecializationInfo {
+    const VariableTemplateDecl* primary_template = nullptr;
+    std::vector<TemplateArgument> arguments;
+};
+
 struct FunctionTemplateSpecializationEntry {
     const FunctionTemplateDecl* primary_template = nullptr;
     TemplateSpecializationSemanticKey semantic_key;
     std::vector<TemplateArgument> arguments;
     std::unique_ptr<FuncDecl> specialization_decl;
+    std::shared_ptr<Symbol> specialization_symbol = nullptr;
+    SrcLoc first_required_loc;
+    bool is_instantiating = false;
+    bool is_instantiated = false;
+    bool instantiation_failed = false;
+
+    void note_first_required_loc(SrcLoc loc) {
+        if (!loc.isInvalid() && first_required_loc.isInvalid()) {
+            first_required_loc = loc;
+        }
+    }
+};
+
+struct VariableTemplateSpecializationEntry {
+    const VariableTemplateDecl* primary_template = nullptr;
+    TemplateSpecializationSemanticKey semantic_key;
+    std::vector<TemplateArgument> arguments;
+    std::unique_ptr<VariableDecl> specialization_decl;
     std::shared_ptr<Symbol> specialization_symbol = nullptr;
     SrcLoc first_required_loc;
     bool is_instantiating = false;
@@ -250,6 +275,15 @@ struct FuncExternalSemanticInfo {
     }
 };
 
+struct VariableExternalSemanticInfo {
+    std::optional<VariableTemplateSpecializationInfo>
+        variable_template_specialization;
+
+    bool empty() const {
+        return !variable_template_specialization.has_value();
+    }
+};
+
 struct ParamExternalSemanticInfo {
     std::unique_ptr<Expr> default_argument;
 
@@ -263,12 +297,15 @@ struct SymbolExternalSemanticInfo {
     QualType owner_record_type;
     std::optional<FunctionTemplateSpecializationInfo>
         function_template_specialization;
+    std::optional<VariableTemplateSpecializationInfo>
+        variable_template_specialization;
     std::vector<const Expr*> cpp_default_arguments;
 
     bool empty() const {
         return cxx_qualifier_prefix == nullptr &&
                !owner_record_type &&
                !function_template_specialization.has_value() &&
+               !variable_template_specialization.has_value() &&
                cpp_default_arguments.empty();
     }
 };
@@ -403,6 +440,14 @@ public:
     get_func_decl_function_template_specialization(const FuncDecl* decl) const;
     void clear_func_decl_function_template_specializations();
 
+    void set_variable_decl_variable_template_specialization(
+        const VariableDecl* decl,
+        VariableTemplateSpecializationInfo info);
+    const VariableTemplateSpecializationInfo*
+    get_variable_decl_variable_template_specialization(
+        const VariableDecl* decl) const;
+    void clear_variable_decl_variable_template_specializations();
+
     void set_template_decl_canonical_decl(const TemplateDecl* decl,
                                           const TemplateDecl* canonical_decl);
     const TemplateDecl* get_template_decl_canonical_decl(
@@ -443,6 +488,13 @@ public:
     const FunctionTemplateSpecializationInfo*
     get_symbol_function_template_specialization(const Symbol* sym) const;
     void clear_symbol_function_template_specializations();
+
+    void set_symbol_variable_template_specialization(
+        const Symbol* sym,
+        VariableTemplateSpecializationInfo info);
+    const VariableTemplateSpecializationInfo*
+    get_symbol_variable_template_specialization(const Symbol* sym) const;
+    void clear_symbol_variable_template_specializations();
 
     bool merge_symbol_cpp_default_arguments(
         const Symbol* sym,
@@ -508,6 +560,21 @@ public:
     const std::vector<std::unique_ptr<FunctionTemplateSpecializationEntry>>&
     function_template_specializations() const;
 
+    VariableTemplateSpecializationEntry* lookup_variable_template_specialization(
+        const VariableTemplateDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments);
+    const VariableTemplateSpecializationEntry*
+    lookup_variable_template_specialization(
+        const VariableTemplateDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments) const;
+    VariableTemplateSpecializationEntry& get_or_create_variable_template_specialization(
+        const VariableTemplateDecl* primary_template,
+        std::vector<TemplateArgument> arguments,
+        std::unique_ptr<VariableDecl> specialization_decl,
+        std::shared_ptr<Symbol> specialization_symbol);
+    const std::vector<std::unique_ptr<VariableTemplateSpecializationEntry>>&
+    variable_template_specializations() const;
+
     bool push_template_instantiation_frame(size_t max_depth = 64);
     void pop_template_instantiation_frame();
     size_t template_instantiation_depth() const;
@@ -527,6 +594,8 @@ public:
 private:
     using FuncExternalSemanticInfoMap =
         std::unordered_map<const FuncDecl*, FuncExternalSemanticInfo>;
+    using VariableExternalSemanticInfoMap =
+        std::unordered_map<const VariableDecl*, VariableExternalSemanticInfo>;
     using ParamExternalSemanticInfoMap =
         std::unordered_map<const ParamDecl*, ParamExternalSemanticInfo>;
     using SymbolExternalSemanticInfoMap =
@@ -556,6 +625,7 @@ private:
 
 ASTContext* get_active_side_table_ast_context();
 ASTContext* get_side_table_ast_context_for(const FuncDecl* decl);
+ASTContext* get_side_table_ast_context_for(const VariableDecl* decl);
 ASTContext* get_side_table_ast_context_for(const TemplateDecl* decl);
 ASTContext* get_side_table_ast_context_for(const TemplateParameterDecl* decl);
 ASTContext* get_side_table_ast_context_for(const ParamDecl* decl);

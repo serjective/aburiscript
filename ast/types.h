@@ -42,7 +42,9 @@ struct DependentNameType;
 struct TemplateDecl;
 struct AliasTemplateDecl;
 struct FunctionTemplateDecl;
+struct VariableTemplateDecl;
 struct ClassTemplateDecl;
+struct VariableTemplatePartialSpecializationDecl;
 struct ClassTemplatePartialSpecializationDecl;
 
 using TemplateParameterList = std::vector<std::unique_ptr<TemplateParameterDecl>>;

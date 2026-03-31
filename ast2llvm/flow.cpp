@@ -1944,6 +1944,8 @@ void ASTToLLVM::convert_declaration(Decl *decl) {
         case DeclKind::TemplateTemplateParmDecl:
         case DeclKind::AliasTemplateDecl:
         case DeclKind::FunctionTemplateDecl:
+        case DeclKind::VariableTemplateDecl:
+        case DeclKind::VariableTemplatePartialSpecializationDecl:
         case DeclKind::ClassTemplateDecl:
         case DeclKind::ClassTemplatePartialSpecializationDecl:
             return;

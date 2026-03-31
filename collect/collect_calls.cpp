@@ -37,6 +37,21 @@ void append_unique_function_template_candidate(
     candidates.push_back(function_template);
 }
 
+void append_unique_variable_template_candidate(
+    std::vector<const VariableTemplateDecl*>& candidates,
+    const Decl* decl) {
+    auto* variable_template = dyn_cast<VariableTemplateDecl>(decl);
+    if (!variable_template) {
+        return;
+    }
+    for (const auto* existing : candidates) {
+        if (existing == variable_template) {
+            return;
+        }
+    }
+    candidates.push_back(variable_template);
+}
+
 std::vector<const FunctionTemplateDecl*> lookup_unqualified_function_templates(
     std::string_view callee_name,
     const std::shared_ptr<Scope>& current_scope) {
@@ -60,6 +75,33 @@ std::vector<const FunctionTemplateDecl*> lookup_unqualified_function_templates(
         template_binding->template_decl);
     for (const auto* decl : template_binding->template_overload_candidates) {
         append_unique_function_template_candidate(template_candidates, decl);
+    }
+    return template_candidates;
+}
+
+std::vector<const VariableTemplateDecl*> lookup_unqualified_variable_templates(
+    std::string_view name,
+    const std::shared_ptr<Scope>& current_scope) {
+    std::vector<const VariableTemplateDecl*> template_candidates;
+    if (!current_scope) {
+        return template_candidates;
+    }
+
+    const DeclBinding* template_binding =
+        LookupEngine::lookup_unqualified_template_binding(
+            std::string(name),
+            current_scope,
+            true,
+            LookupNamespace::Ordinary);
+    if (!template_binding) {
+        return template_candidates;
+    }
+
+    append_unique_variable_template_candidate(
+        template_candidates,
+        template_binding->template_decl);
+    for (const auto* decl : template_binding->template_overload_candidates) {
+        append_unique_variable_template_candidate(template_candidates, decl);
     }
     return template_candidates;
 }
@@ -143,6 +185,40 @@ std::vector<const FunctionTemplateDecl*> lookup_qualified_function_templates(
         template_binding->template_decl);
     for (const auto* decl : template_binding->template_overload_candidates) {
         append_unique_function_template_candidate(template_candidates, decl);
+    }
+    return template_candidates;
+}
+
+std::vector<const VariableTemplateDecl*> lookup_qualified_variable_templates(
+    std::string_view name,
+    const CppQualifiedExprInfo& qualified_info,
+    const DeclContext* current_decl_context) {
+    std::vector<const VariableTemplateDecl*> template_candidates;
+    if (!current_decl_context) {
+        return template_candidates;
+    }
+
+    LookupEngine::QualifiedNameSpec name_spec;
+    name_spec.has_global_qualifier = qualified_info.has_global_qualifier;
+    name_spec.qualifiers = qualified_info.qualifiers;
+    name_spec.terminal_name = std::string(name);
+    auto qualified_lookup = LookupEngine::lookup_qualified_name(
+        name_spec,
+        current_decl_context,
+        LookupNamespace::Ordinary);
+    const DeclBinding* template_binding =
+        qualified_lookup.status == LookupEngine::QualifiedLookupStatus::Found
+            ? qualified_lookup.binding
+            : nullptr;
+    if (!template_binding) {
+        return template_candidates;
+    }
+
+    append_unique_variable_template_candidate(
+        template_candidates,
+        template_binding->template_decl);
+    for (const auto* decl : template_binding->template_overload_candidates) {
+        append_unique_variable_template_candidate(template_candidates, decl);
     }
     return template_candidates;
 }
@@ -613,6 +689,16 @@ std::unique_ptr<Expr> Collect::collect_explicit_function_template_call(
         loc);
 }
 
+std::unique_ptr<Expr> Collect::collect_explicit_template_id_expression(
+    std::unique_ptr<Expr> callee,
+    std::vector<TemplateArgument> explicit_template_args,
+    SrcLoc loc) {
+    return collect_explicit_template_id_impl(
+        std::move(callee),
+        std::move(explicit_template_args),
+        loc);
+}
+
 std::unique_ptr<Expr> Collect::collect_dependent_call_expression(
     std::unique_ptr<Expr> callee,
     std::vector<std::unique_ptr<Expr>> args,
@@ -726,7 +812,8 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
     std::unique_ptr<Expr> callee,
     std::vector<TemplateArgument> explicit_template_args,
     std::vector<std::unique_ptr<Expr>> args,
-    SrcLoc loc) {
+    SrcLoc loc,
+    QualType implicit_this_type) {
     if (!lang_opts_.is_cxx_mode()) {
         report_error("explicit template arguments require C++ mode", loc);
         return collect_make<ErrorExpr>(
@@ -1100,7 +1187,9 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
             }
             attempted_qualified_object_expr = true;
 
-            auto this_expr = collect_cpp_this_expression(loc);
+            auto this_expr = implicit_this_type
+                ? collect_make<CppThisExpr>(implicit_this_type, loc)
+                : collect_cpp_this_expression(loc);
             if (!this_expr || isa<ErrorExpr>(this_expr.get())) {
                 qualified_object_error = std::move(this_expr);
                 return nullptr;
@@ -1424,6 +1513,288 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
         std::move(selected_call),
         member_call_selection,
         loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
+    std::unique_ptr<Expr> callee,
+    std::vector<TemplateArgument> explicit_template_args,
+    SrcLoc loc) {
+    if (!lang_opts_.is_cxx_mode()) {
+        report_error("explicit template arguments require C++ mode", loc);
+        return collect_make<ErrorExpr>(
+            "explicit template arguments require C++ mode",
+            loc);
+    }
+    if (!callee) {
+        return collect_make<ErrorExpr>(
+            "explicit template arguments require a template name",
+            loc);
+    }
+
+    if (auto* unresolved_member = dyn_cast<UnresolvedMemberExpr>(callee.get())) {
+        auto owned_member = std::unique_ptr<UnresolvedMemberExpr>(
+            static_cast<UnresolvedMemberExpr*>(callee.release()));
+        owned_member->explicit_template_arguments =
+            std::move(explicit_template_args);
+        owned_member->requires_template_keyword = true;
+        return owned_member;
+    }
+    if (auto* unresolved_lookup = dyn_cast<UnresolvedLookupExpr>(callee.get())) {
+        auto owned_lookup = std::unique_ptr<UnresolvedLookupExpr>(
+            static_cast<UnresolvedLookupExpr*>(callee.release()));
+        owned_lookup->explicit_template_arguments =
+            std::move(explicit_template_args);
+        owned_lookup->requires_template_keyword = true;
+        return owned_lookup;
+    }
+
+    if (auto* member_callee = dyn_cast<MemberExpr>(callee.get())) {
+        auto member_base_analysis = analyze_cpp_member_lookup_base(
+            member_callee->base ? member_callee->base->get_type() : QualType(nullptr),
+            member_callee->isArrow != 0,
+            session_.func_state_.current_function_is_cpp_member
+                ? session_.func_state_.current_function_cpp_this_type
+                : QualType(nullptr),
+            ast_ctx_.get());
+        if (member_base_analysis.is_dependent) {
+            auto owned_member = std::unique_ptr<MemberExpr>(
+                static_cast<MemberExpr*>(callee.release()));
+            auto unresolved_member = collect_make<UnresolvedMemberExpr>(
+                std::move(owned_member->base),
+                owned_member->get_member_name(),
+                owned_member->member_type,
+                std::optional<std::vector<TemplateArgument>>(
+                    std::move(explicit_template_args)),
+                owned_member->isArrow != 0,
+                member_base_analysis.is_current_instantiation,
+                /*names_dependent_base=*/false,
+                /*requires_template_keyword=*/true,
+                owned_member->suppress_virtual_dispatch != 0,
+                owned_member->location);
+            return unresolved_member;
+        }
+
+        report_error(
+            "member explicit template-id expressions are not supported yet",
+            loc);
+        return collect_make<ErrorExpr>(
+            "member explicit template-id expressions are not supported yet",
+            loc);
+    }
+
+    auto* callee_ref = dyn_cast<VarRef>(callee.get());
+    if (!callee_ref) {
+        report_error(
+            "explicit template arguments require a function or variable template name",
+            loc);
+        return collect_make<ErrorExpr>(
+            "explicit template arguments require a function or variable template name",
+            loc);
+    }
+
+    const auto* qualified_info = callee_ref->get_cpp_qualified_info();
+    if (qualified_info && qualified_info->is_type_qualified) {
+        auto qualified_owner_analysis =
+            analyze_cpp_qualified_expr_owner(qualified_info, ast_ctx_.get());
+        if (qualified_owner_analysis.is_dependent_context()) {
+            auto qualifier = build_dependent_lookup_qualifier(qualified_info);
+            return collect_make<UnresolvedLookupExpr>(
+                callee_ref->get_name(),
+                std::move(qualifier),
+                std::optional<std::vector<TemplateArgument>>(
+                    std::move(explicit_template_args)),
+                /*requires_template_keyword=*/true,
+                /*is_dependent=*/true,
+                QualType(std::make_shared<AutoType>(AutoTypeFlavor::Cxx)),
+                callee_ref->location);
+        }
+
+        report_error(
+            "type-qualified explicit template-id expressions are not supported yet",
+            loc);
+        return collect_make<ErrorExpr>(
+            "type-qualified explicit template-id expressions are not supported yet",
+            loc);
+    }
+
+    if (!session_.current_scope_ && !qualified_info) {
+        report_error(
+            "internal error: missing scope for explicit template-id expression",
+            loc);
+        return collect_make<ErrorExpr>(
+            "missing scope for explicit template-id expression",
+            loc);
+    }
+
+    const std::string& callee_name = callee_ref->get_name();
+    std::string display_name =
+        format_explicit_template_callee_name(qualified_info, callee_name);
+    auto function_templates =
+        qualified_info
+            ? lookup_qualified_function_templates(
+                  callee_name,
+                  *qualified_info,
+                  get_current_decl_context().get())
+            : lookup_unqualified_function_templates(
+                  callee_name,
+                  session_.current_scope_);
+    auto variable_templates =
+        qualified_info
+            ? lookup_qualified_variable_templates(
+                  callee_name,
+                  *qualified_info,
+                  get_current_decl_context().get())
+            : lookup_unqualified_variable_templates(
+                  callee_name,
+                  session_.current_scope_);
+
+    if (function_templates.empty() && variable_templates.empty()) {
+        report_error(
+            "no template named '" + display_name + "'",
+            loc);
+        return collect_make<ErrorExpr>("missing template", loc);
+    }
+
+    if (!variable_templates.empty()) {
+        if (!function_templates.empty()) {
+            report_error(
+                "explicit template-id '" + display_name +
+                    "' is ambiguous between variable and function templates",
+                loc);
+            return collect_make<ErrorExpr>("ambiguous template-id", loc);
+        }
+
+        std::shared_ptr<Symbol> selected_symbol = nullptr;
+        VariableDecl* selected_decl = nullptr;
+        for (const auto* variable_template : variable_templates) {
+            if (!variable_template) {
+                continue;
+            }
+
+            TemplateArgumentBindings specialization_bindings;
+            std::string binding_error;
+            if (!bind_template_arguments_for_specialization(
+                    variable_template,
+                    explicit_template_args,
+                    specialization_bindings,
+                    loc,
+                    &binding_error)) {
+                continue;
+            }
+
+            auto specialization_arguments =
+                flatten_template_argument_bindings(specialization_bindings);
+            std::shared_ptr<Symbol> specialization_symbol = nullptr;
+            auto* specialization_decl =
+                instantiate_variable_template_specialization(
+                    variable_template,
+                    specialization_arguments,
+                    loc,
+                    &specialization_symbol);
+            if (!specialization_decl || !specialization_symbol) {
+                continue;
+            }
+
+            if (selected_symbol) {
+                report_error(
+                    "explicit variable template-id '" + display_name +
+                        "' is ambiguous",
+                    loc);
+                return collect_make<ErrorExpr>(
+                    "ambiguous variable template-id",
+                    loc);
+            }
+            selected_symbol = std::move(specialization_symbol);
+            selected_decl = specialization_decl;
+        }
+
+        if (!selected_symbol || !selected_decl) {
+            report_error(
+                "no matching variable template specialization for '" +
+                    display_name + "'",
+                loc);
+            return collect_make<ErrorExpr>(
+                "no matching variable template specialization",
+                loc);
+        }
+
+        note_specialization_use_for_symbol(selected_symbol, loc);
+        auto result = collect_identifier_reference(
+            callee_name,
+            std::move(selected_symbol),
+            loc);
+        if (qualified_info && isa<VarRef>(result.get())) {
+            result = attach_cpp_qualified_info_to_expr(
+                std::move(result),
+                *qualified_info);
+        }
+        return result;
+    }
+
+    std::shared_ptr<Symbol> selected_function_symbol = nullptr;
+    for (const auto* function_template : function_templates) {
+        if (!function_template) {
+            continue;
+        }
+
+        TemplateArgumentBindings specialization_bindings;
+        std::string binding_error;
+        if (!bind_template_arguments_for_specialization(
+                function_template,
+                explicit_template_args,
+                specialization_bindings,
+                loc,
+                &binding_error)) {
+            continue;
+        }
+
+        auto specialization_arguments =
+            flatten_template_argument_bindings(specialization_bindings);
+        std::shared_ptr<Symbol> specialization_symbol = nullptr;
+        auto* specialization_decl =
+            instantiate_function_template_specialization(
+                function_template,
+                specialization_arguments,
+                loc,
+                &specialization_symbol,
+                /*instantiate_definition=*/true);
+        if (!specialization_decl || !specialization_symbol) {
+            continue;
+        }
+
+        if (selected_function_symbol) {
+            report_error(
+                "explicit function template-id '" + display_name +
+                    "' resolves to an overload set, which is not supported yet",
+                loc);
+            return collect_make<ErrorExpr>(
+                "unsupported function template overload-set expression",
+                loc);
+        }
+        selected_function_symbol = std::move(specialization_symbol);
+    }
+
+    if (!selected_function_symbol) {
+        report_error(
+            "no matching function template specialization for '" +
+                display_name + "'",
+            loc);
+        return collect_make<ErrorExpr>(
+            "no matching function template specialization",
+            loc);
+    }
+
+    note_specialization_use_for_symbol(selected_function_symbol, loc);
+    auto result = collect_identifier_reference(
+        callee_name,
+        std::move(selected_function_symbol),
+        loc);
+    if (qualified_info && isa<VarRef>(result.get())) {
+        result = attach_cpp_qualified_info_to_expr(
+            std::move(result),
+            *qualified_info);
+    }
+    return result;
 }
 
 std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
@@ -1753,16 +2124,21 @@ bool Collect::resolve_dependent_expr_after_substitution(
         };
 
     if (auto* unresolved_member = dyn_cast<UnresolvedMemberExpr>(expr.get())) {
-        if (unresolved_member->explicit_template_arguments.has_value() ||
-            unresolved_member_still_dependent(unresolved_member)) {
+        if (unresolved_member_still_dependent(unresolved_member)) {
             return true;
         }
         auto owned_member = std::unique_ptr<UnresolvedMemberExpr>(
             static_cast<UnresolvedMemberExpr*>(expr.release()));
-        auto rewritten =
-            materialize_unresolved_member(
-                std::move(owned_member),
-                /*allow_overloaded_method_set=*/false);
+        bool has_explicit_template_args =
+            owned_member->explicit_template_arguments.has_value();
+        if (has_explicit_template_args) {
+            expr = std::move(owned_member);
+            return true;
+        }
+        std::vector<TemplateArgument> explicit_template_args;
+        auto rewritten = materialize_unresolved_member(
+            std::move(owned_member),
+            /*allow_overloaded_method_set=*/has_explicit_template_args);
         if (!rewritten) {
             if (error_out && error_out->empty()) {
                 *error_out =
@@ -1770,25 +2146,65 @@ bool Collect::resolve_dependent_expr_after_substitution(
             }
             return false;
         }
+        if (has_explicit_template_args) {
+            SrcLoc template_id_loc = rewritten->location;
+            rewritten = collect_explicit_template_id_impl(
+                std::move(rewritten),
+                std::move(explicit_template_args),
+                template_id_loc);
+            if (!rewritten) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "failed to resolve dependent explicit member template-id";
+                }
+                return false;
+            }
+        }
         expr = std::move(rewritten);
         return true;
     }
 
     if (auto* unresolved_lookup = dyn_cast<UnresolvedLookupExpr>(expr.get())) {
-        if (unresolved_lookup->explicit_template_arguments.has_value() ||
-            unresolved_lookup_still_dependent(unresolved_lookup)) {
+        if (unresolved_lookup_still_dependent(unresolved_lookup)) {
             return true;
         }
         auto owned_lookup = std::unique_ptr<UnresolvedLookupExpr>(
             static_cast<UnresolvedLookupExpr*>(expr.release()));
-        auto rewritten =
-            materialize_unresolved_lookup(std::move(owned_lookup), false);
+        bool has_explicit_template_args =
+            owned_lookup->explicit_template_arguments.has_value();
+        if (has_explicit_template_args &&
+            owned_lookup->qualifier.is_type_qualified) {
+            expr = std::move(owned_lookup);
+            return true;
+        }
+        std::vector<TemplateArgument> explicit_template_args;
+        if (has_explicit_template_args) {
+            explicit_template_args =
+                std::move(*owned_lookup->explicit_template_arguments);
+        }
+        auto rewritten = materialize_unresolved_lookup(
+            std::move(owned_lookup),
+            /*looks_like_call=*/false);
         if (!rewritten) {
             if (error_out && error_out->empty()) {
                 *error_out =
                     "failed to resolve qualified dependent lookup after substitution";
             }
             return false;
+        }
+        if (has_explicit_template_args) {
+            SrcLoc template_id_loc = rewritten->location;
+            rewritten = collect_explicit_template_id_impl(
+                std::move(rewritten),
+                std::move(explicit_template_args),
+                template_id_loc);
+            if (!rewritten) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "failed to resolve dependent explicit template-id";
+                }
+                return false;
+            }
         }
         expr = std::move(rewritten);
         return true;
@@ -1999,7 +2415,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
                   std::move(concrete_callee),
                   std::move(explicit_template_args),
                   std::move(owned_call->args),
-                  owned_call->location)
+                  owned_call->location,
+                  implicit_this_type)
             : collect_function_call(
                   std::move(concrete_callee),
                   std::move(owned_call->args),
@@ -2025,8 +2442,22 @@ bool Collect::resolve_dependent_expr_after_substitution(
         explicit_template_args =
             std::move(*owned_lookup->explicit_template_arguments);
     }
-    auto concrete_callee =
-        materialize_unresolved_lookup(std::move(owned_lookup), true);
+    std::unique_ptr<Expr> concrete_callee;
+    if (has_explicit_template_args &&
+        owned_lookup->qualifier.is_type_qualified) {
+        concrete_callee = collect_identifier_reference(
+            owned_lookup->name,
+            nullptr,
+            owned_lookup->location);
+        if (isa<VarRef>(concrete_callee.get())) {
+            concrete_callee = attach_cpp_qualified_info_to_expr(
+                std::move(concrete_callee),
+                build_cpp_qualified_expr_info(owned_lookup->qualifier));
+        }
+    } else {
+        concrete_callee =
+            materialize_unresolved_lookup(std::move(owned_lookup), true);
+    }
     if (!concrete_callee) {
         if (error_out && error_out->empty()) {
             *error_out =
@@ -2039,7 +2470,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
               std::move(concrete_callee),
               std::move(explicit_template_args),
               std::move(owned_call->args),
-              owned_call->location)
+              owned_call->location,
+              implicit_this_type)
         : collect_function_call(
               std::move(concrete_callee),
               std::move(owned_call->args),

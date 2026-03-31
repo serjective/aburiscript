@@ -13,6 +13,13 @@ ASTContext* side_table_context_for(const FuncDecl* decl) {
     return get_active_side_table_ast_context();
 }
 
+ASTContext* side_table_context_for(const VariableDecl* decl) {
+    if (ASTContext* owner = get_side_table_ast_context_for(decl)) {
+        return owner;
+    }
+    return get_active_side_table_ast_context();
+}
+
 ASTContext* side_table_context_for(const TemplateDecl* decl) {
     if (ASTContext* owner = get_side_table_ast_context_for(decl)) {
         return owner;
@@ -156,6 +163,28 @@ get_func_decl_function_template_specialization(const FuncDecl* decl) {
 void clear_func_decl_function_template_specializations() {
     if (ASTContext* ctx = current_side_table_context()) {
         ctx->clear_func_decl_function_template_specializations();
+    }
+}
+
+void set_variable_decl_variable_template_specialization(
+    const VariableDecl* decl,
+    const VariableTemplateSpecializationInfo& info) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_variable_decl_variable_template_specialization(decl, info);
+    }
+}
+
+const VariableTemplateSpecializationInfo*
+get_variable_decl_variable_template_specialization(const VariableDecl* decl) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_variable_decl_variable_template_specialization(decl);
+    }
+    return nullptr;
+}
+
+void clear_variable_decl_variable_template_specializations() {
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_variable_decl_variable_template_specializations();
     }
 }
 

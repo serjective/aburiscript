@@ -872,12 +872,13 @@ void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
     DeclBinding binding;
     binding.name = name;
     binding.lookup_namespace = lookup_namespace;
-    binding.symbol_kind =
-        lookup_namespace == LookupNamespace::Tag
-            ? SymbolKind::TYPE
-            : (isa<TemplateTemplateParmDecl>(decl)
-                   ? SymbolKind::TYPE
-                   : SymbolKind::FUNCTION);
+    binding.symbol_kind = SymbolKind::FUNCTION;
+    if (lookup_namespace == LookupNamespace::Tag ||
+        isa<TemplateTemplateParmDecl>(decl)) {
+        binding.symbol_kind = SymbolKind::TYPE;
+    } else if (isa<VariableTemplateDecl>(decl)) {
+        binding.symbol_kind = SymbolKind::VARIABLE;
+    }
     binding.ast_decl = decl;
     binding.template_decl = decl;
 
@@ -903,6 +904,11 @@ void Collect::collect_add_class_template_decl(const std::string& name,
 
 void Collect::collect_add_alias_template_decl(const std::string& name,
                                               const Decl* decl) {
+    collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);
+}
+
+void Collect::collect_add_variable_template_decl(const std::string& name,
+                                                 const Decl* decl) {
     collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);
 }
 
@@ -977,9 +983,13 @@ void Collect::sync_decl_context_from_current_scope() {
 
 
 bool Collect::collect_is_file_scope() const {
-
-    return session_.current_scope_ &&
-        scope_flags_contains(session_.current_scope_->flags, ScopeFlags::FileScope);
+    auto scope = session_.current_scope_;
+    while (scope &&
+           scope_flags_contains(scope->flags, ScopeFlags::TemplateParameterScope) &&
+           scope->parent) {
+        scope = scope->parent;
+    }
+    return scope && scope_flags_contains(scope->flags, ScopeFlags::FileScope);
 }
 
 

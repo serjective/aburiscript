@@ -359,10 +359,12 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
             template_parameter);
     }
     const TemplateDecl* template_decl = nullptr;
-    switch (resolved_template->get_kind()) {
+        switch (resolved_template->get_kind()) {
         case DeclKind::AliasTemplateDecl:
         case DeclKind::FunctionTemplateDecl:
+        case DeclKind::VariableTemplateDecl:
         case DeclKind::ClassTemplateDecl:
+        case DeclKind::VariableTemplatePartialSpecializationDecl:
         case DeclKind::ClassTemplatePartialSpecializationDecl:
             template_decl =
                 static_cast<const TemplateDecl*>(resolved_template);
@@ -1257,7 +1259,7 @@ Parser::parse_cpp_explicit_specialization_declaration(
     auto resolve_primary_function_template =
         [&](const FuncDecl* specialized_function,
             std::vector<TemplateArgument>& deduced_arguments_out)
-            -> const FunctionTemplateDecl* {
+        -> const FunctionTemplateDecl* {
         deduced_arguments_out.clear();
         if (!specialized_function || specialized_function->name.empty()) {
             error_custloc(
@@ -1340,6 +1342,98 @@ Parser::parse_cpp_explicit_specialization_declaration(
         return canonical_function_template ? canonical_function_template : matched_template;
     };
 
+    auto resolve_primary_variable_template =
+        [&](const VariableDecl* specialized_variable,
+            std::vector<TemplateArgument>& specialization_arguments_out)
+        -> const VariableTemplateDecl* {
+            specialization_arguments_out.clear();
+            if (!specialized_variable || specialized_variable->name.empty()) {
+                error_custloc(
+                    "explicit specialization requires a named variable template",
+                    template_tok.loc);
+            }
+            if (!specialized_variable->has_explicit_specialization_argument_list ||
+                specialized_variable->explicit_specialization_arguments.empty()) {
+                error_custloc(
+                    "explicit specialization of variable template '" +
+                        specialized_variable->name +
+                        "' requires a template-id",
+                    specialized_variable ? specialized_variable->location
+                                         : template_tok.loc);
+            }
+
+            auto lookup_scope = collect_->collect_current_scope();
+            while (lookup_scope &&
+                   scope_flags_contains(
+                       lookup_scope->flags,
+                       ScopeFlags::TemplateParameterScope)) {
+                lookup_scope = lookup_scope->parent;
+            }
+            const DeclBinding* template_binding =
+                LookupEngine::lookup_unqualified_template_binding(
+                    specialized_variable->name,
+                    lookup_scope ? lookup_scope : collect_->collect_current_scope(),
+                    true,
+                    LookupNamespace::Ordinary);
+            if (!template_binding) {
+                error_custloc(
+                    "explicit specialization requires a prior primary template '" +
+                        specialized_variable->name + "'",
+                    specialized_variable->location);
+            }
+
+            std::vector<const VariableTemplateDecl*> candidates;
+            auto append_candidate = [&](const Decl* candidate) {
+                auto* variable_template = dyn_cast<VariableTemplateDecl>(
+                    const_cast<Decl*>(candidate));
+                if (!variable_template) {
+                    return;
+                }
+                for (const auto* existing : candidates) {
+                    if (existing == variable_template) {
+                        return;
+                    }
+                }
+                candidates.push_back(variable_template);
+            };
+            append_candidate(template_binding->template_decl);
+            for (const auto* candidate : template_binding->template_overload_candidates) {
+                append_candidate(candidate);
+            }
+
+            const VariableTemplateDecl* matched_template = nullptr;
+            for (const auto* candidate : candidates) {
+                if (!candidate) {
+                    continue;
+                }
+                if (matched_template && matched_template != candidate) {
+                    error_custloc(
+                        "explicit specialization of variable template '" +
+                            specialized_variable->name +
+                            "' is ambiguous",
+                        specialized_variable->location);
+                }
+                matched_template = candidate;
+            }
+
+            if (!matched_template) {
+                error_custloc(
+                    "explicit specialization does not match any primary template '" +
+                        specialized_variable->name + "'",
+                    specialized_variable->location);
+            }
+
+            const TemplateDecl* canonical =
+                get_template_decl_canonical_decl(matched_template);
+            auto* canonical_variable_template =
+                dyn_cast<VariableTemplateDecl>(
+                    const_cast<TemplateDecl*>(canonical));
+            specialization_arguments_out =
+                specialized_variable->explicit_specialization_arguments;
+            return canonical_variable_template ? canonical_variable_template
+                                               : matched_template;
+        };
+
     auto explicit_specialization_primary_name =
         [](const TemplateDecl* primary_template) -> std::string {
         if (!primary_template) {
@@ -1359,6 +1453,14 @@ Parser::parse_cpp_explicit_specialization_declaration(
             const auto* function_decl = function_template->function_decl();
             if (function_decl && !function_decl->name.empty()) {
                 return function_decl->name;
+            }
+        }
+        if (const auto* variable_template =
+                dyn_cast<VariableTemplateDecl>(
+                    const_cast<TemplateDecl*>(primary_template))) {
+            const auto* variable_decl = variable_template->variable_decl();
+            if (variable_decl && !variable_decl->name.empty()) {
+                return variable_decl->name;
             }
         }
         if (const auto* alias_template =
@@ -1463,6 +1565,36 @@ Parser::parse_cpp_explicit_specialization_declaration(
                 return out;
             }
 
+            if (const auto* specialized_variable =
+                    dyn_cast<VariableDecl>(
+                        const_cast<Decl*>(
+                            explicit_specialization->get_specialized_decl()))) {
+                std::string out;
+                if (specialized_variable->sym) {
+                    if (const auto* qualifier_prefix =
+                            get_symbol_cxx_qualifier_prefix(
+                                specialized_variable->sym.get());
+                        qualifier_prefix && !qualifier_prefix->empty()) {
+                        out += *qualifier_prefix;
+                        out += "::";
+                    }
+                }
+                std::string variable_name =
+                    specialized_variable->name.empty()
+                        ? explicit_specialization_primary_name(primary_template)
+                        : specialized_variable->name;
+                if (isa<VariableTemplateDecl>(
+                        const_cast<TemplateDecl*>(primary_template)) &&
+                    !explicit_specialization->specialization_arguments.empty()) {
+                    out += format_function_template_specialization_name(
+                        variable_name,
+                        explicit_specialization->specialization_arguments);
+                } else {
+                    out += variable_name;
+                }
+                return out;
+            }
+
             return explicit_specialization_primary_name(primary_template);
         };
 
@@ -1495,32 +1627,43 @@ Parser::parse_cpp_explicit_specialization_declaration(
             const auto* function_template =
                 dyn_cast<FunctionTemplateDecl>(
                     const_cast<TemplateDecl*>(primary_template));
-            if (!function_template) {
+            if (function_template) {
+                const FunctionTemplateDecl* lookup_template = function_template;
+                if (owner_primary_template &&
+                    explicit_specialization->primary_member_decl &&
+                    !explicit_specialization->owner_specialization_arguments.empty()) {
+                    const auto* owner_entry =
+                        ast_ctx->lookup_class_template_specialization(
+                            owner_primary_template,
+                            explicit_specialization->owner_specialization_arguments);
+                    if (!owner_entry) {
+                        return SrcLoc();
+                    }
+                    lookup_template =
+                        owner_entry->lookup_owner_specialized_member_template(
+                            explicit_specialization->primary_member_decl);
+                    if (!lookup_template) {
+                        return SrcLoc();
+                    }
+                }
+
+                const auto* entry =
+                    ast_ctx->lookup_function_template_specialization(
+                        lookup_template,
+                        explicit_specialization->specialization_arguments);
+                return entry ? entry->first_required_loc : SrcLoc();
+            }
+
+            const auto* variable_template =
+                dyn_cast<VariableTemplateDecl>(
+                    const_cast<TemplateDecl*>(primary_template));
+            if (!variable_template) {
                 return SrcLoc();
             }
 
-            const FunctionTemplateDecl* lookup_template = function_template;
-            if (owner_primary_template &&
-                explicit_specialization->primary_member_decl &&
-                !explicit_specialization->owner_specialization_arguments.empty()) {
-                const auto* owner_entry =
-                    ast_ctx->lookup_class_template_specialization(
-                        owner_primary_template,
-                        explicit_specialization->owner_specialization_arguments);
-                if (!owner_entry) {
-                    return SrcLoc();
-                }
-                lookup_template =
-                    owner_entry->lookup_owner_specialized_member_template(
-                        explicit_specialization->primary_member_decl);
-                if (!lookup_template) {
-                    return SrcLoc();
-                }
-            }
-
             const auto* entry =
-                ast_ctx->lookup_function_template_specialization(
-                    lookup_template,
+                ast_ctx->lookup_variable_template_specialization(
+                    variable_template,
                     explicit_specialization->specialization_arguments);
             return entry ? entry->first_required_loc : SrcLoc();
         };
@@ -1817,6 +1960,41 @@ Parser::parse_cpp_explicit_specialization_declaration(
                 nullptr,
                 false,
                 has_explicit_argument_list,
+                template_tok.loc);
+        register_explicit_specialization(
+            primary_template,
+            nullptr,
+            std::move(explicit_specialization));
+        return explicit_decls;
+    }
+
+    if (auto* specialized_variable =
+            dyn_cast<VariableDecl>(specialized_decls.front().get())) {
+        if (specialized_variable->storage_class == StorageClass::EXTERN &&
+            !specialized_variable->init &&
+            !specialized_variable->is_inline) {
+            error_custloc(
+                "explicit specialization of variable template '" +
+                    specialized_variable->name +
+                    "' requires a definition",
+                specialized_variable->location);
+        }
+
+        std::vector<TemplateArgument> specialization_arguments;
+        const VariableTemplateDecl* primary_template =
+            resolve_primary_variable_template(
+                specialized_variable,
+                specialization_arguments);
+        auto explicit_specialization =
+            make_ast<TemplateExplicitSpecializationDecl>(
+                *ast_ctx,
+                primary_template,
+                std::move(specialized_decls.front()),
+                std::move(specialization_arguments),
+                std::vector<TemplateArgument>{},
+                nullptr,
+                false,
+                true,
                 template_tok.loc);
         register_explicit_specialization(
             primary_template,
@@ -2208,7 +2386,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     std::unique_ptr<ClassTemplateDecl> prepared_class_template;
     std::unique_ptr<ClassTemplatePartialSpecializationDecl>
         prepared_class_partial_specialization;
+    std::unique_ptr<VariableTemplatePartialSpecializationDecl>
+        prepared_variable_partial_specialization;
     std::string prepared_class_template_name;
+    std::string prepared_variable_template_name;
     if (templated_decls.size() == 1 && templated_decls.front()) {
         if (auto* record_decl = dyn_cast<CppRecordDecl>(templated_decls.front().get())) {
             if (record_decl->name.empty()) {
@@ -2277,6 +2458,61 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                 prepare_cpp_template_pattern_record(
                     *prepared_class_partial_specialization);
             }
+        } else if (auto* variable_decl =
+                       dyn_cast<VariableDecl>(templated_decls.front().get())) {
+            if (variable_decl->has_explicit_specialization_argument_list) {
+                if (member_template_declaration) {
+                    fail_cpp_unsupported(
+                        "member variable template partial specialization",
+                        variable_decl->location);
+                }
+                prepared_variable_template_name = variable_decl->name;
+                auto lookup_scope = collect_->collect_current_scope();
+                while (lookup_scope &&
+                       scope_flags_contains(
+                           lookup_scope->flags,
+                           ScopeFlags::TemplateParameterScope)) {
+                    lookup_scope = lookup_scope->parent;
+                }
+                const DeclBinding* template_binding =
+                    LookupEngine::lookup_unqualified_template_binding(
+                        prepared_variable_template_name,
+                        lookup_scope ? lookup_scope : collect_->collect_current_scope(),
+                        true,
+                        LookupNamespace::Ordinary);
+                const Decl* primary_template = nullptr;
+                if (template_binding) {
+                    primary_template = template_binding->template_decl;
+                    if (!primary_template &&
+                        template_binding->template_overload_candidates.size() == 1) {
+                        primary_template =
+                            template_binding->template_overload_candidates.front();
+                    }
+                }
+                auto* primary_variable_template =
+                    dyn_cast<VariableTemplateDecl>(primary_template);
+                if (!primary_variable_template) {
+                    error_custloc(
+                        "variable template partial specialization requires a prior primary template '" +
+                            prepared_variable_template_name + "'",
+                        variable_decl->location);
+                }
+                auto specialization_arguments =
+                    std::move(variable_decl->explicit_specialization_arguments);
+                variable_decl->explicit_specialization_arguments.clear();
+                variable_decl->has_explicit_specialization_argument_list = false;
+                prepared_variable_partial_specialization =
+                    make_ast<VariableTemplatePartialSpecializationDecl>(
+                        *ast_ctx,
+                        primary_variable_template,
+                        std::move(parameters),
+                        std::move(specialization_arguments),
+                        std::move(templated_decls.front()),
+                        template_tok.loc);
+                const_cast<VariableTemplateDecl*>(primary_variable_template)
+                    ->add_partial_specialization(
+                        prepared_variable_partial_specialization.get());
+            }
         }
     }
 
@@ -2333,6 +2569,18 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                        QualType(existing_function->function_decl()->type),
                        QualType(current_function->function_decl()->type),
                        true);
+        }
+        if (auto* existing_variable =
+                dyn_cast<VariableTemplateDecl>(const_cast<TemplateDecl*>(existing))) {
+            auto* current_variable =
+                dyn_cast<VariableTemplateDecl>(const_cast<TemplateDecl*>(current));
+            return current_variable &&
+                   existing_variable->variable_decl() &&
+                   current_variable->variable_decl() &&
+                   cpp_out_of_line_type_matches(
+                       existing_variable->variable_decl()->type,
+                       current_variable->variable_decl()->type,
+                       false);
         }
         if (auto* existing_class =
                 dyn_cast<ClassTemplateDecl>(const_cast<TemplateDecl*>(existing))) {
@@ -2401,7 +2649,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
             switch (decl->get_kind()) {
                 case DeclKind::AliasTemplateDecl:
                 case DeclKind::FunctionTemplateDecl:
+                case DeclKind::VariableTemplateDecl:
                 case DeclKind::ClassTemplateDecl:
+                case DeclKind::VariableTemplatePartialSpecializationDecl:
                 case DeclKind::ClassTemplatePartialSpecializationDecl:
                     return static_cast<const TemplateDecl*>(decl);
                 default:
@@ -2433,7 +2683,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
         }
         bool require_trailing_defaults =
             isa<ClassTemplateDecl>(template_decl) ||
-            isa<AliasTemplateDecl>(template_decl);
+            isa<AliasTemplateDecl>(template_decl) ||
+            isa<VariableTemplateDecl>(template_decl);
         if (!require_trailing_defaults) {
             return;
         }
@@ -2497,12 +2748,14 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
 
     if (!prepared_class_template &&
         !prepared_class_partial_specialization &&
+        !prepared_variable_partial_specialization &&
         (templated_decls.size() != 1 || !templated_decls.front())) {
         fail_cpp_unsupported("template-declaration form", template_tok.loc);
     }
 
     if (!prepared_class_template &&
         !prepared_class_partial_specialization &&
+        !prepared_variable_partial_specialization &&
         templated_decls.size() == 1 &&
         templated_decls.front()->get_kind() == DeclKind::NopDecl) {
         return templated_decls;
@@ -2524,6 +2777,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     }
     if (prepared_class_partial_specialization) {
         wrapped_decls.push_back(std::move(prepared_class_partial_specialization));
+        return wrapped_decls;
+    }
+    if (prepared_variable_partial_specialization) {
+        wrapped_decls.push_back(
+            std::move(prepared_variable_partial_specialization));
         return wrapped_decls;
     }
 
@@ -2582,7 +2840,33 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
         return wrapped_decls;
     }
     if (templated_decls.front()->get_kind() == DeclKind::VariableDecl) {
-        fail_cpp_unsupported("variable template", templated_decls.front()->location);
+        if (member_template_declaration) {
+            fail_cpp_unsupported(
+                "member variable template",
+                templated_decls.front()->location);
+        }
+        auto* variable_decl =
+            static_cast<VariableDecl*>(templated_decls.front().get());
+        if (variable_decl->name.empty()) {
+            fail_cpp_unsupported(
+                "unnamed variable template",
+                templated_decls.front()->location);
+        }
+        std::string template_name = variable_decl->name;
+        auto template_decl = make_ast<VariableTemplateDecl>(
+            *ast_ctx,
+            std::move(parameters),
+            std::move(templated_decls.front()),
+            template_tok.loc);
+        finalize_primary_template_decl(
+            template_decl.get(),
+            template_name,
+            LookupNamespace::Ordinary);
+        collect_->collect_add_variable_template_decl(
+            template_name,
+            template_decl.get());
+        wrapped_decls.push_back(std::move(template_decl));
+        return wrapped_decls;
     }
     fail_cpp_unsupported("template-declaration form", templated_decls.front()->location);
     return wrapped_decls;

@@ -591,6 +591,14 @@ FunctionTemplateSpecializationInfo canonicalize_function_template_specialization
             canonical_template_decl_identity(info.primary_template)));
     return info;
 }
+
+VariableTemplateSpecializationInfo canonicalize_variable_template_specialization_info(
+    VariableTemplateSpecializationInfo info) {
+    info.primary_template = dyn_cast<VariableTemplateDecl>(
+        const_cast<TemplateDecl*>(
+            canonical_template_decl_identity(info.primary_template)));
+    return info;
+}
 } // namespace
 
 bool TemplateSpecializationSemanticKey::operator==(
@@ -616,6 +624,18 @@ ASTContext* get_active_side_table_ast_context() {
 }
 
 ASTContext* get_side_table_ast_context_for(const FuncDecl* decl) {
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto* store =
+            lookup_registered_collect_semantic_store(
+                decl->external_semantic_owner_id)) {
+        return store->ast_context();
+    }
+    return nullptr;
+}
+
+ASTContext* get_side_table_ast_context_for(const VariableDecl* decl) {
     if (!decl) {
         return nullptr;
     }
@@ -820,6 +840,25 @@ void ASTContext::clear_func_decl_function_template_specializations() {
     semantic_store_->clear_func_decl_function_template_specializations();
 }
 
+void ASTContext::set_variable_decl_variable_template_specialization(
+    const VariableDecl* decl,
+    VariableTemplateSpecializationInfo info) {
+    semantic_store_->set_variable_decl_variable_template_specialization(
+        decl,
+        std::move(info));
+}
+
+const VariableTemplateSpecializationInfo*
+ASTContext::get_variable_decl_variable_template_specialization(
+    const VariableDecl* decl) const {
+    return semantic_store_->get_variable_decl_variable_template_specialization(
+        decl);
+}
+
+void ASTContext::clear_variable_decl_variable_template_specializations() {
+    semantic_store_->clear_variable_decl_variable_template_specializations();
+}
+
 void ASTContext::set_template_decl_canonical_decl(
     const TemplateDecl* decl,
     const TemplateDecl* canonical_decl) {
@@ -926,6 +965,23 @@ ASTContext::get_symbol_function_template_specialization(const Symbol* sym) const
 
 void ASTContext::clear_symbol_function_template_specializations() {
     semantic_store_->clear_symbol_function_template_specializations();
+}
+
+void ASTContext::set_symbol_variable_template_specialization(
+    const Symbol* sym,
+    VariableTemplateSpecializationInfo info) {
+    semantic_store_->set_symbol_variable_template_specialization(
+        sym,
+        std::move(info));
+}
+
+const VariableTemplateSpecializationInfo*
+ASTContext::get_symbol_variable_template_specialization(const Symbol* sym) const {
+    return semantic_store_->get_symbol_variable_template_specialization(sym);
+}
+
+void ASTContext::clear_symbol_variable_template_specializations() {
+    semantic_store_->clear_symbol_variable_template_specializations();
 }
 
 bool ASTContext::merge_symbol_cpp_default_arguments(
@@ -1095,6 +1151,42 @@ ASTContext::get_or_create_function_template_specialization(
 const std::vector<std::unique_ptr<FunctionTemplateSpecializationEntry>>&
 ASTContext::function_template_specializations() const {
     return semantic_store_->function_template_specializations();
+}
+
+VariableTemplateSpecializationEntry*
+ASTContext::lookup_variable_template_specialization(
+    const VariableTemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) {
+    return semantic_store_->lookup_variable_template_specialization(
+        primary_template,
+        arguments);
+}
+
+const VariableTemplateSpecializationEntry*
+ASTContext::lookup_variable_template_specialization(
+    const VariableTemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) const {
+    return semantic_store_->lookup_variable_template_specialization(
+        primary_template,
+        arguments);
+}
+
+VariableTemplateSpecializationEntry&
+ASTContext::get_or_create_variable_template_specialization(
+    const VariableTemplateDecl* primary_template,
+    std::vector<TemplateArgument> arguments,
+    std::unique_ptr<VariableDecl> specialization_decl,
+    std::shared_ptr<Symbol> specialization_symbol) {
+    return semantic_store_->get_or_create_variable_template_specialization(
+        primary_template,
+        std::move(arguments),
+        std::move(specialization_decl),
+        std::move(specialization_symbol));
+}
+
+const std::vector<std::unique_ptr<VariableTemplateSpecializationEntry>>&
+ASTContext::variable_template_specializations() const {
+    return semantic_store_->variable_template_specializations();
 }
 
 bool ASTContext::push_template_instantiation_frame(size_t max_depth) {

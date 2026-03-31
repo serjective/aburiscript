@@ -29,6 +29,14 @@ public:
         const FuncDecl* decl) const;
     void clear_func_decl_function_template_specializations();
 
+    void set_variable_decl_variable_template_specialization(
+        const VariableDecl* decl,
+        VariableTemplateSpecializationInfo info);
+    const VariableTemplateSpecializationInfo*
+    get_variable_decl_variable_template_specialization(
+        const VariableDecl* decl) const;
+    void clear_variable_decl_variable_template_specializations();
+
     void set_template_decl_canonical_decl(const TemplateDecl* decl,
                                           const TemplateDecl* canonical_decl);
     const TemplateDecl* get_template_decl_canonical_decl(
@@ -69,6 +77,13 @@ public:
     const FunctionTemplateSpecializationInfo*
     get_symbol_function_template_specialization(const Symbol* sym) const;
     void clear_symbol_function_template_specializations();
+
+    void set_symbol_variable_template_specialization(
+        const Symbol* sym,
+        VariableTemplateSpecializationInfo info);
+    const VariableTemplateSpecializationInfo*
+    get_symbol_variable_template_specialization(const Symbol* sym) const;
+    void clear_symbol_variable_template_specializations();
 
     bool merge_symbol_cpp_default_arguments(
         const Symbol* sym,
@@ -142,6 +157,23 @@ public:
         return function_template_specializations_;
     }
 
+    VariableTemplateSpecializationEntry* lookup_variable_template_specialization(
+        const VariableTemplateDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments);
+    const VariableTemplateSpecializationEntry*
+    lookup_variable_template_specialization(
+        const VariableTemplateDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments) const;
+    VariableTemplateSpecializationEntry& get_or_create_variable_template_specialization(
+        const VariableTemplateDecl* primary_template,
+        std::vector<TemplateArgument> arguments,
+        std::unique_ptr<VariableDecl> specialization_decl,
+        std::shared_ptr<Symbol> specialization_symbol);
+    const std::vector<std::unique_ptr<VariableTemplateSpecializationEntry>>&
+    variable_template_specializations() const {
+        return variable_template_specializations_;
+    }
+
     bool push_template_instantiation_frame(size_t max_depth = 64);
     void pop_template_instantiation_frame();
     size_t template_instantiation_depth() const {
@@ -156,6 +188,8 @@ public:
 private:
     using FuncExternalSemanticInfoMap =
         std::unordered_map<const FuncDecl*, FuncExternalSemanticInfo>;
+    using VariableExternalSemanticInfoMap =
+        std::unordered_map<const VariableDecl*, VariableExternalSemanticInfo>;
     using ParamExternalSemanticInfoMap =
         std::unordered_map<const ParamDecl*, ParamExternalSemanticInfo>;
     using SymbolExternalSemanticInfoMap =
@@ -172,6 +206,7 @@ private:
     ASTContext* owner_ast_ctx_ = nullptr;
     std::unordered_set<std::string> external_qualifier_pool_;
     FuncExternalSemanticInfoMap func_decl_semantic_info_map_;
+    VariableExternalSemanticInfoMap variable_decl_semantic_info_map_;
     std::unordered_set<const TemplateDecl*> tracked_template_decls_;
     std::unordered_set<const TemplateParameterDecl*> tracked_template_parameter_decls_;
     ParamExternalSemanticInfoMap param_decl_semantic_info_map_;
@@ -192,6 +227,12 @@ private:
         TemplateSpecializationSemanticKeyHash> function_template_specialization_lookup_;
     std::vector<std::unique_ptr<FunctionTemplateSpecializationEntry>>
         function_template_specializations_;
+    std::unordered_map<
+        TemplateSpecializationSemanticKey,
+        size_t,
+        TemplateSpecializationSemanticKeyHash> variable_template_specialization_lookup_;
+    std::vector<std::unique_ptr<VariableTemplateSpecializationEntry>>
+        variable_template_specializations_;
     std::vector<std::unique_ptr<Decl>> retained_external_decls_;
     uint64_t record_semantics_cache_epoch_ = 1;
     size_t template_instantiation_depth_ = 0;

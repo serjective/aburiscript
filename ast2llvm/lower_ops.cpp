@@ -468,6 +468,16 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
                 }
                 return {static_cast<llvm::Value*>(func), sym->type.get_shared()};
             }
+            if (sym->kind == SymbolKind::VARIABLE &&
+                sym->variable_definition &&
+                (sym->linkage == VariableLinkage::EXTERNAL ||
+                 sym->linkage == VariableLinkage::INTERNAL)) {
+                deal_global_variable_declaration(
+                    const_cast<VariableDecl*>(sym->variable_definition));
+                mangled = mangleCIdentifier(sym->uid);
+            }
+        }
+        if (!named_values.contains(mangled)) {
             error("get_lvalue(): variable not allocated", expr->location);
             return {};
         }

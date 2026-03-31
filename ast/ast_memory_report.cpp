@@ -106,7 +106,9 @@ constexpr auto kAllDeclKinds = std::to_array<DeclKind>({
     DeclKind::NamespaceDecl,
     DeclKind::AliasTemplateDecl,
     DeclKind::FunctionTemplateDecl,
+    DeclKind::VariableTemplateDecl,
     DeclKind::ClassTemplateDecl,
+    DeclKind::VariableTemplatePartialSpecializationDecl,
     DeclKind::ClassTemplatePartialSpecializationDecl,
     DeclKind::TemplateExplicitSpecializationDecl,
     DeclKind::FuncDecl,
@@ -215,7 +217,10 @@ const char* decl_kind_name(DeclKind kind) {
         case DeclKind::NamespaceDecl: return "NamespaceDecl";
         case DeclKind::AliasTemplateDecl: return "AliasTemplateDecl";
         case DeclKind::FunctionTemplateDecl: return "FunctionTemplateDecl";
+        case DeclKind::VariableTemplateDecl: return "VariableTemplateDecl";
         case DeclKind::ClassTemplateDecl: return "ClassTemplateDecl";
+        case DeclKind::VariableTemplatePartialSpecializationDecl:
+            return "VariableTemplatePartialSpecializationDecl";
         case DeclKind::ClassTemplatePartialSpecializationDecl:
             return "ClassTemplatePartialSpecializationDecl";
         case DeclKind::TemplateExplicitSpecializationDecl:
@@ -520,10 +525,33 @@ private:
                 visit_decl(node->templated_decl.get());
                 return;
             }
+            case DeclKind::VariableTemplateDecl: {
+                auto* node = static_cast<const VariableTemplateDecl*>(decl);
+                record_decl<VariableTemplateDecl>(DeclKind::VariableTemplateDecl);
+                ast_vector_backing_bytes_ += vector_backing_bytes(node->parameters);
+                for (const auto& param : node->parameters) {
+                    visit_decl(param.get());
+                }
+                visit_decl(node->templated_decl.get());
+                return;
+            }
             case DeclKind::ClassTemplateDecl: {
                 auto* node = static_cast<const ClassTemplateDecl*>(decl);
                 record_decl<ClassTemplateDecl>(DeclKind::ClassTemplateDecl);
                 ast_vector_backing_bytes_ += vector_backing_bytes(node->parameters);
+                for (const auto& param : node->parameters) {
+                    visit_decl(param.get());
+                }
+                visit_decl(node->templated_decl.get());
+                return;
+            }
+            case DeclKind::VariableTemplatePartialSpecializationDecl: {
+                auto* node =
+                    static_cast<const VariableTemplatePartialSpecializationDecl*>(decl);
+                record_decl<VariableTemplatePartialSpecializationDecl>(
+                    DeclKind::VariableTemplatePartialSpecializationDecl);
+                ast_vector_backing_bytes_ += vector_backing_bytes(node->parameters);
+                visit_template_arguments(node->specialization_arguments);
                 for (const auto& param : node->parameters) {
                     visit_decl(param.get());
                 }

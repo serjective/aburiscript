@@ -156,7 +156,9 @@ enum class DeclKind : uint8_t {
     NamespaceDecl,
     AliasTemplateDecl,
     FunctionTemplateDecl,
+    VariableTemplateDecl,
     ClassTemplateDecl,
+    VariableTemplatePartialSpecializationDecl,
     ClassTemplatePartialSpecializationDecl,
     TemplateExplicitSpecializationDecl,
     FuncDecl,
@@ -810,6 +812,7 @@ struct CppDestructorDecl : FuncDecl {
     }
 };
 struct FunctionTemplateSpecializationInfo;
+struct VariableTemplateSpecializationInfo;
 struct TemplateDecl;
 void set_func_decl_cxx_qualifier_prefix(const FuncDecl* decl,
                                         std::optional<std::string> prefix);
@@ -824,6 +827,12 @@ void set_func_decl_function_template_specialization(
 const FunctionTemplateSpecializationInfo*
 get_func_decl_function_template_specialization(const FuncDecl* decl);
 void clear_func_decl_function_template_specializations();
+void set_variable_decl_variable_template_specialization(
+    const VariableDecl* decl,
+    const VariableTemplateSpecializationInfo& info);
+const VariableTemplateSpecializationInfo*
+get_variable_decl_variable_template_specialization(const VariableDecl* decl);
+void clear_variable_decl_variable_template_specializations();
 void set_template_decl_canonical_decl(const TemplateDecl* decl,
                                       const TemplateDecl* canonical_decl);
 const TemplateDecl* get_template_decl_canonical_decl(const TemplateDecl* decl);
@@ -2292,14 +2301,17 @@ struct VariableDecl: Decl {
     QualType original_type;
     std::string name;
     std::unique_ptr<Expr> init;
+    std::vector<TemplateArgument> explicit_specialization_arguments;
     std::shared_ptr<Symbol> sym;
     const std::string* asm_label;
     StorageClass storage_class;
+    bool has_explicit_specialization_argument_list = false;
     uint8_t is_inline : 1;
     uint8_t is_constexpr : 1;
     uint8_t is_thread_local : 1;
     uint8_t is_block_byref : 1;
     uint8_t language_linkage : 2;
+    mutable uint32_t external_semantic_owner_id = 0; // See ownership conventions at top of file
 
     bool is_const() const { return type.is_const(); }
 
@@ -2307,6 +2319,7 @@ struct VariableDecl: Decl {
                  std::unique_ptr<Expr> init, bool is_inline = false, SrcLoc loc = SrcLoc()) :
     Decl(DeclKind::VariableDecl, loc), type(std::move(type)), original_type(nullptr), name(name), init(std::move(init)), asm_label(nullptr),
     storage_class(StorageClass::NONE),
+    has_explicit_specialization_argument_list(false),
     is_inline(is_inline), is_constexpr(false), is_thread_local(false),
     is_block_byref(false),
     language_linkage(static_cast<uint8_t>(LanguageLinkage::None)) {}
@@ -2316,6 +2329,7 @@ struct VariableDecl: Decl {
              StorageClass storage_class = StorageClass::NONE, bool is_inline = false, SrcLoc loc = SrcLoc()) :
     Decl(DeclKind::VariableDecl, loc), type(std::move(type)), original_type(nullptr), name(name), init(std::move(init)), sym(std::move(sym)),
     asm_label(nullptr), storage_class(storage_class),
+    has_explicit_specialization_argument_list(false),
     is_inline(is_inline), is_constexpr(false), is_thread_local(false),
     is_block_byref(false),
     language_linkage(static_cast<uint8_t>(LanguageLinkage::None)) {}
@@ -2675,7 +2689,10 @@ struct TemplateExplicitSpecializationDecl : Decl {
             return record_decl->is_definition;
         }
         if (auto* variable_decl = dyn_cast<VariableDecl>(specialized_decl.get())) {
-            return variable_decl->init != nullptr;
+            if (variable_decl->init) {
+                return true;
+            }
+            return variable_decl->storage_class != StorageClass::EXTERN;
         }
         return false;
     }
@@ -2705,6 +2722,45 @@ struct FunctionTemplateDecl : TemplateDecl {
     static bool classof(const Decl* d) {
         return d->get_kind() == DeclKind::FunctionTemplateDecl;
     }
+};
+
+struct VariableTemplateDecl : TemplateDecl {
+    VariableTemplateDecl(TemplateParameterList parameters,
+                         std::unique_ptr<Decl> templated_decl,
+                         SrcLoc loc = SrcLoc())
+        : TemplateDecl(DeclKind::VariableTemplateDecl,
+                       std::move(parameters),
+                       std::move(templated_decl),
+                       loc) {}
+
+    VariableDecl* variable_decl() {
+        return static_cast<VariableDecl*>(templated_decl.get());
+    }
+
+    const VariableDecl* variable_decl() const {
+        return static_cast<const VariableDecl*>(templated_decl.get());
+    }
+
+    void add_partial_specialization(
+        VariableTemplatePartialSpecializationDecl* partial_specialization) {
+        if (!partial_specialization) {
+            return;
+        }
+        partial_specializations_.push_back(partial_specialization);
+    }
+
+    const std::vector<VariableTemplatePartialSpecializationDecl*>&
+    partial_specializations() const {
+        return partial_specializations_;
+    }
+
+    static bool classof(const Decl* d) {
+        return d->get_kind() == DeclKind::VariableTemplateDecl;
+    }
+
+private:
+    std::vector<VariableTemplatePartialSpecializationDecl*>
+        partial_specializations_;
 };
 
 inline const TemplateExplicitSpecializationDecl*
@@ -2760,6 +2816,7 @@ TemplateDecl::find_explicit_specialization(
 }
 
 struct ObjectDecl;
+struct VariableTemplatePartialSpecializationDecl;
 struct ClassTemplatePartialSpecializationDecl;
 
 struct ClassTemplateDecl : TemplateDecl {
@@ -2867,6 +2924,43 @@ struct ClassTemplatePartialSpecializationDecl : TemplateDecl {
 private:
     const ClassTemplateDecl* primary_template_ = nullptr;
     std::unique_ptr<TagDecl> pattern_semantic_decl_;
+};
+
+struct VariableTemplatePartialSpecializationDecl : TemplateDecl {
+    std::vector<TemplateArgument> specialization_arguments;
+
+    VariableTemplatePartialSpecializationDecl(
+        const VariableTemplateDecl* primary_template,
+        TemplateParameterList parameters,
+        std::vector<TemplateArgument> specialization_arguments,
+        std::unique_ptr<Decl> templated_decl,
+        SrcLoc loc = SrcLoc())
+        : TemplateDecl(DeclKind::VariableTemplatePartialSpecializationDecl,
+                       std::move(parameters),
+                       std::move(templated_decl),
+                       loc),
+          primary_template_(primary_template),
+          specialization_arguments(std::move(specialization_arguments)) {}
+
+    VariableDecl* variable_decl() {
+        return static_cast<VariableDecl*>(templated_decl.get());
+    }
+
+    const VariableDecl* variable_decl() const {
+        return static_cast<const VariableDecl*>(templated_decl.get());
+    }
+
+    const VariableTemplateDecl* primary_template() const {
+        return primary_template_;
+    }
+
+    static bool classof(const Decl* d) {
+        return d->get_kind() ==
+               DeclKind::VariableTemplatePartialSpecializationDecl;
+    }
+
+private:
+    const VariableTemplateDecl* primary_template_ = nullptr;
 };
 
 // Struct/Union declaration

@@ -53,6 +53,7 @@ set(COLLECT_SOURCES
         collect/collect_templates_deduction.cpp
         collect/collect_templates_deferred.cpp
         collect/collect_templates_function_specialization.cpp
+        collect/collect_templates_variable_specialization.cpp
         collect/collect_templates_class_specialization.cpp
         collect/collect_templates_substitution.cpp
         collect/collect_templates_materialize.cpp

@@ -100,9 +100,22 @@ std::string template_decl_display_name(const TemplateDecl* decl) {
             ? function_template->function_decl()->name
             : "";
     }
+    if (auto* variable_template =
+            dyn_cast<VariableTemplateDecl>(const_cast<TemplateDecl*>(decl))) {
+        return variable_template->variable_decl()
+            ? variable_template->variable_decl()->name
+            : "";
+    }
     if (auto* class_template =
             dyn_cast<ClassTemplateDecl>(const_cast<TemplateDecl*>(decl))) {
         return class_template->record_decl() ? class_template->record_decl()->name : "";
+    }
+    if (auto* variable_partial =
+            dyn_cast<VariableTemplatePartialSpecializationDecl>(
+                const_cast<TemplateDecl*>(decl))) {
+        return variable_partial->variable_decl()
+            ? variable_partial->variable_decl()->name
+            : "";
     }
     if (auto* partial_specialization =
             dyn_cast<ClassTemplatePartialSpecializationDecl>(
@@ -394,6 +407,11 @@ const TemplateParameterList* template_template_argument_parameter_list(
             dyn_cast<AliasTemplateDecl>(
                 const_cast<TemplateDecl*>(argument.template_decl))) {
         return &alias_template->parameters;
+    }
+    if (auto* variable_template =
+            dyn_cast<VariableTemplateDecl>(
+                const_cast<TemplateDecl*>(argument.template_decl))) {
+        return &variable_template->parameters;
     }
     if (auto* class_template =
             dyn_cast<ClassTemplateDecl>(

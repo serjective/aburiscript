@@ -626,12 +626,14 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
     }
 
     bool looks_like_call = gentle_check(TokenType::LEFT_PAREN);
+    bool might_be_template_id = looks_like_call;
     if (!looks_like_call &&
         is_cxx_mode_active() &&
         gentle_check(TokenType::LESS_THAN)) {
         TentativeParsingAction tentative(*this);
         try {
             (void)parse_cpp_template_argument_list();
+            might_be_template_id = true;
             looks_like_call = gentle_check(TokenType::LEFT_PAREN);
         } catch (const ParseError&) {
         } catch (const FatalErrorLimitReached&) {
@@ -915,12 +917,13 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
 
     if (!qualifier_lookup_failed) {
         std::shared_ptr<Symbol> sym = nullptr;
+        const DeclBinding* binding = nullptr;
         if (lookup_context) {
             auto qualified_lookup = LookupEngine::lookup_qualified(
                 terminal_name,
                 lookup_context,
                 LookupNamespace::Ordinary);
-            auto* binding =
+            binding =
                 qualified_lookup.status == LookupEngine::QualifiedLookupStatus::Found
                     ? qualified_lookup.binding
                     : nullptr;
@@ -934,6 +937,16 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
                     sym = binding->overload_candidates.front();
                 }
             }
+        }
+
+        if (!sym &&
+            might_be_template_id &&
+            binding &&
+            (binding->template_decl || binding->has_template_overload_set())) {
+            auto qualified_ref = collect_->collect_identifier_reference(
+                terminal_name, nullptr, qualified_loc);
+            set_qualified_expr_info(qualified_ref);
+            return qualified_ref;
         }
 
         if (!sym && !looks_like_call) {
@@ -959,6 +972,13 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             qualified_loc);
         return collect_->collect_error_expression("undeclared identifier",
             qualified_loc);
+    }
+
+    if (might_be_template_id) {
+        auto qualified_ref = collect_->collect_identifier_reference(
+            terminal_name, nullptr, qualified_loc);
+        set_qualified_expr_info(qualified_ref);
+        return qualified_ref;
     }
 
     if (!looks_like_call) {
@@ -1845,6 +1865,7 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
             return collect_->collect_integer_literal("1", type_ctx->get_builtin(BuiltinTypes::Int), tok.loc);
         }
         bool looks_like_call = (peek_token().type == TokenType::LEFT_PAREN);
+        bool might_be_template_id = looks_like_call;
         if (!looks_like_call &&
             is_cxx_mode_active() &&
             peek_token().type == TokenType::LESS_THAN) {
@@ -1853,6 +1874,7 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
                 advance();
                 if (gentle_check(TokenType::LESS_THAN)) {
                     (void)parse_cpp_template_argument_list();
+                    might_be_template_id = true;
                     looks_like_call = gentle_check(TokenType::LEFT_PAREN);
                 }
             } catch (const ParseError&) {
@@ -1863,7 +1885,7 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
         // todo: when we get typedefs this can be ambgioous. But we should realize that at cast_expression not here
         advance();
         return collect_->collect_unqualified_identifier_expression(
-            tok.value, looks_like_call, tok.loc);
+            tok.value, looks_like_call, might_be_template_id, tok.loc);
     }
     diag_engine->report_error("unexpected token \"" + tok.value +
           "\" in parse_primary_expression", tok.loc);
@@ -1943,6 +1965,12 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                             loc);
                         continue;
                     }
+                    tentative.commit();
+                    expr = collect_->collect_explicit_template_id_expression(
+                        std::move(expr),
+                        std::move(explicit_template_args),
+                        loc);
+                    continue;
                 } catch (const ParseError&) {
                 } catch (const FatalErrorLimitReached&) {
                     throw;

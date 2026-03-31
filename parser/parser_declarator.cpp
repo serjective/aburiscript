@@ -1065,7 +1065,8 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
             }
             mgnt->advance();
             if (pars->is_cxx_mode_active() &&
-                pars->is_parsing_cpp_explicit_specialization() &&
+                (pars->is_parsing_cpp_explicit_specialization() ||
+                 pars->is_in_template_pattern_context()) &&
                 !has_explicit_specialization_argument_list &&
                 mgnt->gentle_check(TokenType::LESS_THAN)) {
                 explicit_specialization_arguments =

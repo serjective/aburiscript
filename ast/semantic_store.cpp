@@ -64,6 +64,19 @@ void erase_func_decl_owner_if_unused(const CollectSemanticStore* store,
     }
 }
 
+void erase_variable_decl_owner_if_unused(const CollectSemanticStore* store,
+                                         const VariableDecl* decl) {
+    if (!store || !decl) {
+        return;
+    }
+    if (store->get_variable_decl_variable_template_specialization(decl) != nullptr) {
+        return;
+    }
+    if (decl->external_semantic_owner_id == store->registry_id()) {
+        decl->external_semantic_owner_id = 0;
+    }
+}
+
 void erase_symbol_owner_if_unused(const CollectSemanticStore* store,
                                   const Symbol* sym) {
     if (!store || !sym) {
@@ -76,6 +89,9 @@ void erase_symbol_owner_if_unused(const CollectSemanticStore* store,
         return;
     }
     if (store->get_symbol_function_template_specialization(sym) != nullptr) {
+        return;
+    }
+    if (store->get_symbol_variable_template_specialization(sym) != nullptr) {
         return;
     }
     if (store->get_symbol_cpp_default_arguments(sym) != nullptr) {
@@ -258,6 +274,25 @@ void append_symbol_semantic_fingerprint(std::string& out, const Symbol* sym) {
             get_symbol_function_template_specialization(sym);
         specialization_info && specialization_info->primary_template) {
         out += ":FT(";
+        append_template_decl_semantic_identity(
+            out,
+            specialization_info->primary_template);
+        out += ")<";
+        for (size_t idx = 0; idx < specialization_info->arguments.size(); ++idx) {
+            if (idx > 0) {
+                out += ",";
+            }
+            append_template_argument_semantic_fingerprint(
+                out,
+                specialization_info->arguments[idx]);
+        }
+        out += ">";
+    }
+
+    if (const auto* specialization_info =
+            get_symbol_variable_template_specialization(sym);
+        specialization_info && specialization_info->primary_template) {
+        out += ":VT(";
         append_template_decl_semantic_identity(
             out,
             specialization_info->primary_template);
@@ -686,6 +721,14 @@ FunctionTemplateSpecializationInfo canonicalize_function_template_specialization
             canonical_template_decl_identity(info.primary_template)));
     return info;
 }
+
+VariableTemplateSpecializationInfo canonicalize_variable_template_specialization_info(
+    VariableTemplateSpecializationInfo info) {
+    info.primary_template = dyn_cast<VariableTemplateDecl>(
+        const_cast<TemplateDecl*>(
+            canonical_template_decl_identity(info.primary_template)));
+    return info;
+}
 } // namespace
 
 CollectSemanticStore::CollectSemanticStore(ASTContext* owner_ast_ctx)
@@ -863,6 +906,59 @@ void CollectSemanticStore::clear_func_decl_function_template_specializations() {
         }
         erase_external_semantic_info_if_empty(func_decl_semantic_info_map_, decl);
         erase_func_decl_owner_if_unused(this, decl);
+    }
+}
+
+void CollectSemanticStore::set_variable_decl_variable_template_specialization(
+    const VariableDecl* decl,
+    VariableTemplateSpecializationInfo info) {
+    if (!decl) {
+        return;
+    }
+    ASTContextSideTableScope side_table_scope(owner_ast_ctx_);
+    auto& decl_info = variable_decl_semantic_info_map_[decl];
+    if (!info.primary_template) {
+        decl_info.variable_template_specialization.reset();
+        erase_external_semantic_info_if_empty(
+            variable_decl_semantic_info_map_,
+            decl);
+        erase_variable_decl_owner_if_unused(this, decl);
+        return;
+    }
+    decl_info.variable_template_specialization =
+        canonicalize_variable_template_specialization_info(std::move(info));
+    decl->external_semantic_owner_id = registry_id_;
+}
+
+const VariableTemplateSpecializationInfo*
+CollectSemanticStore::get_variable_decl_variable_template_specialization(
+    const VariableDecl* decl) const {
+    const auto* info =
+        find_external_semantic_info(variable_decl_semantic_info_map_, decl);
+    if (!info || !info->variable_template_specialization.has_value()) {
+        return nullptr;
+    }
+    return &(*info->variable_template_specialization);
+}
+
+void CollectSemanticStore::clear_variable_decl_variable_template_specializations() {
+    std::vector<const VariableDecl*> decls;
+    decls.reserve(variable_decl_semantic_info_map_.size());
+    for (const auto& [decl, info] : variable_decl_semantic_info_map_) {
+        if (info.variable_template_specialization.has_value()) {
+            decls.push_back(decl);
+        }
+    }
+    for (const VariableDecl* decl : decls) {
+        auto* info =
+            find_external_semantic_info(variable_decl_semantic_info_map_, decl);
+        if (info) {
+            info->variable_template_specialization.reset();
+        }
+        erase_external_semantic_info_if_empty(
+            variable_decl_semantic_info_map_,
+            decl);
+        erase_variable_decl_owner_if_unused(this, decl);
     }
 }
 
@@ -1195,6 +1291,53 @@ void CollectSemanticStore::clear_symbol_function_template_specializations() {
         auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
         if (info) {
             info->function_template_specialization.reset();
+        }
+        erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
+        erase_symbol_owner_if_unused(this, sym);
+    }
+}
+
+void CollectSemanticStore::set_symbol_variable_template_specialization(
+    const Symbol* sym,
+    VariableTemplateSpecializationInfo info) {
+    if (!sym) {
+        return;
+    }
+    ASTContextSideTableScope side_table_scope(owner_ast_ctx_);
+    auto& symbol_info = symbol_semantic_info_map_[sym];
+    if (!info.primary_template) {
+        symbol_info.variable_template_specialization.reset();
+        erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
+        erase_symbol_owner_if_unused(this, sym);
+        return;
+    }
+    symbol_info.variable_template_specialization =
+        canonicalize_variable_template_specialization_info(std::move(info));
+    sym->external_semantic_owner_id = registry_id_;
+}
+
+const VariableTemplateSpecializationInfo*
+CollectSemanticStore::get_symbol_variable_template_specialization(
+    const Symbol* sym) const {
+    const auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
+    if (!info || !info->variable_template_specialization.has_value()) {
+        return nullptr;
+    }
+    return &(*info->variable_template_specialization);
+}
+
+void CollectSemanticStore::clear_symbol_variable_template_specializations() {
+    std::vector<const Symbol*> symbols;
+    symbols.reserve(symbol_semantic_info_map_.size());
+    for (const auto& [sym, info] : symbol_semantic_info_map_) {
+        if (info.variable_template_specialization.has_value()) {
+            symbols.push_back(sym);
+        }
+    }
+    for (const Symbol* sym : symbols) {
+        auto* info = find_external_semantic_info(symbol_semantic_info_map_, sym);
+        if (info) {
+            info->variable_template_specialization.reset();
         }
         erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
         erase_symbol_owner_if_unused(this, sym);
@@ -1557,6 +1700,67 @@ CollectSemanticStore::get_or_create_function_template_specialization(
     return *function_template_specializations_.back();
 }
 
+VariableTemplateSpecializationEntry*
+CollectSemanticStore::lookup_variable_template_specialization(
+    const VariableTemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) {
+    ASTContextSideTableScope side_table_scope(owner_ast_ctx_);
+    auto key = make_template_specialization_semantic_key(primary_template, arguments);
+    auto it = variable_template_specialization_lookup_.find(key);
+    if (it == variable_template_specialization_lookup_.end()) {
+        return nullptr;
+    }
+    if (it->second >= variable_template_specializations_.size()) {
+        return nullptr;
+    }
+    return variable_template_specializations_[it->second].get();
+}
+
+const VariableTemplateSpecializationEntry*
+CollectSemanticStore::lookup_variable_template_specialization(
+    const VariableTemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) const {
+    ASTContextSideTableScope side_table_scope(owner_ast_ctx_);
+    auto key = make_template_specialization_semantic_key(primary_template, arguments);
+    auto it = variable_template_specialization_lookup_.find(key);
+    if (it == variable_template_specialization_lookup_.end()) {
+        return nullptr;
+    }
+    if (it->second >= variable_template_specializations_.size()) {
+        return nullptr;
+    }
+    return variable_template_specializations_[it->second].get();
+}
+
+VariableTemplateSpecializationEntry&
+CollectSemanticStore::get_or_create_variable_template_specialization(
+    const VariableTemplateDecl* primary_template,
+    std::vector<TemplateArgument> arguments,
+    std::unique_ptr<VariableDecl> specialization_decl,
+    std::shared_ptr<Symbol> specialization_symbol) {
+    ASTContextSideTableScope side_table_scope(owner_ast_ctx_);
+    auto semantic_key =
+        make_template_specialization_semantic_key(primary_template, arguments);
+    auto existing_it = variable_template_specialization_lookup_.find(semantic_key);
+    if (existing_it != variable_template_specialization_lookup_.end() &&
+        existing_it->second < variable_template_specializations_.size()) {
+        return *variable_template_specializations_[existing_it->second];
+    }
+
+    auto entry = std::make_unique<VariableTemplateSpecializationEntry>();
+    entry->primary_template = dyn_cast<VariableTemplateDecl>(
+        const_cast<TemplateDecl*>(semantic_key.primary_template));
+    entry->semantic_key = std::move(semantic_key);
+    entry->arguments = entry->semantic_key.arguments;
+    entry->specialization_decl = std::move(specialization_decl);
+    entry->specialization_symbol = std::move(specialization_symbol);
+
+    size_t index = variable_template_specializations_.size();
+    variable_template_specialization_lookup_.emplace(entry->semantic_key, index);
+    variable_template_specializations_.push_back(std::move(entry));
+    return *variable_template_specializations_.back();
+}
+
 bool CollectSemanticStore::push_template_instantiation_frame(size_t max_depth) {
     if (template_instantiation_depth_ >= max_depth) {
         return false;
@@ -1575,12 +1779,14 @@ void CollectSemanticStore::clear_translation_unit_semantic_state() {
     clear_func_decl_cxx_qualifier_prefixes();
     clear_func_decl_owner_record_types();
     clear_func_decl_function_template_specializations();
+    clear_variable_decl_variable_template_specializations();
     clear_template_decl_canonical_decls();
     clear_template_parameter_default_arguments();
     clear_template_decl_default_arguments();
     clear_symbol_cxx_qualifier_prefixes();
     clear_symbol_owner_record_types();
     clear_symbol_function_template_specializations();
+    clear_symbol_variable_template_specializations();
     clear_param_decl_default_arguments();
     clear_symbol_cpp_default_arguments();
     clear_template_specialization_resolved_types();
@@ -1596,6 +1802,8 @@ void CollectSemanticStore::clear_all_semantic_state() {
     class_template_specializations_.clear();
     function_template_specialization_lookup_.clear();
     function_template_specializations_.clear();
+    variable_template_specialization_lookup_.clear();
+    variable_template_specializations_.clear();
     retained_external_decls_.clear();
     template_instantiation_depth_ = 0;
 }

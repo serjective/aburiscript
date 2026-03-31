@@ -1009,7 +1009,10 @@ std::unique_ptr<Expr> Collect::collect_cpp_this_expression(SrcLoc loc) const {
 }
 
 std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
-    const std::string& name, bool looks_like_call, SrcLoc loc) {
+    const std::string& name,
+    bool looks_like_call,
+    bool might_be_template_id,
+    SrcLoc loc) {
 
     auto sym = collect_lookup_variable_symbol(name, true);
     bool symbol_is_local = is_local_variable_or_parameter_symbol(sym);
@@ -1130,6 +1133,16 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
 
     if (sym || is_predefined_ident) {
         return collect_identifier_reference(name, std::move(sym), loc);
+    }
+    if (lang_opts_.is_cxx_mode() &&
+        might_be_template_id &&
+        session_.current_scope_ &&
+        LookupEngine::lookup_unqualified_template_binding(
+            name,
+            session_.current_scope_,
+            true,
+            LookupNamespace::Ordinary)) {
+        return collect_identifier_reference(name, nullptr, loc);
     }
     if (!looks_like_call) {
         report_error("use of undeclared identifier '" + name + "'", loc);

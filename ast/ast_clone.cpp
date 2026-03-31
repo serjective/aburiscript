@@ -1676,6 +1676,13 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
             result->is_thread_local = variable->is_thread_local;
             result->is_block_byref = variable->is_block_byref;
             result->original_type = cloned_original_type;
+            result->explicit_specialization_arguments =
+                rewrite_template_arguments(
+                    variable->explicit_specialization_arguments,
+                    ctx,
+                    error_out);
+            result->has_explicit_specialization_argument_list =
+                variable->has_explicit_specialization_argument_list;
             result->set_language_linkage(variable->get_language_linkage());
             if (variable->asm_label) {
                 result->set_asm_label(*variable->asm_label);

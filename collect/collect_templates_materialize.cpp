@@ -20,6 +20,19 @@ void Collect::note_specialization_use_for_symbol(
         return;
     }
 
+    const auto* variable_specialization_info =
+        get_symbol_variable_template_specialization(symbol.get());
+    if (variable_specialization_info &&
+        variable_specialization_info->primary_template) {
+        if (auto* entry =
+                ast_ctx_->lookup_variable_template_specialization(
+                    variable_specialization_info->primary_template,
+                    variable_specialization_info->arguments)) {
+            entry->note_first_required_loc(loc);
+        }
+        return;
+    }
+
     QualType owner_type = get_symbol_owner_record_type(symbol.get());
     auto owner_record_type =
         desugar_type(owner_type, ast_ctx_.get()).as_shared<ObjectType>();

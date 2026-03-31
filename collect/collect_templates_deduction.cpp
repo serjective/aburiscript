@@ -1123,6 +1123,103 @@ bool is_class_template_partial_specialization_more_specialized(
     return compare_pack_layout_specificity(lhs_layout, rhs_layout) > 0;
 }
 
+bool deduce_variable_template_partial_specialization_bindings(
+    const VariableTemplatePartialSpecializationDecl* partial_specialization,
+    const std::vector<TemplateArgument>& actual_arguments,
+    TemplateArgumentBindings& deduced_bindings_out) {
+    deduced_bindings_out.clear();
+    if (!partial_specialization) {
+        return false;
+    }
+    TemplatePatternLayout pattern_layout =
+        analyze_template_argument_pattern_layout(
+            partial_specialization->specialization_arguments,
+            &partial_specialization->parameters);
+    return deduce_class_template_specialization_argument_list(
+        partial_specialization->specialization_arguments,
+        pattern_layout,
+        partial_specialization->parameters,
+        actual_arguments,
+        deduced_bindings_out);
+}
+
+bool is_variable_template_partial_specialization_more_specialized(
+    const VariableTemplatePartialSpecializationDecl* lhs_partial,
+    const VariableTemplatePartialSpecializationDecl* rhs_partial) {
+    if (!lhs_partial || !rhs_partial || lhs_partial == rhs_partial) {
+        return false;
+    }
+
+    auto variable_partial_is_at_least_as_specialized_as =
+        [](const VariableTemplatePartialSpecializationDecl* parameter_partial,
+           const VariableTemplatePartialSpecializationDecl* argument_partial)
+        -> bool {
+            if (!parameter_partial || !argument_partial) {
+                return false;
+            }
+            TemplatePatternLayout parameter_layout =
+                analyze_template_argument_pattern_layout(
+                    parameter_partial->specialization_arguments,
+                    &parameter_partial->parameters);
+            TemplatePatternLayout argument_layout =
+                analyze_template_argument_pattern_layout(
+                    argument_partial->specialization_arguments,
+                    &argument_partial->parameters);
+            if (!parameter_layout.valid || !argument_layout.valid) {
+                return false;
+            }
+
+            size_t transformed_argument_count = 0;
+            if (!argument_layout.pack_index.has_value()) {
+                transformed_argument_count = argument_layout.element_count;
+            } else if (!parameter_layout.pack_index.has_value()) {
+                transformed_argument_count = parameter_layout.element_count;
+            } else {
+                transformed_argument_count =
+                    std::max(parameter_layout.fixed_count(),
+                             argument_layout.fixed_count()) +
+                    1;
+            }
+
+            std::vector<TemplateArgument> transformed_argument_patterns;
+            if (!expand_partial_specialization_argument_pattern(
+                    argument_partial->specialization_arguments,
+                    argument_layout,
+                    transformed_argument_count,
+                    transformed_argument_patterns)) {
+                return false;
+            }
+
+            TemplateArgumentBindings deduced_bindings;
+            return deduce_class_template_specialization_argument_list(
+                parameter_partial->specialization_arguments,
+                parameter_layout,
+                parameter_partial->parameters,
+                transformed_argument_patterns,
+                deduced_bindings);
+        };
+
+    bool rhs_from_lhs =
+        variable_partial_is_at_least_as_specialized_as(rhs_partial, lhs_partial);
+    if (!rhs_from_lhs) {
+        return false;
+    }
+    bool lhs_from_rhs =
+        variable_partial_is_at_least_as_specialized_as(lhs_partial, rhs_partial);
+    if (!lhs_from_rhs) {
+        return true;
+    }
+    TemplatePatternLayout lhs_layout =
+        analyze_template_argument_pattern_layout(
+            lhs_partial->specialization_arguments,
+            &lhs_partial->parameters);
+    TemplatePatternLayout rhs_layout =
+        analyze_template_argument_pattern_layout(
+            rhs_partial->specialization_arguments,
+            &rhs_partial->parameters);
+    return compare_pack_layout_specificity(lhs_layout, rhs_layout) > 0;
+}
+
 } // namespace template_sema_internal
 
 bool Collect::deduce_function_template_call_arguments(

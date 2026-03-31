@@ -75,6 +75,28 @@ void clear_symbol_function_template_specializations() {
     }
 }
 
+void set_symbol_variable_template_specialization(
+    const Symbol* sym,
+    const VariableTemplateSpecializationInfo& info) {
+    if (ASTContext* ctx = side_table_context_for(sym)) {
+        ctx->set_symbol_variable_template_specialization(sym, info);
+    }
+}
+
+const VariableTemplateSpecializationInfo*
+get_symbol_variable_template_specialization(const Symbol* sym) {
+    if (ASTContext* ctx = side_table_context_for(sym)) {
+        return ctx->get_symbol_variable_template_specialization(sym);
+    }
+    return nullptr;
+}
+
+void clear_symbol_variable_template_specializations() {
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_symbol_variable_template_specializations();
+    }
+}
+
 bool merge_symbol_cpp_default_arguments(
     const Symbol* sym,
     const std::vector<const Expr*>& defaults,
