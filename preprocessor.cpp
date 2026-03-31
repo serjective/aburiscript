@@ -1405,7 +1405,9 @@ typedef __builtin_va_list va_list;
 #define _ABURI_STDDEF_H
 typedef __SIZE_TYPE__ size_t;
 typedef __PTRDIFF_TYPE__ ptrdiff_t;
+#ifndef __cplusplus
 typedef __WCHAR_TYPE__ wchar_t;
+#endif
 typedef long double max_align_t;
 #define NULL ((void*)0)
 #define offsetof(type, member) __builtin_offsetof(type, member)
@@ -1415,8 +1417,10 @@ typedef long double max_align_t;
     builtin_headers["uchar.h"] = R"(
 #ifndef _ABURI_UCHAR_H
 #define _ABURI_UCHAR_H
+#ifndef __cplusplus
 typedef __CHAR16_TYPE__ char16_t;
 typedef __CHAR32_TYPE__ char32_t;
+#endif
 #endif
 )";
 

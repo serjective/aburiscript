@@ -1569,6 +1569,7 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
     if (tok.type == TokenType::CHAR_LITERAL) {
         advance();
         // Character literals have type int in C
+        bool cxx_mode = is_cxx_mode_active();
         int32_t fin_val = 0;
         bool is_unicode_prefixed = (tok.literal_prefix == LiteralPrefix::L ||
                                     tok.literal_prefix == LiteralPrefix::u ||
@@ -1586,24 +1587,29 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
         std::shared_ptr<CType> char_type;
         switch (tok.literal_prefix) {
             case LiteralPrefix::u:
-                char_type = type_ctx->get_builtin(BuiltinTypes::UShort);
+                char_type = type_ctx->get_builtin(
+                    cxx_mode ? BuiltinTypes::Char16 : BuiltinTypes::UShort);
                 break;
             case LiteralPrefix::U:
-                char_type = type_ctx->get_builtin(BuiltinTypes::UInt);
+                char_type = type_ctx->get_builtin(
+                    cxx_mode ? BuiltinTypes::Char32 : BuiltinTypes::UInt);
                 break;
             case LiteralPrefix::L:
-                char_type = type_ctx->get_builtin(BuiltinTypes::Int);
+                char_type = type_ctx->get_builtin(
+                    cxx_mode ? BuiltinTypes::WChar : BuiltinTypes::Int);
                 break;
             case LiteralPrefix::U8:
             case LiteralPrefix::None:
             default:
-                char_type = type_ctx->get_builtin(BuiltinTypes::Int);
+                char_type = type_ctx->get_builtin(
+                    cxx_mode ? BuiltinTypes::Char : BuiltinTypes::Int);
                 break;
         }
         return collect_->collect_character_literal(tok.value, fin_val, QualType(char_type), tok.loc);
     }
     if (tok.type == TokenType::STRING_LITERAL) {
         advance();
+        bool cxx_mode = is_cxx_mode_active();
         bool is_unicode_prefixed = (tok.literal_prefix == LiteralPrefix::L ||
                                     tok.literal_prefix == LiteralPrefix::u ||
                                     tok.literal_prefix == LiteralPrefix::U);
@@ -1613,13 +1619,16 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
         std::shared_ptr<CType> charType;
         switch (tok.literal_prefix) {
             case LiteralPrefix::u:
-                charType = type_ctx->get_builtin(BuiltinTypes::UShort);
+                charType = type_ctx->get_builtin(
+                    cxx_mode ? BuiltinTypes::Char16 : BuiltinTypes::UShort);
                 break;
             case LiteralPrefix::U:
-                charType = type_ctx->get_builtin(BuiltinTypes::UInt);
+                charType = type_ctx->get_builtin(
+                    cxx_mode ? BuiltinTypes::Char32 : BuiltinTypes::UInt);
                 break;
             case LiteralPrefix::L:
-                charType = type_ctx->get_builtin(BuiltinTypes::Int);
+                charType = type_ctx->get_builtin(
+                    cxx_mode ? BuiltinTypes::WChar : BuiltinTypes::Int);
                 break;
             case LiteralPrefix::U8:
             case LiteralPrefix::None:

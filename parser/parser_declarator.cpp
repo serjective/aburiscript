@@ -286,6 +286,8 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                 case TokenType::UNSIGNED: tally.unsigned_count++; break;
                 case TokenType::BOOL:     tally.bool_count++; break;
                 case TokenType::WCHAR_T:  tally.wchar_count++; break;
+                case TokenType::CHAR16_T: tally.char16_count++; break;
+                case TokenType::CHAR32_T: tally.char32_count++; break;
                 case TokenType::INT128:   tally.int128_count++; break;
                 case TokenType::UINT128_T: tally.int128_count++; tally.unsigned_count++; break;
                 case TokenType::AUTO_TYPE: tally.auto_type_count++; break;
@@ -586,7 +588,8 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                         bool has_type_specifier = (tally.void_count || tally.char_count ||
                             tally.short_count || tally.int_count || tally.long_count ||
                             tally.float_count || tally.double_count || tally.bool_count ||
-                            tally.wchar_count ||
+                            tally.wchar_count || tally.char16_count ||
+                            tally.char32_count ||
                             tally.signed_count || tally.unsigned_count ||
                             tally.int128_count || tally.auto_type_count ||
                             tally.cxx_auto_count ||

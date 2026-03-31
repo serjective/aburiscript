@@ -615,6 +615,8 @@ private:
                 case TokenType::UNSIGNED:
                 case TokenType::BOOL:
                 case TokenType::WCHAR_T:
+                case TokenType::CHAR16_T:
+                case TokenType::CHAR32_T:
                 case TokenType::INT128:
                 case TokenType::UINT128_T:
                 case TokenType::AUTO_TYPE:

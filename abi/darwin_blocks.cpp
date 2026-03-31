@@ -80,6 +80,19 @@ struct EncodedTypeInfo {
     size_t alignment = 1;
 };
 
+EncodedTypeInfo encode_integer_builtin_by_width(size_t bytes, bool is_unsigned) {
+    switch (bytes) {
+        case 1:
+            return {is_unsigned ? "C" : "c", 1, 1};
+        case 2:
+            return {is_unsigned ? "S" : "s", 2, 2};
+        case 4:
+            return {is_unsigned ? "I" : "i", 4, 4};
+        default:
+            return {is_unsigned ? "Q" : "q", bytes, bytes};
+    }
+}
+
 EncodedTypeInfo encode_type(QualType type,
                             const TargetInfo* target,
                             std::unordered_set<const CType*>& active_records);
@@ -96,9 +109,20 @@ EncodedTypeInfo encode_builtin_type(const BuiltinType* builtin,
         case BuiltinTypes::Bool:
             return {"B", 1, 1};
         case BuiltinTypes::Char:
+        case BuiltinTypes::SChar:
             return {"c", 1, 1};
         case BuiltinTypes::UChar:
             return {"C", 1, 1};
+        case BuiltinTypes::WChar:
+            return encode_integer_builtin_by_width(
+                target && target->wchar_width > 0
+                    ? static_cast<size_t>(target->wchar_width / 8)
+                    : static_cast<size_t>(4),
+                builtin->isUnsigned());
+        case BuiltinTypes::Char16:
+            return {"S", 2, 2};
+        case BuiltinTypes::Char32:
+            return {"I", 4, 4};
         case BuiltinTypes::Short:
             return {"s", 2, 2};
         case BuiltinTypes::UShort:
@@ -212,6 +236,7 @@ EncodedTypeInfo encode_type(QualType type,
         }
         if (auto* pointee_builtin = pointee.as<BuiltinType>()) {
             if (pointee_builtin->builtin_kind == BuiltinTypes::Char ||
+                pointee_builtin->builtin_kind == BuiltinTypes::SChar ||
                 pointee_builtin->builtin_kind == BuiltinTypes::UChar) {
                 return {"*", bytes, bytes};
             }

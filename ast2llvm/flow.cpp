@@ -23,7 +23,9 @@ QualType kr_abi_promote_param_type(const QualType& qt, const std::shared_ptr<Typ
             return QualType(type_ctx->get_builtin(BuiltinTypes::Double), qt.get_qualifiers());
         case BuiltinTypes::Bool:
         case BuiltinTypes::Char:
+        case BuiltinTypes::SChar:
         case BuiltinTypes::UChar:
+        case BuiltinTypes::Char16:
         case BuiltinTypes::Short:
         case BuiltinTypes::UShort:
             return QualType(type_ctx->get_builtin(BuiltinTypes::Int), qt.get_qualifiers());
@@ -42,8 +44,16 @@ std::string get_itanium_builtin_type_code(BuiltinTypes kind) {
             return "b";
         case BuiltinTypes::Char:
             return "c";
+        case BuiltinTypes::SChar:
+            return "a";
         case BuiltinTypes::UChar:
             return "h";
+        case BuiltinTypes::WChar:
+            return "w";
+        case BuiltinTypes::Char16:
+            return "Ds";
+        case BuiltinTypes::Char32:
+            return "Di";
         case BuiltinTypes::Short:
             return "s";
         case BuiltinTypes::UShort:

@@ -760,7 +760,7 @@ struct DeclarationParser {
     struct TypeTally {
         int void_count = 0, char_count = 0, short_count = 0, int_count = 0,
             long_count = 0, float_count = 0, double_count = 0, bool_count = 0,
-            wchar_count = 0,
+            wchar_count = 0, char16_count = 0, char32_count = 0,
             signed_count = 0, unsigned_count = 0, complex_count = 0, int128_count = 0,
             float16_count = 0;
         int static_count = 0, extern_count = 0, auto_count = 0, register_count = 0, typedef_count = 0;
@@ -805,11 +805,14 @@ struct DeclarationParser {
 
         if (tally.void_count == 1) return ctx.get_builtin(BuiltinTypes::Void);
         if (tally.bool_count == 1) return ctx.get_builtin(BuiltinTypes::Bool);
-        if (tally.wchar_count == 1) return ctx.get_builtin(BuiltinTypes::Int);
+        if (tally.wchar_count == 1) return ctx.get_builtin(BuiltinTypes::WChar);
+        if (tally.char16_count == 1) return ctx.get_builtin(BuiltinTypes::Char16);
+        if (tally.char32_count == 1) return ctx.get_builtin(BuiltinTypes::Char32);
         // Handle Character Types
         if (tally.char_count == 1) {
             if (tally.unsigned_count == 1) return ctx.get_builtin(BuiltinTypes::UChar);
-            return ctx.get_builtin(BuiltinTypes::Char); // signed char or plain char
+            if (tally.signed_count == 1) return ctx.get_builtin(BuiltinTypes::SChar);
+            return ctx.get_builtin(BuiltinTypes::Char);
         }
 
         // Handle 128-bit integer types
@@ -860,7 +863,8 @@ struct DeclarationParser {
             error_custloc("duplicate '__int128' specifier", begin_loc);
         if (tally.int128_count && (tally.char_count || tally.short_count || tally.long_count ||
             tally.int_count || tally.float_count || tally.double_count || tally.void_count ||
-            tally.bool_count || tally.wchar_count))
+            tally.bool_count || tally.wchar_count || tally.char16_count ||
+            tally.char32_count))
             error_custloc("'__int128' cannot be combined with other type specifiers", begin_loc);
 
         if (tally.wchar_count > 1) {
@@ -870,8 +874,31 @@ struct DeclarationParser {
             (tally.void_count || tally.char_count || tally.short_count || tally.int_count ||
              tally.long_count || tally.float_count || tally.double_count || tally.bool_count ||
              tally.signed_count || tally.unsigned_count || tally.int128_count ||
-             tally.float16_count || tally.complex_count)) {
+             tally.float16_count || tally.complex_count ||
+             tally.char16_count || tally.char32_count)) {
             error_custloc("'wchar_t' cannot be combined with other type specifiers", begin_loc);
+        }
+        if (tally.char16_count > 1) {
+            error_custloc("duplicate 'char16_t' specifier", begin_loc);
+        }
+        if (tally.char16_count &&
+            (tally.void_count || tally.char_count || tally.short_count || tally.int_count ||
+             tally.long_count || tally.float_count || tally.double_count || tally.bool_count ||
+             tally.wchar_count || tally.signed_count || tally.unsigned_count ||
+             tally.int128_count || tally.float16_count || tally.complex_count ||
+             tally.char32_count)) {
+            error_custloc("'char16_t' cannot be combined with other type specifiers", begin_loc);
+        }
+        if (tally.char32_count > 1) {
+            error_custloc("duplicate 'char32_t' specifier", begin_loc);
+        }
+        if (tally.char32_count &&
+            (tally.void_count || tally.char_count || tally.short_count || tally.int_count ||
+             tally.long_count || tally.float_count || tally.double_count || tally.bool_count ||
+             tally.wchar_count || tally.signed_count || tally.unsigned_count ||
+             tally.int128_count || tally.float16_count || tally.complex_count ||
+             tally.char16_count)) {
+            error_custloc("'char32_t' cannot be combined with other type specifiers", begin_loc);
         }
 
         // __auto_type constraints
@@ -879,7 +906,8 @@ struct DeclarationParser {
             error_custloc("duplicate '__auto_type' specifier", begin_loc);
         if (tally.auto_type_count && (tally.void_count || tally.char_count || tally.short_count ||
             tally.int_count || tally.long_count || tally.float_count || tally.double_count ||
-            tally.bool_count || tally.wchar_count || tally.signed_count || tally.unsigned_count ||
+            tally.bool_count || tally.wchar_count || tally.char16_count ||
+            tally.char32_count || tally.signed_count || tally.unsigned_count ||
             tally.int128_count))
             error_custloc("'__auto_type' cannot be combined with other type specifiers", begin_loc);
         if (tally.auto_type_count && tally.typedef_count)
@@ -892,7 +920,8 @@ struct DeclarationParser {
             error_custloc("'auto' cannot be combined with '__auto_type'", begin_loc);
         if (tally.cxx_auto_count && (tally.void_count || tally.char_count || tally.short_count ||
             tally.int_count || tally.long_count || tally.float_count || tally.double_count ||
-            tally.bool_count || tally.wchar_count || tally.signed_count || tally.unsigned_count ||
+            tally.bool_count || tally.wchar_count || tally.char16_count ||
+            tally.char32_count || tally.signed_count || tally.unsigned_count ||
             tally.int128_count || tally.float16_count || tally.complex_count))
             error_custloc("'auto' cannot be combined with other type specifiers", begin_loc);
         if (tally.cxx_auto_count && tally.typedef_count)
@@ -947,7 +976,8 @@ struct DeclarationParser {
             error_custloc("Cannot combine 'float' and 'double'", begin_loc);
         if ((tally.float_count || tally.double_count) &&
             (tally.char_count || tally.short_count || tally.int_count || tally.void_count ||
-             tally.bool_count || tally.wchar_count)) {
+             tally.bool_count || tally.wchar_count || tally.char16_count ||
+             tally.char32_count)) {
             error_custloc("Cannot combine floating-point type with other type specifiers", begin_loc);
         }
         // double can only combine with long (long double)
@@ -1014,7 +1044,8 @@ struct DeclarationParser {
 
                 auto pick_int_mode = [&](bool is_unsigned) -> std::shared_ptr<CType> {
                     if (mode_name == "QI" || mode_name == "BYTE") {
-                        return pars->type_ctx->get_builtin(is_unsigned ? BuiltinTypes::UChar : BuiltinTypes::Char);
+                        return pars->type_ctx->get_builtin(
+                            is_unsigned ? BuiltinTypes::UChar : BuiltinTypes::SChar);
                     }
                     if (mode_name == "HI") {
                         return pars->type_ctx->get_builtin(is_unsigned ? BuiltinTypes::UShort : BuiltinTypes::Short);

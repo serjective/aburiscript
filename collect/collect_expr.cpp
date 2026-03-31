@@ -2290,7 +2290,9 @@ std::unique_ptr<Expr> Collect::collect_va_arg_expression(std::unique_ptr<Expr> v
     if (auto builtin = arg_type.as_shared<BuiltinType>()) {
         switch (builtin->builtin_kind) {
             case BuiltinTypes::Char:
+            case BuiltinTypes::SChar:
             case BuiltinTypes::UChar:
+            case BuiltinTypes::Char16:
             case BuiltinTypes::Short:
             case BuiltinTypes::UShort:
                 report_warning(

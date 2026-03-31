@@ -28,11 +28,26 @@ std::shared_ptr<TargetInfo> TargetInfo::create_host() {
     ti->pointer_width = 64;
     ti->long_width = 64;
     ti->long_double_width = 64;  // Apple ARM64: long double == double
+    ti->wchar_width = 32;
+    ti->wchar_is_unsigned = false;
     ti->long_double_format = LongDoubleFormat::IEEE_DOUBLE;
     ti->va_list_kind = VaListKind::CHAR_PTR;
     ti->max_alignment_bytes = 16;
     ti->triple = "";  // empty means use llvm::sys::getDefaultTargetTriple()
     return ti;
+}
+
+std::string TargetInfo::wchar_type_spelling() const {
+    if (wchar_width <= 16) {
+        return wchar_is_unsigned ? "unsigned short" : "short";
+    }
+    if (wchar_width <= 32) {
+        return wchar_is_unsigned ? "unsigned int" : "int";
+    }
+    if (wchar_width <= long_width) {
+        return wchar_is_unsigned ? "unsigned long" : "long";
+    }
+    return wchar_is_unsigned ? "unsigned long long" : "long long";
 }
 
 std::vector<std::pair<std::string, std::string>> TargetInfo::get_builtin_macros() const {
@@ -171,13 +186,8 @@ std::vector<std::pair<std::string, std::string>> TargetInfo::get_builtin_type_ma
     add("__INT_LEAST64_TYPE__", "long long");
     add("__UINT_LEAST64_TYPE__", "unsigned long long");
 
-    if (os == TargetOS::MACOS) {
-        add("__WCHAR_TYPE__", "int");
-        add("__WINT_TYPE__", "int");
-    } else {
-        add("__WCHAR_TYPE__", "int");
-        add("__WINT_TYPE__", "int");
-    }
+    add("__WCHAR_TYPE__", wchar_type_spelling());
+    add("__WINT_TYPE__", wchar_type_spelling());
 
     // Floating-point limit macros
     // float (IEEE 754 binary32) — same on all targets

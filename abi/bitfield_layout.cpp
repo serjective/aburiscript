@@ -10,11 +10,17 @@ uint32_t BitfieldLayoutEngine::get_storage_unit_size(const std::shared_ptr<CType
         switch (builtin->builtin_kind) {
             case BuiltinTypes::Bool:
             case BuiltinTypes::Char:
+            case BuiltinTypes::SChar:
             case BuiltinTypes::UChar:
                 return 8;
+            case BuiltinTypes::Char16:
+                return 16;
             case BuiltinTypes::Short:
             case BuiltinTypes::UShort:
                 return 16;
+            case BuiltinTypes::WChar:
+            case BuiltinTypes::Char32:
+                return 32;
             case BuiltinTypes::Int:
             case BuiltinTypes::UInt:
                 return 32;

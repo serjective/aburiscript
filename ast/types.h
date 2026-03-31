@@ -592,7 +592,11 @@ enum class BuiltinTypes {
     NullPtr,
     Bool,
     Char,
+    SChar,
     UChar,
+    WChar,
+    Char16,
+    Char32,
     Short,
     UShort,
     UInt,
@@ -610,7 +614,20 @@ enum class BuiltinTypes {
 };
 struct BuiltinType : CType {
     BuiltinTypes builtin_kind;
+    int64_t width_override = -1;
+    int rank_override = -1;
+    int8_t unsigned_override = -1;
+
     BuiltinType(BuiltinTypes k) : CType(TypeKind::Builtin), builtin_kind(k) {}
+    BuiltinType(BuiltinTypes k,
+                int64_t width_override,
+                int rank_override,
+                int8_t unsigned_override)
+        : CType(TypeKind::Builtin),
+          builtin_kind(k),
+          width_override(width_override),
+          rank_override(rank_override),
+          unsigned_override(unsigned_override) {}
     bool isArithmetic() const override {
         return builtin_kind != BuiltinTypes::Void &&
                builtin_kind != BuiltinTypes::NullPtr;
@@ -633,7 +650,7 @@ struct BuiltinType : CType {
     // in bits
     bool equals(const CType &other) override {
         if (other.kind != TypeKind::Builtin) return false;
-        return this->builtin_kind == static_cast<const BuiltinType&>(other).builtin_kind;
+        return builtin_kind == static_cast<const BuiltinType&>(other).builtin_kind;
     }
     static bool classof(const CType *t) { return t->kind == TypeKind::Builtin; }
     bool isVoid() const override {
@@ -648,7 +665,11 @@ struct BuiltinType : CType {
             case BuiltinTypes::NullPtr: return "decltype(nullptr)";
             case BuiltinTypes::Bool: return "_Bool";
             case BuiltinTypes::Char: return "char";
+            case BuiltinTypes::SChar: return "signed char";
             case BuiltinTypes::UChar: return "unsigned char";
+            case BuiltinTypes::WChar: return "wchar_t";
+            case BuiltinTypes::Char16: return "char16_t";
+            case BuiltinTypes::Char32: return "char32_t";
             case BuiltinTypes::Short: return "short";
             case BuiltinTypes::UShort: return "unsigned short";
             case BuiltinTypes::Int: return "int";

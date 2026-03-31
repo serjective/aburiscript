@@ -600,7 +600,11 @@ int ASTToLLVM::run() {
 
     add_runtime_symbol("_ZTIb", &typeid(bool));
     add_runtime_symbol("_ZTIc", &typeid(char));
+    add_runtime_symbol("_ZTIa", &typeid(signed char));
     add_runtime_symbol("_ZTIh", &typeid(unsigned char));
+    add_runtime_symbol("_ZTIw", &typeid(wchar_t));
+    add_runtime_symbol("_ZTIDs", &typeid(char16_t));
+    add_runtime_symbol("_ZTIDi", &typeid(char32_t));
     add_runtime_symbol("_ZTIs", &typeid(short));
     add_runtime_symbol("_ZTIt", &typeid(unsigned short));
     add_runtime_symbol("_ZTIi", &typeid(int));
@@ -1135,8 +1139,14 @@ llvm::Type* ASTToLLVM::convert_type(std::shared_ptr<CType> ctype) {
             case BuiltinTypes::Bool:
                 return llvm::Type::getInt1Ty(*context);
             case BuiltinTypes::Char:
+            case BuiltinTypes::SChar:
             case BuiltinTypes::UChar:
                 return llvm::Type::getInt8Ty(*context);
+            case BuiltinTypes::Char16:
+                return llvm::Type::getInt16Ty(*context);
+            case BuiltinTypes::WChar:
+            case BuiltinTypes::Char32:
+                return llvm::Type::getInt32Ty(*context);
             case BuiltinTypes::Short:
             case BuiltinTypes::UShort:
                 return llvm::Type::getInt16Ty(*context);

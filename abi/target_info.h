@@ -48,6 +48,8 @@ struct TargetInfo {
     int pointer_width;       // in bits (64 for ARM64)
     int long_width;          // in bits (64 for LP64, 32 for LLP64/Windows)
     int long_double_width;   // in bits (64 Apple ARM64, 80 x87, 128 IEEE quad)
+    int wchar_width = 32;    // in bits
+    bool wchar_is_unsigned = false;
     LongDoubleFormat long_double_format;
     VaListKind va_list_kind;
     size_t max_alignment_bytes = 16;
@@ -65,6 +67,7 @@ struct TargetInfo {
     std::shared_ptr<CType> get_va_list_type(TypeContext& ctx) const;
     std::vector<std::pair<std::string, std::string>> get_builtin_macros() const;
     std::vector<std::pair<std::string, std::string>> get_builtin_type_macros() const;
+    std::string wchar_type_spelling() const;
     size_t max_pack_alignment_bytes() const { return max_alignment_bytes; }
 
     // Create a TargetInfo for the host machine.

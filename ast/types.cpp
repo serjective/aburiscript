@@ -2191,12 +2191,41 @@ std::shared_ptr<CType> extract_decl_enum_underlying_type(const EnumDecl* enum_de
 }
 } // namespace
 
-static void init_builtins(std::unordered_map<BuiltinTypes, std::shared_ptr<BuiltinType>>& builtins) {
+int builtin_integer_rank_from_width(int64_t width_bits) {
+    if (width_bits <= 8) {
+        return 10;
+    }
+    if (width_bits <= 16) {
+        return 20;
+    }
+    if (width_bits <= 32) {
+        return 30;
+    }
+    if (width_bits <= 64) {
+        return 40;
+    }
+    return 60;
+}
+
+void init_builtins(std::unordered_map<BuiltinTypes, std::shared_ptr<BuiltinType>>& builtins,
+                   const TargetInfo* target) {
     builtins[BuiltinTypes::Void] = std::make_shared<BuiltinType>(BuiltinTypes::Void);
     builtins[BuiltinTypes::NullPtr] = std::make_shared<BuiltinType>(BuiltinTypes::NullPtr);
     builtins[BuiltinTypes::Bool] = std::make_shared<BuiltinType>(BuiltinTypes::Bool);
     builtins[BuiltinTypes::Char] = std::make_shared<BuiltinType>(BuiltinTypes::Char);
+    builtins[BuiltinTypes::SChar] = std::make_shared<BuiltinType>(
+        BuiltinTypes::SChar, 8, 10, 0);
     builtins[BuiltinTypes::UChar] = std::make_shared<BuiltinType>(BuiltinTypes::UChar);
+    int64_t wchar_width = target ? target->wchar_width : 32;
+    builtins[BuiltinTypes::WChar] = std::make_shared<BuiltinType>(
+        BuiltinTypes::WChar,
+        wchar_width,
+        builtin_integer_rank_from_width(wchar_width),
+        target && target->wchar_is_unsigned ? 1 : 0);
+    builtins[BuiltinTypes::Char16] = std::make_shared<BuiltinType>(
+        BuiltinTypes::Char16, 16, 20, 1);
+    builtins[BuiltinTypes::Char32] = std::make_shared<BuiltinType>(
+        BuiltinTypes::Char32, 32, 30, 1);
     builtins[BuiltinTypes::Short] = std::make_shared<BuiltinType>(BuiltinTypes::Short);
     builtins[BuiltinTypes::UShort] = std::make_shared<BuiltinType>(BuiltinTypes::UShort);
     builtins[BuiltinTypes::Int] = std::make_shared<BuiltinType>(BuiltinTypes::Int);
@@ -2215,24 +2244,33 @@ static void init_builtins(std::unordered_map<BuiltinTypes, std::shared_ptr<Built
 
 TypeContext::TypeContext() {
     target = TargetInfo::create_host();
-    init_builtins(builtins);
+    init_builtins(builtins, target.get());
     cpp_type_info_type = std::make_shared<CppTypeInfoType>(
         target && target->pointer_width > 0 ? target->pointer_width : 64);
 }
 
 TypeContext::TypeContext(std::shared_ptr<TargetInfo> ti) : target(std::move(ti)) {
-    init_builtins(builtins);
+    init_builtins(builtins, target.get());
     cpp_type_info_type = std::make_shared<CppTypeInfoType>(
         target && target->pointer_width > 0 ? target->pointer_width : 64);
 }
 
 // using Mac os definitions for now
 int64_t BuiltinType::getWidth() {
+    if (width_override >= 0) {
+        return width_override;
+    }
     switch (builtin_kind) {
         case BuiltinTypes::Void:
         case BuiltinTypes::Bool:
         case BuiltinTypes::Char:
+        case BuiltinTypes::SChar:
         case BuiltinTypes::UChar: return 8;
+        case BuiltinTypes::WChar:
+        case BuiltinTypes::Char32:
+            return 32;
+        case BuiltinTypes::Char16:
+            return 16;
         case BuiltinTypes::NullPtr:
             return 64;
         case BuiltinTypes::Short:
@@ -2254,12 +2292,20 @@ int64_t BuiltinType::getWidth() {
 }
 
 int BuiltinType::getRank() const {
+    if (rank_override >= 0) {
+        return rank_override;
+    }
     switch (builtin_kind) {
         case BuiltinTypes::Bool: return 1;
         case BuiltinTypes::Char:
+        case BuiltinTypes::SChar:
         case BuiltinTypes::UChar: return 10;
+        case BuiltinTypes::Char16: return 20;
         case BuiltinTypes::Short:
         case BuiltinTypes::UShort: return 20;
+        case BuiltinTypes::WChar:
+        case BuiltinTypes::Char32:
+            return 30;
         case BuiltinTypes::Int:
         case BuiltinTypes::UInt: return 30;
         case BuiltinTypes::Long:
@@ -2274,9 +2320,14 @@ int BuiltinType::getRank() const {
 }
 
 bool BuiltinType::isUnsigned() const  {
+    if (unsigned_override >= 0) {
+        return unsigned_override != 0;
+    }
     switch (builtin_kind) {
         case BuiltinTypes::Bool:
         case BuiltinTypes::UChar:
+        case BuiltinTypes::Char16:
+        case BuiltinTypes::Char32:
         case BuiltinTypes::UShort:
         case BuiltinTypes::UInt:
         case BuiltinTypes::ULong:

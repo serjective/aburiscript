@@ -71,6 +71,8 @@ enum class TokenType {
     UNSIGNED,
     BOOL,
     WCHAR_T,
+    CHAR16_T,
+    CHAR32_T,
     FLOAT,
     DOUBLE,
     CHAR,
@@ -230,6 +232,8 @@ struct Token {
             case TokenType::UNSIGNED:
             case TokenType::BOOL:
             case TokenType::WCHAR_T:
+            case TokenType::CHAR16_T:
+            case TokenType::CHAR32_T:
             case TokenType::FLOAT:
             case TokenType::DOUBLE:
             case TokenType::CHAR:

@@ -516,7 +516,15 @@ llvm::Value * ASTToLLVM::convert_floating_literal(Expr *expr) {
 llvm::Value * ASTToLLVM::convert_character_literal(Expr *expr) {
     auto* char_lit = dyn_cast<CharacterLiteral>(expr);
     if (!char_lit) return nullptr;
-    return llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), char_lit->int_value, true);
+    auto literal_type = expr->get_type();
+    llvm::Type* llvm_type = literal_type ? convert_type(literal_type.get_shared())
+                                         : llvm::Type::getInt32Ty(*context);
+    auto* int_type = llvm::dyn_cast<llvm::IntegerType>(llvm_type);
+    if (!int_type) {
+        int_type = llvm::Type::getInt32Ty(*context);
+    }
+    bool is_unsigned = literal_type && literal_type->isUnsigned();
+    return llvm::ConstantInt::get(int_type, char_lit->int_value, !is_unsigned);
 }
 
 llvm::Constant* ASTToLLVM::build_string_literal_array_constant(const StringLiteral* str_lit, size_t len) {

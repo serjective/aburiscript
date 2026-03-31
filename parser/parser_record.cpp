@@ -95,7 +95,7 @@ std::shared_ptr<CType> choose_default_enum_underlying(
 
     if (prefer_smallest_width) {
         if (min_value < 0) {
-            if (fits_signed(BuiltinTypes::Char)) return type_ctx->get_builtin(BuiltinTypes::Char);
+            if (fits_signed(BuiltinTypes::SChar)) return type_ctx->get_builtin(BuiltinTypes::SChar);
             if (fits_signed(BuiltinTypes::Short)) return type_ctx->get_builtin(BuiltinTypes::Short);
             if (fits_signed(BuiltinTypes::Int)) return type_ctx->get_builtin(BuiltinTypes::Int);
             if (fits_signed(BuiltinTypes::Long)) return type_ctx->get_builtin(BuiltinTypes::Long);
@@ -5193,6 +5193,8 @@ bool Parser::isTokenDeclarationSpec(Token s) {
         case TokenType::UNSIGNED:
         case TokenType::BOOL:
         case TokenType::WCHAR_T:
+        case TokenType::CHAR16_T:
+        case TokenType::CHAR32_T:
         case TokenType::STRUCT:
         case TokenType::UNION:
         case TokenType::ENUM:

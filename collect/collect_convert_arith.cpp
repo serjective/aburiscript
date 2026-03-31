@@ -171,7 +171,19 @@ QualType Collect::unsigned_counterpart(QualType type) const {
     }
     switch (builtin->builtin_kind) {
         case BuiltinTypes::Char:
+        case BuiltinTypes::SChar:
             return QualType(ast_ctx_->type_ctx->get_builtin(BuiltinTypes::UChar));
+        case BuiltinTypes::WChar:
+            if (builtin->getWidth() <= 16) {
+                return QualType(ast_ctx_->type_ctx->get_builtin(BuiltinTypes::UShort));
+            }
+            if (builtin->getWidth() <= 32) {
+                return QualType(ast_ctx_->type_ctx->get_builtin(BuiltinTypes::UInt));
+            }
+            if (builtin->getWidth() <= 64) {
+                return QualType(ast_ctx_->type_ctx->get_builtin(BuiltinTypes::ULong));
+            }
+            return QualType(ast_ctx_->type_ctx->get_builtin(BuiltinTypes::UInt128));
         case BuiltinTypes::Short:
             return QualType(ast_ctx_->type_ctx->get_builtin(BuiltinTypes::UShort));
         case BuiltinTypes::Int:

@@ -3,9 +3,16 @@
 #include "../helpers/auto_type_utils.h"
 
 namespace {
+bool is_narrow_character_builtin_kind(BuiltinTypes kind) {
+    return kind == BuiltinTypes::Char ||
+           kind == BuiltinTypes::SChar ||
+           kind == BuiltinTypes::UChar;
+}
+
 bool string_array_element_types_compatible(const QualType& target_elem,
                                            const QualType& literal_elem,
-                                           ASTContext* ast_ctx) {
+                                           ASTContext* ast_ctx,
+                                           bool cxx_mode) {
     if (!target_elem || !literal_elem) {
         return false;
     }
@@ -27,12 +34,13 @@ bool string_array_element_types_compatible(const QualType& target_elem,
         return false;
     }
 
-    auto is_char_family = [](BuiltinTypes kind) {
-        return kind == BuiltinTypes::Char || kind == BuiltinTypes::UChar;
-    };
-    if (is_char_family(target_builtin->builtin_kind) &&
-        is_char_family(literal_builtin->builtin_kind)) {
+    if (is_narrow_character_builtin_kind(target_builtin->builtin_kind) &&
+        is_narrow_character_builtin_kind(literal_builtin->builtin_kind)) {
         return true;
+    }
+
+    if (cxx_mode) {
+        return target_builtin->builtin_kind == literal_builtin->builtin_kind;
     }
 
     // Accept typedef-level signedness differences when width matches
@@ -666,7 +674,8 @@ std::unique_ptr<Expr> Collect::consume_for_type(std::vector<InitElement>& elemen
         if (arr_type && str_lit_type &&
             string_array_element_types_compatible(arr_type->element_type,
                                                   str_lit_type->element_type,
-                                                  ast_ctx_.get())) {
+                                                  ast_ctx_.get(),
+                                                  lang_opts_.is_cxx_mode())) {
             auto value = std::move(elem.value);
             if (str_lit_type && arr_type->size_kind == ArraySizeKind::Constant && arr_type->size.has_value()) {
                 str_lit_type->size = arr_type->size;
@@ -842,7 +851,8 @@ std::unique_ptr<Expr> Collect::process_init_list_expression(std::unique_ptr<Init
             if (arr_type && str_lit_type &&
                 string_array_element_types_compatible(arr_type->element_type,
                                                       str_lit_type->element_type,
-                                                      ast_ctx_.get())) {
+                                                      ast_ctx_.get(),
+                                                      lang_opts_.is_cxx_mode())) {
                 auto value = std::move(init_list->elements[0].value);
                 auto* moved_lit = dyn_cast<StringLiteral>(value.get());
                 auto moved_lit_type = moved_lit ? moved_lit->ctype.as_shared<ArrayType>() : nullptr;
@@ -1166,7 +1176,8 @@ std::unique_ptr<Expr> Collect::process_initializer_for_type(std::unique_ptr<Expr
             bool compatible_elem =
                 string_array_element_types_compatible(target_elem,
                                                       literal_elem,
-                                                      ast_ctx_.get());
+                                                      ast_ctx_.get(),
+                                                      lang_opts_.is_cxx_mode());
             if (!compatible_elem) {
                 report_error("incompatible variable for string literal initializer", loc);
                 return init;

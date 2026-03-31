@@ -122,6 +122,8 @@ const std::unordered_map<std::string_view, TokenType>& cxx_keyword_table() {
     static const std::unordered_map<std::string_view, TokenType> keywords = {
         {"bool", TokenType::BOOL},
         {"wchar_t", TokenType::WCHAR_T},
+        {"char16_t", TokenType::CHAR16_T},
+        {"char32_t", TokenType::CHAR32_T},
         {"class", TokenType::CLASS},
         {"using", TokenType::USING},
         {"namespace", TokenType::NAMESPACE},
@@ -1365,6 +1367,8 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::UNSIGNED: return "'unsigned'";
         case TokenType::BOOL: return "'_Bool'";
         case TokenType::WCHAR_T: return "'wchar_t'";
+        case TokenType::CHAR16_T: return "'char16_t'";
+        case TokenType::CHAR32_T: return "'char32_t'";
         case TokenType::STRUCT: return "'struct'";
         case TokenType::UNION: return "'union'";
         case TokenType::ENUM: return "'enum'";

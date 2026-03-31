@@ -128,7 +128,9 @@ bool Collect::are_char_family_compatible(const CType& a, const CType& b) const {
         return false;
     }
     auto is_char = [](BuiltinTypes kind) {
-        return kind == BuiltinTypes::Char || kind == BuiltinTypes::UChar;
+        return kind == BuiltinTypes::Char ||
+               kind == BuiltinTypes::SChar ||
+               kind == BuiltinTypes::UChar;
     };
     return is_char(ba->builtin_kind) && is_char(bb->builtin_kind);
 }

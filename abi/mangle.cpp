@@ -889,7 +889,11 @@ void append_builtin_type_encoding(std::string& out, BuiltinTypes kind) {
         case BuiltinTypes::NullPtr: out += "Dn"; return;
         case BuiltinTypes::Bool: out += 'b'; return;
         case BuiltinTypes::Char: out += 'c'; return;
+        case BuiltinTypes::SChar: out += 'a'; return;
         case BuiltinTypes::UChar: out += 'h'; return;
+        case BuiltinTypes::WChar: out += 'w'; return;
+        case BuiltinTypes::Char16: out += "Ds"; return;
+        case BuiltinTypes::Char32: out += "Di"; return;
         case BuiltinTypes::Short: out += 's'; return;
         case BuiltinTypes::UShort: out += 't'; return;
         case BuiltinTypes::Int: out += 'i'; return;
