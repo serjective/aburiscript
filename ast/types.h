@@ -1401,10 +1401,13 @@ struct RecordSemanticState {
         QualType type;
         RecordMemberAccess declared_access = RecordMemberAccess::Public;
         bool is_static = false;
+        bool is_explicit = false;
         bool is_virtual = false;
         bool is_override = false;
         bool is_final = false;
         bool is_pure = false;
+        bool is_conversion_function = false;
+        QualType conversion_target_type;
         bool overrides_base_virtual = false;
         int32_t virtual_slot_index = -1;
         const CppMethodDecl* decl = nullptr;

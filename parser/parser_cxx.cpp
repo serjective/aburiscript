@@ -5037,9 +5037,6 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 last_recovery_idx = std::numeric_limits<size_t>::max();
                 continue;
             }
-            if (gentle_check(TokenType::OPERATOR_KW)) {
-                fail_cpp_unsupported("operator-function declaration", current_token().loc);
-            }
             if (!cxx_record_parse_stack_.empty() &&
                 !cxx_record_parse_stack_.back().name.empty()) {
                 const std::string& record_name = cxx_record_parse_stack_.back().name;

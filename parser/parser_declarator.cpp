@@ -23,6 +23,61 @@ bool parse_cpp_operator_function_name(DeclarationParser& decl_parser) {
         }
     };
 
+    auto parse_conversion_function_name = [&]() -> bool {
+        if (decl_parser.first_half) {
+            decl_parser.error_custloc(
+                "conversion function cannot have a declared return type",
+                decl_parser.begin_loc);
+        }
+
+        DeclarationParser conversion_type_parser(pars);
+        conversion_type_parser.parse_new_type_id_context = true;
+        auto parsed_type = conversion_type_parser.parse_declaration(false);
+        if (!parsed_type) {
+            decl_parser.error_custloc(
+                "expected type-id after 'operator' in conversion-function-id",
+                operator_kw_tok.loc);
+        }
+        if (!conversion_type_parser.name.empty()) {
+            decl_parser.error_custloc(
+                "conversion-function-id requires a type-id, not a declarator-id",
+                operator_kw_tok.loc);
+        }
+
+        QualType conversion_target(
+            parsed_type,
+            conversion_type_parser.qualifiers);
+        while (true) {
+            if (mgnt->gentle_check_and_consume(TokenType::MULTIPLY)) {
+                conversion_target = QualType(
+                    std::make_shared<PointerType>(conversion_target));
+                continue;
+            }
+            if (mgnt->gentle_check_and_consume(TokenType::BITWISE_AND)) {
+                conversion_target = QualType(
+                    std::make_shared<ReferenceType>(
+                        conversion_target,
+                        ReferenceKind::LValue));
+                continue;
+            }
+            if (mgnt->gentle_check_and_consume(TokenType::LOGICAL_AND)) {
+                conversion_target = QualType(
+                    std::make_shared<ReferenceType>(
+                        conversion_target,
+                        ReferenceKind::RValue));
+                continue;
+            }
+            break;
+        }
+        decl_parser.is_conversion_function = true;
+        decl_parser.conversion_target_type = conversion_target;
+        if (decl_parser.name.empty()) {
+            decl_parser.name = "operator " + conversion_target.to_string();
+            decl_parser.loc = operator_kw_tok.loc;
+        }
+        return true;
+    };
+
     auto consume_paired_operator = [&](TokenType open_tok,
                                        TokenType close_tok,
                                        std::string_view op_suffix) -> bool {
@@ -180,9 +235,7 @@ bool parse_cpp_operator_function_name(DeclarationParser& decl_parser) {
             mgnt->advance();
             set_operator_name(std::move(op_suffix));
         } else {
-            decl_parser.error_custloc(
-                "C++ parser unsupported syntax: operator-function declaration",
-                operator_kw_tok.loc);
+            return parse_conversion_function_name();
         }
     }
 
@@ -707,6 +760,8 @@ void DeclarationParser::reset_declarator_parsing_state() {
         captured_func_args = false;
         trailing_function_cv_qualifiers = QUAL_NONE;
         trailing_function_ref_qualifier = 0;
+        is_conversion_function = false;
+        conversion_target_type = nullptr;
         kr_param_names.clear();
         preparsed_sym = nullptr;
         default_argument.reset();
@@ -1107,7 +1162,9 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                             over_arch = nullptr;
                         }
                     } else {
-                        new_type = replace_placeholder(new_type, old_type);
+                        if (old_type || !is_conversion_function) {
+                            new_type = replace_placeholder(new_type, old_type);
+                        }
                     }
                     break;
                 }
@@ -1134,7 +1191,9 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                                 over_arch = nullptr;
                             }
                         } else {
-                            new_type = replace_placeholder(new_type, old_type);
+                            if (old_type || !is_conversion_function) {
+                                new_type = replace_placeholder(new_type, old_type);
+                            }
                         }
                         break;
                     }
@@ -1251,7 +1310,12 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                 func_type->is_variadic = found_ellipsis;
                 func_type->has_prototype = has_prototype;
                 if (new_type == nullptr) {
-                    new_type = std::make_shared<PlaceholderType>(); // If not nullptr we assume new_type has a placeholder
+                    if (is_conversion_function && conversion_target_type) {
+                        new_type = conversion_target_type.get_shared();
+                        qualifiers = conversion_target_type.get_qualifiers();
+                    } else {
+                        new_type = std::make_shared<PlaceholderType>(); // If not nullptr we assume new_type has a placeholder
+                    }
                 }
                 func_type->ret_type = new_type;
                 if (pars->is_cxx_mode_active()) {
@@ -1300,7 +1364,9 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                   //  new_type = old_type; // cointinuing
                 } else {
                     // this will insert basic type at the end
-                    new_type = replace_placeholder(new_type, old_type);
+                    if (old_type || !is_conversion_function) {
+                        new_type = replace_placeholder(new_type, old_type);
+                    }
                 }
                 break;
             }

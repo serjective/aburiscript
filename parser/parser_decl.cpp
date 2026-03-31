@@ -85,6 +85,12 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     bool is_static_member =
         in_class_member_context &&
         decl_parser->str_class == StorageClass::STATIC;
+    if (decl_parser->is_conversion_function &&
+        (!in_class_member_context || is_static_member)) {
+        error_custloc(
+            "conversion function must be a non-static member function",
+            loc);
+    }
     QualType predecl_original_type =
         predecl_sym ? predecl_sym->type : QualType();
     validate_cpp_operator_function_declaration(
@@ -130,6 +136,7 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     if (auto fin_fn_type = dyn_cast_shared<FunctionType>(fin_funcdecl->type)) {
         bool has_cxx_auto_param = false;
         bool has_gnu_auto_param = false;
+        size_t user_param_count = fin_fn_type->parameters.size();
         for (const auto& param_type : fin_fn_type->parameters) {
             has_cxx_auto_param |=
                 auto_type_utils::has_cxx_auto_type(param_type.get_shared());
@@ -144,6 +151,11 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
         }
         if (auto_type_utils::has_gnu_auto_type(fin_fn_type->ret_type.get_shared())) {
             error("'__auto_type' is not allowed in function return types");
+        }
+        if (decl_parser->is_conversion_function && user_param_count != 0) {
+            error_custloc(
+                "conversion function cannot have parameters",
+                loc);
         }
     }
     if (predecl_sym && predecl_sym->kind == SymbolKind::FUNCTION) {

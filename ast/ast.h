@@ -621,8 +621,11 @@ struct CppMethodDecl : FuncDecl {
     uint8_t is_override : 1;
     uint8_t is_final : 1;
     uint8_t is_pure : 1;
+    uint8_t is_conversion_function : 1;
+    uint8_t is_explicit_conversion : 1;
     size_t deferred_inline_body_begin_token_idx;
     size_t deferred_inline_body_end_token_idx;
+    QualType conversion_target_type;
 
     CppMethodDecl(const std::string name, const std::shared_ptr<CType> type,
                   std::vector<std::unique_ptr<Decl>> parameters, std::unique_ptr<Stmt> body,
@@ -636,8 +639,11 @@ struct CppMethodDecl : FuncDecl {
           is_override(false),
           is_final(false),
           is_pure(false),
+          is_conversion_function(false),
+          is_explicit_conversion(false),
           deferred_inline_body_begin_token_idx(0),
-          deferred_inline_body_end_token_idx(0) {}
+          deferred_inline_body_end_token_idx(0),
+          conversion_target_type(nullptr) {}
     explicit CppMethodDecl(SrcLoc loc = SrcLoc())
         : FuncDecl(DeclKind::CppMethodDecl, loc),
           has_deferred_inline_body_tokens(false),
@@ -645,8 +651,11 @@ struct CppMethodDecl : FuncDecl {
           is_override(false),
           is_final(false),
           is_pure(false),
+          is_conversion_function(false),
+          is_explicit_conversion(false),
           deferred_inline_body_begin_token_idx(0),
-          deferred_inline_body_end_token_idx(0) {}
+          deferred_inline_body_end_token_idx(0),
+          conversion_target_type(nullptr) {}
 
     bool has_deferred_inline_body() const {
         return has_deferred_inline_body_tokens != 0 &&

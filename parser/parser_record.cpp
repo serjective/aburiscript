@@ -1006,10 +1006,13 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             method.type = method_decl->type;
             method.declared_access = current_access;
             method.is_static = method_decl->storage_class == StorageClass::STATIC;
+            method.is_explicit = method_decl->is_explicit_conversion;
             method.is_virtual = method_decl->is_virtual;
             method.is_override = method_decl->is_override;
             method.is_final = method_decl->is_final;
             method.is_pure = method_decl->is_pure;
+            method.is_conversion_function = method_decl->is_conversion_function;
+            method.conversion_target_type = method_decl->conversion_target_type;
             method.decl = method_decl;
             method.symbol = std::move(method_sym);
             methods.push_back(std::move(method));
@@ -1646,6 +1649,63 @@ void Parser::emit_declaration_head_side_decls(DeclarationParser& decl_parser,
 std::shared_ptr<CType> Parser::parse_declaration_head(Token start_token,
     DeclarationParser& decl_parser,
     std::vector<std::unique_ptr<Decl>>& ret_vec) {
+    auto looks_like_typeless_cpp_conversion_declaration =
+        [&]() -> bool {
+            if (!is_cxx_mode_active()) {
+                return false;
+            }
+
+            auto token_at = [&](size_t offset) -> Token {
+                return offset == 0
+                    ? current_token()
+                    : peek_token(static_cast<int>(offset));
+            };
+            auto consume_scope_resolution =
+                [&](size_t& offset) -> bool {
+                    if (token_at(offset).type == TokenType::SCOPE_RESOLUTION) {
+                        ++offset;
+                        return true;
+                    }
+                    if (token_at(offset).type == TokenType::COLON &&
+                        token_at(offset + 1).type == TokenType::COLON) {
+                        offset += 2;
+                        return true;
+                    }
+                    return false;
+                };
+
+            size_t offset = 0;
+            bool saw_scope_resolution = false;
+            if (token_at(offset).type == TokenType::EXPLICIT_KW) {
+                ++offset;
+            }
+            if (token_at(offset).type == TokenType::OPERATOR_KW) {
+                return true;
+            }
+
+            if (consume_scope_resolution(offset)) {
+                saw_scope_resolution = true;
+            }
+
+            while (token_at(offset).type == TokenType::IDENTIFIER) {
+                ++offset;
+                if (!consume_scope_resolution(offset)) {
+                    break;
+                }
+                saw_scope_resolution = true;
+            }
+            return saw_scope_resolution &&
+                   token_at(offset).type == TokenType::OPERATOR_KW;
+        };
+
+    if (looks_like_typeless_cpp_conversion_declaration()) {
+        decl_parser.begin_loc = current_token().loc;
+        decl_parser.first_half = nullptr;
+        decl_parser.base_qualifiers = QUAL_NONE;
+        decl_parser.qualifiers = QUAL_NONE;
+        return nullptr;
+    }
+
     validate_declaration_start(start_token);
 
     bool enable_implicit_int_for_decl =
@@ -1765,7 +1825,9 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
             }
             return {std::move(component), ident_token_idx};
         };
-        if (has_global_qualifier || gentle_check(TokenType::IDENTIFIER)) {
+        if (has_global_qualifier && gentle_check(TokenType::OPERATOR_KW)) {
+            terminal_token_idx = get_token_idx();
+        } else if (has_global_qualifier || gentle_check(TokenType::IDENTIFIER)) {
             if (!gentle_check(TokenType::IDENTIFIER)) {
                 error_custloc(
                     "expected identifier after '::' in qualified-id declarator",
@@ -1776,11 +1838,16 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
                 consume_cpp_scope_resolution();
                 qualifier_component_spellings.push_back(component.spelling());
                 qualifier_components.push_back(std::move(component));
+                if (gentle_check(TokenType::OPERATOR_KW)) {
+                    terminal_token_idx = get_token_idx();
+                    break;
+                }
                 auto next_component = parse_qualified_component();
                 component = std::move(next_component.first);
                 ident_token_idx = next_component.second;
             }
-            if (has_global_qualifier || !qualifier_components.empty()) {
+            if (!terminal_token_idx.has_value() &&
+                (has_global_qualifier || !qualifier_components.empty())) {
                 terminal_token_idx = ident_token_idx;
             }
         }
@@ -2670,6 +2737,15 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         out_of_line_method->is_pure = matched_method_decl
             ? matched_method_decl->is_pure
             : qualified_declarator.method_match->is_pure;
+        out_of_line_method->is_conversion_function = matched_method_decl
+            ? matched_method_decl->is_conversion_function
+            : qualified_declarator.method_match->is_conversion_function;
+        out_of_line_method->is_explicit_conversion = matched_method_decl
+            ? matched_method_decl->is_explicit_conversion
+            : qualified_declarator.method_match->is_explicit;
+        out_of_line_method->conversion_target_type = matched_method_decl
+            ? matched_method_decl->conversion_target_type
+            : qualified_declarator.method_match->conversion_target_type;
 
         if (matched_method_decl) {
             if (auto* existing_prefix =
@@ -2860,6 +2936,12 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                 std::move(out_of_line_method->stmt_labels);
             matched_method_decl->is_constexpr =
                 out_of_line_method->is_constexpr;
+            matched_method_decl->is_conversion_function =
+                out_of_line_method->is_conversion_function;
+            matched_method_decl->is_explicit_conversion =
+                out_of_line_method->is_explicit_conversion;
+            matched_method_decl->conversion_target_type =
+                out_of_line_method->conversion_target_type;
             matched_method_decl->set_language_linkage(
                 out_of_line_method->get_language_linkage());
             if (out_of_line_method->asm_label) {
@@ -2890,6 +2972,12 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                         }
                         method.decl = matched_method_decl;
                         method.type = QualType(matched_method_decl->type);
+                        method.is_explicit =
+                            matched_method_decl->is_explicit_conversion;
+                        method.is_conversion_function =
+                            matched_method_decl->is_conversion_function;
+                        method.conversion_target_type =
+                            matched_method_decl->conversion_target_type;
                         if (method_sym) {
                             method.symbol = method_sym;
                         }
@@ -3531,7 +3619,21 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
     }
 
     DeclarationParser decl_parser(this);
-    auto base_type = decl_parser.parse_declaration(false);
+    std::shared_ptr<CType> base_type = nullptr;
+    bool looks_like_typeless_conversion_member =
+        is_cxx_mode_active() &&
+        is_parsing_cpp_record_body() &&
+        !cxx_record_parse_stack_.empty() &&
+        cxx_record_parse_stack_.back().kind != CppRecordKind::Union &&
+        gentle_check(TokenType::OPERATOR_KW);
+    if (looks_like_typeless_conversion_member) {
+        decl_parser.begin_loc = current_token().loc;
+        decl_parser.first_half = nullptr;
+        decl_parser.base_qualifiers = QUAL_NONE;
+        decl_parser.qualifiers = QUAL_NONE;
+    } else {
+        base_type = decl_parser.parse_declaration(false);
+    }
     bool declaration_leading_virtual = leading_virtual_specifier;
     auto ensure_namespace_qualifier_prefix = [&](std::string& qualifier_prefix) {
         if (!is_cxx_mode_active()) {
@@ -3665,8 +3767,16 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     body_begin_token_idx, body_end_token_idx);
             };
 
-            if (member_explicit && !is_constructor_member) {
+            if (member_explicit &&
+                !is_constructor_member &&
+                !decl_parser.is_conversion_function) {
                 error("'explicit' is only allowed on constructors");
+            }
+            if (decl_parser.is_conversion_function) {
+                auto method_fn_type = dyn_cast_shared<FunctionType>(field_type);
+                if (method_fn_type && !method_fn_type->parameters.empty()) {
+                    error("conversion function cannot have parameters");
+                }
             }
 
             if (is_constructor_member) {
@@ -3975,6 +4085,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     t.loc);
                 cpp_method->type = field_type;
                 cpp_method->is_constexpr = decl_parser.is_constexpr;
+                cpp_method->is_conversion_function =
+                    decl_parser.is_conversion_function;
+                cpp_method->is_explicit_conversion = member_explicit;
+                cpp_method->conversion_target_type =
+                    decl_parser.conversion_target_type;
                 cpp_method->is_virtual = method_is_virtual;
                 cpp_method->is_override = method_is_override;
                 cpp_method->is_final = method_is_final;
@@ -4011,6 +4126,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->scope = parsed_method->scope;
                 cpp_method->type = parsed_method->type;
                 cpp_method->is_constexpr = parsed_method->is_constexpr;
+                cpp_method->is_conversion_function =
+                    decl_parser.is_conversion_function;
+                cpp_method->is_explicit_conversion = member_explicit;
+                cpp_method->conversion_target_type =
+                    decl_parser.conversion_target_type;
                 cpp_method->is_virtual = method_is_virtual;
                 cpp_method->is_override = method_is_override;
                 cpp_method->is_final = method_is_final;

@@ -559,6 +559,7 @@ std::unique_ptr<Expr> Collect::make_hidden_overload_callee(
 Collect::OverloadCandidateEval Collect::evaluate_conversion_constructor_candidate(
     const RecordSemanticState::Constructor& ctor,
     Expr* arg,
+    QualType target_type,
     bool allow_explicit_constructors,
     OverloadConversionMemoCache* conversion_cache) {
 
@@ -638,6 +639,159 @@ Collect::OverloadCandidateEval Collect::evaluate_conversion_constructor_candidat
         eval.failure.from = seq.from ? seq.from : (arg ? arg->get_type() : QualType());
         eval.failure.to = param_type;
         eval.failure.note = seq.note;
+        return eval;
+    }
+
+    auto produced_expr = collect_make<CppConstructExpr>(
+        ctor.symbol,
+        std::vector<std::unique_ptr<Expr>>{},
+        remove_reference(target_type, ast_ctx_.get()),
+        false,
+        arg ? arg->location : SrcLoc());
+    auto final_seq = build_cpp_overload_conversion_sequence(
+        produced_expr.get(),
+        target_type,
+        /*allow_user_defined=*/false);
+    eval.conversions.push_back(final_seq);
+    if (!final_seq.viable) {
+        eval.viable = false;
+        eval.failure.kind = OverloadFailureKind::ArgumentConversionFailure;
+        eval.failure.argument_index = 2;
+        eval.failure.from = produced_expr->get_type();
+        eval.failure.to = target_type;
+        eval.failure.note = final_seq.note;
+    }
+
+    return eval;
+}
+
+Collect::OverloadCandidateEval Collect::evaluate_conversion_function_candidate(
+    const RecordSemanticState::Method& method,
+    const ObjectDecl* owner_record_decl,
+    Expr* arg,
+    QualType target_type,
+    bool allow_explicit_conversion_functions,
+    OverloadConversionMemoCache* conversion_cache) {
+
+    bump_overload_candidate_evaluations();
+    OverloadCandidateEval eval;
+    eval.candidate_kind = OverloadCandidateKind::ConversionFunction;
+    eval.symbol = method.symbol;
+    eval.conversion_function = &method;
+    eval.owner_record_decl = owner_record_decl;
+    eval.implicit_object_arg_kind = OverloadImplicitObjectArgKind::MemberObject;
+    eval.function_type =
+        desugar_type(method.type, ast_ctx_.get()).as_shared<FunctionType>();
+    if (!eval.function_type || !method.symbol) {
+        eval.failure.kind = OverloadFailureKind::InvalidCandidateState;
+        eval.failure.note = "conversion function is missing type or symbol";
+        return eval;
+    }
+
+    if (!method.is_conversion_function) {
+        eval.failure.kind = OverloadFailureKind::InvalidCandidateState;
+        eval.failure.note = "candidate is not a conversion function";
+        return eval;
+    }
+    if (method.is_static) {
+        eval.failure.kind = OverloadFailureKind::InvalidCandidateState;
+        eval.failure.note = "conversion function must be non-static";
+        return eval;
+    }
+    if (!allow_explicit_conversion_functions && method.is_explicit) {
+        eval.failure.kind = OverloadFailureKind::InaccessibleCandidate;
+        eval.failure.note = "explicit conversion function is not allowed";
+        return eval;
+    }
+
+    auto source_record_type =
+        remove_reference_and_desugar(arg ? arg->get_type() : QualType(), ast_ctx_.get())
+            .as_shared<ObjectType>();
+    const ObjectDecl* source_record_decl =
+        source_record_type
+            ? canonical_record_decl(dyn_cast<ObjectDecl>(source_record_type->get_decl()))
+            : nullptr;
+    const ObjectDecl* access_context_decl = nullptr;
+    if (lang_opts_.is_cxx_mode() &&
+        session_.func_state_.current_function_is_cpp_member) {
+        access_context_decl = current_record_decl_from_this_type(
+            session_.func_state_.current_function_cpp_this_type);
+    }
+    if (lang_opts_.is_cxx_mode()) {
+        if (method.declared_access == RecordMemberAccess::Private &&
+            !can_access_private_member_in_context(
+                owner_record_decl,
+                access_context_decl)) {
+            eval.failure.kind = OverloadFailureKind::InaccessibleCandidate;
+            eval.failure.note = "conversion function is not accessible";
+            return eval;
+        }
+        if (method.declared_access == RecordMemberAccess::Protected &&
+            !can_access_protected_member_in_context(
+                owner_record_decl,
+                access_context_decl,
+                source_record_decl,
+                false)) {
+            eval.failure.kind = OverloadFailureKind::InaccessibleCandidate;
+            eval.failure.note = "conversion function is not accessible";
+            return eval;
+        }
+    }
+
+    if (eval.function_type->parameters.empty()) {
+        eval.failure.kind = OverloadFailureKind::InvalidCandidateState;
+        eval.failure.note = "conversion function is missing implicit object parameter";
+        return eval;
+    }
+    if (eval.function_type->parameters.size() != 1) {
+        eval.failure.kind = OverloadFailureKind::InvalidCandidateState;
+        eval.failure.note = "conversion function must not have user parameters";
+        return eval;
+    }
+
+    eval.viable = true;
+    eval.conversions.reserve(2);
+
+    QualType implicit_object_type =
+        decay_parameter_type(eval.function_type->parameters.front());
+    auto object_seq = evaluate_overload_implicit_object_conversion(
+        arg,
+        implicit_object_type,
+        OverloadImplicitObjectArgKind::MemberObject,
+        eval.function_type->member_ref_qualifier,
+        conversion_cache);
+    eval.conversions.push_back(object_seq);
+    if (!object_seq.viable) {
+        eval.viable = false;
+        eval.failure.kind =
+            object_seq.detail_kind ==
+                    ConversionSequenceDetailKind::ReferenceRefQualifierMismatch
+                ? OverloadFailureKind::ImplicitObjectRefQualifierMismatch
+                : OverloadFailureKind::ImplicitObjectConversionFailure;
+        eval.failure.argument_index = 1;
+        eval.failure.from = object_seq.from ? object_seq.from
+                                            : (arg ? arg->get_type() : QualType());
+        eval.failure.to = implicit_object_type;
+        eval.failure.ref_qualifier = eval.function_type->member_ref_qualifier;
+        eval.failure.note = object_seq.note;
+        return eval;
+    }
+
+    auto dummy_callee = make_hidden_overload_callee(method.symbol, arg ? arg->location : SrcLoc());
+    auto produced_expr = collect_make<FuncCall>(std::move(dummy_callee), arg ? arg->location : SrcLoc());
+    produced_expr->ctype = eval.function_type->ret_type;
+    auto final_seq = build_cpp_overload_conversion_sequence(
+        produced_expr.get(),
+        target_type,
+        /*allow_user_defined=*/false);
+    eval.conversions.push_back(final_seq);
+    if (!final_seq.viable) {
+        eval.viable = false;
+        eval.failure.kind = OverloadFailureKind::ArgumentConversionFailure;
+        eval.failure.argument_index = 2;
+        eval.failure.from = produced_expr->get_type();
+        eval.failure.to = target_type;
+        eval.failure.note = final_seq.note;
     }
 
     return eval;
@@ -678,6 +832,7 @@ Collect::select_cpp_conversion_constructor(Expr* arg,
         candidate_set.evaluated.push_back(evaluate_conversion_constructor_candidate(
             ctor,
             arg,
+            target_object_type,
             allow_explicit_constructors,
             &conversion_cache));
     }
@@ -709,7 +864,8 @@ std::optional<Collect::CppUserDefinedConversionMatch>
 Collect::select_cpp_user_defined_conversion(
     Expr* arg,
     QualType target_type,
-    bool allow_explicit_constructors) {
+    bool allow_explicit_constructors,
+    bool allow_explicit_conversion_functions) {
 
     if (!lang_opts_.is_cxx_mode() || !arg || !target_type || !ast_ctx_) {
         return std::nullopt;
@@ -766,21 +922,101 @@ Collect::select_cpp_user_defined_conversion(
         }
     }
 
-    if (canonical_type_kind(conversion_target, ast_ctx_.get()) !=
-        TypeKind::Object) {
+    OverloadConversionMemoCache conversion_cache;
+    OverloadCandidateSet candidate_set;
+
+    if (source_record_decl) {
+        auto conversion_methods =
+            find_record_conversion_methods(source_record_type.get());
+        candidate_set.evaluated.reserve(
+            candidate_set.evaluated.size() + conversion_methods.size());
+        for (const auto& method_candidate : conversion_methods) {
+            if (!method_candidate.method) {
+                continue;
+            }
+            candidate_set.evaluated.push_back(
+                evaluate_conversion_function_candidate(
+                    *method_candidate.method,
+                    method_candidate.owner_record_decl,
+                    arg,
+                    target_type,
+                    allow_explicit_conversion_functions,
+                    &conversion_cache));
+        }
+    }
+
+    auto conversion_target_kind = canonical_type_kind(
+        conversion_target,
+        ast_ctx_.get());
+    if (conversion_target_kind == TypeKind::Object) {
+        auto canonical_target =
+            conversion_target.as_shared<ObjectType>();
+        const ObjectDecl* record_decl = canonical_target
+            ? canonical_record_decl(dyn_cast<ObjectDecl>(canonical_target->get_decl()))
+            : nullptr;
+        const RecordSemanticState* record_state =
+            record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
+        if (record_state && !record_state->constructors.empty()) {
+            candidate_set.evaluated.reserve(
+                candidate_set.evaluated.size() + record_state->constructors.size());
+            for (const auto& ctor : record_state->constructors) {
+                candidate_set.evaluated.push_back(
+                    evaluate_conversion_constructor_candidate(
+                        ctor,
+                        arg,
+                        target_type,
+                        allow_explicit_constructors,
+                        &conversion_cache));
+            }
+        }
+    }
+
+    if (candidate_set.evaluated.empty()) {
         return std::nullopt;
     }
 
-    auto constructor_match = select_cpp_conversion_constructor(
-        arg, conversion_target, allow_explicit_constructors);
-    if (!constructor_match.has_value()) {
+    collect_viable_overload_candidates(candidate_set);
+    if (candidate_set.viable_indices.empty()) {
         return std::nullopt;
     }
 
+    auto best_index = select_best_overload_candidate_index(candidate_set);
+    if (!best_index.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto& chosen = candidate_set.evaluated[*best_index];
     CppUserDefinedConversionMatch result;
-    result.kind = CppUserDefinedConversionKind::Constructor;
-    result.constructor = *constructor_match;
-    return result;
+    switch (chosen.candidate_kind) {
+        case OverloadCandidateKind::ConversionFunction:
+            if (!chosen.conversion_function || !chosen.symbol || !chosen.function_type) {
+                return std::nullopt;
+            }
+            result.kind = CppUserDefinedConversionKind::ConversionFunction;
+            result.conversion_function.method = chosen.conversion_function;
+            result.conversion_function.owner_record_decl = chosen.owner_record_decl;
+            result.conversion_function.method_symbol = chosen.symbol;
+            result.conversion_function.method_function_type = chosen.function_type;
+            result.conversion_function.conversion_target_type =
+                chosen.conversion_function->conversion_target_type
+                    ? chosen.conversion_function->conversion_target_type
+                    : chosen.function_type->ret_type;
+            return result;
+        case OverloadCandidateKind::ConversionConstructor:
+            if (!chosen.constructor || !chosen.constructor->symbol ||
+                !chosen.function_type) {
+                return std::nullopt;
+            }
+            result.kind = CppUserDefinedConversionKind::Constructor;
+            result.constructor.ctor_symbol = chosen.constructor->symbol;
+            result.constructor.ctor_function_type = chosen.function_type;
+            result.constructor.user_param_start = chosen.user_param_start;
+            result.constructor.max_user_param_count = chosen.max_user_param_count;
+            return result;
+        case OverloadCandidateKind::Function:
+            break;
+    }
+    return std::nullopt;
 }
 
 std::unique_ptr<Expr> Collect::build_cpp_user_defined_conversion_expr(
@@ -812,12 +1048,32 @@ std::unique_ptr<Expr> Collect::build_cpp_user_defined_conversion_expr(
     auto conversion_match = select_cpp_user_defined_conversion(
         arg.get(),
         target_type,
-        /*allow_explicit_constructors=*/false);
+        /*allow_explicit_constructors=*/false,
+        /*allow_explicit_conversion_functions=*/false);
     if (!conversion_match.has_value()) {
         return arg;
     }
 
-    if (conversion_match->kind ==
+    return build_cpp_selected_user_defined_conversion_expr(
+        std::move(arg),
+        target_type,
+        *conversion_match,
+        loc);
+}
+
+std::unique_ptr<Expr> Collect::build_cpp_selected_user_defined_conversion_expr(
+    std::unique_ptr<Expr> arg,
+    QualType target_type,
+    const CppUserDefinedConversionMatch& conversion_match,
+    SrcLoc loc) {
+    if (!arg || !target_type) {
+        return arg;
+    }
+
+    QualType target_object_type = remove_reference(target_type, ast_ctx_.get());
+    target_object_type = desugar_type(target_object_type, ast_ctx_.get());
+
+    if (conversion_match.kind ==
         CppUserDefinedConversionKind::LambdaFunctionPointer) {
         QualType conversion_target = remove_reference(target_type, ast_ctx_.get());
         return collect_make<ImplicitCast>(
@@ -840,8 +1096,95 @@ std::unique_ptr<Expr> Collect::build_cpp_user_defined_conversion_expr(
         return converted;
     }
 
-    if (!conversion_match->constructor.ctor_symbol ||
-        !conversion_match->constructor.ctor_function_type) {
+    if (conversion_match.kind ==
+        CppUserDefinedConversionKind::ConversionFunction) {
+        if (!conversion_match.conversion_function.method_symbol ||
+            !conversion_match.conversion_function.method_function_type) {
+            report_error(
+                "internal error: missing conversion-function symbol metadata",
+                loc);
+            return collect_make<ErrorExpr>(
+                "missing conversion-function metadata", loc);
+        }
+
+        auto call_callee = make_hidden_overload_callee(
+            conversion_match.conversion_function.method_symbol,
+            loc);
+        auto call = collect_make<FuncCall>(std::move(call_callee), loc);
+
+        MemberCallSelection member_call_selection;
+        member_call_selection.selected = true;
+        member_call_selection.is_arrow = false;
+        member_call_selection.suppress_virtual_dispatch = false;
+        member_call_selection.has_implicit_object_argument = true;
+        member_call_selection.name =
+            conversion_match.conversion_function.method
+                ? conversion_match.conversion_function.method->name
+                : "operator";
+        member_call_selection.symbol =
+            conversion_match.conversion_function.method_symbol;
+        member_call_selection.record_decl =
+            conversion_match.conversion_function.owner_record_decl;
+
+        auto implicit_object_arg = build_overload_implicit_object_arg(
+            OverloadImplicitObjectArgKind::MemberObject,
+            std::move(arg),
+            false,
+            loc);
+        if (!implicit_object_arg) {
+            report_error(
+                "internal error: failed to build conversion-function object argument",
+                loc);
+            return collect_make<ErrorExpr>(
+                "missing conversion-function object argument", loc);
+        }
+        call->args.push_back(std::move(implicit_object_arg));
+
+        auto converted_call = finalize_call_expression(
+            std::move(call),
+            member_call_selection,
+            loc);
+        if (!converted_call || isa<ErrorExpr>(converted_call.get())) {
+            return converted_call;
+        }
+
+        auto final_seq = build_cpp_overload_conversion_sequence(
+            converted_call.get(),
+            target_type,
+            /*allow_user_defined=*/false);
+        if (!final_seq.viable) {
+            report_conversion_failure(
+                "conversion function result",
+                converted_call->get_type(),
+                target_type,
+                loc);
+            return collect_make<ErrorExpr>(
+                "invalid conversion-function result", loc);
+        }
+
+        if (canonical_type_kind(target_type, ast_ctx_.get()) == TypeKind::Reference) {
+            return collect_make<ImplicitCast>(
+                std::move(converted_call),
+                target_type);
+        }
+
+        converted_call = collect_apply_standard_conversions(
+            std::move(converted_call),
+            ExprUseContext::CallArgument);
+        return cast_if_needed(std::move(converted_call), target_type);
+    }
+
+    if (conversion_match.kind !=
+        CppUserDefinedConversionKind::Constructor) {
+        report_error(
+            "internal error: unsupported user-defined conversion kind",
+            loc);
+        return collect_make<ErrorExpr>(
+            "unsupported user-defined conversion kind", loc);
+    }
+
+    if (!conversion_match.constructor.ctor_symbol ||
+        !conversion_match.constructor.ctor_function_type) {
         report_error(
             "internal error: missing user-defined conversion constructor for '" +
                 target_object_type.to_string() + "'",
@@ -851,16 +1194,16 @@ std::unique_ptr<Expr> Collect::build_cpp_user_defined_conversion_expr(
     }
 
     std::vector<std::unique_ptr<Expr>> ctor_args;
-    ctor_args.reserve(conversion_match->constructor.max_user_param_count);
+    ctor_args.reserve(conversion_match.constructor.max_user_param_count);
     ctor_args.push_back(std::move(arg));
 
     for (size_t arg_index = ctor_args.size();
-         arg_index < conversion_match->constructor.max_user_param_count;
+         arg_index < conversion_match.constructor.max_user_param_count;
          ++arg_index) {
         size_t param_index =
-            conversion_match->constructor.user_param_start + arg_index;
+            conversion_match.constructor.user_param_start + arg_index;
         const Expr* default_expr = lookup_default_argument_for_param(
-            conversion_match->constructor.ctor_symbol, param_index);
+            conversion_match.constructor.ctor_symbol, param_index);
         if (!default_expr) {
             report_error(
                 "internal error: missing conversion-constructor default argument metadata",
@@ -889,9 +1232,9 @@ std::unique_ptr<Expr> Collect::build_cpp_user_defined_conversion_expr(
     converted_ctor_args.reserve(ctor_args.size());
     for (size_t arg_index = 0; arg_index < ctor_args.size(); ++arg_index) {
         size_t param_index =
-            conversion_match->constructor.user_param_start + arg_index;
+            conversion_match.constructor.user_param_start + arg_index;
         if (param_index >=
-            conversion_match->constructor.ctor_function_type->parameters.size()) {
+            conversion_match.constructor.ctor_function_type->parameters.size()) {
             report_error(
                 "internal error: conversion-constructor parameter index out of range",
                 loc);
@@ -899,7 +1242,7 @@ std::unique_ptr<Expr> Collect::build_cpp_user_defined_conversion_expr(
                 "conversion-constructor parameter index out of range", loc);
         }
         QualType param_type = decay_parameter_type(
-            conversion_match->constructor.ctor_function_type->parameters[param_index]);
+            conversion_match.constructor.ctor_function_type->parameters[param_index]);
         auto ctor_arg = std::move(ctor_args[arg_index]);
         if (canonical_type_kind(param_type, ast_ctx_.get()) ==
             TypeKind::Reference) {
@@ -922,12 +1265,16 @@ std::unique_ptr<Expr> Collect::build_cpp_user_defined_conversion_expr(
         converted_ctor_args.push_back(std::move(ctor_arg));
     }
 
-    return collect_make<CppConstructExpr>(
-        std::move(conversion_match->constructor.ctor_symbol),
+    auto constructed = collect_make<CppConstructExpr>(
+        conversion_match.constructor.ctor_symbol,
         std::move(converted_ctor_args),
         target_object_type,
         false,
         loc);
+    if (canonical_type_kind(target_type, ast_ctx_.get()) == TypeKind::Reference) {
+        return collect_make<ImplicitCast>(std::move(constructed), target_type);
+    }
+    return constructed;
 }
 
 std::unique_ptr<Expr> Collect::convert_cpp_braced_init_argument(
@@ -1099,6 +1446,24 @@ std::unique_ptr<Expr> Collect::build_overload_implicit_object_arg(
     ValueCategory category = classify_value_category(
         raw_object ? raw_object : object_expr.get());
     if (category == ValueCategory::LValue) {
+        while (auto* cast = dyn_cast<ImplicitCast>(object_expr.get())) {
+            if (!cast->expr || !cast->expr->isLValue()) {
+                break;
+            }
+            switch (cast->kind) {
+                case ImplicitCastTypes::LVALUE_TO_RVALUE:
+                case ImplicitCastTypes::ARITH_CAST:
+                case ImplicitCastTypes::RAW_CAST: {
+                    auto owned_cast = std::unique_ptr<ImplicitCast>(
+                        static_cast<ImplicitCast*>(object_expr.release()));
+                    object_expr = std::move(owned_cast->expr);
+                    continue;
+                }
+                default:
+                    break;
+            }
+            break;
+        }
         return collect_unary_operation(
             UnaryOpTypes::ADDRESS_OF, std::move(object_expr), loc);
     }
@@ -1180,10 +1545,14 @@ Collect::evaluate_overload_implicit_object_conversion(
         return rejected;
     }
 
+    // The implicit object parameter for a member call only participates in
+    // standard conversions. Allowing user-defined conversions here recurses
+    // through the same conversion-function set while we are still evaluating
+    // a candidate.
     auto seq = build_cpp_overload_conversion_sequence_cached(
         object_arg,
         param_type,
-        /*allow_user_defined=*/true,
+        /*allow_user_defined=*/false,
         conversion_cache);
     if (seq.viable || !object_arg || !param_type) {
         return seq;

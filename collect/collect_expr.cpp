@@ -2786,6 +2786,10 @@ std::unique_ptr<Expr> Collect::cpp_static_named_cast(
     QualType target_type,
     QualType target_no_ref,
     SrcLoc loc) const {
+    auto source_object_type =
+        source_type.as_shared<ObjectType>();
+    auto target_object_type =
+        target_no_ref.as_shared<ObjectType>();
     auto source_ptr = source_type.as_shared<PointerType>();
     auto target_ptr = target_no_ref.as_shared<PointerType>();
     auto source_member_ptr = source_type.as_shared<MemberPointerType>();
@@ -2851,6 +2855,38 @@ std::unique_ptr<Expr> Collect::cpp_static_named_cast(
     } else if (source_member_ptr && target_integer_like) {
         return named_cast_error(
             "invalid static_cast from member pointer to integer type", loc);
+    }
+
+    if (lang_opts_.is_cxx_mode() &&
+        (source_object_type || target_object_type)) {
+        auto conversion_match =
+            const_cast<Collect*>(this)->select_cpp_user_defined_conversion(
+                expr.get(),
+                target_type,
+                /*allow_explicit_constructors=*/true,
+                /*allow_explicit_conversion_functions=*/true);
+        if (conversion_match.has_value()) {
+            return const_cast<Collect*>(this)
+                ->build_cpp_selected_user_defined_conversion_expr(
+                    std::move(expr),
+                    target_type,
+                    *conversion_match,
+                    loc);
+        }
+
+        bool same_object_type =
+            source_object_type &&
+            target_object_type &&
+            source_type.equals_unqualified(target_no_ref);
+        bool derived_to_base_object =
+            source_object_type &&
+            target_object_type &&
+            can_convert_derived_to_base_object(source_type, target_no_ref);
+        if (!same_object_type && !derived_to_base_object) {
+            return named_cast_error(
+                "invalid static_cast between object types",
+                loc);
+        }
     }
 
     return collect_make<ExplicitCast>(std::move(expr), target_type, loc);

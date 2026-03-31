@@ -1822,10 +1822,16 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             semantic_method.declared_access = declared_access;
             semantic_method.is_static =
                 specialized_decl->storage_class == StorageClass::STATIC;
+            semantic_method.is_explicit =
+                specialized_decl->is_explicit_conversion;
             semantic_method.is_virtual = specialized_decl->is_virtual;
             semantic_method.is_override = specialized_decl->is_override;
             semantic_method.is_final = specialized_decl->is_final;
             semantic_method.is_pure = specialized_decl->is_pure;
+            semantic_method.is_conversion_function =
+                specialized_decl->is_conversion_function;
+            semantic_method.conversion_target_type =
+                specialized_decl->conversion_target_type;
             semantic_method.decl = specialized_decl;
             semantic_method.symbol = specialized_symbol;
             methods.push_back(std::move(semantic_method));
@@ -1858,6 +1864,13 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_override = method_decl->is_override;
         cloned_decl->is_final = method_decl->is_final;
         cloned_decl->is_pure = method_decl->is_pure;
+        cloned_decl->is_conversion_function = method_decl->is_conversion_function;
+        cloned_decl->is_explicit_conversion =
+            method_decl->is_explicit_conversion;
+        cloned_decl->conversion_target_type =
+            rewrite_class_template_type(
+                method_decl->conversion_target_type,
+                specialization_bindings);
         if (method_decl->asm_label) {
             cloned_decl->set_asm_label(*method_decl->asm_label);
         }
@@ -1890,10 +1903,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         semantic_method.declared_access = declared_access;
         semantic_method.is_static =
             cloned_decl->storage_class == StorageClass::STATIC;
+        semantic_method.is_explicit = cloned_decl->is_explicit_conversion;
         semantic_method.is_virtual = cloned_decl->is_virtual;
         semantic_method.is_override = cloned_decl->is_override;
         semantic_method.is_final = cloned_decl->is_final;
         semantic_method.is_pure = cloned_decl->is_pure;
+        semantic_method.is_conversion_function =
+            cloned_decl->is_conversion_function;
+        semantic_method.conversion_target_type =
+            cloned_decl->conversion_target_type;
         semantic_method.decl = cloned_decl.get();
         semantic_method.symbol = cloned_symbol;
         methods.push_back(std::move(semantic_method));

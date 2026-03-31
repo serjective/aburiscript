@@ -1102,7 +1102,8 @@ private:
 
     enum class OverloadCandidateKind : uint8_t {
         Function,
-        ConversionConstructor
+        ConversionConstructor,
+        ConversionFunction
     };
 
     enum class OverloadFailureKind : uint8_t {
@@ -1146,6 +1147,8 @@ private:
             OverloadImplicitObjectArgKind::None;
         OverloadFailure failure;
         const RecordSemanticState::Constructor* constructor = nullptr;
+        const RecordSemanticState::Method* conversion_function = nullptr;
+        const ObjectDecl* owner_record_decl = nullptr;
         size_t user_param_start = 0;
         size_t max_user_param_count = 0;
         size_t required_user_param_count = 0;
@@ -1215,9 +1218,18 @@ private:
         std::shared_ptr<FunctionType> invoker_function_type = nullptr;
     };
 
+    struct CppConversionFunctionMatch {
+        const RecordSemanticState::Method* method = nullptr;
+        const ObjectDecl* owner_record_decl = nullptr;
+        std::shared_ptr<Symbol> method_symbol = nullptr;
+        std::shared_ptr<FunctionType> method_function_type = nullptr;
+        QualType conversion_target_type = nullptr;
+    };
+
     enum class CppUserDefinedConversionKind : uint8_t {
         Constructor,
         LambdaFunctionPointer,
+        ConversionFunction,
     };
 
     struct CppUserDefinedConversionMatch {
@@ -1225,6 +1237,7 @@ private:
             CppUserDefinedConversionKind::Constructor;
         CppConversionConstructorMatch constructor;
         CppLambdaFunctionPointerConversionMatch lambda_function_pointer;
+        CppConversionFunctionMatch conversion_function;
     };
 
     struct VariableInitializationSelection {
@@ -1626,11 +1639,18 @@ private:
     select_cpp_user_defined_conversion(
         Expr* arg,
         QualType target_type,
-        bool allow_explicit_constructors = false) ;
+        bool allow_explicit_constructors = false,
+        bool allow_explicit_conversion_functions = false) ;
 
     std::unique_ptr<Expr> build_cpp_user_defined_conversion_expr(
         std::unique_ptr<Expr> arg,
         QualType target_type,
+        SrcLoc loc) ;
+
+    std::unique_ptr<Expr> build_cpp_selected_user_defined_conversion_expr(
+        std::unique_ptr<Expr> arg,
+        QualType target_type,
+        const CppUserDefinedConversionMatch& conversion_match,
         SrcLoc loc) ;
 
     std::unique_ptr<Expr> convert_cpp_braced_init_argument(
@@ -1944,7 +1964,16 @@ private:
     OverloadCandidateEval evaluate_conversion_constructor_candidate(
         const RecordSemanticState::Constructor& ctor,
         Expr* arg,
+        QualType target_type,
         bool allow_explicit_constructors,
+        OverloadConversionMemoCache* conversion_cache = nullptr) ;
+
+    OverloadCandidateEval evaluate_conversion_function_candidate(
+        const RecordSemanticState::Method& method,
+        const ObjectDecl* owner_record_decl,
+        Expr* arg,
+        QualType target_type,
+        bool allow_explicit_conversion_functions,
         OverloadConversionMemoCache* conversion_cache = nullptr) ;
 
     void collect_viable_overload_candidates(

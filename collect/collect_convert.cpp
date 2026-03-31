@@ -166,6 +166,33 @@ std::unique_ptr<Expr> Collect::collect_value_expression(std::unique_ptr<Expr> ex
 
 
 std::unique_ptr<Expr> Collect::collect_condition_expression(std::unique_ptr<Expr> condition, SrcLoc loc, const std::string& stmt_name) const {
+    if (lang_opts_.is_cxx_mode() && condition && ast_ctx_) {
+        auto condition_type = condition->get_type();
+        bool condition_is_dependent =
+            expression_depends_on_template_parameters(condition.get()) ||
+            (condition_type &&
+             type_depends_on_template_parameters(condition_type, ast_ctx_.get()));
+        if (!condition_is_dependent &&
+            condition_type &&
+            !allows_condition_conversion(condition_type, ast_ctx_.get())) {
+            QualType bool_type(get_builtin_bool());
+            auto conversion_match =
+                const_cast<Collect*>(this)->select_cpp_user_defined_conversion(
+                    condition.get(),
+                    bool_type,
+                    /*allow_explicit_constructors=*/false,
+                    /*allow_explicit_conversion_functions=*/true);
+            if (conversion_match.has_value()) {
+                condition =
+                    const_cast<Collect*>(this)
+                        ->build_cpp_selected_user_defined_conversion_expr(
+                            std::move(condition),
+                            bool_type,
+                            *conversion_match,
+                            loc);
+            }
+        }
+    }
 
     condition = collect_apply_standard_conversions(std::move(condition), ExprUseContext::Condition);
     if (!condition) {

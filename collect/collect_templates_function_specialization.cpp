@@ -499,6 +499,20 @@ FuncDecl* Collect::instantiate_function_template_specialization(
             specialized_method->is_override = pattern_method->is_override;
             specialized_method->is_final = pattern_method->is_final;
             specialized_method->is_pure = pattern_method->is_pure;
+            specialized_method->is_conversion_function =
+                pattern_method->is_conversion_function;
+            specialized_method->is_explicit_conversion =
+                pattern_method->is_explicit_conversion;
+            if (pattern_method->conversion_target_type) {
+                specialized_method->conversion_target_type =
+                    finalize_deferred_semantic_type(
+                        substitute_template_type(
+                            pattern_method->conversion_target_type,
+                            function_template->parameters,
+                            normalized_arguments,
+                            loc),
+                        loc);
+            }
             if (pattern_method->asm_label) {
                 specialized_method->set_asm_label(*pattern_method->asm_label);
             }

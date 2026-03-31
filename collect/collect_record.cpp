@@ -1166,6 +1166,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             member_info.is_static = is_static_method || is_operator_new_delete;
             member_info.is_constructor = false;
             member_info.is_destructor = false;
+            member_info.is_explicit = method_decl->is_explicit_conversion;
             member_info.is_virtual = method_decl->is_virtual;
             member_info.is_override = method_decl->is_override;
             member_info.is_final = method_decl->is_final;
@@ -1179,10 +1180,13 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
         method.type = method_decl->type;
         method.declared_access = current_access;
         method.is_static = is_static_method || is_operator_new_delete;
+        method.is_explicit = method_decl->is_explicit_conversion;
         method.is_virtual = method_decl->is_virtual;
         method.is_override = method_decl->is_override;
         method.is_final = method_decl->is_final;
         method.is_pure = method_decl->is_pure;
+        method.is_conversion_function = method_decl->is_conversion_function;
+        method.conversion_target_type = method_decl->conversion_target_type;
         method.decl = method_decl;
         method.symbol = std::move(method_sym);
         ctx.methods.push_back(std::move(method));

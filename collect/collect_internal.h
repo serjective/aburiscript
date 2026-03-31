@@ -717,6 +717,56 @@ std::vector<MethodCandidate> find_record_methods(
     return matches;
 }
 
+void find_record_conversion_functions_impl(
+    const ObjectDecl* record_decl,
+    std::vector<MethodCandidate>& out,
+    std::unordered_set<const ObjectDecl*>& visited) {
+    const ObjectDecl* canonical_decl = canonical_record_decl(record_decl);
+    if (!canonical_decl || visited.contains(canonical_decl)) {
+        return;
+    }
+    visited.insert(canonical_decl);
+    const RecordSemanticState* state = record_semantics_cache_lookup(canonical_decl);
+    if (!state) {
+        return;
+    }
+
+    for (const auto& method : state->methods) {
+        if (!method.is_conversion_function) {
+            continue;
+        }
+        out.push_back(MethodCandidate{&method, canonical_decl});
+    }
+
+    for (const auto& base : state->bases) {
+        if (!base.record_decl) {
+            continue;
+        }
+        find_record_conversion_functions_impl(
+            base.record_decl,
+            out,
+            visited);
+    }
+}
+
+std::vector<MethodCandidate> find_record_conversion_methods(
+    const ObjectType* record_type) {
+    std::vector<MethodCandidate> matches;
+    if (!record_type) {
+        return matches;
+    }
+
+    const auto* record_decl = canonical_record_decl(
+        dyn_cast<ObjectDecl>(record_type->get_decl()));
+    if (!record_decl) {
+        return matches;
+    }
+
+    std::unordered_set<const ObjectDecl*> visited;
+    find_record_conversion_functions_impl(record_decl, matches, visited);
+    return matches;
+}
+
 std::vector<MethodTemplateCandidate> find_record_method_templates(
     const ObjectType* record_type,
     const std::string& method_name) {

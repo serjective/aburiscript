@@ -739,6 +739,8 @@ struct DeclarationParser {
     uint8_t trailing_function_cv_qualifiers = QUAL_NONE;
     // 0 = none, 1 = lvalue (&), 2 = rvalue (&&)
     uint8_t trailing_function_ref_qualifier = 0;
+    bool is_conversion_function = false;
+    QualType conversion_target_type = nullptr;
     std::vector<TemplateArgument> explicit_specialization_arguments;
     bool has_explicit_specialization_argument_list = false;
     std::vector<std::string> kr_param_names;  // K&R identifier-list parameter names
