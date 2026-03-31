@@ -4985,7 +4985,8 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
                         "redefinition of enum constant '" + name + "'", loc);
                 }
                 bool inject_enumerator_into_scope =
-                    !is_cxx_mode_active() || !is_scoped;
+                    !is_cxx_mode_active() ||
+                    (!is_scoped && !is_parsing_cpp_record_body());
                 if (inject_enumerator_into_scope) {
                     auto existing = collect_->collect_lookup_variable_symbol(name, false);
                     if (existing) {
@@ -5036,8 +5037,8 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
                 enum_const->sym = enum_sym;
                 if (inject_enumerator_into_scope) {
                     collect_->collect_bind_symbol_in_current_scope(name, enum_sym);
+                    collect_->collect_add_global_symbol(enum_sym);
                 }
-                collect_->collect_add_global_symbol(enum_sym);
 
                 constants.push_back(std::move(enum_const));
                 if (__builtin_add_overflow(enum_value, int64_t{1}, &next_enum_value)) {
