@@ -3734,14 +3734,22 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
             fail_cpp_unsupported("using-declaration", declarator.terminal_loc);
         }
 
-        auto target_scope = resolve_namespace_path(
-            declarator.has_global_qualifier,
-            declarator.qualifiers,
-            declarator.terminal_loc,
-            "using-declaration");
-        auto* target_context = target_scope
-            ? target_scope->associated_decl_context
-            : nullptr;
+        std::shared_ptr<Scope> target_scope;
+        DeclContext* target_context = nullptr;
+        if (declarator.has_global_qualifier &&
+            declarator.qualifiers.empty()) {
+            target_scope = global_scope;
+            target_context = translation_unit_context.get();
+        } else {
+            target_scope = resolve_namespace_path(
+                declarator.has_global_qualifier,
+                declarator.qualifiers,
+                declarator.terminal_loc,
+                "using-declaration");
+            target_context = target_scope
+                ? target_scope->associated_decl_context
+                : nullptr;
+        }
         if (!target_context) {
             error_custloc("internal error: using-declaration target context missing",
                           declarator.terminal_loc);
