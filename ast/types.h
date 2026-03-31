@@ -1532,6 +1532,8 @@ const RecordSemanticState* record_semantics_cache_lookup(
 const RecordSemanticState* record_semantics_cache_lookup(
     const ObjectDecl* record_decl);
 uint64_t record_semantics_cache_epoch(const ASTContext* ast_ctx);
+QualType cpp_written_method_type(QualType method_type,
+                                 const ASTContext* ast_ctx = nullptr);
 std::string make_cpp_virtual_slot_key(const std::string& method_name,
                                       QualType method_type,
                                       const ASTContext* ast_ctx = nullptr);

@@ -210,7 +210,9 @@ std::unique_ptr<Expr> Collect::collect_member_pointer_literal_expression(
 
             QualType owner_qual(owner_type);
             QualType method_owner_qual(method_owner_type);
-            QualType member_qual = method_lookup.method->type;
+            QualType member_qual = cpp_written_method_type(
+                method_lookup.method->type,
+                ast_ctx_.get());
             QualType member_ptr_type(
                 std::make_shared<MemberPointerType>(owner_qual, member_qual));
             QualType method_owner_member_ptr_type(std::make_shared<MemberPointerType>(

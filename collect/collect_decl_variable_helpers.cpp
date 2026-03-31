@@ -9,6 +9,91 @@
 
 using namespace collect_decl_internal;
 
+namespace {
+QualType replace_auto_placeholder_qualtype(QualType pattern, QualType deduced) {
+    if (!pattern) {
+        return pattern;
+    }
+
+    if (isa<AutoType>(pattern.get())) {
+        if (!deduced) {
+            return pattern;
+        }
+        uint8_t merged_quals = static_cast<uint8_t>(
+            pattern.get_qualifiers() | deduced.get_qualifiers());
+        return QualType(deduced.get_shared(), merged_quals);
+    }
+
+    auto raw = pattern.get_shared();
+    if (!raw) {
+        return pattern;
+    }
+
+    if (auto ptr = dyn_cast_shared<PointerType>(raw)) {
+        return QualType(
+            std::make_shared<PointerType>(
+                replace_auto_placeholder_qualtype(ptr->pointed_type, deduced)),
+            pattern.get_qualifiers());
+    }
+
+    if (auto ref = dyn_cast_shared<ReferenceType>(raw)) {
+        return QualType(
+            std::make_shared<ReferenceType>(
+                replace_auto_placeholder_qualtype(ref->referred_type, deduced),
+                ref->reference_kind),
+            pattern.get_qualifiers());
+    }
+
+    if (auto blk = dyn_cast_shared<BlockPointerType>(raw)) {
+        return QualType(
+            std::make_shared<BlockPointerType>(
+                replace_auto_placeholder_qualtype(blk->pointed_type, deduced)),
+            pattern.get_qualifiers());
+    }
+
+    if (auto mem_ptr = dyn_cast_shared<MemberPointerType>(raw)) {
+        return QualType(
+            std::make_shared<MemberPointerType>(
+                replace_auto_placeholder_qualtype(mem_ptr->class_type, deduced),
+                replace_auto_placeholder_qualtype(mem_ptr->member_type, deduced)),
+            pattern.get_qualifiers());
+    }
+
+    if (auto arr = dyn_cast_shared<ArrayType>(raw)) {
+        QualType elem =
+            replace_auto_placeholder_qualtype(arr->element_type, deduced);
+        if (arr->size_kind == ArraySizeKind::Variable) {
+            return QualType(
+                std::make_shared<ArrayType>(elem, arr->size_expr),
+                pattern.get_qualifiers());
+        }
+        auto rebuilt = std::make_shared<ArrayType>(elem, arr->size);
+        rebuilt->size_kind = arr->size_kind;
+        return QualType(rebuilt, pattern.get_qualifiers());
+    }
+
+    if (auto func = dyn_cast_shared<FunctionType>(raw)) {
+        auto rebuilt = std::make_shared<FunctionType>();
+        rebuilt->ret_type =
+            replace_auto_placeholder_qualtype(func->ret_type, deduced);
+        rebuilt->parameters.reserve(func->parameters.size());
+        for (const auto& param : func->parameters) {
+            rebuilt->parameters.push_back(
+                replace_auto_placeholder_qualtype(param, deduced));
+        }
+        rebuilt->is_variadic = func->is_variadic;
+        rebuilt->has_prototype = func->has_prototype;
+        rebuilt->member_ref_qualifier = func->member_ref_qualifier;
+        rebuilt->has_explicit_exception_spec =
+            func->has_explicit_exception_spec;
+        rebuilt->exception_spec = func->exception_spec;
+        return QualType(rebuilt, pattern.get_qualifiers());
+    }
+
+    return pattern;
+}
+}
+
 void Collect::resolve_auto_variable_type_from_expr(
     QualType& declared_type,
     const Expr* init_expr,
@@ -77,17 +162,36 @@ void Collect::resolve_auto_variable_type_from_expr(
         deduced_qt = remove_reference(deduced_qt, ast_ctx_.get()).without_qualifiers();
     }
 
-    auto deduced = desugar_type(deduced_qt, ast_ctx_.get()).get_shared();
-    auto deduced_kind = deduced ? deduced->kind : TypeKind::Other;
-    if (deduced_kind == TypeKind::Array) {
-        auto arr = dyn_cast_shared<ArrayType>(deduced);
-        deduced = std::make_shared<PointerType>(arr->element_type);
-    } else if (deduced_kind == TypeKind::Function) {
-        deduced = std::make_shared<PointerType>(QualType(deduced));
+    QualType deduction_source = deduced_qt;
+    auto deduction_source_raw =
+        desugar_type(deduction_source, ast_ctx_.get()).get_shared();
+    auto deduction_source_kind =
+        deduction_source_raw ? deduction_source_raw->kind : TypeKind::Other;
+    if (deduction_source_kind == TypeKind::Array) {
+        auto arr = dyn_cast_shared<ArrayType>(deduction_source_raw);
+        deduction_source = QualType(std::make_shared<PointerType>(arr->element_type));
+    } else if (deduction_source_kind == TypeKind::Function) {
+        deduction_source =
+            QualType(std::make_shared<PointerType>(QualType(deduction_source_raw)));
     }
 
-    auto replaced = replace_auto_type(declared_type.get_shared(), deduced);
-    declared_type = QualType(replaced, declared_type.get_qualifiers());
+    QualType deduced_placeholder = deduction_source;
+    if (treat_as_cxx_auto) {
+        auto extracted = auto_type_utils::extract_auto_placeholder_replacement(
+            remove_reference(declared_type, ast_ctx_.get()),
+            deduction_source);
+        if (!extracted.has_value() || !extracted->get_shared()) {
+            report_error(
+                "cannot deduce type for 'auto' from initializer of type '" +
+                    deduction_source.to_string() + "'",
+                loc);
+            return;
+        }
+        deduced_placeholder = *extracted;
+    }
+
+    declared_type =
+        replace_auto_placeholder_qualtype(declared_type, deduced_placeholder);
     if (sym) {
         sym->type = declared_type;
     }

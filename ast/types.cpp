@@ -1556,6 +1556,38 @@ uint64_t record_semantics_cache_epoch(const ASTContext* ast_ctx) {
     return ast_ctx ? ast_ctx->record_semantics_cache_epoch() : 0;
 }
 
+QualType cpp_written_method_type(QualType method_type,
+                                 const ASTContext* ast_ctx) {
+    auto fn_type =
+        desugar_type(method_type, ast_ctx).as_shared<FunctionType>();
+    if (!fn_type || fn_type->parameters.empty()) {
+        return method_type;
+    }
+
+    auto this_param =
+        desugar_type(fn_type->parameters.front(), ast_ctx).as_shared<PointerType>();
+    auto this_object = this_param
+        ? desugar_type(this_param->pointed_type, ast_ctx).as_shared<ObjectType>()
+        : nullptr;
+    if (!this_param || !this_object) {
+        return method_type;
+    }
+
+    auto rebuilt = std::make_shared<FunctionType>();
+    rebuilt->ret_type = fn_type->ret_type;
+    rebuilt->parameters.reserve(fn_type->parameters.size() - 1);
+    for (size_t i = 1; i < fn_type->parameters.size(); ++i) {
+        rebuilt->parameters.push_back(fn_type->parameters[i]);
+    }
+    rebuilt->is_variadic = fn_type->is_variadic;
+    rebuilt->has_prototype = fn_type->has_prototype;
+    rebuilt->member_ref_qualifier = fn_type->member_ref_qualifier;
+    rebuilt->has_explicit_exception_spec =
+        fn_type->has_explicit_exception_spec;
+    rebuilt->exception_spec = fn_type->exception_spec;
+    return QualType(rebuilt, method_type.get_qualifiers());
+}
+
 std::string make_cpp_virtual_slot_key(const std::string& method_name,
                                       QualType method_type,
                                       const ASTContext* ast_ctx) {
