@@ -49,14 +49,10 @@ public:
                                 CollectSemanticStore& store);
 
     bool lookup_enum_semantics(const EnumDecl* enum_decl,
-                               bool& is_incomplete_out,
-                               std::shared_ptr<CType>& underlying_type_out,
-                               bool& has_negative_values_out,
+                               EnumSemanticState& state_out,
                                const CollectSemanticStore& store) const;
     void publish_enum_semantics(const EnumDecl* enum_decl,
-                                bool is_incomplete,
-                                std::shared_ptr<CType> underlying_type,
-                                bool has_negative_values,
+                                EnumSemanticState state,
                                 CollectSemanticStore& store);
     void erase_enum_semantics(const EnumDecl* enum_decl,
                               CollectSemanticStore& store);

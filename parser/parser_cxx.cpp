@@ -4804,6 +4804,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
     }
     advance(); // consume class/struct/union key
 
+    auto head_attrs = try_parse_attributes();
+
     std::string name;
     if (gentle_check(TokenType::IDENTIFIER)) {
         name = current_token().value;
@@ -4955,6 +4957,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
             std::move(bases),
             false,
             key_tok.loc);
+        ast_ctx->append_attrs(record->node_id, std::move(head_attrs));
         return record;
     }
 
@@ -5148,5 +5151,6 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         std::move(members),
         true,
         key_tok.loc);
+    ast_ctx->append_attrs(record->node_id, std::move(head_attrs));
     return record;
 }

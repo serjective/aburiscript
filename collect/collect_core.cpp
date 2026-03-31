@@ -1154,6 +1154,71 @@ QualType Collect::collect_lookup_record_nested_type(QualType owner_type,
     return QualType();
 }
 
+std::shared_ptr<Symbol> Collect::collect_lookup_record_enumerator(
+    QualType owner_type,
+    const std::string& name) const {
+    if (!owner_type || name.empty()) {
+        return nullptr;
+    }
+
+    auto record_type =
+        desugar_type(owner_type, ast_ctx_.get()).as_shared<ObjectType>();
+    if (!record_type) {
+        return nullptr;
+    }
+
+    auto* owner_decl = dyn_cast<ObjectDecl>(record_type->get_decl());
+    if (!owner_decl) {
+        return nullptr;
+    }
+
+    const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
+    if (!state) {
+        return nullptr;
+    }
+
+    for (auto it = state->enumerator_members.rbegin();
+         it != state->enumerator_members.rend();
+         ++it) {
+        if (it->name == name) {
+            return it->symbol;
+        }
+    }
+    return nullptr;
+}
+
+std::shared_ptr<Symbol> Collect::collect_lookup_enum_enumerator(
+    QualType owner_type,
+    const std::string& name) const {
+    if (!owner_type || name.empty()) {
+        return nullptr;
+    }
+
+    auto enum_type =
+        desugar_type(owner_type, ast_ctx_.get()).as_shared<EnumType>();
+    if (!enum_type) {
+        return nullptr;
+    }
+
+    auto* owner_decl = dyn_cast<EnumDecl>(enum_type->get_decl());
+    if (!owner_decl) {
+        return nullptr;
+    }
+
+    EnumSemanticState state;
+    if (!query_lookup_enum_semantics(owner_decl, state)) {
+        return nullptr;
+    }
+    for (auto it = state.enumerators.rbegin();
+         it != state.enumerators.rend();
+         ++it) {
+        if (it->name == name) {
+            return it->symbol;
+        }
+    }
+    return nullptr;
+}
+
 const RecordSemanticState::NestedTemplate*
 Collect::collect_lookup_record_nested_template(QualType owner_type,
                                                const std::string& name) const {

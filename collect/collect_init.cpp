@@ -1,5 +1,6 @@
 #include "collect.h"
 #include "collect_internal.h"
+#include "../helpers/auto_type_utils.h"
 
 namespace {
 bool string_array_element_types_compatible(const QualType& target_elem,
@@ -1219,11 +1220,28 @@ std::unique_ptr<Expr> Collect::process_initializer_for_type(std::unique_ptr<Expr
     if (lang_opts_.is_cxx_mode() &&
         type->kind != TypeKind::Object &&
         type->kind != TypeKind::Reference) {
-        auto seq = build_cpp_overload_conversion_sequence(init.get(), declared_type);
-        if (seq.viable && seq.kind == ConversionSequenceKind::UserDefined) {
-            init = build_cpp_user_defined_conversion_expr(
-                std::move(init), declared_type, loc);
-            return cast_if_needed(std::move(init), declared_type);
+        auto init_type = init->get_type();
+        bool skip_conversion_check =
+            !init_type ||
+            expression_depends_on_template_parameters(init.get()) ||
+            type_depends_on_template_parameters(declared_type, ast_ctx_.get()) ||
+            type_depends_on_template_parameters(init_type, ast_ctx_.get()) ||
+            contains_deferred_semantic_type(declared_type.get_shared()) ||
+            contains_deferred_semantic_type(init_type.get_shared()) ||
+            auto_type_utils::has_cxx_auto_type(declared_type.get_shared()) ||
+            auto_type_utils::has_cxx_auto_type(init_type.get_shared());
+        if (!skip_conversion_check) {
+            auto seq = build_cpp_overload_conversion_sequence(init.get(), declared_type);
+            if (!seq.viable) {
+                report_error("cannot initialize '" + declared_type.to_string() +
+                                 "' with an expression of type '" +
+                                 init_type.to_string() + "'",
+                             loc);
+            } else if (seq.kind == ConversionSequenceKind::UserDefined) {
+                init = build_cpp_user_defined_conversion_expr(
+                    std::move(init), declared_type, loc);
+                return cast_if_needed(std::move(init), declared_type);
+            }
         }
     }
 

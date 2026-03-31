@@ -82,11 +82,7 @@ struct CppLambdaInvokerInfo {
     const FuncDecl* call_operator_decl = nullptr;
 };
 
-struct EnumSemanticsCacheEntry {
-    bool is_incomplete = true;
-    bool has_negative_values = false;
-    std::shared_ptr<CType> underlying_type;
-};
+using EnumSemanticsCacheEntry = EnumSemanticState;
 
 struct TemplateSpecializationSemanticKey {
     const TemplateDecl* primary_template = nullptr;
@@ -479,14 +475,10 @@ public:
 
     void clear_enum_semantics_cache();
     void set_enum_semantics(const EnumDecl* enum_decl,
-                            bool is_incomplete,
-                            std::shared_ptr<CType> underlying_type,
-                            bool has_negative_values);
+                            EnumSemanticState state);
     void erase_enum_semantics(const EnumDecl* enum_decl);
     bool lookup_enum_semantics(const EnumDecl* enum_decl,
-                               bool& is_incomplete_out,
-                               std::shared_ptr<CType>& underlying_type_out,
-                               bool& has_negative_values_out) const;
+                               EnumSemanticState& state_out) const;
 
     ClassTemplateSpecializationEntry* lookup_class_template_specialization(
         const ClassTemplateDecl* primary_template,

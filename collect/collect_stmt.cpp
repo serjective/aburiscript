@@ -1,6 +1,9 @@
 #include "collect.h"
+#include "collect_internal.h"
 #include "../helpers/auto_type_utils.h"
 #include <cctype>
+
+using namespace collect_internal;
 
 namespace {
 bool constraint_uses_memory_operand(const std::string& constraint) {
@@ -265,11 +268,13 @@ std::unique_ptr<Expr> Collect::collect_switch_condition(std::unique_ptr<Expr> co
         report_error("switch condition has unknown type", loc);
         return condition;
     }
-    if (!cond_type->isInteger()) {
+    if (!is_integer_or_enum_type(cond_type, ast_ctx_.get())) {
         report_error("statement requires expression of integer type ('" + cond_type.to_string() + "' invalid)", loc);
         return condition;
     }
-    auto promoted = integer_promotion_type(cond_type);
+    QualType promoted = is_scoped_enum_type(cond_type, ast_ctx_.get())
+        ? cond_type
+        : integer_promotion_type(cond_type);
     if (promoted && !cond_type->equals(*promoted.get_shared())) {
         condition = collect_make<ImplicitCast>(std::move(condition), promoted);
     }
@@ -577,12 +582,28 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
     }
 
     if (lang_opts_.is_cxx_mode() && expr) {
-        auto seq = build_cpp_overload_conversion_sequence(expr.get(), return_type);
-        if (seq.viable && seq.kind == ConversionSequenceKind::UserDefined) {
-            expr = build_cpp_user_defined_conversion_expr(
-                std::move(expr), return_type, loc);
-            expr = cast_if_needed(std::move(expr), return_type);
-            return collect_make<ReturnStmt>(std::move(expr), loc);
+        auto expr_type = expr->get_type();
+        bool skip_conversion_check =
+            !expr_type ||
+            expression_depends_on_template_parameters(expr.get()) ||
+            type_depends_on_template_parameters(return_type, ast_ctx_.get()) ||
+            type_depends_on_template_parameters(expr_type, ast_ctx_.get()) ||
+            contains_deferred_semantic_type(return_type.get_shared()) ||
+            contains_deferred_semantic_type(expr_type.get_shared()) ||
+            auto_type_utils::has_cxx_auto_type(return_type.get_shared()) ||
+            auto_type_utils::has_cxx_auto_type(expr_type.get_shared());
+        if (!skip_conversion_check) {
+            auto seq = build_cpp_overload_conversion_sequence(expr.get(), return_type);
+            if (!seq.viable) {
+                report_error("no viable conversion from '" + expr_type.to_string() +
+                                 "' to '" + return_type.to_string() + "'",
+                             loc);
+            } else if (seq.kind == ConversionSequenceKind::UserDefined) {
+                expr = build_cpp_user_defined_conversion_expr(
+                    std::move(expr), return_type, loc);
+                expr = cast_if_needed(std::move(expr), return_type);
+                return collect_make<ReturnStmt>(std::move(expr), loc);
+            }
         }
     }
 

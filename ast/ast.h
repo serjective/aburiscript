@@ -3243,15 +3243,11 @@ struct EnumDecl: TagDecl {
     }
 
     bool is_complete_definition() const override {
-        bool is_incomplete = true;
-        bool has_negative_values = false;
-        std::shared_ptr<CType> underlying_type;
+        EnumSemanticState state;
         if (enum_semantics_cache_lookup(this,
-                                        is_incomplete,
-                                        underlying_type,
-                                        has_negative_values,
+                                        state,
                                         get_side_table_ast_context_for(this))) {
-            return !is_incomplete;
+            return !state.is_incomplete;
         }
         return false;
     }
@@ -3259,6 +3255,10 @@ struct EnumDecl: TagDecl {
     const std::string& get_tag_name() const override { return tag; }
     std::shared_ptr<EnumType> get_enum_type() const {
         return dyn_cast_shared<EnumType>(get_tag_type());
+    }
+    bool is_scoped() const {
+        auto enum_type = get_enum_type();
+        return enum_type ? enum_type->isScoped() : false;
     }
 
     static bool classof(const Decl *d) { return d->get_kind() == DeclKind::EnumDecl; }

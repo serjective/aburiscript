@@ -1008,14 +1008,10 @@ void ASTContext::clear_enum_semantics_cache() {
 }
 
 void ASTContext::set_enum_semantics(const EnumDecl* enum_decl,
-                                    bool is_incomplete,
-                                    std::shared_ptr<CType> underlying_type,
-                                    bool has_negative_values) {
+                                    EnumSemanticState state) {
     semantic_store_->set_enum_semantics(
         enum_decl,
-        is_incomplete,
-        std::move(underlying_type),
-        has_negative_values);
+        std::move(state));
 }
 
 void ASTContext::erase_enum_semantics(const EnumDecl* enum_decl) {
@@ -1024,14 +1020,10 @@ void ASTContext::erase_enum_semantics(const EnumDecl* enum_decl) {
 
 bool ASTContext::lookup_enum_semantics(
     const EnumDecl* enum_decl,
-    bool& is_incomplete_out,
-    std::shared_ptr<CType>& underlying_type_out,
-    bool& has_negative_values_out) const {
+    EnumSemanticState& state_out) const {
     return semantic_store_->lookup_enum_semantics(
         enum_decl,
-        is_incomplete_out,
-        underlying_type_out,
-        has_negative_values_out);
+        state_out);
 }
 
 ClassTemplateSpecializationEntry* ASTContext::lookup_class_template_specialization(

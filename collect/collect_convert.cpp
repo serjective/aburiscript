@@ -1,4 +1,7 @@
 #include "collect.h"
+#include "collect_internal.h"
+
+using namespace collect_internal;
 
 std::unique_ptr<Expr> Collect::collect_apply_standard_conversions(std::unique_ptr<Expr> expr,
                                                                   ExprUseContext context,
@@ -174,6 +177,11 @@ std::unique_ptr<Expr> Collect::collect_condition_expression(std::unique_ptr<Expr
         return condition;
     }
     if (!condition_type->isScalar()) {
+        if (!allows_condition_conversion(condition_type, ast_ctx_.get())) {
+            report_error("statement requires expression of scalar type ('" +
+                condition_type.to_string() + "' invalid)", loc);
+        }
+    } else if (!allows_condition_conversion(condition_type, ast_ctx_.get())) {
         report_error("statement requires expression of scalar type ('" +
             condition_type.to_string() + "' invalid)", loc);
     }

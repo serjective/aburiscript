@@ -316,6 +316,12 @@ public:
 
     QualType collect_lookup_record_nested_type(QualType owner_type,
                                                const std::string& name) const ;
+    std::shared_ptr<Symbol> collect_lookup_record_enumerator(
+        QualType owner_type,
+        const std::string& name) const;
+    std::shared_ptr<Symbol> collect_lookup_enum_enumerator(
+        QualType owner_type,
+        const std::string& name) const;
 
     const RecordSemanticState::NestedTemplate* collect_lookup_record_nested_template(
         QualType owner_type,
@@ -908,6 +914,7 @@ private:
         std::vector<RecordSemanticState::StaticDataMember> static_data_members;
         std::vector<RecordSemanticState::NestedType> nested_types;
         std::vector<RecordSemanticState::NestedTemplate> nested_templates;
+        std::vector<RecordSemanticState::EnumeratorMember> enumerator_members;
         std::unordered_set<std::string> seen_static_data_member_names;
         std::vector<RecordSemanticState::Constructor> constructors;
         std::vector<RecordSemanticState::Destructor> destructors;
@@ -973,14 +980,10 @@ public:
     void query_erase_record_semantics(const ObjectDecl* record_decl);
     bool query_lookup_enum_semantics(
         const EnumDecl* enum_decl,
-        bool& is_incomplete_out,
-        std::shared_ptr<CType>& underlying_type_out,
-        bool& has_negative_values_out) const;
+        EnumSemanticState& state_out) const;
     void query_publish_enum_semantics(
         const EnumDecl* enum_decl,
-        bool is_incomplete,
-        std::shared_ptr<CType> underlying_type,
-        bool has_negative_values);
+        EnumSemanticState state);
     std::shared_ptr<CType> query_lookup_template_specialization_resolved_type(
         const TemplateSpecializationType* type) const;
     void query_publish_template_specialization_resolved_type(

@@ -24,6 +24,7 @@ struct Decl;
 struct TagDecl;
 struct ObjectDecl;
 struct EnumDecl;
+struct EnumConstantDecl;
 struct TypedefDecl;
 struct CppMethodDecl;
 struct CppConstructorDecl;
@@ -1484,6 +1485,14 @@ struct RecordSemanticState {
         size_t offset = 0;
     };
 
+    struct EnumeratorMember {
+        std::string name;
+        RecordMemberAccess declared_access = RecordMemberAccess::Public;
+        const EnumDecl* enum_decl = nullptr;
+        const EnumConstantDecl* decl = nullptr;
+        std::shared_ptr<Symbol> symbol = nullptr;
+    };
+
     bool is_incomplete = true;
     bool is_polymorphic = false;
     bool is_abstract = false;
@@ -1496,6 +1505,7 @@ struct RecordSemanticState {
     std::vector<StaticDataMember> static_data_members;
     std::vector<NestedType> nested_types;
     std::vector<NestedTemplate> nested_templates;
+    std::vector<EnumeratorMember> enumerator_members;
     std::vector<Constructor> constructors;
     std::vector<Destructor> destructors;
     std::vector<VirtualSlot> virtual_slots;
@@ -1558,27 +1568,33 @@ size_t object_field_storage_size_bytes(const ObjectType::Field& field);
 size_t object_field_storage_alignment(const ObjectType::Field& field);
 std::vector<ObjectType::Field> get_record_fields_for_type_matching(
     const ObjectType* record_type);
+struct EnumSemanticState {
+    struct Enumerator {
+        std::string name;
+        const EnumConstantDecl* decl = nullptr;
+        std::shared_ptr<Symbol> symbol = nullptr;
+        int64_t value = 0;
+    };
+
+    bool is_incomplete = true;
+    bool is_scoped = false;
+    bool has_negative_values = false;
+    std::shared_ptr<CType> underlying_type;
+    std::vector<Enumerator> enumerators;
+};
 void enum_semantics_cache_clear(ASTContext* ast_ctx);
 void enum_semantics_cache_set(ASTContext* ast_ctx,
                               const EnumDecl* enum_decl,
-                              bool is_incomplete,
-                              std::shared_ptr<CType> underlying_type,
-                              bool has_negative_values);
+                              EnumSemanticState state);
 void enum_semantics_cache_set(const EnumDecl* enum_decl,
-                              bool is_incomplete,
-                              std::shared_ptr<CType> underlying_type,
-                              bool has_negative_values);
+                              EnumSemanticState state);
 void enum_semantics_cache_erase(ASTContext* ast_ctx, const EnumDecl* enum_decl);
 void enum_semantics_cache_erase(const EnumDecl* enum_decl);
 bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
-                                 bool& is_incomplete_out,
-                                 std::shared_ptr<CType>& underlying_type_out,
-                                 bool& has_negative_values_out,
+                                 EnumSemanticState& state_out,
                                  const ASTContext* ast_ctx);
 bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
-                                 bool& is_incomplete_out,
-                                 std::shared_ptr<CType>& underlying_type_out,
-                                 bool& has_negative_values_out);
+                                 EnumSemanticState& state_out);
 
 struct EnumType : TagType {
     explicit EnumType(std::string tag, bool incomplete = false)
@@ -1600,6 +1616,7 @@ struct EnumType : TagType {
     static bool classof(const CType *t) { return t->kind == TypeKind::Enum; }
 
     bool isIncomplete() const override;
+    bool isScoped() const;
 
     bool isArithmetic() const override { return true; }
     bool isInteger() const override { return true; }

@@ -1964,9 +1964,7 @@ void enum_semantics_cache_clear(ASTContext* ast_ctx) {
 
 void enum_semantics_cache_set(ASTContext* ast_ctx,
                               const EnumDecl* enum_decl,
-                              bool is_incomplete,
-                              std::shared_ptr<CType> underlying_type,
-                              bool has_negative_values) {
+                              EnumSemanticState state) {
     if (!enum_decl) {
         return;
     }
@@ -1974,30 +1972,17 @@ void enum_semantics_cache_set(ASTContext* ast_ctx,
         if (auto* query_context = get_active_collect_query_context()) {
             query_context->publish_enum_semantics(
                 enum_decl,
-                is_incomplete,
-                std::move(underlying_type),
-                has_negative_values,
+                std::move(state),
                 cache_ctx->semantic_store());
         } else {
-            cache_ctx->set_enum_semantics(
-                enum_decl,
-                is_incomplete,
-                std::move(underlying_type),
-                has_negative_values);
+            cache_ctx->set_enum_semantics(enum_decl, std::move(state));
         }
     }
 }
 
 void enum_semantics_cache_set(const EnumDecl* enum_decl,
-                              bool is_incomplete,
-                              std::shared_ptr<CType> underlying_type,
-                              bool has_negative_values) {
-    enum_semantics_cache_set(
-        nullptr,
-        enum_decl,
-        is_incomplete,
-        std::move(underlying_type),
-        has_negative_values);
+                              EnumSemanticState state) {
+    enum_semantics_cache_set(nullptr, enum_decl, std::move(state));
 }
 
 void enum_semantics_cache_erase(ASTContext* ast_ctx, const EnumDecl* enum_decl) {
@@ -2020,9 +2005,7 @@ void enum_semantics_cache_erase(const EnumDecl* enum_decl) {
 }
 
 bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
-                                 bool& is_incomplete_out,
-                                 std::shared_ptr<CType>& underlying_type_out,
-                                 bool& has_negative_values_out,
+                                 EnumSemanticState& state_out,
                                  const ASTContext* ast_ctx) {
     if (!enum_decl) {
         return false;
@@ -2035,30 +2018,17 @@ bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
         if (auto* query_context = get_active_collect_query_context()) {
             return query_context->lookup_enum_semantics(
                 enum_decl,
-                is_incomplete_out,
-                underlying_type_out,
-                has_negative_values_out,
+                state_out,
                 cache_ctx->semantic_store());
         }
-        return cache_ctx->lookup_enum_semantics(
-            enum_decl,
-            is_incomplete_out,
-            underlying_type_out,
-            has_negative_values_out);
+        return cache_ctx->lookup_enum_semantics(enum_decl, state_out);
     }
     return false;
 }
 
 bool enum_semantics_cache_lookup(const EnumDecl* enum_decl,
-                                 bool& is_incomplete_out,
-                                 std::shared_ptr<CType>& underlying_type_out,
-                                 bool& has_negative_values_out) {
-    return enum_semantics_cache_lookup(
-        enum_decl,
-        is_incomplete_out,
-        underlying_type_out,
-        has_negative_values_out,
-        nullptr);
+                                 EnumSemanticState& state_out) {
+    return enum_semantics_cache_lookup(enum_decl, state_out, nullptr);
 }
 
 namespace {
@@ -2145,34 +2115,47 @@ bool extract_decl_enum_incomplete(const EnumDecl* enum_decl, bool& incomplete_ou
     if (!enum_decl) {
         return false;
     }
-    std::shared_ptr<CType> ignored_underlying;
-    bool ignored_negative = false;
-    return enum_semantics_cache_lookup(
-        enum_decl, incomplete_out, ignored_underlying, ignored_negative);
+    EnumSemanticState state;
+    if (!enum_semantics_cache_lookup(enum_decl, state)) {
+        return false;
+    }
+    incomplete_out = state.is_incomplete;
+    return true;
 }
 
 bool extract_decl_enum_has_negative_values(const EnumDecl* enum_decl, bool& has_negative_out) {
     if (!enum_decl) {
         return false;
     }
-    bool ignored_incomplete = true;
-    std::shared_ptr<CType> ignored_underlying;
-    return enum_semantics_cache_lookup(
-        enum_decl, ignored_incomplete, ignored_underlying, has_negative_out);
+    EnumSemanticState state;
+    if (!enum_semantics_cache_lookup(enum_decl, state)) {
+        return false;
+    }
+    has_negative_out = state.has_negative_values;
+    return true;
+}
+
+bool extract_decl_enum_scoped(const EnumDecl* enum_decl, bool& is_scoped_out) {
+    if (!enum_decl) {
+        return false;
+    }
+    EnumSemanticState state;
+    if (!enum_semantics_cache_lookup(enum_decl, state)) {
+        return false;
+    }
+    is_scoped_out = state.is_scoped;
+    return true;
 }
 
 std::shared_ptr<CType> extract_decl_enum_underlying_type(const EnumDecl* enum_decl) {
     if (!enum_decl) {
         return nullptr;
     }
-    bool ignored_incomplete = true;
-    bool ignored_negative = false;
-    std::shared_ptr<CType> underlying;
-    if (!enum_semantics_cache_lookup(
-            enum_decl, ignored_incomplete, underlying, ignored_negative)) {
+    EnumSemanticState state;
+    if (!enum_semantics_cache_lookup(enum_decl, state)) {
         return nullptr;
     }
-    return underlying;
+    return state.underlying_type;
 }
 } // namespace
 
@@ -2894,17 +2877,22 @@ bool EnumType::isIncomplete() const {
     return decl_incomplete;
 }
 
-bool EnumType::isUnsigned() const {
+bool EnumType::isScoped() const {
     const auto* enum_decl = get_enum_decl(this);
     if (!enum_decl) {
         return false;
     }
 
-    bool decl_has_negative_values = false;
-    if (!extract_decl_enum_has_negative_values(enum_decl, decl_has_negative_values)) {
+    bool decl_is_scoped = false;
+    if (!extract_decl_enum_scoped(enum_decl, decl_is_scoped)) {
         return false;
     }
-    return !decl_has_negative_values;
+    return decl_is_scoped;
+}
+
+bool EnumType::isUnsigned() const {
+    auto underlying = semantic_underlying_type();
+    return underlying ? underlying->isUnsigned() : false;
 }
 
 std::shared_ptr<CType> EnumType::semantic_underlying_type() const {
@@ -2924,7 +2912,8 @@ int64_t EnumType::getWidth() {
 std::string EnumType::to_string() const {
     const auto* enum_decl = get_enum_decl(this);
     std::string display_tag = enum_decl ? enum_decl->get_tag_name() : "";
-    return "enum " + (display_tag.empty() ? "(anonymous)" : display_tag);
+    std::string prefix = isScoped() ? "enum class " : "enum ";
+    return prefix + (display_tag.empty() ? "(anonymous)" : display_tag);
 }
 
 bool type_contains_vla(const std::shared_ptr<CType>& type) {

@@ -1402,16 +1402,12 @@ void CollectSemanticStore::clear_enum_semantics_cache() {
 }
 
 void CollectSemanticStore::set_enum_semantics(const EnumDecl* enum_decl,
-                                              bool is_incomplete,
-                                              std::shared_ptr<CType> underlying_type,
-                                              bool has_negative_values) {
+                                              EnumSemanticState state) {
     if (!enum_decl) {
         return;
     }
     auto& entry = enum_semantics_cache_[enum_decl];
-    entry.is_incomplete = is_incomplete;
-    entry.underlying_type = std::move(underlying_type);
-    entry.has_negative_values = has_negative_values;
+    entry = std::move(state);
     enum_decl->external_semantic_owner_id = registry_id_;
 }
 
@@ -1427,9 +1423,7 @@ void CollectSemanticStore::erase_enum_semantics(const EnumDecl* enum_decl) {
 
 bool CollectSemanticStore::lookup_enum_semantics(
     const EnumDecl* enum_decl,
-    bool& is_incomplete_out,
-    std::shared_ptr<CType>& underlying_type_out,
-    bool& has_negative_values_out) const {
+    EnumSemanticState& state_out) const {
     if (!enum_decl) {
         return false;
     }
@@ -1437,9 +1431,7 @@ bool CollectSemanticStore::lookup_enum_semantics(
     if (it == enum_semantics_cache_.end()) {
         return false;
     }
-    is_incomplete_out = it->second.is_incomplete;
-    underlying_type_out = it->second.underlying_type;
-    has_negative_values_out = it->second.has_negative_values;
+    state_out = it->second;
     return true;
 }
 

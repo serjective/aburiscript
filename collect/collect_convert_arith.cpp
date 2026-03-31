@@ -1,14 +1,38 @@
 #include "collect.h"
+#include "collect_internal.h"
+
+using namespace collect_internal;
 
 QualType Collect::integer_promotion_type(QualType type) const {
 
-    if (!type || !type->isInteger()) {
+    if (!type || !allows_integral_promotion(type, ast_ctx_.get())) {
         return type;
     }
     auto canonical = desugar_type(type);
     auto canonical_kind = canonical ? canonical->kind : TypeKind::Other;
     if (canonical_kind == TypeKind::Enum) {
-        return QualType(get_builtin_int());
+        auto enum_type = canonical.as_shared<EnumType>();
+        if (!enum_type || enum_type->isScoped()) {
+            return canonical;
+        }
+
+        auto underlying_raw = enum_type->semantic_underlying_type();
+        if (!underlying_raw) {
+            return QualType(get_builtin_int());
+        }
+
+        QualType underlying(underlying_raw);
+        auto underlying_builtin =
+            desugar_type(underlying, ast_ctx_.get()).as_shared<BuiltinType>();
+        auto int_type = get_builtin_int();
+        auto int_builtin = dyn_cast_shared<BuiltinType>(int_type);
+        if (!underlying_builtin || !int_builtin) {
+            return underlying;
+        }
+        if (underlying_builtin->getRank() < int_builtin->getRank()) {
+            return QualType(int_type);
+        }
+        return QualType(underlying_builtin);
     }
     auto builtin = canonical.as_shared<BuiltinType>();
     if (!builtin) {
@@ -39,7 +63,7 @@ std::unique_ptr<Expr> Collect::apply_default_argument_promotions(std::unique_ptr
         return expr;
     }
     auto expr_canonical = desugar_type(expr_type);
-    if (expr_canonical->isInteger()) {
+    if (allows_integral_promotion(expr_canonical, ast_ctx_.get())) {
         auto promoted = integer_promotion_type(expr_canonical);
         return cast_if_needed(std::move(expr), promoted);
     }
@@ -58,6 +82,10 @@ QualType Collect::usual_arithmetic_conversion_type(QualType lhs, QualType rhs) c
     }
     lhs = desugar_type(lhs);
     rhs = desugar_type(rhs);
+    if (is_scoped_enum_type(lhs, ast_ctx_.get()) ||
+        is_scoped_enum_type(rhs, ast_ctx_.get())) {
+        return QualType();
+    }
     bool either_complex = lhs->isComplex() || rhs->isComplex();
     if (auto c1 = lhs.as_shared<ComplexType>()) {
         lhs = QualType(c1->element_type);

@@ -89,10 +89,7 @@ void CollectQueryContext::apply_overlay_to_store(TentativeOverlay& overlay,
         store.erase_enum_semantics(enum_decl);
     }
     for (auto& [enum_decl, state] : overlay.enum_semantics) {
-        store.set_enum_semantics(enum_decl,
-                                 state.is_incomplete,
-                                 state.underlying_type,
-                                 state.has_negative_values);
+        store.set_enum_semantics(enum_decl, std::move(state));
     }
 
     for (auto& [type, resolved_type] :
@@ -192,9 +189,7 @@ void CollectQueryContext::erase_record_semantics(const ObjectDecl* record_decl,
 
 bool CollectQueryContext::lookup_enum_semantics(
     const EnumDecl* enum_decl,
-    bool& is_incomplete_out,
-    std::shared_ptr<CType>& underlying_type_out,
-    bool& has_negative_values_out,
+    EnumSemanticState& state_out,
     const CollectSemanticStore& store) const {
     if (!enum_decl) {
         return false;
@@ -208,17 +203,12 @@ bool CollectQueryContext::lookup_enum_semantics(
         }
         auto overlay_it = it->enum_semantics.find(enum_decl);
         if (overlay_it != it->enum_semantics.end()) {
-            is_incomplete_out = overlay_it->second.is_incomplete;
-            underlying_type_out = overlay_it->second.underlying_type;
-            has_negative_values_out = overlay_it->second.has_negative_values;
+            state_out = overlay_it->second;
             ++metrics_.enum_semantics_hits;
             return true;
         }
     }
-    if (store.lookup_enum_semantics(enum_decl,
-                                    is_incomplete_out,
-                                    underlying_type_out,
-                                    has_negative_values_out)) {
+    if (store.lookup_enum_semantics(enum_decl, state_out)) {
         ++metrics_.enum_semantics_hits;
         return true;
     }
@@ -228,27 +218,19 @@ bool CollectQueryContext::lookup_enum_semantics(
 
 void CollectQueryContext::publish_enum_semantics(
     const EnumDecl* enum_decl,
-    bool is_incomplete,
-    std::shared_ptr<CType> underlying_type,
-    bool has_negative_values,
+    EnumSemanticState state,
     CollectSemanticStore& store) {
     if (!enum_decl) {
         return;
     }
     ++metrics_.enum_semantics_publications;
     if (tentative_overlays_.empty()) {
-        store.set_enum_semantics(enum_decl,
-                                 is_incomplete,
-                                 std::move(underlying_type),
-                                 has_negative_values);
+        store.set_enum_semantics(enum_decl, std::move(state));
         return;
     }
     auto& overlay = tentative_overlays_.back();
     overlay.erased_enum_semantics.erase(enum_decl);
-    overlay.enum_semantics[enum_decl] = EnumSemanticsCacheEntry{
-        is_incomplete,
-        has_negative_values,
-        std::move(underlying_type)};
+    overlay.enum_semantics[enum_decl] = std::move(state);
 }
 
 void CollectQueryContext::erase_enum_semantics(const EnumDecl* enum_decl,
@@ -419,30 +401,22 @@ void Collect::query_erase_record_semantics(const ObjectDecl* record_decl) {
 
 bool Collect::query_lookup_enum_semantics(
     const EnumDecl* enum_decl,
-    bool& is_incomplete_out,
-    std::shared_ptr<CType>& underlying_type_out,
-    bool& has_negative_values_out) const {
+    EnumSemanticState& state_out) const {
     if (!ast_ctx_ || !enum_decl) {
         return false;
     }
     return query_context_.lookup_enum_semantics(enum_decl,
-                                                is_incomplete_out,
-                                                underlying_type_out,
-                                                has_negative_values_out,
+                                                state_out,
                                                 ast_ctx_->semantic_store());
 }
 
 void Collect::query_publish_enum_semantics(const EnumDecl* enum_decl,
-                                           bool is_incomplete,
-                                           std::shared_ptr<CType> underlying_type,
-                                           bool has_negative_values) {
+                                           EnumSemanticState state) {
     if (!ast_ctx_ || !enum_decl) {
         return;
     }
     query_context_.publish_enum_semantics(enum_decl,
-                                          is_incomplete,
-                                          std::move(underlying_type),
-                                          has_negative_values,
+                                          std::move(state),
                                           ast_ctx_->semantic_store());
 }
 

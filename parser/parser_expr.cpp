@@ -644,21 +644,32 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
     bool qualifier_lookup_failed = owner_chain.lookup_failed;
     std::shared_ptr<ObjectType> qualified_owner_type = nullptr;
     const ObjectDecl* qualified_owner_record_decl = nullptr;
+    std::shared_ptr<EnumType> qualified_owner_enum_type = nullptr;
+    const EnumDecl* qualified_owner_enum_decl = nullptr;
     if (owner_chain.has_owner_type() &&
         !owner_chain.is_dependent_context()) {
-        qualified_owner_type =
+        QualType qualified_owner_canonical =
             desugar_type(
                 remove_reference(owner_chain.owner_type, ast_ctx.get()),
-                ast_ctx.get())
-                .as_shared<ObjectType>();
+                ast_ctx.get());
+        qualified_owner_type = qualified_owner_canonical.as_shared<ObjectType>();
         qualified_owner_record_decl =
             dyn_cast<ObjectDecl>(
                 qualified_owner_type
                     ? qualified_owner_type->get_decl()
                     : nullptr);
+        if (!qualified_owner_record_decl) {
+            qualified_owner_enum_type = qualified_owner_canonical.as_shared<EnumType>();
+            qualified_owner_enum_decl =
+                dyn_cast<EnumDecl>(
+                    qualified_owner_enum_type
+                        ? qualified_owner_enum_type->get_decl()
+                        : nullptr);
+        }
         qualifier_lookup_failed =
             qualifier_lookup_failed ||
-            (!qualified_owner_type || !qualified_owner_record_decl);
+            ((!qualified_owner_type || !qualified_owner_record_decl) &&
+             (!qualified_owner_enum_type || !qualified_owner_enum_decl));
     }
 
     if (qualified_owner_type && qualified_owner_record_decl) {
@@ -670,6 +681,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
         std::vector<std::pair<const RecordSemanticState::StaticDataMember*,
                               const ObjectDecl*>>
             static_data_matches;
+        std::vector<std::shared_ptr<Symbol>> enumerator_matches;
         std::unordered_set<const ObjectDecl*> visited;
         // Search owner + bases until we find the first level that defines the name.
         // If a level matches, stop descending so hidden base members stay hidden.
@@ -690,6 +702,12 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
                 if (static_data.name == terminal_name) {
                     static_data_matches.emplace_back(
                         &static_data, current_decl);
+                    matched_here = true;
+                }
+            }
+            for (const auto& enumerator : state->enumerator_members) {
+                if (enumerator.name == terminal_name) {
+                    enumerator_matches.push_back(enumerator.symbol);
                     matched_here = true;
                 }
             }
@@ -740,7 +758,8 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
         size_t total_matches =
             method_matches.size() +
             method_template_matches.size() +
-            static_data_matches.size();
+            static_data_matches.size() +
+            enumerator_matches.size();
         if (looks_like_call &&
             static_callable_matches > 0 &&
             nonstatic_method_matches == 0 &&
@@ -794,6 +813,17 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
                 return qualified_ref;
         }
 
+        if (enumerator_matches.size() == 1) {
+            auto qualified_ref = collect_->collect_identifier_reference(
+                terminal_name, enumerator_matches.front(), qualified_loc);
+            set_qualified_expr_info(
+                qualified_ref,
+                QualType(qualified_owner_type),
+                true,
+                false);
+            return qualified_ref;
+        }
+
         if (method_matches.size() == 1) {
             const auto* method = method_matches.front().first;
             if (method && method->is_static) {
@@ -842,6 +872,30 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             qualified_loc,
             looks_like_call,
             true);
+    }
+
+    if (qualified_owner_enum_type && qualified_owner_enum_decl) {
+        auto enumerator_symbol =
+            collect_->collect_lookup_enum_enumerator(
+                owner_chain.owner_type,
+                terminal_name);
+        if (!enumerator_symbol) {
+            diag_engine->report_error(
+                "use of undeclared identifier '" + terminal_name + "'",
+                qualified_loc);
+            return collect_->collect_error_expression("undeclared identifier",
+                qualified_loc);
+        }
+        auto qualified_ref = collect_->collect_identifier_reference(
+            terminal_name,
+            enumerator_symbol,
+            qualified_loc);
+        set_qualified_expr_info(
+            qualified_ref,
+            QualType(qualified_owner_enum_type),
+            true,
+            false);
+        return qualified_ref;
     }
 
     if (owner_chain.is_dependent_context()) {

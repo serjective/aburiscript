@@ -513,11 +513,22 @@ std::unique_ptr<Decl> Parser::build_cpp_record_semantic_decl(
                 deferred_semantic_state};
             build_cpp_record_parse_deferred_bodies(deferred_ctx);
         };
-    return collect_->collect_build_cpp_record_semantic_decl(
+    auto semantic_decl = collect_->collect_build_cpp_record_semantic_decl(
         record,
         std::move(semantic_tag_name),
         &cpp_transient_semantic_decls_,
         std::move(deferred_body_callback));
+    if (!semantic_decl || !ast_ctx) {
+        return semantic_decl;
+    }
+
+    const auto& record_attrs = ast_ctx->get_attrs(record.node_id).attrs;
+    if (!record_attrs.empty()) {
+        std::vector<ParsedAttribute> copied_attrs(
+            record_attrs.begin(), record_attrs.end());
+        ast_ctx->append_attrs(semantic_decl->node_id, std::move(copied_attrs));
+    }
+    return semantic_decl;
 }
 
 void Parser::ensure_cpp_class_placeholder_type(const std::string& name, SrcLoc loc) {
@@ -3592,6 +3603,13 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
         fields.push_back(std::move(decl_parser.enum_obj));
     }
 
+    if (!fields.empty() &&
+        gentle_check(TokenType::SEMICOLON) &&
+        dyn_cast<EnumDecl>(fields.back().get()) != nullptr) {
+        check_and_consume(TokenType::SEMICOLON);
+        return fields;
+    }
+
     while (true) {
         decl_parser.reset_declarator_parsing_state();
         auto field_type = decl_parser.parse_declarator(base_type);
@@ -4563,6 +4581,13 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
     Token enum_tok = current_token();
     check_and_consume(TokenType::ENUM);
 
+    bool is_scoped = false;
+    if (is_cxx_mode_active() &&
+        (gentle_check(TokenType::CLASS) || gentle_check(TokenType::STRUCT))) {
+        is_scoped = true;
+        advance();
+    }
+
     auto pre_attrs = try_parse_attributes();
     std::string tag;
     bool has_tag = false;
@@ -4579,7 +4604,9 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
     bool has_fixed_underlying = false;
     std::shared_ptr<CType> fixed_underlying = nullptr;
     if (gentle_check(TokenType::COLON)) {
-        if (!lang_opts.standard.empty() && !is_c23_family_standard(lang_opts.standard)) {
+        if (!is_cxx_mode_active() &&
+            !lang_opts.standard.empty() &&
+            !is_c23_family_standard(lang_opts.standard)) {
             diag_engine->report_error(
                 "fixed underlying enum type requires C23 or GNU2x mode", current_token().loc);
         }
@@ -4594,59 +4621,58 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
         has_fixed_underlying = true;
     }
 
-    struct EnumSemanticState {
-        bool is_incomplete = true;
-        bool has_negative_values = false;
-        std::shared_ptr<CType> underlying_type;
-    };
     auto read_enum_state = [&](const EnumDecl* enum_decl) -> EnumSemanticState {
         EnumSemanticState state;
         if (!enum_decl) {
             return state;
         }
         if (collect_) {
-            collect_->query_lookup_enum_semantics(enum_decl,
-                                                  state.is_incomplete,
-                                                  state.underlying_type,
-                                                  state.has_negative_values);
+            collect_->query_lookup_enum_semantics(enum_decl, state);
         } else {
-            enum_semantics_cache_lookup(
-                enum_decl,
-                state.is_incomplete,
-                state.underlying_type,
-                state.has_negative_values,
-                ast_ctx.get());
+            enum_semantics_cache_lookup(enum_decl, state, ast_ctx.get());
         }
         return state;
     };
     auto write_enum_state = [&](const EnumDecl* enum_decl, const EnumSemanticState& state) {
         if (collect_) {
-            collect_->query_publish_enum_semantics(enum_decl,
-                                                   state.is_incomplete,
-                                                   state.underlying_type,
-                                                   state.has_negative_values);
+            collect_->query_publish_enum_semantics(enum_decl, state);
             return;
         }
-        enum_semantics_cache_set(
-            ast_ctx.get(),
-            enum_decl,
-            state.is_incomplete,
-            state.underlying_type,
-            state.has_negative_values);
+        enum_semantics_cache_set(ast_ctx.get(), enum_decl, state);
+    };
+    auto expected_underlying_type =
+        [&]() -> std::shared_ptr<CType> {
+        if (has_fixed_underlying) {
+            return fixed_underlying;
+        }
+        if (is_cxx_mode_active() && is_scoped) {
+            return type_ctx->get_builtin(BuiltinTypes::Int);
+        }
+        return nullptr;
     };
 
     auto reconcile_tag_decl = [&](EnumDecl* enum_decl, SrcLoc loc) {
-        if (!enum_decl || !has_fixed_underlying) {
+        if (!enum_decl) {
             return;
         }
         auto state = read_enum_state(enum_decl);
+        if (state.is_scoped != is_scoped) {
+            diag_engine->report_error(
+                "enum declaration scopedness mismatch with previous declaration",
+                loc);
+            return;
+        }
+        auto expected_underlying = expected_underlying_type();
+        if (!expected_underlying) {
+            return;
+        }
         if (state.underlying_type &&
-            !state.underlying_type->equals(*fixed_underlying)) {
+            !state.underlying_type->equals(*expected_underlying)) {
             diag_engine->report_error(
                 "enum underlying type mismatch with previous declaration", loc);
             return;
         }
-        state.underlying_type = fixed_underlying;
+        state.underlying_type = expected_underlying;
         write_enum_state(enum_decl, state);
     };
     auto extract_enum_decl = [&](TagDecl* existing_tag_decl,
@@ -4667,8 +4693,38 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
         }
         write_enum_state(dst, read_enum_state(src));
     };
+    auto build_enumerator_state =
+        [](const EnumDecl* enum_decl) {
+            std::vector<EnumSemanticState::Enumerator> enumerators;
+            if (!enum_decl) {
+                return enumerators;
+            }
+            enumerators.reserve(enum_decl->constants.size());
+            for (const auto& constant : enum_decl->constants) {
+                if (!constant) {
+                    continue;
+                }
+                EnumSemanticState::Enumerator enumerator;
+                enumerator.name = constant->name;
+                enumerator.decl = constant.get();
+                enumerator.symbol = constant->sym;
+                enumerator.value = constant->value;
+                enumerators.push_back(std::move(enumerator));
+            }
+            return enumerators;
+        };
 
-    if (gentle_check(TokenType::LEFT_BRACE)) {
+    bool has_braced_definition = gentle_check(TokenType::LEFT_BRACE);
+    if (is_cxx_mode_active() &&
+        !has_braced_definition &&
+        !is_scoped &&
+        !has_fixed_underlying) {
+        diag_engine->report_error(
+            "opaque enum declaration requires an explicit underlying type in C++",
+            enum_tok.loc);
+    }
+
+    if (has_braced_definition) {
         advance(); // consume '{'
 
         EnumDecl* existing_enum_decl = nullptr;
@@ -4683,28 +4739,36 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
             enum_type = std::make_shared<EnumType>(tag);
         }
 
-        std::shared_ptr<CType> enum_underlying = has_fixed_underlying
-            ? fixed_underlying
-            : type_ctx->get_builtin(BuiltinTypes::Int);
+        std::shared_ptr<CType> enum_underlying = expected_underlying_type();
         bool enum_has_negative_values = false;
         if (existing_enum_decl) {
             auto existing_state = read_enum_state(existing_enum_decl);
+            if (existing_state.is_scoped != is_scoped) {
+                diag_engine->report_error(
+                    "enum declaration scopedness mismatch with previous declaration",
+                    enum_tok.loc);
+            }
             if (!existing_state.underlying_type) {
                 existing_state.underlying_type = enum_underlying;
+                existing_state.is_scoped = is_scoped;
                 write_enum_state(existing_enum_decl, existing_state);
             }
             reconcile_tag_decl(existing_enum_decl, enum_tok.loc);
             existing_state = read_enum_state(existing_enum_decl);
+            is_scoped = existing_state.is_scoped;
             if (existing_state.underlying_type) {
                 enum_underlying = existing_state.underlying_type;
             }
             enum_has_negative_values = existing_state.has_negative_values;
         }
+        bool validate_against_fixed_underlying =
+            has_fixed_underlying || (is_cxx_mode_active() && is_scoped);
         if (enum_underlying && enum_underlying->isUnsigned()) {
             enum_has_negative_values = false;
         }
 
         std::vector<std::unique_ptr<EnumConstantDecl>> constants;
+        std::unordered_set<std::string> seen_enumerator_names;
         int64_t next_enum_value = 0;
         bool saw_any_enumerator = false;
         int64_t min_enum_value = 0;
@@ -4730,10 +4794,18 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
                     init = parse_conditional_expression();
                 }
 
-                auto existing = collect_->collect_lookup_variable_symbol(name, false);
-                if (existing) {
+                if (!seen_enumerator_names.insert(name).second) {
                     diag_engine->report_error(
                         "redefinition of enum constant '" + name + "'", loc);
+                }
+                bool inject_enumerator_into_scope =
+                    !is_cxx_mode_active() || !is_scoped;
+                if (inject_enumerator_into_scope) {
+                    auto existing = collect_->collect_lookup_variable_symbol(name, false);
+                    if (existing) {
+                        diag_engine->report_error(
+                            "redefinition of enum constant '" + name + "'", loc);
+                    }
                 }
 
                 int64_t enum_value = next_enum_value;
@@ -4748,7 +4820,7 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
                     }
                 }
 
-                if (has_fixed_underlying &&
+                if (validate_against_fixed_underlying &&
                     !fixed_enum_value_fits_underlying(enum_value, enum_underlying)) {
                     diag_engine->report_error(
                         "enumerator value is not representable in fixed underlying enum type", loc);
@@ -4776,7 +4848,9 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
                     StorageClass::NONE);
                 enum_sym->enum_val = enum_value;
                 enum_const->sym = enum_sym;
-                collect_->collect_bind_symbol_in_current_scope(name, enum_sym);
+                if (inject_enumerator_into_scope) {
+                    collect_->collect_bind_symbol_in_current_scope(name, enum_sym);
+                }
                 collect_->collect_add_global_symbol(enum_sym);
 
                 constants.push_back(std::move(enum_const));
@@ -4809,7 +4883,7 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
         check_and_consume(TokenType::RIGHT_BRACE);
         auto post_attrs = try_parse_attributes();
         packed_attr = packed_attr || has_packed_attr(post_attrs);
-        if (!has_fixed_underlying && saw_any_enumerator) {
+        if (!validate_against_fixed_underlying && saw_any_enumerator) {
             if (auto inferred = choose_default_enum_underlying(
                     type_ctx.get(), min_enum_value, max_enum_value, packed_attr)) {
                 enum_underlying = inferred;
@@ -4828,11 +4902,13 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
         }
         auto ret_enum = collect_->collect_enum_declaration(
             tag, std::move(constants), enum_type, enum_tok.loc);
-        write_enum_state(ret_enum.get(), EnumSemanticState{
-            .is_incomplete = false,
-            .has_negative_values = enum_has_negative_values,
-            .underlying_type = enum_underlying,
-        });
+        EnumSemanticState final_state;
+        final_state.is_incomplete = false;
+        final_state.is_scoped = is_scoped;
+        final_state.has_negative_values = enum_has_negative_values;
+        final_state.underlying_type = enum_underlying;
+        final_state.enumerators = build_enumerator_state(ret_enum.get());
+        write_enum_state(ret_enum.get(), final_state);
         enum_type->set_decl(ret_enum.get());
         if (has_tag) {
             collect_->collect_add_tag_decl(tag, ret_enum.get());
@@ -4857,18 +4933,23 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
             auto* inherited_enum_decl = extract_enum_decl(inherited_tag_decl, tag);
             if (gentle_check(TokenType::SEMICOLON)) {
                 auto shadow = std::make_shared<EnumType>(tag, true);
-                auto shadow_underlying = has_fixed_underlying
-                    ? fixed_underlying
-                    : type_ctx->get_builtin(BuiltinTypes::Int);
+                auto shadow_underlying = expected_underlying_type();
                 auto ret_enum = collect_->collect_enum_declaration(tag, shadow, enum_tok.loc);
-                write_enum_state(ret_enum.get(), EnumSemanticState{
-                    .is_incomplete = true,
-                    .has_negative_values = false,
-                    .underlying_type = shadow_underlying,
-                });
+                EnumSemanticState shadow_state;
+                shadow_state.is_incomplete = true;
+                shadow_state.is_scoped = is_scoped;
+                shadow_state.has_negative_values = false;
+                shadow_state.underlying_type = shadow_underlying;
+                write_enum_state(ret_enum.get(), shadow_state);
                 shadow->set_decl(ret_enum.get());
                 collect_->collect_add_tag_decl(tag, ret_enum.get());
                 return ret_enum;
+            }
+            auto inherited_state = read_enum_state(inherited_enum_decl);
+            if (inherited_state.is_scoped != is_scoped) {
+                diag_engine->report_error(
+                    "enum declaration scopedness mismatch with previous declaration",
+                    enum_tok.loc);
             }
             reconcile_tag_decl(inherited_enum_decl, enum_tok.loc);
             auto ret_enum = collect_->collect_enum_declaration(
@@ -4877,15 +4958,14 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
             return ret_enum;
         }
         auto enum_type = std::make_shared<EnumType>(tag, true);
-        auto enum_underlying = has_fixed_underlying
-            ? fixed_underlying
-            : type_ctx->get_builtin(BuiltinTypes::Int);
+        auto enum_underlying = expected_underlying_type();
         auto ret_enum = collect_->collect_enum_declaration(tag, enum_type, enum_tok.loc);
-        write_enum_state(ret_enum.get(), EnumSemanticState{
-            .is_incomplete = true,
-            .has_negative_values = false,
-            .underlying_type = enum_underlying,
-        });
+        EnumSemanticState opaque_state;
+        opaque_state.is_incomplete = true;
+        opaque_state.is_scoped = is_scoped;
+        opaque_state.has_negative_values = false;
+        opaque_state.underlying_type = enum_underlying;
+        write_enum_state(ret_enum.get(), opaque_state);
         enum_type->set_decl(ret_enum.get());
         collect_->collect_add_tag_decl(tag, ret_enum.get());
         return ret_enum;

@@ -155,6 +155,64 @@ bool same_type_ignoring_all_qualifiers(QualType lhs, QualType rhs) {
         get_active_side_table_ast_context());
 }
 
+const EnumType* enum_type_from_qualtype(QualType type, const ASTContext* ast_ctx) {
+    type = remove_reference(type, ast_ctx);
+    type = desugar_type(type, ast_ctx);
+    if (!type) {
+        return nullptr;
+    }
+    return dyn_cast<EnumType>(type.get());
+}
+
+bool is_enum_type(QualType type, const ASTContext* ast_ctx) {
+    return enum_type_from_qualtype(type, ast_ctx) != nullptr;
+}
+
+bool is_enum_type(QualType type) {
+    return is_enum_type(type, get_active_side_table_ast_context());
+}
+
+bool is_scoped_enum_type(QualType type, const ASTContext* ast_ctx) {
+    auto* enum_type = enum_type_from_qualtype(type, ast_ctx);
+    return enum_type && enum_type->isScoped();
+}
+
+bool is_scoped_enum_type(QualType type) {
+    return is_scoped_enum_type(type, get_active_side_table_ast_context());
+}
+
+bool is_unscoped_enum_type(QualType type, const ASTContext* ast_ctx) {
+    auto* enum_type = enum_type_from_qualtype(type, ast_ctx);
+    return enum_type && !enum_type->isScoped();
+}
+
+bool is_unscoped_enum_type(QualType type) {
+    return is_unscoped_enum_type(type, get_active_side_table_ast_context());
+}
+
+bool same_unqualified_enum_type(QualType lhs,
+                                QualType rhs,
+                                const ASTContext* ast_ctx) {
+    auto* lhs_enum = enum_type_from_qualtype(lhs, ast_ctx);
+    auto* rhs_enum = enum_type_from_qualtype(rhs, ast_ctx);
+    if (!lhs_enum || !rhs_enum) {
+        return false;
+    }
+    auto* lhs_decl = lhs_enum->get_decl();
+    auto* rhs_decl = rhs_enum->get_decl();
+    if (lhs_decl && rhs_decl) {
+        return lhs_decl == rhs_decl;
+    }
+    return lhs_enum == rhs_enum;
+}
+
+bool same_unqualified_enum_type(QualType lhs, QualType rhs) {
+    return same_unqualified_enum_type(
+        lhs,
+        rhs,
+        get_active_side_table_ast_context());
+}
+
 bool is_integer_or_enum_type(QualType type, const ASTContext* ast_ctx) {
     type = remove_reference(type, ast_ctx);
     type = desugar_type(type, ast_ctx);
@@ -166,6 +224,71 @@ bool is_integer_or_enum_type(QualType type, const ASTContext* ast_ctx) {
 
 bool is_integer_or_enum_type(QualType type) {
     return is_integer_or_enum_type(type, get_active_side_table_ast_context());
+}
+
+// "Adjacent" helpers cover the current built-in C++ conversion buckets where
+// unscoped enums travel with integer-like categories, while scoped enums stay
+// out of those paths.
+bool is_integer_adjacent(QualType type, const ASTContext* ast_ctx) {
+    type = remove_reference(type, ast_ctx);
+    type = desugar_type(type, ast_ctx);
+    if (!type) {
+        return false;
+    }
+    if (auto* enum_type = dyn_cast<EnumType>(type.get())) {
+        return !enum_type->isScoped();
+    }
+    return type->isInteger();
+}
+
+bool is_integer_adjacent(QualType type) {
+    return is_integer_adjacent(
+        type,
+        get_active_side_table_ast_context());
+}
+
+// This arithmetic bucket is currently the built-in operator family that
+// accepts arithmetic types plus unscoped enums, but excludes scoped enums.
+bool is_arithmetic_adjacent(QualType type, const ASTContext* ast_ctx) {
+    type = remove_reference(type, ast_ctx);
+    type = desugar_type(type, ast_ctx);
+    if (!type) {
+        return false;
+    }
+    if (auto* enum_type = dyn_cast<EnumType>(type.get())) {
+        return !enum_type->isScoped();
+    }
+    return type->isArithmetic();
+}
+
+bool is_arithmetic_adjacent(QualType type) {
+    return is_arithmetic_adjacent(
+        type,
+        get_active_side_table_ast_context());
+}
+
+bool allows_integral_promotion(QualType type, const ASTContext* ast_ctx) {
+    return is_integer_adjacent(type, ast_ctx);
+}
+
+bool allows_integral_promotion(QualType type) {
+    return allows_integral_promotion(type, get_active_side_table_ast_context());
+}
+
+bool allows_condition_conversion(QualType type, const ASTContext* ast_ctx) {
+    type = remove_reference(type, ast_ctx);
+    type = desugar_type(type, ast_ctx);
+    if (!type) {
+        return false;
+    }
+    if (auto* enum_type = dyn_cast<EnumType>(type.get())) {
+        return !enum_type->isScoped();
+    }
+    return type->isScalar();
+}
+
+bool allows_condition_conversion(QualType type) {
+    return allows_condition_conversion(type, get_active_side_table_ast_context());
 }
 
 bool is_pointer_like_type(QualType type, const ASTContext* ast_ctx) {

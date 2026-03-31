@@ -2755,8 +2755,10 @@ std::unique_ptr<Expr> Collect::cpp_reinterpret_named_cast(
     SrcLoc loc) const {
     bool source_pointer_like = is_pointer_like_type(source_type, ast_ctx_.get());
     bool target_pointer_like = is_pointer_like_type(target_no_ref, ast_ctx_.get());
-    bool source_integer_like = is_integer_or_enum_type(source_type, ast_ctx_.get());
-    bool target_integer_like = is_integer_or_enum_type(target_no_ref, ast_ctx_.get());
+    bool source_integer_like =
+        is_integer_adjacent(source_type, ast_ctx_.get());
+    bool target_integer_like =
+        is_integer_adjacent(target_no_ref, ast_ctx_.get());
 
     bool allowed = (source_pointer_like && target_pointer_like) ||
                    (source_pointer_like && target_integer_like) ||
@@ -3788,17 +3790,17 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
             break;
         }
         case UnaryOpTypes::LOGICAL_NOT:
-            if (!exp_type->isScalar()) {
+            if (!allows_condition_conversion(exp_type, ast_ctx_.get())) {
                 report_error("logical not requires scalar operand", loc);
             }
             node->ctype = QualType(get_builtin_int());
             break;
         case UnaryOpTypes::NEG:
         case UnaryOpTypes::POSITIVE:
-            if (!exp_type->isArithmetic()) {
+            if (!is_arithmetic_adjacent(exp_type, ast_ctx_.get())) {
                 report_error("invalid argument type to unary expression", loc);
             }
-            if (exp_type->isInteger()) {
+            if (allows_integral_promotion(exp_type, ast_ctx_.get())) {
                 node->ctype = integer_promotion_type(exp_type);
             } else {
                 node->ctype = exp_type;
@@ -3809,7 +3811,7 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
                 node->ctype = exp_type;
                 break;
             }
-            if (!exp_type->isInteger()) {
+            if (!is_integer_adjacent(exp_type, ast_ctx_.get())) {
                 report_error("invalid argument type to unary expression", loc);
             }
             node->ctype = integer_promotion_type(exp_type);
@@ -3825,7 +3827,7 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
                     report_error("expression is not assignable", loc);
                 }
             }
-            if (!(exp_type->isArithmetic() ||
+            if (!(is_arithmetic_adjacent(exp_type, ast_ctx_.get()) ||
                   canonical_type_kind(exp_type) == TypeKind::Pointer)) {
                 report_error("invalid argument type for increment/decrement", loc);
             }
@@ -3910,7 +3912,7 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 // the vector element domain instead of forcing scalar result type.
                 QualType vector_type = lhs_vector ? lhs_ty : rhs_ty;
                 QualType scalar_type = lhs_vector ? rhs_ty : lhs_ty;
-                if (scalar_type && scalar_type->isArithmetic()) {
+                if (is_arithmetic_adjacent(scalar_type, ast_ctx_.get())) {
                     if (lhs_vector) {
                         node->right = cast_if_needed(std::move(node->right), vector_type);
                     } else {
@@ -3968,7 +3970,7 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 }
             } else if (lhs_ty && rhs_ty &&
                 lhs_assignment_kind == TypeKind::MemberPointer &&
-                rhs_ty->isInteger()) {
+                is_integer_adjacent(rhs_ty, ast_ctx_.get())) {
                 if (!is_null_pointer_constant_expr(node->right.get())) {
                     report_error("incompatible integer to member pointer conversion in assignment",
                                  loc);
@@ -3986,7 +3988,7 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 }
             } else if (lhs_ty && rhs_ty &&
                 lhs_assignment_kind == TypeKind::Pointer &&
-                rhs_ty->isInteger()) {
+                is_integer_adjacent(rhs_ty, ast_ctx_.get())) {
                 if (!is_null_pointer_constant_expr(node->right.get())) {
                     if (lang_opts_.implicit_int) {
                         report_warning("incompatible integer to pointer conversion in assignment", loc);
@@ -3996,7 +3998,7 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 }
             } else if (lhs_ty && rhs_ty &&
                 lhs_assignment_kind == TypeKind::BlockPointer &&
-                rhs_ty->isInteger()) {
+                is_integer_adjacent(rhs_ty, ast_ctx_.get())) {
                 if (!is_null_pointer_constant_expr(node->right.get())) {
                     if (lang_opts_.implicit_int) {
                         report_warning("incompatible integer to block pointer conversion in assignment", loc);
@@ -4005,7 +4007,8 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                     }
                 }
             } else if (lhs_ty && rhs_ty &&
-                lhs_assignment_type && lhs_assignment_type->isInteger() &&
+                lhs_assignment_type &&
+                is_integer_adjacent(lhs_assignment_type, ast_ctx_.get()) &&
                 (rhs_kind == TypeKind::Pointer ||
                  rhs_kind == TypeKind::BlockPointer)) {
                 // Preserve historical C-extension behavior for implicit-int mode:
@@ -4022,6 +4025,16 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                     }
                 }
             }
+            if (lhs_ty && rhs_ty &&
+                is_scoped_enum_type(lhs_assignment_type, ast_ctx_.get()) &&
+                !same_unqualified_enum_type(lhs_assignment_type,
+                                            rhs_ty,
+                                            ast_ctx_.get())) {
+                report_error("assigning to '" + lhs_assignment_type.to_string() +
+                                 "' from incompatible type '" +
+                                 rhs_ty.to_string() + "'",
+                             loc);
+            }
             node->right = cast_if_needed(std::move(node->right), lhs_assignment_type);
             node->ctype = lhs_assignment_type ? lhs_assignment_type : rhs_ty;
             break;
@@ -4029,7 +4042,10 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
         // --- Logical operators ---
         case BinOpTypes::LOGICAL_AND:
         case BinOpTypes::LOGICAL_OR: {
-            if ((lhs_ty && !lhs_ty->isScalar()) || (rhs_ty && !rhs_ty->isScalar())) {
+            if ((lhs_ty &&
+                 !allows_condition_conversion(lhs_ty, ast_ctx_.get())) ||
+                (rhs_ty &&
+                 !allows_condition_conversion(rhs_ty, ast_ctx_.get()))) {
                 report_error("logical operator requires scalar operands", loc);
             }
             node->ctype = QualType(get_builtin_int());
@@ -4088,6 +4104,20 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 node->ctype = comparison_result_type();
                 break;
             }
+            bool lhs_scoped_enum = is_scoped_enum_type(lhs_ty, ast_ctx_.get());
+            bool rhs_scoped_enum = is_scoped_enum_type(rhs_ty, ast_ctx_.get());
+            if (lhs_ty && rhs_ty &&
+                lhs_scoped_enum &&
+                rhs_scoped_enum &&
+                same_unqualified_enum_type(lhs_ty, rhs_ty, ast_ctx_.get())) {
+                node->ctype = comparison_result_type();
+                break;
+            }
+            if ((lhs_ty && lhs_scoped_enum) || (rhs_ty && rhs_scoped_enum)) {
+                report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
+                node->ctype = comparison_result_type();
+                break;
+            }
             if (lhs_ty && rhs_ty && (lhs_nullptr || rhs_nullptr)) {
                 if (ordered) {
                     report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
@@ -4115,7 +4145,8 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                             cast_if_needed(std::move(nullptr_operand), other_type);
                         return true;
                     }
-                    if (other_type && other_type->isInteger() &&
+                    if (other_type &&
+                        is_integer_adjacent(other_type, ast_ctx_.get()) &&
                         is_null_pointer_constant_expr(other_operand.get())) {
                         other_operand =
                             cast_if_needed(std::move(other_operand), nullptr_type);
@@ -4155,8 +4186,10 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 break;
             }
             if (lhs_ty && rhs_ty &&
-                ((lhs_kind == TypeKind::MemberPointer && rhs_ty->isInteger()) ||
-                 (rhs_kind == TypeKind::MemberPointer && lhs_ty->isInteger()))) {
+                ((lhs_kind == TypeKind::MemberPointer &&
+                  is_integer_adjacent(rhs_ty, ast_ctx_.get())) ||
+                 (rhs_kind == TypeKind::MemberPointer &&
+                  is_integer_adjacent(lhs_ty, ast_ctx_.get())))) {
                 if (ordered) {
                     report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
                     node->ctype = comparison_result_type();
@@ -4192,8 +4225,10 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 break;
             }
             if (lhs_ty && rhs_ty &&
-                ((lhs_kind == TypeKind::BlockPointer && rhs_ty->isInteger()) ||
-                 (rhs_kind == TypeKind::BlockPointer && lhs_ty->isInteger()))) {
+                ((lhs_kind == TypeKind::BlockPointer &&
+                  is_integer_adjacent(rhs_ty, ast_ctx_.get())) ||
+                 (rhs_kind == TypeKind::BlockPointer &&
+                  is_integer_adjacent(lhs_ty, ast_ctx_.get())))) {
                 if (ordered) {
                     report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
                     node->ctype = comparison_result_type();
@@ -4231,12 +4266,14 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 break;
             }
             if (lhs_ty && rhs_ty &&
-                ((lhs_kind == TypeKind::Pointer && rhs_ty->isInteger()) ||
-                    (rhs_kind == TypeKind::Pointer && lhs_ty->isInteger()))) {
+                ((lhs_kind == TypeKind::Pointer &&
+                  is_integer_adjacent(rhs_ty, ast_ctx_.get())) ||
+                 (rhs_kind == TypeKind::Pointer &&
+                  is_integer_adjacent(lhs_ty, ast_ctx_.get())))) {
                 if (ordered) {
                     report_warning("ordered comparison between pointer and integer", loc);
                 }
-                if (lhs_ty->isInteger()) {
+                if (is_integer_adjacent(lhs_ty, ast_ctx_.get())) {
                     node->left = cast_if_needed(std::move(node->left), rhs_ty);
                 } else {
                     node->right = cast_if_needed(std::move(node->right), lhs_ty);
@@ -4244,7 +4281,10 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 node->ctype = comparison_result_type();
                 break;
             }
-            if ((lhs_ty && !lhs_ty->isArithmetic()) || (rhs_ty && !rhs_ty->isArithmetic())) {
+            if ((lhs_ty &&
+                 !is_arithmetic_adjacent(lhs_ty, ast_ctx_.get())) ||
+                (rhs_ty &&
+                 !is_arithmetic_adjacent(rhs_ty, ast_ctx_.get()))) {
                 report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
             } else {
                 auto common = ensure_arithmetic_common();
@@ -4262,7 +4302,10 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
         // --- Shift operators ---
         case BinOpTypes::SHIFT_LEFT:
         case BinOpTypes::SHIFT_RIGHT: {
-            if ((lhs_ty && !lhs_ty->isInteger()) || (rhs_ty && !rhs_ty->isInteger())) {
+            if ((lhs_ty &&
+                 !is_integer_adjacent(lhs_ty, ast_ctx_.get())) ||
+                (rhs_ty &&
+                 !is_integer_adjacent(rhs_ty, ast_ctx_.get()))) {
                 report_invalid_binary_operands("binary shift", lhs_ty, rhs_ty, loc);
             }
             bool lhs_vector = lhs_kind == TypeKind::Vector;
@@ -4284,11 +4327,14 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
         case BinOpTypes::SUB: {
             bool lhs_ptr = lhs_kind == TypeKind::Pointer;
             bool rhs_ptr = rhs_kind == TypeKind::Pointer;
-            if (lhs_ptr && rhs_ty && rhs_ty->isInteger()) {
+            if (lhs_ptr &&
+                is_integer_adjacent(rhs_ty, ast_ctx_.get())) {
                 node->ctype = lhs_ty;
                 break;
             }
-            if (bop == BinOpTypes::ADD && rhs_ptr && lhs_ty && lhs_ty->isInteger()) {
+            if (bop == BinOpTypes::ADD &&
+                rhs_ptr &&
+                is_integer_adjacent(lhs_ty, ast_ctx_.get())) {
                 node->ctype = rhs_ty;
                 break;
             }
@@ -4304,7 +4350,10 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
                 node->ctype = lhs_ptr ? lhs_ty : rhs_ty;
                 break;
             }
-            if ((lhs_ty && !lhs_ty->isArithmetic()) || (rhs_ty && !rhs_ty->isArithmetic())) {
+            if ((lhs_ty &&
+                 !is_arithmetic_adjacent(lhs_ty, ast_ctx_.get())) ||
+                (rhs_ty &&
+                 !is_arithmetic_adjacent(rhs_ty, ast_ctx_.get()))) {
                 report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
                 node->ctype = QualType(get_builtin_int());
                 break;
@@ -4318,7 +4367,10 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
         case BinOpTypes::BITWISE_AND:
         case BinOpTypes::BITWISE_XOR:
         case BinOpTypes::BITWISE_OR: {
-            if ((lhs_ty && !lhs_ty->isInteger()) || (rhs_ty && !rhs_ty->isInteger())) {
+            if ((lhs_ty &&
+                 !is_integer_adjacent(lhs_ty, ast_ctx_.get())) ||
+                (rhs_ty &&
+                 !is_integer_adjacent(rhs_ty, ast_ctx_.get()))) {
                 report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
             }
             auto common = ensure_arithmetic_common();
@@ -4328,7 +4380,10 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
         // --- Multiplicative operators ---
         case BinOpTypes::MULT:
         case BinOpTypes::DIV: {
-            if ((lhs_ty && !lhs_ty->isArithmetic()) || (rhs_ty && !rhs_ty->isArithmetic())) {
+            if ((lhs_ty &&
+                 !is_arithmetic_adjacent(lhs_ty, ast_ctx_.get())) ||
+                (rhs_ty &&
+                 !is_arithmetic_adjacent(rhs_ty, ast_ctx_.get()))) {
                 report_invalid_binary_operands("binary expression", lhs_ty, rhs_ty, loc);
             }
             auto common = ensure_arithmetic_common();
@@ -4458,7 +4513,8 @@ std::unique_ptr<Expr> Collect::collect_compound_assign_operation(std::unique_ptr
         case BinOpTypes::ASSIGN_ADD:
         case BinOpTypes::ASSIGN_SUB:
             if (lhs_ptr) {
-                if (!(rhs_ty && rhs_ty->isInteger())) {
+                if (!(rhs_ty &&
+                      is_integer_adjacent(rhs_ty, ast_ctx_.get()))) {
                     report_invalid_compound_assign_operands("", lhs_ty, rhs_ty, loc);
                 }
                 break;
@@ -4466,7 +4522,10 @@ std::unique_ptr<Expr> Collect::collect_compound_assign_operation(std::unique_ptr
             [[fallthrough]];
         case BinOpTypes::ASSIGN_MUL:
         case BinOpTypes::ASSIGN_DIV: {
-            if ((lhs_ty && !lhs_ty->isArithmetic()) || (rhs_ty && !rhs_ty->isArithmetic())) {
+            if ((lhs_ty &&
+                 !is_arithmetic_adjacent(lhs_ty, ast_ctx_.get())) ||
+                (rhs_ty &&
+                 !is_arithmetic_adjacent(rhs_ty, ast_ctx_.get()))) {
                 report_invalid_compound_assign_operands("", lhs_ty, rhs_ty, loc);
             }
             auto common = usual_arithmetic_conversion_type(lhs_ty, rhs_ty);
@@ -4479,7 +4538,10 @@ std::unique_ptr<Expr> Collect::collect_compound_assign_operation(std::unique_ptr
         case BinOpTypes::ASSIGN_AND:
         case BinOpTypes::ASSIGN_OR:
         case BinOpTypes::ASSIGN_XOR: {
-            if ((lhs_ty && !lhs_ty->isInteger()) || (rhs_ty && !rhs_ty->isInteger())) {
+            if ((lhs_ty &&
+                 !is_integer_adjacent(lhs_ty, ast_ctx_.get())) ||
+                (rhs_ty &&
+                 !is_integer_adjacent(rhs_ty, ast_ctx_.get()))) {
                 report_invalid_compound_assign_operands("", lhs_ty, rhs_ty, loc);
             }
             auto common = usual_arithmetic_conversion_type(lhs_ty, rhs_ty);
@@ -4490,7 +4552,10 @@ std::unique_ptr<Expr> Collect::collect_compound_assign_operation(std::unique_ptr
         }
         case BinOpTypes::ASSIGN_LSHIFT:
         case BinOpTypes::ASSIGN_RSHIFT: {
-            if ((lhs_ty && !lhs_ty->isInteger()) || (rhs_ty && !rhs_ty->isInteger())) {
+            if ((lhs_ty &&
+                 !is_integer_adjacent(lhs_ty, ast_ctx_.get())) ||
+                (rhs_ty &&
+                 !is_integer_adjacent(rhs_ty, ast_ctx_.get()))) {
                 report_invalid_compound_assign_operands("", lhs_ty, rhs_ty, loc);
             }
             auto rhs_promoted = integer_promotion_type(rhs_ty);
@@ -4531,7 +4596,9 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
         bool cond_is_dependent =
             lang_opts_.is_cxx_mode() &&
             expression_depends_on_template_parameters(cond.get());
-        if (!cond_is_dependent && cond_ty && !cond_ty->isScalar()) {
+        if (!cond_is_dependent &&
+            cond_ty &&
+            !allows_condition_conversion(cond_ty, ast_ctx_.get())) {
             report_error("statement requires expression of scalar type ('" +
                 cond_ty.to_string() + "' invalid)", loc);
         }
@@ -4549,10 +4616,16 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
                    is_nullptr_type(true_ty, ast_ctx_.get()) &&
                    is_nullptr_type(false_ty, ast_ctx_.get())) {
             result_type = true_ty;
+        } else if ((true_ty &&
+                    is_scoped_enum_type(true_ty, ast_ctx_.get())) ||
+                   (false_ty &&
+                    is_scoped_enum_type(false_ty, ast_ctx_.get()))) {
+            result_type = QualType();
         } else if ((true_ty && true_ty->isVoid()) || (false_ty && false_ty->isVoid())) {
             result_type = QualType(get_builtin_void());
         } else if (true_ty && false_ty &&
-                   ((true_ty->isArithmetic() && false_ty->isArithmetic()) ||
+                   ((is_arithmetic_adjacent(true_ty, ast_ctx_.get()) &&
+                     is_arithmetic_adjacent(false_ty, ast_ctx_.get())) ||
                     true_ty->isComplex() || false_ty->isComplex())) {
             result_type = usual_arithmetic_conversion_type(true_ty, false_ty);
         } else if (true_ty && false_ty &&
@@ -4593,19 +4666,23 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
                     true_kind == TypeKind::BlockPointer)) {
             result_type = true_ty;
         } else if (true_ty && true_kind == TypeKind::Pointer &&
-                   false_ty && false_ty->isInteger() &&
+                   false_ty &&
+                   is_integer_adjacent(false_ty, ast_ctx_.get()) &&
                    is_null_pointer_constant_expr(false_expr.get())) {
             result_type = true_ty;
         } else if (true_ty && true_kind == TypeKind::BlockPointer &&
-                   false_ty && false_ty->isInteger() &&
+                   false_ty &&
+                   is_integer_adjacent(false_ty, ast_ctx_.get()) &&
                    is_null_pointer_constant_expr(false_expr.get())) {
             result_type = true_ty;
         } else if (false_ty && false_kind == TypeKind::Pointer &&
-                   true_ty && true_ty->isInteger() &&
+                   true_ty &&
+                   is_integer_adjacent(true_ty, ast_ctx_.get()) &&
                    is_null_pointer_constant_expr(true_expr.get())) {
             result_type = false_ty;
         } else if (false_ty && false_kind == TypeKind::BlockPointer &&
-                   true_ty && true_ty->isInteger() &&
+                   true_ty &&
+                   is_integer_adjacent(true_ty, ast_ctx_.get()) &&
                    is_null_pointer_constant_expr(true_expr.get())) {
             result_type = false_ty;
         } else {
@@ -5369,7 +5446,9 @@ Collect::ImplicitConversionSequence Collect::build_implicit_conversion_sequence(
         }
     }
 
-    if ((from->isArithmetic() && to->isArithmetic()) || from->isComplex() || to->isComplex()) {
+    if ((is_arithmetic_adjacent(from, ast_ctx_.get()) &&
+         is_arithmetic_adjacent(to, ast_ctx_.get())) ||
+        from->isComplex() || to->isComplex()) {
         auto promoted = integer_promotion_type(from);
         seq.kind = ConversionSequenceKind::Numeric;
         seq.rank = promoted.equals_qualified(to)
@@ -5422,7 +5501,8 @@ Collect::ImplicitConversionSequence Collect::build_implicit_conversion_sequence(
         }
     }
 
-    if (context == ExprUseContext::Condition && from->isScalar()) {
+    if (context == ExprUseContext::Condition &&
+        allows_condition_conversion(from, ast_ctx_.get())) {
         seq.kind = ConversionSequenceKind::Numeric;
         seq.rank = ConversionSequenceRank::Conversion;
         return seq;
@@ -5711,7 +5791,7 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
     auto to_builtin = to.as_shared<BuiltinType>();
     if (to_builtin &&
         to_builtin->builtin_kind == BuiltinTypes::Bool &&
-        from_for_conversion->isScalar()) {
+        allows_condition_conversion(from_for_conversion, ast_ctx_.get())) {
         seq.kind = ConversionSequenceKind::Numeric;
         seq.rank = ConversionSequenceRank::Conversion;
         return seq;
@@ -5810,7 +5890,8 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
         }
     }
 
-    if ((from_for_conversion->isArithmetic() && to->isArithmetic()) ||
+    if ((is_arithmetic_adjacent(from_for_conversion, ast_ctx_.get()) &&
+         is_arithmetic_adjacent(to, ast_ctx_.get())) ||
         from_for_conversion->isComplex() || to->isComplex()) {
         bool is_promotion = false;
         auto from_builtin = from_for_conversion.as_shared<BuiltinType>();
@@ -5818,7 +5899,7 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
             from_builtin->builtin_kind == BuiltinTypes::Float &&
             to_builtin->builtin_kind == BuiltinTypes::Double) {
             is_promotion = true;
-        } else if (from_for_conversion->isInteger()) {
+        } else if (allows_integral_promotion(from_for_conversion, ast_ctx_.get())) {
             auto promoted = integer_promotion_type(from_for_conversion);
             is_promotion = promoted.equals_qualified(to);
         }

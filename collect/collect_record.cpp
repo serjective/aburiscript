@@ -370,6 +370,7 @@ public:
             ctx.static_data_members.reserve(record_.members.size());
             ctx.nested_types.reserve(record_.members.size());
             ctx.nested_templates.reserve(record_.members.size());
+            ctx.enumerator_members.reserve(record_.members.size());
             ctx.seen_static_data_member_names.reserve(record_.members.size());
             ctx.constructors.reserve(record_.members.size());
             ctx.destructors.reserve(record_.members.size());
@@ -705,6 +706,32 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                     RecordSemanticState::NestedTemplateKind::Class;
                 nested_template.decl = class_template;
                 ctx.nested_templates.push_back(std::move(nested_template));
+            }
+            continue;
+        }
+
+        if (const auto* enum_decl = dyn_cast<EnumDecl>(member.get())) {
+            if (!enum_decl->tag.empty()) {
+                RecordSemanticState::NestedType nested_type;
+                nested_type.name = enum_decl->tag;
+                nested_type.type = QualType(enum_decl->get_enum_type());
+                nested_type.declared_access = current_access;
+                nested_type.decl = enum_decl;
+                ctx.nested_types.push_back(std::move(nested_type));
+            }
+            if (!enum_decl->is_scoped()) {
+                for (const auto& constant : enum_decl->constants) {
+                    if (!constant) {
+                        continue;
+                    }
+                    RecordSemanticState::EnumeratorMember enumerator_member;
+                    enumerator_member.name = constant->name;
+                    enumerator_member.declared_access = current_access;
+                    enumerator_member.enum_decl = enum_decl;
+                    enumerator_member.decl = constant.get();
+                    enumerator_member.symbol = constant->sym;
+                    ctx.enumerator_members.push_back(std::move(enumerator_member));
+                }
             }
             continue;
         }
@@ -1985,6 +2012,7 @@ void Collect::collect_record_publish_semantics(
     ctx.semantic_state.static_data_members = std::move(ctx.static_data_members);
     ctx.semantic_state.nested_types = std::move(ctx.nested_types);
     ctx.semantic_state.nested_templates = std::move(ctx.nested_templates);
+    ctx.semantic_state.enumerator_members = std::move(ctx.enumerator_members);
     ctx.semantic_state.constructors = std::move(ctx.constructors);
     ctx.semantic_state.destructors = std::move(ctx.destructors);
     collect_record_publish_state(
