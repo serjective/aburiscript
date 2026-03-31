@@ -1358,6 +1358,7 @@ private:
         std::string* error_out = nullptr) ;
 
     struct ClassTemplateSpecializationInstantiator;
+    struct FunctionTemplateSpecializationInstantiator;
 
     ObjectDecl* instantiate_class_template_specialization(
         const ClassTemplateDecl* class_template,
