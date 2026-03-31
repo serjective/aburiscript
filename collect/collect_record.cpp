@@ -757,7 +757,23 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
 
             std::string static_member_prefix = ctx.tag;
             ensure_namespace_qualifier_prefix(static_member_prefix);
-            bool has_in_class_initializer = static_data_decl->init != nullptr;
+            VariableDeclFlags static_member_flags{
+                static_data_decl->is_constexpr != 0,
+                static_data_decl->is_inline != 0,
+                false,
+                true,
+                static_data_decl->is_thread_local != 0,
+                static_data_decl->is_block_byref != 0,
+                false,
+                false};
+            bool is_definition_bearing_static_member =
+                is_definition_bearing_variable_declaration(
+                    StorageClass::STATIC,
+                    static_member_flags,
+                    static_data_decl->init.get());
+            bool blocks_out_of_line_definition =
+                is_definition_bearing_static_member &&
+                !(static_data_decl->is_constexpr && !static_data_decl->is_inline);
 
             std::shared_ptr<Symbol> static_member_sym = static_data_decl->sym;
             if (!static_member_sym) {
@@ -766,19 +782,31 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                     SymbolKind::VARIABLE,
                     desugar_type(static_data_decl->type),
                     StorageClass::STATIC,
-                    VariableLinkage::EXTERNAL);
+                    VariableLinkage::EXTERNAL,
+                    static_data_decl->is_inline != 0);
                 static_member_sym->is_constexpr = static_data_decl->is_constexpr;
                 static_member_sym->set_language_linkage(
                     static_data_decl->get_language_linkage());
-                static_member_sym->is_defined = has_in_class_initializer;
+                static_member_sym->is_defined = blocks_out_of_line_definition;
+                if (is_definition_bearing_static_member) {
+                    static_member_sym->variable_definition = static_data_decl;
+                }
                 collect_add_global_symbol(static_member_sym);
                 static_data_decl->sym = static_member_sym;
             } else {
                 static_member_sym->type = desugar_type(static_data_decl->type);
                 static_member_sym->storage_class = StorageClass::STATIC;
                 static_member_sym->is_constexpr = static_data_decl->is_constexpr;
-                if (has_in_class_initializer) {
+                if (static_data_decl->is_inline) {
+                    static_member_sym->is_inline = true;
+                } else {
+                    static_member_sym->had_non_inline_declaration = true;
+                }
+                if (blocks_out_of_line_definition) {
                     static_member_sym->is_defined = true;
+                }
+                if (is_definition_bearing_static_member) {
+                    static_member_sym->variable_definition = static_data_decl;
                 }
                 if (static_member_sym->get_language_linkage() ==
                     LanguageLinkage::None) {

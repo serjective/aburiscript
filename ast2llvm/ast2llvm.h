@@ -204,6 +204,10 @@ public:
     std::string get_function_llvm_name(const FuncDecl& decl) const;
     std::string get_function_llvm_name(const std::shared_ptr<Symbol>& sym,
                                        const std::string& fallback_spelling = "") const;
+    std::string get_variable_linkage_identity(const VariableDecl& decl) const;
+    std::string get_variable_llvm_name(const VariableDecl& decl) const;
+    std::string get_variable_llvm_name(const std::shared_ptr<Symbol>& sym,
+                                       const std::string& fallback_spelling = "") const;
     llvm::Function* get_or_create_function_symbol(
         const std::shared_ptr<Symbol>& sym,
         const std::string& fallback_spelling = "");
@@ -284,7 +288,10 @@ public:
                                            llvm::Value* object_addr,
                                            std::shared_ptr<Symbol> selected_dtor_sym,
                                            SrcLoc loc,
-                                           const std::string& teardown_context);
+                                           const std::string& teardown_context,
+                                           llvm::GlobalValue::LinkageTypes thunk_linkage =
+                                               llvm::GlobalValue::InternalLinkage,
+                                           llvm::Constant* comdat_association = nullptr);
     const ObjectDecl* canonical_cpp_record_decl(const ObjectDecl* decl) const;
     const RecordSemanticState* lookup_cpp_record_state(const ObjectDecl* decl) const;
     std::string get_cpp_special_member_variant_llvm_name(

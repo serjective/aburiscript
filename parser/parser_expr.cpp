@@ -1148,6 +1148,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
                     declared_type,
                     StorageClass::NONE,
                     false,
+                    false,
                     capture.location);
                 collect_->collect_resolve_auto_variable_type_from_expr(
                     declared_type,

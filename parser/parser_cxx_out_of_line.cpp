@@ -697,6 +697,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                     param_decl->type,
                     param_decl->storage_class,
                     false,
+                    false,
                     param_decl->location);
             }
 
@@ -1292,6 +1293,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
                     param_decl->get_name(),
                     param_decl->type,
                     param_decl->storage_class,
+                    false,
                     false,
                     param_decl->location);
             }

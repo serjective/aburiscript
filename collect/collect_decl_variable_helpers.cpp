@@ -241,6 +241,7 @@ void Collect::validate_variable_declared_type(QualType& declared_type,
                                                       StorageClass storage_class,
                                                       bool is_inline,
                                                       bool is_file_scope,
+                                                      bool is_cpp_static_data_member,
                                                       SrcLoc loc) const {
     auto declared_kind = [&]() {
         return canonical_type_kind(declared_type, ast_ctx_.get());
@@ -252,7 +253,13 @@ void Collect::validate_variable_declared_type(QualType& declared_type,
     }
 
     if (is_inline) {
-        report_error("inline can only appear on functions", loc);
+        if (!lang_opts_.is_cxx_mode()) {
+            report_error("inline can only appear on functions", loc);
+        } else if (!is_file_scope && !is_cpp_static_data_member) {
+            report_error(
+                "inline can only appear on namespace-scope variables and static data members",
+                loc);
+        }
     }
     if (declared_kind() == TypeKind::Function) {
         report_error("variable '" + name + "' declared as function type", loc);

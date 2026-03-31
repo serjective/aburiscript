@@ -29,6 +29,42 @@ bool any_initializer_argument_depends_on_template_parameters(
 
 } // namespace
 
+bool Collect::is_definition_bearing_variable_declaration(
+    StorageClass storage_class,
+    const VariableDeclFlags& flags,
+    const Expr* init) const {
+    if (flags.is_cpp_static_data_member) {
+        return flags.is_inline || init != nullptr;
+    }
+
+    if (init) {
+        return true;
+    }
+
+    if (storage_class == StorageClass::EXTERN) {
+        return false;
+    }
+
+    if (flags.is_file_scope) {
+        return true;
+    }
+
+    return storage_class != StorageClass::EXTERN;
+}
+
+bool Collect::is_inline_equivalent_variable_definition(
+    StorageClass storage_class,
+    const VariableDeclFlags& flags,
+    const Expr* init) const {
+    if (!is_definition_bearing_variable_declaration(storage_class, flags, init)) {
+        return false;
+    }
+    if (flags.is_inline) {
+        return true;
+    }
+    return flags.is_cpp_static_data_member && flags.is_constexpr && init != nullptr;
+}
+
 Collect::ArrayBoundResult Collect::collect_array_bound_expression(std::unique_ptr<Expr> expr) const {
 
     ArrayBoundResult result{};
@@ -86,10 +122,12 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
     bool is_constexpr = flags.is_constexpr;
     bool is_inline = flags.is_inline;
     bool is_file_scope = flags.is_file_scope;
+    bool is_cpp_static_data_member = flags.is_cpp_static_data_member;
     bool is_thread_local = flags.is_thread_local;
     bool is_block_byref = flags.is_block_byref;
     bool is_copy_initialization = flags.is_copy_initialization;
     bool allow_abstract_object_type_instantiation = flags.allow_abstract_object_type_instantiation;
+    bool caller_tracks_symbol_definition = flags.caller_tracks_symbol_definition;
 
     if (declared_type && contains_deferred_semantic_type(declared_type.get_shared())) {
         declared_type = resolve_typeof_types(declared_type, loc);
@@ -118,6 +156,7 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         storage_class,
         is_inline,
         is_file_scope,
+        is_cpp_static_data_member,
         loc);
 
     if (is_constexpr && !init) {
@@ -389,8 +428,28 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
     decl->is_thread_local = is_thread_local;
     decl->is_block_byref = is_block_byref;
     decl->set_language_linkage(language_linkage);
-    if (decl->sym) {
-        decl->sym->variable_definition = decl.get();
+    if (decl->sym && !caller_tracks_symbol_definition) {
+        bool has_owner_record =
+            static_cast<bool>(get_symbol_owner_record_type(decl->sym.get()));
+        bool is_definition_bearing =
+            is_definition_bearing_variable_declaration(
+                storage_class,
+                flags,
+                decl->init.get());
+        if (is_definition_bearing &&
+            lang_opts_.is_cxx_mode() &&
+            is_file_scope &&
+            !has_owner_record &&
+            decl->sym->variable_definition &&
+            decl->sym->variable_definition != decl.get()) {
+            report_error("redefinition of '" + name + "'", loc);
+        }
+        if (is_definition_bearing) {
+            if (!has_owner_record) {
+                decl->sym->is_defined = true;
+            }
+            decl->sym->variable_definition = decl.get();
+        }
     }
     return decl;
 }
@@ -455,8 +514,8 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
         std::move(init_list),
         nullptr,
         StorageClass::NONE,
-        {false, false, false, false, false, false,
-         allow_abstract_object_type_instantiation},
+        {false, false, false, false, false, false, false,
+         allow_abstract_object_type_instantiation, false},
         loc);
     auto* temp_var = dyn_cast<VariableDecl>(temp_decl.get());
     if (!temp_var) {

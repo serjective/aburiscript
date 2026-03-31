@@ -1279,6 +1279,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                     param_decl->type,
                     param_decl->storage_class,
                     false,
+                    false,
                     param_decl->location);
             }
 
@@ -3143,12 +3144,17 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
             declared_type,
             storage_class,
             declaration_is_constexpr,
+            decl_parser.is_inline,
             declarator_token.loc,
             declaration_language_linkage);
     }
     if (declared_sym) {
         declared_sym->is_constexpr = declaration_is_constexpr;
     }
+    bool declared_sym_was_defined =
+        declared_sym ? declared_sym->is_defined != 0 : false;
+    const VariableDecl* declared_sym_prior_definition =
+        declared_sym ? declared_sym->variable_definition : nullptr;
     if (declared_sym) {
         for (const auto& attr : decl_parser.leading_attrs) {
             declared_sym->sym_attrs.attrs.push_back(attr);
@@ -3185,10 +3191,13 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
         {declaration_is_constexpr,
          decl_parser.is_inline,
          is_file_scope,
+         false,
          decl_parser.is_thread_local,
          decl_parser.is_block_byref,
          is_copy_initialization,
-         false},
+         false,
+         qualified_declarator.owner_record_decl != nullptr &&
+             !preserve_explicit_specialization_static_decl},
         declarator_token.loc,
         declaration_language_linkage);
     auto* var_decl = cast<VariableDecl>(var_decl_base.get());
@@ -3204,6 +3213,12 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
     }
     ast_ctx->append_attrs(var_decl->node_id, std::move(decl_parser.leading_attrs));
     ast_ctx->append_attrs(var_decl->node_id, std::move(trailing_attrs));
+    if (qualified_declarator.owner_record_decl &&
+        declared_sym &&
+        !preserve_explicit_specialization_static_decl) {
+        declared_sym->is_defined = declared_sym_was_defined;
+        declared_sym->variable_definition = declared_sym_prior_definition;
+    }
 
     if (preserve_explicit_specialization_static_decl) {
         const Decl* primary_member_decl =
@@ -3232,7 +3247,17 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
         declared_sym &&
         !qualified_declarator.targets_template_pattern) {
         bool is_definition =
-            storage_class != StorageClass::EXTERN || var_decl->init != nullptr;
+            collect_->is_definition_bearing_variable_declaration(
+                storage_class,
+                {declaration_is_constexpr,
+                 decl_parser.is_inline,
+                 is_file_scope,
+                 false,
+                 decl_parser.is_thread_local,
+                 decl_parser.is_block_byref,
+                 is_copy_initialization,
+                 false},
+                var_decl->init.get());
         if (is_definition) {
             if (declared_sym->is_defined) {
                 error_custloc(
@@ -3245,6 +3270,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
                     qualified_declarator.loc);
             }
             declared_sym->is_defined = true;
+            declared_sym->variable_definition = var_decl;
         }
     }
 
@@ -3262,7 +3288,17 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
         }
 
         bool is_definition =
-            storage_class != StorageClass::EXTERN || var_decl->init != nullptr;
+            collect_->is_definition_bearing_variable_declaration(
+                storage_class,
+                {declaration_is_constexpr,
+                 decl_parser.is_inline,
+                 is_file_scope,
+                 false,
+                 decl_parser.is_thread_local,
+                 decl_parser.is_block_byref,
+                 is_copy_initialization,
+                 false},
+                var_decl->init.get());
         if (is_definition &&
             (matched_static_decl->init != nullptr ||
              (declared_sym && declared_sym->is_defined))) {
@@ -3304,6 +3340,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
             }
             if (is_definition) {
                 declared_sym->is_defined = true;
+                declared_sym->variable_definition = matched_static_decl;
             }
         }
 
@@ -3565,7 +3602,8 @@ std::unique_ptr<Decl> Parser::parse_parameter_declaration() {
     }
     std::shared_ptr<Symbol> sym = nullptr;
     if (!name.empty()) {
-        sym = collect_->collect_declare_variable_symbol(name, ctype, sclass, false, t.loc);
+        sym = collect_->collect_declare_variable_symbol(
+            name, ctype, sclass, false, false, t.loc);
     }
     auto param_decl = collect_->collect_parameter_declaration(ctype, name, sym, sclass, t.loc);
     if (auto* parsed_param = dyn_cast<ParamDecl>(param_decl.get())) {
@@ -4353,8 +4391,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     nullptr,
                     decl_parser.str_class,
                     {decl_parser.is_constexpr, decl_parser.is_inline,
-                     collect_->collect_is_file_scope(), decl_parser.is_thread_local,
-                     decl_parser.is_block_byref, is_copy_initialization, false},
+                     collect_->collect_is_file_scope(), true,
+                     decl_parser.is_thread_local, decl_parser.is_block_byref,
+                     is_copy_initialization, false, false},
                     t.loc,
                     current_decl_language_linkage());
                 auto* static_member_decl =

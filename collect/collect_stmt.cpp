@@ -566,7 +566,7 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
                 std::move(expr),
                 nullptr,
                 StorageClass::NONE,
-                {false, false, false, false, false, true, true},
+                {false, false, false, false, false, false, true, true, false},
                 loc);
             auto* temp_var = dyn_cast<VariableDecl>(temp_decl.get());
             if (!temp_var) {

@@ -13,7 +13,7 @@
 
 using namespace collect_decl_internal;
 
-std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, SrcLoc loc, LanguageLinkage language_linkage) {
+std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, SrcLoc loc, LanguageLinkage language_linkage) {
 
     if (!scope || name.empty()) {
         return nullptr;
@@ -42,6 +42,10 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
     if (is_constexpr && storage_class == StorageClass::AUTO) {
         report_error("'constexpr' cannot be combined with 'auto'", loc);
     }
+    auto namespace_prefix_for_scope = [](const std::shared_ptr<Scope>& scope)
+        -> std::optional<std::string> {
+        return qualified_name_utils::namespace_prefix_from_scope(scope);
+    };
     const bool is_cxx_mode = lang_opts_.is_cxx_mode();
     const LanguageLinkage requested_language_linkage =
         effective_language_linkage(language_linkage, is_cxx_mode);
@@ -154,6 +158,18 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
                 storage_class != StorageClass::EXTERN) {
                 existing->storage_class = storage_class;
             }
+            if (is_file_scope) {
+                if (auto ns_prefix = namespace_prefix_for_scope(scope)) {
+                    if (!get_symbol_cxx_qualifier_prefix(existing.get())) {
+                        set_symbol_cxx_qualifier_prefix(existing.get(), *ns_prefix);
+                    }
+                }
+            }
+            if (is_inline) {
+                existing->is_inline = true;
+            } else {
+                existing->had_non_inline_declaration = true;
+            }
             merge_language_linkage(existing);
             return existing;
         }
@@ -179,6 +195,11 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
                 report_error("conflicting constexpr specifier for '" + name + "'", loc);
             }
             reconcile_array_redeclaration_types(visible->type, type);
+            if (is_inline) {
+                visible->is_inline = true;
+            } else {
+                visible->had_non_inline_declaration = true;
+            }
             merge_language_linkage(visible);
             bind_symbol_in_scope(scope, name, visible);
             return visible;
@@ -192,9 +213,20 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
     } else if (is_file_scope) {
         linkage = VariableLinkage::EXTERNAL;
     }
-    auto sym = std::make_shared<Symbol>(name, SymbolKind::VARIABLE, std::move(type), storage_class, linkage);
+    auto sym = std::make_shared<Symbol>(
+        name,
+        SymbolKind::VARIABLE,
+        std::move(type),
+        storage_class,
+        linkage,
+        is_inline);
     sym->is_constexpr = is_constexpr;
     sym->set_language_linkage(requested_language_linkage);
+    if (is_file_scope) {
+        if (auto ns_prefix = namespace_prefix_for_scope(scope)) {
+            set_symbol_cxx_qualifier_prefix(sym.get(), *ns_prefix);
+        }
+    }
     if (global_scope) {
         record_global_scope_mutation(global_scope);
         global_scope->add_to_global_scope(sym);
@@ -203,10 +235,45 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
     return sym;
 }
 
+std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, SrcLoc loc, LanguageLinkage language_linkage) {
+
+    return collect_declare_variable_symbol(
+        std::move(scope),
+        std::move(global_scope),
+        name,
+        type,
+        storage_class,
+        is_constexpr,
+        false,
+        loc,
+        language_linkage);
+}
+
+
+std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, SrcLoc loc, LanguageLinkage language_linkage) {
+
+    return collect_declare_variable_symbol(
+        session_.current_scope_,
+        session_.current_global_scope_,
+        name,
+        type,
+        storage_class,
+        is_constexpr,
+        is_inline,
+        loc,
+        language_linkage);
+}
 
 std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, SrcLoc loc, LanguageLinkage language_linkage) {
 
-    return collect_declare_variable_symbol(session_.current_scope_, session_.current_global_scope_, name, type, storage_class, is_constexpr, loc, language_linkage);
+    return collect_declare_variable_symbol(
+        name,
+        type,
+        storage_class,
+        is_constexpr,
+        false,
+        loc,
+        language_linkage);
 }
 
 

@@ -30,10 +30,12 @@ struct VariableDeclFlags {
     bool is_constexpr = false;
     bool is_inline = false;
     bool is_file_scope = false;
+    bool is_cpp_static_data_member = false;
     bool is_thread_local = false;
     bool is_block_byref = false;
     bool is_copy_initialization = false;
     bool allow_abstract_object_type_instantiation = false;
+    bool caller_tracks_symbol_definition = false;
 };
 
 // Parser-facing semantic action surface.
@@ -748,6 +750,24 @@ public:
                                                             QualType type,
                                                             StorageClass storage_class,
                                                             bool is_constexpr,
+                                                            bool is_inline,
+                                                            SrcLoc loc,
+                                                            LanguageLinkage language_linkage = LanguageLinkage::None) ;
+
+    std::shared_ptr<Symbol> collect_declare_variable_symbol(std::shared_ptr<Scope> scope,
+                                                            std::shared_ptr<GlobalIdentTracker> global_scope,
+                                                            const std::string& name,
+                                                            QualType type,
+                                                            StorageClass storage_class,
+                                                            bool is_constexpr,
+                                                            SrcLoc loc,
+                                                            LanguageLinkage language_linkage = LanguageLinkage::None) ;
+
+    std::shared_ptr<Symbol> collect_declare_variable_symbol(const std::string& name,
+                                                            QualType type,
+                                                            StorageClass storage_class,
+                                                            bool is_constexpr,
+                                                            bool is_inline,
                                                             SrcLoc loc,
                                                             LanguageLinkage language_linkage = LanguageLinkage::None) ;
 
@@ -890,6 +910,16 @@ public:
             arguments,
             loc);
     }
+
+    bool is_definition_bearing_variable_declaration(
+        StorageClass storage_class,
+        const VariableDeclFlags& flags,
+        const Expr* init) const ;
+
+    bool is_inline_equivalent_variable_definition(
+        StorageClass storage_class,
+        const VariableDeclFlags& flags,
+        const Expr* init) const ;
 
 private:
     friend class CollectRecordBuilder;
@@ -1516,6 +1546,7 @@ private:
                                                  StorageClass storage_class,
                                                  bool is_inline,
                                                  bool is_file_scope,
+                                                 bool is_cpp_static_data_member,
                                                  SrcLoc loc) const ;
 
     bool select_constructor_for_variable_initialization(

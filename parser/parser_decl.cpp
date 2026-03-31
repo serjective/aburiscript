@@ -213,7 +213,7 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
                     collect_->collect_bind_symbol_in_current_scope(i->name, param_sym);
                 } else {
                     param_sym = collect_->collect_declare_variable_symbol(
-                        i->name, param_type, i->str_class, false, i->begin_loc);
+                        i->name, param_type, i->str_class, false, false, i->begin_loc);
                 }
             }
             auto new_param_decl_base = collect_->collect_parameter_declaration(param_type,
@@ -457,7 +457,7 @@ void Parser::parse_kr_declaration_list(DeclarationParser *decl_parser, FuncDecl 
             declared_param_type = apply_kr_default_promotions(declared_param_type);
         }
         std::shared_ptr<Symbol> param_sym = collect_->collect_declare_variable_symbol(
-            pname, declared_param_type, param_sc, false, param_loc);
+            pname, declared_param_type, param_sc, false, false, param_loc);
         auto new_param_decl_base = collect_->collect_parameter_declaration(declared_param_type, pname, param_sym, param_sc, param_loc);
         func_decl->parameters.push_back(std::move(new_param_decl_base));
         param_types.push_back(declared_param_type);

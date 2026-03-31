@@ -48,4 +48,17 @@ ResolvedFunctionName resolve_function_linkage_name(const Symbol& sym,
                                                    const AbiPolicy& policy,
                                                    std::string_view fallback_spelling = {});
 
+struct ResolvedVariableName {
+    std::string name;
+    bool from_asm_label = false;
+};
+
+ResolvedVariableName resolve_variable_linkage_name(const VariableDecl& decl,
+                                                   const AbiPolicy& policy);
+
+ResolvedVariableName resolve_variable_linkage_name(
+    const Symbol& sym,
+    const AbiPolicy& policy,
+    std::string_view fallback_spelling = {});
+
 #endif // ABURI_MANGLE_H

@@ -533,7 +533,9 @@ void ASTToLLVM::emit_cpp_global_object_dtor_thunk(
     llvm::Value* object_addr,
     std::shared_ptr<Symbol> selected_dtor_sym,
     SrcLoc loc,
-    const std::string& teardown_context) {
+    const std::string& teardown_context,
+    llvm::GlobalValue::LinkageTypes thunk_linkage,
+    llvm::Constant* comdat_association) {
     if (!object_addr) {
         return;
     }
@@ -580,10 +582,16 @@ void ASTToLLVM::emit_cpp_global_object_dtor_thunk(
             llvm::Type::getVoidTy(*context), false);
         dtor_thunk = llvm::Function::Create(
             thunk_type,
-            llvm::GlobalValue::InternalLinkage,
+            thunk_linkage,
             thunk_name,
             module.get());
-        llvm::appendToGlobalDtors(*module, dtor_thunk, 65535);
+        if (auto* associated_global =
+                llvm::dyn_cast_or_null<llvm::GlobalObject>(comdat_association);
+            associated_global && associated_global->hasComdat()) {
+            dtor_thunk->setComdat(associated_global->getComdat());
+        }
+        llvm::appendToGlobalDtors(
+            *module, dtor_thunk, 65535, comdat_association);
     }
 
     if (!dtor_thunk->empty()) {

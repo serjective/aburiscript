@@ -8,8 +8,10 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include <llvm/TargetParser/Triple.h>
 #include <algorithm>
 #include <cstdlib>
 #include <functional>
@@ -503,6 +505,181 @@ llvm::Function* get_or_create_block_byref_destroy_helper(ASTToLLVM& lower,
     return fn;
 }
 
+bool variable_decl_is_static_data_member(ASTToLLVM& lower,
+                                         const VariableDecl* var_decl) {
+    if (!var_decl || !lower.ast_ctx) {
+        return false;
+    }
+    const auto* member_info =
+        lower.ast_ctx->get_cpp_member_decl_info(var_decl->node_id);
+    return member_info && !member_info->is_method && member_info->is_static;
+}
+
+std::optional<std::string> variable_decl_weakref_target(
+    ASTToLLVM& lower,
+    const VariableDecl* var_decl) {
+    if (!var_decl || !lower.ast_ctx) {
+        return std::nullopt;
+    }
+    for (const auto& attr : lower.ast_ctx->get_attrs(var_decl->node_id).attrs) {
+        if (attr.canonical_name() != "weakref" ||
+            attr.args.empty() ||
+            attr.args[0].kind != AttributeArg::Kind::STRING ||
+            attr.args[0].str_value.empty()) {
+            continue;
+        }
+        return attr.args[0].str_value;
+    }
+    return std::nullopt;
+}
+
+std::string weakref_alias_llvm_name(ASTToLLVM& lower,
+                                    const VariableDecl& decl) {
+    if (decl.sym &&
+        (decl.sym->linkage == VariableLinkage::INTERNAL ||
+         decl.sym->linkage == VariableLinkage::NONE ||
+         decl.storage_class == StorageClass::STATIC)) {
+        return ASTToLLVM::mangleCIdentifier(decl.sym->uid);
+    }
+    if (decl.sym) {
+        return lower.get_variable_llvm_name(decl.sym, decl.name);
+    }
+    if (!decl.name.empty()) {
+        return decl.name;
+    }
+    return "";
+}
+
+llvm::GlobalValue::LinkageTypes weakref_alias_linkage(
+    const VariableDecl* var_decl) {
+    if (!var_decl || !var_decl->sym) {
+        return llvm::GlobalValue::ExternalLinkage;
+    }
+    if (var_decl->sym->linkage == VariableLinkage::INTERNAL ||
+        var_decl->storage_class == StorageClass::STATIC) {
+        return llvm::GlobalValue::InternalLinkage;
+    }
+    return llvm::GlobalValue::ExternalLinkage;
+}
+
+llvm::GlobalValue* get_or_create_variable_weakref_alias(
+    ASTToLLVM& lower,
+    const VariableDecl* var_decl,
+    llvm::Type* var_type) {
+    auto weakref_target = variable_decl_weakref_target(lower, var_decl);
+    if (!weakref_target || !var_decl || !var_decl->sym || !var_type) {
+        return nullptr;
+    }
+
+    std::string alias_name = weakref_alias_llvm_name(lower, *var_decl);
+    if (alias_name.empty()) {
+        return nullptr;
+    }
+
+    if (auto* alias = lower.module->getNamedAlias(alias_name)) {
+        return alias;
+    }
+    if (auto* existing = lower.module->getGlobalVariable(alias_name, true)) {
+        return existing;
+    }
+
+    llvm::GlobalVariable* aliasee =
+        lower.module->getGlobalVariable(*weakref_target, true);
+    if (!aliasee) {
+        aliasee = lower.module->getGlobalVariable(
+            ASTToLLVM::get_asm_label_name(*weakref_target),
+            true);
+    }
+    if (!aliasee) {
+        aliasee = new llvm::GlobalVariable(
+            *lower.module,
+            var_type,
+            var_decl->type.is_const(),
+            llvm::GlobalValue::ExternalWeakLinkage,
+            nullptr,
+            *weakref_target);
+    }
+
+    return llvm::GlobalAlias::create(
+        var_type,
+        aliasee->getAddressSpace(),
+        weakref_alias_linkage(var_decl),
+        alias_name,
+        aliasee,
+        lower.module.get());
+}
+
+bool variable_decl_is_definition_bearing(ASTToLLVM& lower,
+                                         const VariableDecl* var_decl) {
+    if (!var_decl) {
+        return false;
+    }
+    if (variable_decl_is_static_data_member(lower, var_decl)) {
+        return var_decl->is_inline || var_decl->init != nullptr;
+    }
+    return var_decl->storage_class != StorageClass::EXTERN ||
+           var_decl->init != nullptr;
+}
+
+bool variable_decl_is_inline_equivalent_external_definition(
+    ASTToLLVM& lower,
+    const VariableDecl* var_decl) {
+    if (!var_decl || !var_decl->sym ||
+        var_decl->sym->linkage != VariableLinkage::EXTERNAL ||
+        !variable_decl_is_definition_bearing(lower, var_decl)) {
+        return false;
+    }
+    if (var_decl->is_inline) {
+        return true;
+    }
+    return variable_decl_is_static_data_member(lower, var_decl) &&
+           var_decl->is_constexpr &&
+           var_decl->init != nullptr;
+}
+
+llvm::GlobalValue::LinkageTypes variable_global_linkage(ASTToLLVM& lower,
+                                                        const VariableDecl* var_decl) {
+    if (!var_decl || !var_decl->sym) {
+        return llvm::GlobalValue::ExternalLinkage;
+    }
+    if (var_decl->sym->linkage == VariableLinkage::INTERNAL ||
+        (var_decl->sym->linkage == VariableLinkage::NONE &&
+         var_decl->storage_class == StorageClass::STATIC)) {
+        return llvm::GlobalValue::InternalLinkage;
+    }
+    if (variable_decl_is_inline_equivalent_external_definition(lower, var_decl)) {
+        return llvm::GlobalValue::LinkOnceODRLinkage;
+    }
+    return llvm::GlobalValue::ExternalLinkage;
+}
+
+void configure_variable_global_linkage(ASTToLLVM& lower,
+                                       const VariableDecl* var_decl,
+                                       llvm::GlobalVariable* gvar) {
+    if (!var_decl || !gvar) {
+        return;
+    }
+    llvm::GlobalValue::LinkageTypes linkage =
+        variable_global_linkage(lower, var_decl);
+    if (gvar->getLinkage() == llvm::GlobalValue::LinkOnceODRLinkage &&
+        linkage != llvm::GlobalValue::LinkOnceODRLinkage) {
+        return;
+    }
+    gvar->setLinkage(linkage);
+    if (linkage != llvm::GlobalValue::LinkOnceODRLinkage) {
+        return;
+    }
+    llvm::Triple triple(lower.module->getTargetTriple());
+    if (!triple.supportsCOMDAT()) {
+        return;
+    }
+    std::string comdat_key = lower.get_variable_linkage_identity(*var_decl);
+    if (comdat_key.empty()) {
+        return;
+    }
+    gvar->setComdat(lower.module->getOrInsertComdat(comdat_key));
+}
+
 } // namespace
 
 void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
@@ -511,10 +688,9 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
             if (!member) {
                 continue;
             }
-            // In-class static data member initializers behave as definitions.
             if (auto* static_member = dyn_cast<VariableDecl>(member.get())) {
                 if (static_member->storage_class == StorageClass::STATIC &&
-                    static_member->init != nullptr) {
+                    variable_decl_is_definition_bearing(*this, static_member)) {
                     deal_global_variable_declaration(static_member);
                 }
                 continue;
@@ -537,6 +713,7 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
         return;
     }
     std::string mangled = mangleCIdentifier(sym->uid);
+    std::string linkage_identity = get_variable_linkage_identity(*varDecl);
     // Global variable
     // Check if it already exists (e.g. extern declaration)
     llvm::Type* varType = convert_global_storage_type(*this, varDecl->type, varDecl->init.get());
@@ -556,33 +733,23 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
                 dst_unsigned,
                 module->getDataLayout());
         };
-    std::string var_name_get = varDecl->name;
-    if (varDecl->asm_label) {
-        const std::string& raw_label = *varDecl->asm_label;
-        if (module->getGlobalVariable(raw_label, true)) {
-            var_name_get = raw_label;
-        } else {
-            var_name_get = get_asm_label_name(raw_label);
-        }
+    if (llvm::GlobalValue* weak_alias =
+            get_or_create_variable_weakref_alias(*this, varDecl, varType)) {
+        named_values[mangled] = weak_alias;
+        return;
     }
-    if (sym->linkage == VariableLinkage::NONE && !varDecl->asm_label) {
-        var_name_get = mangled;
-    }
+    std::string var_name_get = get_variable_llvm_name(*varDecl);
     llvm::GlobalVariable* gVar = module->getGlobalVariable(var_name_get, true);
 
     // Create the global variable first (before evaluating initializer) so that
     // self-referential initializers like LIST_HEAD can take the address of the
     // variable being defined.
     if (!gVar) {
-        llvm::GlobalValue::LinkageTypes linkage = llvm::GlobalValue::ExternalLinkage;
-        if (sym->linkage == VariableLinkage::INTERNAL) {
-            linkage = llvm::GlobalValue::InternalLinkage;
-        }
         gVar = new llvm::GlobalVariable(
             *module,
             varType,
             varDecl->type.is_const(), // isConstant
-            linkage,
+            variable_global_linkage(*this, varDecl),
             nullptr, // initializer set below
             var_name_get
         );
@@ -594,15 +761,11 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
         // declaration (e.g., extern T[] followed by T[] = {...}).
         // Replace the old GlobalVariable with a new one of the correct type.
         auto* oldGVar = gVar;
-        auto linkage = oldGVar->getLinkage();
-        if (sym->linkage == VariableLinkage::INTERNAL) {
-            linkage = llvm::GlobalValue::InternalLinkage;
-        }
         gVar = new llvm::GlobalVariable(
             *module,
             varType,
             varDecl->type.is_const(),
-            linkage,
+            variable_global_linkage(*this, varDecl),
             nullptr,
             var_name_get + ".new"
         );
@@ -610,6 +773,7 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
         gVar->takeName(oldGVar);
         oldGVar->eraseFromParent();
     }
+    configure_variable_global_linkage(*this, varDecl, gVar);
     named_values[mangled] = gVar;
 
     // Now evaluate the initializer (the variable is already in named_values)
@@ -728,7 +892,8 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
         }
     }
 
-    if (!initVal && varDecl->storage_class != StorageClass::EXTERN
+    if (!initVal &&
+        variable_decl_is_definition_bearing(*this, varDecl)
         && !gVar->hasInitializer()) {
         // Tentative definition or definition without initializer: initialize to zero
         if (varType->isArrayTy()) {
@@ -789,20 +954,27 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
     if (ast_ctx &&
         !varDecl->is_thread_local &&
         canonical_type_kind(varDecl->type, ast_ctx.get()) == TypeKind::Object &&
-        varDecl->storage_class != StorageClass::EXTERN) {
+        variable_decl_is_definition_bearing(*this, varDecl)) {
         auto* selected_dtor_sym_ptr =
             ast_ctx->get_cpp_variable_destructor_symbol(varDecl->node_id);
         std::shared_ptr<Symbol> selected_dtor_sym =
             selected_dtor_sym_ptr ? *selected_dtor_sym_ptr : nullptr;
-        std::string dtor_thunk_name =
-            mangleCIdentifier(sym->uid) + ".cxx.global.dtor";
+        bool mergeable_dtor_thunk =
+            variable_decl_is_inline_equivalent_external_definition(*this, varDecl);
+        std::string dtor_thunk_name = linkage_identity + ".cxx.global.dtor";
         emit_cpp_global_object_dtor_thunk(
             dtor_thunk_name,
             varDecl->type,
             gVar,
             selected_dtor_sym,
             varDecl->location,
-            "deal_global_variable_declaration() global dtor thunk");
+            "deal_global_variable_declaration() global dtor thunk",
+            mergeable_dtor_thunk
+                ? llvm::GlobalValue::LinkOnceODRLinkage
+                : llvm::GlobalValue::InternalLinkage,
+            mergeable_dtor_thunk
+                ? static_cast<llvm::Constant*>(gVar)
+                : nullptr);
     }
 }
 
@@ -1262,21 +1434,15 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                 dst_unsigned,
                 module->getDataLayout());
         };
+    if (llvm::GlobalValue* weak_alias =
+            get_or_create_variable_weakref_alias(*this, varDecl, varType)) {
+        named_values[mangled] = weak_alias;
+        return;
+    }
 
+    std::string linkage_identity = get_variable_linkage_identity(*varDecl);
     auto get_global_var_name = [&]() -> std::string {
-        std::string var_name_get = varDecl->name;
-        if (varDecl->asm_label) {
-            const std::string& raw_label = *varDecl->asm_label;
-            if (module->getGlobalVariable(raw_label, true)) {
-                var_name_get = raw_label;
-            } else {
-                var_name_get = get_asm_label_name(raw_label);
-            }
-        }
-        if (sym->linkage == VariableLinkage::NONE && !varDecl->asm_label) {
-            var_name_get = mangled;
-        }
-        return var_name_get;
+        return get_variable_llvm_name(*varDecl);
     };
 
     // Local static initializers can reference the variable itself (e.g. &x).
@@ -1287,10 +1453,6 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
         std::string var_name_get = get_global_var_name();
         llvm::GlobalVariable* gVar = module->getGlobalVariable(var_name_get, true);
         if (!gVar) {
-            llvm::GlobalValue::LinkageTypes linkage = llvm::GlobalValue::InternalLinkage;
-            if (sym->linkage == VariableLinkage::EXTERNAL) {
-                linkage = llvm::GlobalValue::ExternalLinkage;
-            }
             llvm::Constant* zero_init = nullptr;
             if (varType->isArrayTy()) {
                 zero_init = llvm::ConstantAggregateZero::get(varType);
@@ -1301,11 +1463,12 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                 *module,
                 varType,
                 varDecl->type.is_const(),
-                linkage,
+                variable_global_linkage(*this, varDecl),
                 zero_init,
                 var_name_get
             );
         }
+        configure_variable_global_linkage(*this, varDecl, gVar);
         if (varDecl->is_thread_local) {
             gVar->setThreadLocalMode(llvm::GlobalVariable::GeneralDynamicTLSModel);
         }
@@ -1585,12 +1748,6 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
             // we should never reach here as we delt with this in deal_global
             // This means that if we are here the variable has linkage but limited "scope"
 
-            llvm::GlobalValue::LinkageTypes linkage = llvm::GlobalValue::ExternalLinkage;
-            if (sym->linkage == VariableLinkage::INTERNAL ||
-                (sym->linkage == VariableLinkage::NONE && varDecl->storage_class == StorageClass::STATIC)) {
-                linkage = llvm::GlobalValue::InternalLinkage;
-            }
-
             llvm::Constant* initConst = nullptr;
             if (initVal) {
                 if (auto* constant = llvm::dyn_cast<llvm::Constant>(initVal)) {
@@ -1605,7 +1762,7 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                     error("convert_variable_declaration(): initializer must be constant", varDecl->location);
                     return;
                 }
-            } else if (sym->linkage != VariableLinkage::EXTERNAL) {
+            } else if (variable_decl_is_definition_bearing(*this, varDecl)) {
                 // Tentative definition or definition without initializer: initialize to zero
                 if (varType->isArrayTy()) {
                     initConst = llvm::ConstantAggregateZero::get(varType);
@@ -1618,7 +1775,7 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                 *module,
                 varType,
                 varDecl->type.is_const(), // isConstant
-                linkage,
+                variable_global_linkage(*this, varDecl),
                 initConst,
                 var_name_get
             );
@@ -1636,13 +1793,15 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                     error("convert_variable_declaration(): initializer must be constant", varDecl->location);
                     return;
                 }
-            } else if (!gVar->hasInitializer() && sym->linkage != VariableLinkage::EXTERNAL) {
+            } else if (!gVar->hasInitializer() &&
+                       variable_decl_is_definition_bearing(*this, varDecl)) {
                 llvm::Constant* zero_init = varType->isArrayTy()
                     ? static_cast<llvm::Constant*>(llvm::ConstantAggregateZero::get(varType))
                     : static_cast<llvm::Constant*>(llvm::Constant::getNullValue(varType));
                 gVar->setInitializer(zero_init);
             }
         }
+        configure_variable_global_linkage(*this, varDecl, gVar);
         if (varDecl->is_thread_local) {
             gVar->setThreadLocalMode(llvm::GlobalVariable::GeneralDynamicTLSModel);
         }
@@ -1697,17 +1856,24 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
 
         if (!varDecl->is_thread_local &&
             canonical_type_kind(varDecl->type, ast_ctx.get()) == TypeKind::Object &&
-            varDecl->storage_class != StorageClass::EXTERN &&
+            variable_decl_is_definition_bearing(*this, varDecl) &&
             ast_ctx) {
-            std::string dtor_thunk_name =
-                mangleCIdentifier(sym->uid) + ".cxx.global.dtor";
+            bool mergeable_dtor_thunk =
+                variable_decl_is_inline_equivalent_external_definition(*this, varDecl);
+            std::string dtor_thunk_name = linkage_identity + ".cxx.global.dtor";
             emit_cpp_global_object_dtor_thunk(
                 dtor_thunk_name,
                 varDecl->type,
                 gVar,
                 selected_destructor_sym,
                 varDecl->location,
-                "convert_variable_declaration() global dtor thunk");
+                "convert_variable_declaration() global dtor thunk",
+                mergeable_dtor_thunk
+                    ? llvm::GlobalValue::LinkOnceODRLinkage
+                    : llvm::GlobalValue::InternalLinkage,
+                mergeable_dtor_thunk
+                    ? static_cast<llvm::Constant*>(gVar)
+                    : nullptr);
         }
 
     } else {

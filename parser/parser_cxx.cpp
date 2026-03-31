@@ -2151,6 +2151,7 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
                     parameter_type,
                     StorageClass::NONE,
                     true,
+                    false,
                     param_loc);
             }
             auto param_decl = make_ast<TemplateNonTypeParmDecl>(
@@ -3834,6 +3835,7 @@ CppCatchClause Parser::parse_cpp_catch_clause() {
             clause.exception_name,
             clause.exception_type,
             StorageClass::NONE,
+            false,
             false,
             catch_tok.loc);
     }

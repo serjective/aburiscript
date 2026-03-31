@@ -300,6 +300,7 @@ void Parser::build_cpp_record_parse_deferred_bodies(
                 param_decl->type,
                 param_decl->storage_class,
                 false,
+                false,
                 param_decl->location);
         }
 

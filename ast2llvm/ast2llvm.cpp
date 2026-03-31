@@ -704,6 +704,74 @@ std::string ASTToLLVM::get_function_llvm_name(const std::shared_ptr<Symbol>& sym
     return fallback_spelling;
 }
 
+std::string ASTToLLVM::get_variable_linkage_identity(const VariableDecl& decl) const {
+    if (decl.sym && decl.sym->linkage == VariableLinkage::NONE && !decl.asm_label) {
+        return mangleCIdentifier(decl.sym->uid);
+    }
+    if (ast_ctx && ast_ctx->abi_policy) {
+        auto resolved = resolve_variable_linkage_name(decl, *ast_ctx->abi_policy);
+        return resolved.name;
+    }
+    if (decl.asm_label) {
+        return *decl.asm_label;
+    }
+    if (!decl.name.empty()) {
+        return decl.name;
+    }
+    if (decl.sym) {
+        return decl.sym->name;
+    }
+    return "";
+}
+
+std::string ASTToLLVM::get_variable_llvm_name(const VariableDecl& decl) const {
+    if (decl.sym && decl.sym->linkage == VariableLinkage::NONE && !decl.asm_label) {
+        return mangleCIdentifier(decl.sym->uid);
+    }
+    if (ast_ctx && ast_ctx->abi_policy) {
+        auto resolved = resolve_variable_linkage_name(decl, *ast_ctx->abi_policy);
+        if (resolved.from_asm_label) {
+            return get_asm_label_name(resolved.name);
+        }
+        return resolved.name;
+    }
+    if (decl.asm_label) {
+        return get_asm_label_name(*decl.asm_label);
+    }
+    if (!decl.name.empty()) {
+        return decl.name;
+    }
+    if (decl.sym) {
+        return decl.sym->name;
+    }
+    return "";
+}
+
+std::string ASTToLLVM::get_variable_llvm_name(const std::shared_ptr<Symbol>& sym,
+                                              const std::string& fallback_spelling) const {
+    if (!sym) {
+        return fallback_spelling;
+    }
+    if (sym->linkage == VariableLinkage::NONE && !sym->asm_label.has_value()) {
+        return mangleCIdentifier(sym->uid);
+    }
+    if (ast_ctx && ast_ctx->abi_policy) {
+        auto resolved = resolve_variable_linkage_name(
+            *sym, *ast_ctx->abi_policy, fallback_spelling);
+        if (resolved.from_asm_label) {
+            return get_asm_label_name(resolved.name);
+        }
+        return resolved.name;
+    }
+    if (sym->asm_label.has_value()) {
+        return get_asm_label_name(sym->asm_label.value());
+    }
+    if (!sym->name.empty()) {
+        return sym->name;
+    }
+    return fallback_spelling;
+}
+
 llvm::Function* ASTToLLVM::get_or_create_function_symbol(
     const std::shared_ptr<Symbol>& sym,
     const std::string& fallback_spelling) {

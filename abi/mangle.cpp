@@ -1265,6 +1265,36 @@ std::string mangle_function_entity_itanium(const std::string& name,
     return out;
 }
 
+std::string mangle_variable_entity_itanium(const std::string& name,
+                                           std::string_view qualifier_prefix,
+                                           QualType owner_type) {
+    std::string out = "_Z";
+    ItaniumMangleContext ctx;
+    auto owner_object = owner_object_type_for_naming(owner_type);
+    if (qualifier_prefix.empty() && !owner_object) {
+        append_itanium_unqualified_name(out, name);
+        return out;
+    }
+
+    auto components =
+        normalized_member_qualifier_components(qualifier_prefix, owner_type);
+    if (components.empty() && !owner_object) {
+        append_itanium_unqualified_name(out, name);
+        return out;
+    }
+
+    out += 'N';
+    for (auto component : components) {
+        append_source_name(out, component);
+    }
+    if (owner_object) {
+        append_object_name_encoding(out, *owner_object, ctx);
+    }
+    append_itanium_unqualified_name(out, name);
+    out += 'E';
+    return out;
+}
+
 bool symbol_looks_like_constructor(const Symbol& sym, std::string_view spelling) {
     if (sym.function_definition && isa<CppConstructorDecl>(sym.function_definition)) {
         return true;
@@ -1476,6 +1506,56 @@ std::string mangle_function_symbol_name_for_policy(const Symbol& sym,
     }
 }
 
+std::string mangle_variable_decl_name_for_policy(const VariableDecl& decl,
+                                                 const AbiPolicy& policy) {
+    std::string spelling = decl.name;
+    if (spelling.empty() && decl.sym) {
+        spelling = decl.sym->name;
+    }
+    switch (policy.mangling) {
+        case ManglingKind::Itanium: {
+            std::string_view qualifier_prefix{};
+            QualType owner_type;
+            if (decl.sym) {
+                if (auto* prefix = get_symbol_cxx_qualifier_prefix(decl.sym.get())) {
+                    qualifier_prefix = *prefix;
+                }
+                owner_type = get_symbol_owner_record_type(decl.sym.get());
+            }
+            return mangle_variable_entity_itanium(
+                spelling,
+                qualifier_prefix,
+                owner_type);
+        }
+        case ManglingKind::Msvc:
+        case ManglingKind::C:
+        default:
+            return spelling;
+    }
+}
+
+std::string mangle_variable_symbol_name_for_policy(const Symbol& sym,
+                                                   std::string_view fallback_spelling,
+                                                   const AbiPolicy& policy) {
+    std::string spelling = sym.name;
+    if (spelling.empty()) {
+        spelling = std::string(fallback_spelling);
+    }
+    switch (policy.mangling) {
+        case ManglingKind::Itanium:
+            return mangle_variable_entity_itanium(
+                spelling,
+                get_symbol_cxx_qualifier_prefix(&sym)
+                    ? std::string_view(*get_symbol_cxx_qualifier_prefix(&sym))
+                    : std::string_view{},
+                get_symbol_owner_record_type(&sym));
+        case ManglingKind::Msvc:
+        case ManglingKind::C:
+        default:
+            return spelling;
+    }
+}
+
 ResolvedFunctionName resolve_function_linkage_name(
     const std::string& name,
     const QualType& function_type,
@@ -1546,4 +1626,52 @@ ResolvedFunctionName resolve_function_linkage_name(const Symbol& sym,
         mangle_function_symbol_name_for_policy(sym, spelling, policy),
         false
     };
+}
+
+ResolvedVariableName resolve_variable_linkage_name(const VariableDecl& decl,
+                                                   const AbiPolicy& policy) {
+    std::string spelling = decl.name;
+    if (spelling.empty() && decl.sym) {
+        spelling = decl.sym->name;
+    }
+    if (decl.asm_label) {
+        return ResolvedVariableName{*decl.asm_label, true};
+    }
+
+    LanguageLinkage language_linkage = decl.get_language_linkage();
+    if (language_linkage == LanguageLinkage::None && decl.sym) {
+        language_linkage = decl.sym->get_language_linkage();
+    }
+    LanguageLinkage effective =
+        effective_language_linkage_for_naming(language_linkage, policy);
+    if (effective == LanguageLinkage::C) {
+        return ResolvedVariableName{spelling, false};
+    }
+
+    return ResolvedVariableName{
+        mangle_variable_decl_name_for_policy(decl, policy),
+        false};
+}
+
+ResolvedVariableName resolve_variable_linkage_name(
+    const Symbol& sym,
+    const AbiPolicy& policy,
+    std::string_view fallback_spelling) {
+    const std::string* asm_label =
+        sym.asm_label.has_value() ? &sym.asm_label.value() : nullptr;
+    std::string spelling = sym.name;
+    if (spelling.empty()) {
+        spelling = std::string(fallback_spelling);
+    }
+    if (asm_label) {
+        return ResolvedVariableName{*asm_label, true};
+    }
+    LanguageLinkage effective = effective_language_linkage_for_naming(
+        sym.get_language_linkage(), policy);
+    if (effective == LanguageLinkage::C) {
+        return ResolvedVariableName{spelling, false};
+    }
+    return ResolvedVariableName{
+        mangle_variable_symbol_name_for_policy(sym, spelling, policy),
+        false};
 }
