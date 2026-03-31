@@ -123,6 +123,8 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
     bool is_inline = flags.is_inline;
     bool is_file_scope = flags.is_file_scope;
     bool is_cpp_static_data_member = flags.is_cpp_static_data_member;
+    bool allow_constexpr_redeclaration_without_initializer =
+        flags.allow_constexpr_redeclaration_without_initializer;
     bool is_thread_local = flags.is_thread_local;
     bool is_block_byref = flags.is_block_byref;
     bool is_copy_initialization = flags.is_copy_initialization;
@@ -159,7 +161,8 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         is_cpp_static_data_member,
         loc);
 
-    if (is_constexpr && !init) {
+    if (is_constexpr && !init &&
+        !allow_constexpr_redeclaration_without_initializer) {
         report_error("constexpr variable requires an initializer", loc);
     }
 

@@ -762,6 +762,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 static_data_decl->is_inline != 0,
                 false,
                 true,
+                false,
                 static_data_decl->is_thread_local != 0,
                 static_data_decl->is_block_byref != 0,
                 false,

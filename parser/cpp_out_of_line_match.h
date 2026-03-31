@@ -249,7 +249,15 @@ inline bool cpp_primary_template_owner_matches(
         if (!non_type_parameter ||
             argument->kind != TemplateArgumentKind::Value ||
             !argument->is_dependent ||
-            argument->referenced_parameter != non_type_parameter) {
+            !argument->referenced_parameter) {
+            return false;
+        }
+        const auto* referenced_parameter = argument->referenced_parameter;
+        if (referenced_parameter->get_kind() != non_type_parameter->get_kind() ||
+            referenced_parameter->depth != non_type_parameter->depth ||
+            referenced_parameter->index != non_type_parameter->index ||
+            referenced_parameter->is_parameter_pack !=
+                non_type_parameter->is_parameter_pack) {
             return false;
         }
     }

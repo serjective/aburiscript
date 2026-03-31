@@ -31,6 +31,7 @@ struct VariableDeclFlags {
     bool is_inline = false;
     bool is_file_scope = false;
     bool is_cpp_static_data_member = false;
+    bool allow_constexpr_redeclaration_without_initializer = false;
     bool is_thread_local = false;
     bool is_block_byref = false;
     bool is_copy_initialization = false;

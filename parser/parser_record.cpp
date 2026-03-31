@@ -3109,6 +3109,8 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
     if (declaration_is_constexpr && decl_parser.is_thread_local) {
         error("'constexpr' cannot be combined with '_Thread_local'");
     }
+    bool is_out_of_line_static_data_member =
+        qualified_declarator.owner_record_decl != nullptr;
     std::shared_ptr<Symbol> declared_sym = nullptr;
     bool preserve_explicit_specialization_static_decl =
         is_parsing_cpp_explicit_specialization() &&
@@ -3191,7 +3193,9 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
         {declaration_is_constexpr,
          decl_parser.is_inline,
          is_file_scope,
-         false,
+         is_out_of_line_static_data_member,
+         is_out_of_line_static_data_member &&
+             declaration_is_constexpr,
          decl_parser.is_thread_local,
          decl_parser.is_block_byref,
          is_copy_initialization,
@@ -3252,6 +3256,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
                 {declaration_is_constexpr,
                  decl_parser.is_inline,
                  is_file_scope,
+                 is_out_of_line_static_data_member,
                  false,
                  decl_parser.is_thread_local,
                  decl_parser.is_block_byref,
@@ -3293,6 +3298,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
                 {declaration_is_constexpr,
                  decl_parser.is_inline,
                  is_file_scope,
+                 is_out_of_line_static_data_member,
                  false,
                  decl_parser.is_thread_local,
                  decl_parser.is_block_byref,
@@ -4383,7 +4389,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     nullptr,
                     decl_parser.str_class,
                     {decl_parser.is_constexpr, decl_parser.is_inline,
-                     collect_->collect_is_file_scope(), true,
+                     collect_->collect_is_file_scope(), true, false,
                      decl_parser.is_thread_local, decl_parser.is_block_byref,
                      is_copy_initialization, false, false},
                     t.loc,
