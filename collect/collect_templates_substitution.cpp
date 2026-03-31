@@ -812,6 +812,20 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                         return true;
                     }
 
+                    std::string resolve_error;
+                    if (!resolve_dependent_expr_after_substitution(
+                            cloned_expr,
+                            QualType(),
+                            &resolve_error)) {
+                        report_error(
+                            resolve_error.empty()
+                                ? "failed to resolve non-type template argument expression after substitution"
+                                : resolve_error,
+                            loc);
+                        rewritten.push_back(std::move(new_argument));
+                        return true;
+                    }
+
                     ConstEvalResult eval = evaluate_with_consteval_compat(
                         cloned_expr.get(),
                         ConstEvalMode::cpp_non_type_template_argument());

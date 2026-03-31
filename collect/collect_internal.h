@@ -454,16 +454,20 @@ struct MemberNameLookupResult {
     size_t static_method_matches = 0;
     size_t static_method_template_matches = 0;
     size_t static_data_matches = 0;
+    size_t enumerator_matches = 0;
     size_t nonstatic_method_matches = 0;
     size_t nonstatic_method_template_matches = 0;
     const RecordSemanticState::Method* single_static_method = nullptr;
     const RecordSemanticState::StaticDataMember* single_static_data_member = nullptr;
+    const RecordSemanticState::EnumeratorMember* single_enumerator_member =
+        nullptr;
 
     bool has_member_match() const {
         return field_matches > 0 ||
                static_method_matches > 0 ||
                static_method_template_matches > 0 ||
                static_data_matches > 0 ||
+               enumerator_matches > 0 ||
                nonstatic_method_matches > 0 ||
                nonstatic_method_template_matches > 0;
     }
@@ -862,6 +866,15 @@ MemberNameLookupResult lookup_record_member_name_impl(
             local_result.single_static_data_member = &static_member;
         }
     }
+    for (const auto& enumerator : state->enumerator_members) {
+        if (enumerator.name != member_name) {
+            continue;
+        }
+        ++local_result.enumerator_matches;
+        if (!local_result.single_enumerator_member) {
+            local_result.single_enumerator_member = &enumerator;
+        }
+    }
     if (local_result.has_member_match()) {
         return local_result;
     }
@@ -878,6 +891,7 @@ MemberNameLookupResult lookup_record_member_name_impl(
         inherited_result.static_method_template_matches +=
             base_result.static_method_template_matches;
         inherited_result.static_data_matches += base_result.static_data_matches;
+        inherited_result.enumerator_matches += base_result.enumerator_matches;
         inherited_result.nonstatic_method_matches += base_result.nonstatic_method_matches;
         inherited_result.nonstatic_method_template_matches +=
             base_result.nonstatic_method_template_matches;
@@ -893,12 +907,21 @@ MemberNameLookupResult lookup_record_member_name_impl(
             inherited_result.single_static_data_member =
                 base_result.single_static_data_member;
         }
+        if (!inherited_result.single_enumerator_member &&
+            base_result.single_enumerator_member &&
+            base_result.enumerator_matches == 1) {
+            inherited_result.single_enumerator_member =
+                base_result.single_enumerator_member;
+        }
     }
     if (inherited_result.static_method_matches != 1) {
         inherited_result.single_static_method = nullptr;
     }
     if (inherited_result.static_data_matches != 1) {
         inherited_result.single_static_data_member = nullptr;
+    }
+    if (inherited_result.enumerator_matches != 1) {
+        inherited_result.single_enumerator_member = nullptr;
     }
     return inherited_result;
 }

@@ -1040,7 +1040,8 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
                 size_t static_candidate_matches =
                     member_lookup.static_method_matches +
                     static_template_candidate_matches +
-                    member_lookup.static_data_matches;
+                    member_lookup.static_data_matches +
+                    member_lookup.enumerator_matches;
                 if (static_candidate_matches > 1) {
                     report_error("member '" + name + "' is ambiguous", loc);
                     return collect_make<ErrorExpr>(
@@ -1052,6 +1053,14 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
                     return collect_identifier_reference(
                         name,
                         member_lookup.single_static_data_member->symbol,
+                        loc);
+                }
+                if (member_lookup.enumerator_matches == 1 &&
+                    member_lookup.single_enumerator_member &&
+                    member_lookup.single_enumerator_member->symbol) {
+                    return collect_identifier_reference(
+                        name,
+                        member_lookup.single_enumerator_member->symbol,
                         loc);
                 }
                 if (member_lookup.single_static_method &&
@@ -1070,7 +1079,8 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
             size_t static_candidate_matches =
                 member_lookup.static_method_matches +
                 static_template_candidate_matches +
-                member_lookup.static_data_matches;
+                member_lookup.static_data_matches +
+                member_lookup.enumerator_matches;
             if (member_lookup.field_matches == 0 &&
                 member_lookup.nonstatic_method_matches == 0 &&
                 nonstatic_template_candidate_matches == 0 &&
@@ -1086,6 +1096,14 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
                     return collect_identifier_reference(
                         name,
                         member_lookup.single_static_data_member->symbol,
+                        loc);
+                }
+                if (member_lookup.enumerator_matches == 1 &&
+                    member_lookup.single_enumerator_member &&
+                    member_lookup.single_enumerator_member->symbol) {
+                    return collect_identifier_reference(
+                        name,
+                        member_lookup.single_enumerator_member->symbol,
                         loc);
                 }
                 if (member_lookup.single_static_method &&

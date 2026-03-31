@@ -1482,6 +1482,7 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
         member_lookup.static_method_matches +
         member_lookup.static_method_template_matches +
         member_lookup.static_data_matches +
+        member_lookup.enumerator_matches +
         member_lookup.nonstatic_method_matches +
         member_lookup.nonstatic_method_template_matches;
 
@@ -1490,7 +1491,8 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
         member_lookup.nonstatic_method_matches == 0 &&
         member_lookup.nonstatic_method_template_matches == 0 &&
         member_lookup.field_matches == 0 &&
-        member_lookup.static_data_matches == 0) {
+        member_lookup.static_data_matches == 0 &&
+        member_lookup.enumerator_matches == 0) {
         std::shared_ptr<Symbol> selected_symbol = nullptr;
         if (member_lookup.static_method_matches == 1 &&
             member_lookup.static_method_template_matches == 0 &&
@@ -1513,6 +1515,13 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
             member_lookup.single_static_data_member->symbol);
     }
 
+    if (member_lookup.enumerator_matches == 1 &&
+        member_lookup.single_enumerator_member &&
+        member_lookup.single_enumerator_member->symbol) {
+        return make_qualified_var_ref(
+            member_lookup.single_enumerator_member->symbol);
+    }
+
     if (member_lookup.static_method_matches == 1 &&
         member_lookup.nonstatic_method_matches == 0 &&
         member_lookup.static_method_template_matches == 0 &&
@@ -1525,6 +1534,7 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
 
     if (total_matches == 1 &&
         (member_lookup.static_data_matches == 1 ||
+         member_lookup.enumerator_matches == 1 ||
          member_lookup.static_method_matches == 1)) {
         report_error(
             "internal error: missing symbol for resolved qualified lookup '" +

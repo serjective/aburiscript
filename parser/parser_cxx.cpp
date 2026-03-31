@@ -471,83 +471,8 @@ bool Parser::expr_depends_on_active_template_parameter(const Expr* expr) const {
         return find_active_non_type_template_parameter(var_ref->symref.get()) !=
             nullptr;
     }
-    if (type_depends_on_template_parameters(
-            const_cast<Expr*>(expr)->get_type(),
-            ast_ctx.get())) {
-        return true;
-    }
-    switch (expr->get_kind()) {
-        case StmtKind::UnaryOperation:
-            return expr_depends_on_active_template_parameter(
-                static_cast<const UnaryOperation*>(expr)->exp.get());
-        case StmtKind::BinaryOperation: {
-            const auto* binary = static_cast<const BinaryOperation*>(expr);
-            return expr_depends_on_active_template_parameter(binary->left.get()) ||
-                   expr_depends_on_active_template_parameter(binary->right.get());
-        }
-        case StmtKind::CondExpr: {
-            const auto* cond = static_cast<const CondExpr*>(expr);
-            return expr_depends_on_active_template_parameter(
-                       cond->condition.get()) ||
-                   expr_depends_on_active_template_parameter(
-                       cond->true_expr.get()) ||
-                   expr_depends_on_active_template_parameter(
-                       cond->false_expr.get());
-        }
-        case StmtKind::ImplicitCast:
-            return expr_depends_on_active_template_parameter(
-                static_cast<const ImplicitCast*>(expr)->expr.get());
-        case StmtKind::ExplicitCast:
-            return expr_depends_on_active_template_parameter(
-                static_cast<const ExplicitCast*>(expr)->expr.get());
-        case StmtKind::ArraySubscriptExpr: {
-            const auto* subscript =
-                static_cast<const ArraySubscriptExpr*>(expr);
-            return expr_depends_on_active_template_parameter(
-                       subscript->array.get()) ||
-                   expr_depends_on_active_template_parameter(
-                       subscript->index.get());
-        }
-        case StmtKind::MemberExpr:
-            return expr_depends_on_active_template_parameter(
-                static_cast<const MemberExpr*>(expr)->base.get());
-        case StmtKind::PackExpansionExpr:
-            return expr_depends_on_active_template_parameter(
-                static_cast<const PackExpansionExpr*>(expr)->pattern.get());
-        case StmtKind::FoldExpr: {
-            const auto* fold = static_cast<const FoldExpr*>(expr);
-            return expr_depends_on_active_template_parameter(
-                       fold->pattern.get()) ||
-                   expr_depends_on_active_template_parameter(
-                       fold->init.get());
-        }
-        case StmtKind::SizeOfPackExpr:
-            return static_cast<const SizeOfPackExpr*>(expr)->parameter_decl !=
-                nullptr;
-        case StmtKind::InitListExpr: {
-            const auto* init_list = static_cast<const InitListExpr*>(expr);
-            for (const auto& elem : init_list->elements) {
-                if (expr_depends_on_active_template_parameter(elem.value.get())) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        case StmtKind::CompoundLiteralExpr:
-            return expr_depends_on_active_template_parameter(
-                static_cast<const CompoundLiteralExpr*>(expr)->init.get());
-        case StmtKind::CppConstructExpr: {
-            const auto* construct = static_cast<const CppConstructExpr*>(expr);
-            for (const auto& arg : construct->args) {
-                if (expr_depends_on_active_template_parameter(arg.get())) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        default:
-            return false;
-    }
+    return collect_ &&
+           collect_->expression_depends_on_template_parameters(expr);
 }
 
 std::unique_ptr<Expr> Parser::try_parse_cpp_typed_braced_template_argument_expr() {

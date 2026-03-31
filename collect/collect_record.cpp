@@ -505,6 +505,13 @@ void Collect::collect_record_resolve_bases(CollectRecordBuildContext& ctx) const
         }
 
         QualType resolved_base_type = base_spec.type;
+        if (resolved_base_type &&
+            !cpp_base_type_is_dependent(resolved_base_type)) {
+            resolved_base_type =
+                const_cast<Collect*>(this)
+                    ->collect_try_realize_deferred_semantic_type(
+                        resolved_base_type);
+        }
         auto* base_record_decl = cpp_base_record_decl_from_type(resolved_base_type);
         if (!base_record_decl && !resolved_base_type) {
             auto* base_tag_decl =

@@ -656,6 +656,12 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
         }
 
         QualType resolved_base_type = base_spec.type;
+        if (resolved_base_type &&
+            !cpp_base_type_is_dependent(resolved_base_type)) {
+            resolved_base_type =
+                collect_->collect_try_realize_deferred_semantic_type(
+                    resolved_base_type);
+        }
         auto* base_record_decl = cpp_base_record_decl_from_type(resolved_base_type);
         if (!base_record_decl && !resolved_base_type) {
             auto* base_tag_decl =

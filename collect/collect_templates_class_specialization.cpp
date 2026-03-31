@@ -323,6 +323,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     std::vector<RecordSemanticState::StaticDataMember> static_data_members;
     std::vector<RecordSemanticState::NestedType> nested_types;
     std::vector<RecordSemanticState::NestedTemplate> nested_templates;
+    std::vector<RecordSemanticState::EnumeratorMember> enumerator_members;
     std::unordered_map<const FuncDecl*, std::shared_ptr<Symbol>>
         specialized_member_symbols;
     std::vector<PendingMethodTemplateClone> pending_method_template_clones;
@@ -1197,6 +1198,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         static_data_members.clear();
         nested_types.clear();
         nested_templates.clear();
+        enumerator_members.clear();
         specialized_member_symbols.clear();
         pending_method_template_clones.clear();
         pending_body_clones.clear();
@@ -1210,6 +1212,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         static_data_members.reserve(pattern->members.size());
         nested_types.reserve(pattern->members.size());
         nested_templates.reserve(pattern->members.size());
+        enumerator_members.reserve(pattern->members.size());
         specialized_member_symbols.reserve(pattern->members.size());
         pending_method_template_clones.reserve(pattern->members.size());
         pending_body_clones.reserve(pattern->members.size());
@@ -1251,6 +1254,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         provisional_state.is_incomplete = true;
         provisional_state.nested_types = nested_types;
         provisional_state.nested_templates = nested_templates;
+        provisional_state.enumerator_members = enumerator_members;
         collect.query_publish_record_semantics(entry->specialization_decl.get(),
                                                std::move(provisional_state));
     }
@@ -1280,6 +1284,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         if (auto* field_decl = dyn_cast<FieldDecl>(member)) {
             return handle_field_member(field_decl, declared_access);
         }
+        if (auto* enum_decl = dyn_cast<EnumDecl>(member)) {
+            return handle_enum_member(enum_decl, declared_access);
+        }
         if (auto* static_member = dyn_cast<VariableDecl>(member)) {
             return handle_static_member(static_member, declared_access);
         }
@@ -1306,6 +1313,180 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return fail_instantiation(
             "class template instantiation for this member kind is not supported yet",
             member ? member->location : loc);
+    }
+
+    bool handle_enum_member(
+        const EnumDecl* enum_decl,
+        RecordMemberAccess declared_access) {
+        EnumSemanticState pattern_enum_state;
+        if (!collect.query_lookup_enum_semantics(enum_decl, pattern_enum_state)) {
+            return fail_instantiation(
+                "internal error: missing class template nested enum semantic state",
+                enum_decl->location);
+        }
+
+        std::shared_ptr<CType> rewritten_underlying =
+            pattern_enum_state.underlying_type
+                ? clone_pass.rewrite_type(
+                      QualType(pattern_enum_state.underlying_type))
+                      .get_shared()
+                : nullptr;
+        if (rewritten_underlying) {
+            rewritten_underlying =
+                collect.finalize_deferred_semantic_type(
+                    QualType(rewritten_underlying),
+                    enum_decl->location)
+                    .get_shared();
+        }
+        if (!rewritten_underlying) {
+            if (auto pattern_enum_type = enum_decl->get_enum_type()) {
+                rewritten_underlying = pattern_enum_type->semantic_underlying_type();
+            }
+        }
+        if (!rewritten_underlying) {
+            rewritten_underlying =
+                ast_ctx()->type_ctx->get_builtin(BuiltinTypes::Int);
+        }
+
+        int64_t next_enum_value = 0;
+        bool has_negative_values = false;
+        std::vector<std::unique_ptr<EnumConstantDecl>> cloned_constants;
+        cloned_constants.reserve(enum_decl->constants.size());
+
+        for (const auto& constant : enum_decl->constants) {
+            if (!constant) {
+                continue;
+            }
+
+            std::unique_ptr<Expr> cloned_init = nullptr;
+            if (constant->init) {
+                std::string clone_error;
+                cloned_init = clone_pass.clone_expr(
+                    constant->init.get(),
+                    &clone_error);
+                if (!cloned_init) {
+                    return fail_instantiation(
+                        clone_error.empty()
+                            ? "failed to clone class template nested enum initializer"
+                            : clone_error,
+                        constant->location);
+                }
+                if (!collect.resolve_dependent_expr_after_substitution(
+                        cloned_init,
+                        QualType(),
+                        &clone_error)) {
+                    return fail_instantiation(
+                        clone_error.empty()
+                            ? "failed to resolve class template nested enum initializer after substitution"
+                            : clone_error,
+                        constant->location);
+                }
+            }
+
+            int64_t enum_value = next_enum_value;
+            if (cloned_init) {
+                auto eval = try_evaluate_with_consteval_compat(
+                    cloned_init.get(),
+                    ConstEvalMode::c_ice());
+                if (!eval.has_value()) {
+                    return fail_instantiation(
+                        "enumerator value is not an integer constant expression",
+                        constant->location);
+                }
+                enum_value = *eval;
+            }
+
+            auto cloned_constant = collect.collect_enum_constant_declaration(
+                constant->name,
+                std::move(cloned_init),
+                constant->location);
+            cloned_constant->value = enum_value;
+
+            std::shared_ptr<Symbol> cloned_symbol =
+                constant->sym
+                    ? clone_symbol_shallow_for_specialization(
+                          constant->sym,
+                          QualType(
+                              ast_ctx()->type_ctx->get_builtin(BuiltinTypes::Int)))
+                    : std::make_shared<Symbol>(
+                          constant->name,
+                          SymbolKind::ENUM_CONSTANT,
+                          QualType(
+                              ast_ctx()->type_ctx->get_builtin(BuiltinTypes::Int)),
+                          StorageClass::NONE);
+            cloned_symbol->enum_val = enum_value;
+            if (constant->sym) {
+                clone_pass.context().symbol_remap.emplace(
+                    constant->sym.get(),
+                    cloned_symbol);
+            }
+            cloned_constant->sym = cloned_symbol;
+            cloned_constants.push_back(std::move(cloned_constant));
+
+            if (enum_value < 0) {
+                has_negative_values = true;
+            }
+            if (__builtin_add_overflow(enum_value, int64_t{1}, &next_enum_value)) {
+                return fail_instantiation(
+                    "incremented enumerator value is not representable in int64",
+                    constant->location);
+            }
+        }
+
+        auto enum_type = std::make_shared<EnumType>(enum_decl->tag);
+        auto cloned_enum_decl = collect.collect_enum_declaration(
+            enum_decl->tag,
+            std::move(cloned_constants),
+            enum_type,
+            enum_decl->location);
+
+        EnumSemanticState cloned_enum_state;
+        cloned_enum_state.is_incomplete = false;
+        cloned_enum_state.is_scoped = pattern_enum_state.is_scoped;
+        cloned_enum_state.has_negative_values = has_negative_values;
+        cloned_enum_state.underlying_type = rewritten_underlying;
+        cloned_enum_state.enumerators.reserve(cloned_enum_decl->constants.size());
+        for (const auto& constant : cloned_enum_decl->constants) {
+            if (!constant) {
+                continue;
+            }
+            EnumSemanticState::Enumerator enumerator;
+            enumerator.name = constant->name;
+            enumerator.decl = constant.get();
+            enumerator.symbol = constant->sym;
+            enumerator.value = constant->value;
+            cloned_enum_state.enumerators.push_back(std::move(enumerator));
+        }
+        collect.query_publish_enum_semantics(
+            cloned_enum_decl.get(),
+            cloned_enum_state);
+
+        if (!cloned_enum_decl->tag.empty()) {
+            RecordSemanticState::NestedType nested_type;
+            nested_type.name = cloned_enum_decl->tag;
+            nested_type.type = QualType(cloned_enum_decl->get_enum_type());
+            nested_type.declared_access = declared_access;
+            nested_type.decl = cloned_enum_decl.get();
+            nested_types.push_back(std::move(nested_type));
+        }
+        if (!cloned_enum_state.is_scoped) {
+            for (const auto& constant : cloned_enum_decl->constants) {
+                if (!constant) {
+                    continue;
+                }
+                RecordSemanticState::EnumeratorMember enumerator_member;
+                enumerator_member.name = constant->name;
+                enumerator_member.declared_access = declared_access;
+                enumerator_member.enum_decl = cloned_enum_decl.get();
+                enumerator_member.decl = constant.get();
+                enumerator_member.symbol = constant->sym;
+                enumerator_members.push_back(std::move(enumerator_member));
+            }
+        }
+        publish_provisional_nested_members();
+
+        entry->member_decls.push_back(std::move(cloned_enum_decl));
+        return true;
     }
 
     bool handle_field_member(
@@ -2501,6 +2682,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         ctx.static_data_members = std::move(static_data_members);
         ctx.nested_types = std::move(nested_types);
         ctx.nested_templates = std::move(nested_templates);
+        ctx.enumerator_members = std::move(enumerator_members);
         ctx.semantic_state = semantic_state;
         collect.collect_record_compute_layout(ctx);
         collect.collect_record_publish_semantics(ctx);
