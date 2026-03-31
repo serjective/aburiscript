@@ -738,9 +738,19 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
         validateTally(tally); // Ensure no "unsigned float" etc.
         auto ret = resolveBuiltinType(tally, *pars->type_ctx.get());
         if (ret == nullptr) {
+            bool can_parse_typeless_conversion_function =
+                allow_typeless_conversion_function &&
+                pars->is_cxx_mode_active() &&
+                mgnt->current_token().type == TokenType::OPERATOR_KW;
             // K&R / C89 implicit int: no type specifiers means int
             if (pars->lang_opts.implicit_int) {
                 ret = pars->type_ctx->get_builtin(BuiltinTypes::Int);
+            } else if (can_parse_typeless_conversion_function) {
+                first_half = nullptr;
+                if (run_second_half) {
+                    return parse_declarator(nullptr);
+                }
+                return nullptr;
             } else {
                 error_custloc("Couldn't find corresponding internal type", begin_loc);
             }

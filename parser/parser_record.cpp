@@ -3657,21 +3657,13 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
     }
 
     DeclarationParser decl_parser(this);
-    std::shared_ptr<CType> base_type = nullptr;
-    bool looks_like_typeless_conversion_member =
+    decl_parser.allow_typeless_conversion_function =
         is_cxx_mode_active() &&
         is_parsing_cpp_record_body() &&
         !cxx_record_parse_stack_.empty() &&
-        cxx_record_parse_stack_.back().kind != CppRecordKind::Union &&
-        gentle_check(TokenType::OPERATOR_KW);
-    if (looks_like_typeless_conversion_member) {
-        decl_parser.begin_loc = current_token().loc;
-        decl_parser.first_half = nullptr;
-        decl_parser.base_qualifiers = QUAL_NONE;
-        decl_parser.qualifiers = QUAL_NONE;
-    } else {
-        base_type = decl_parser.parse_declaration(false);
-    }
+        cxx_record_parse_stack_.back().kind != CppRecordKind::Union;
+    std::shared_ptr<CType> base_type = nullptr;
+    base_type = decl_parser.parse_declaration(false);
     bool declaration_leading_virtual = leading_virtual_specifier;
     auto ensure_namespace_qualifier_prefix = [&](std::string& qualifier_prefix) {
         if (!is_cxx_mode_active()) {
