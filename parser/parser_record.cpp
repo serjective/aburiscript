@@ -4117,18 +4117,47 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             error("'explicit' is only allowed on constructors");
         }
 
-        bool in_cpp_named_class_body =
+        bool in_cpp_record_body =
             is_cxx_mode_active() &&
             is_parsing_cpp_record_body() &&
-            !cxx_record_parse_stack_.empty() &&
+            !cxx_record_parse_stack_.empty();
+        bool in_cpp_named_class_body =
+            in_cpp_record_body &&
             cxx_record_parse_stack_.back().kind != CppRecordKind::Union;
+        bool is_typedef_member_decl =
+            in_cpp_record_body &&
+            decl_parser.str_class == StorageClass::TYPEDEF;
         bool is_static_data_member_decl =
             in_cpp_named_class_body &&
             decl_parser.str_class == StorageClass::STATIC;
         if (in_cpp_named_class_body &&
             decl_parser.str_class != StorageClass::NONE &&
-            decl_parser.str_class != StorageClass::STATIC) {
+            decl_parser.str_class != StorageClass::STATIC &&
+            decl_parser.str_class != StorageClass::TYPEDEF) {
             error("invalid storage class specifier in class member declaration");
+        }
+
+        if (is_typedef_member_decl) {
+            handle_typedef_declarator(
+                decl_parser,
+                t,
+                field_type,
+                field_attrs_before_colon,
+                decl_parser.is_constexpr,
+                fields);
+
+            if (gentle_check(TokenType::COMMA)) {
+                advance();
+                continue;
+            }
+            if (lang_opts.implicit_int && gentle_check(TokenType::RIGHT_BRACE)) {
+                diag_engine->report_warning(
+                    "missing ';' after class member declaration; assuming ';'",
+                    current_token().loc);
+                break;
+            }
+            check_and_consume(TokenType::SEMICOLON);
+            break;
         }
 
         // Check for bitfield syntax: field_name : width or just : width (anonymous)
