@@ -60,6 +60,7 @@ std::optional<int64_t> try_evaluate_float_cast_array_bound(const Expr* expr) {
 
 bool validate_constexpr_initializer_expr(const Collect& collect,
                                          Expr* expr,
+                                         ConstEvalMode mode,
                                          std::string& out_failure,
                                          SrcLoc& out_loc) {
     if (!expr) {
@@ -69,8 +70,7 @@ bool validate_constexpr_initializer_expr(const Collect& collect,
         return true;
     }
 
-    ConstEvalResult const_eval = evaluate_with_consteval_compat(
-        expr, ConstEvalMode::c23_constexpr_initializer());
+    ConstEvalResult const_eval = evaluate_with_consteval_compat(expr, mode);
     if (const_eval.status == ConstEvalStatus::Constant) {
         return true;
     }

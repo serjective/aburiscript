@@ -250,6 +250,10 @@ bool interpreter_mode_enabled(ConstEvalMode mode) {
            mode.kind == ConstEvalModeKind::CppImmediateFunction;
 }
 
+bool is_cpp_core_constant_expression_mode(ConstEvalMode mode) {
+    return mode.kind == ConstEvalModeKind::CppCoreConstantExpression;
+}
+
 bool is_c23_constexpr_initializer_mode(ConstEvalMode mode) {
     return mode.kind == ConstEvalModeKind::C23ConstexprInitializer;
 }
@@ -471,6 +475,7 @@ Expr* strip_noop_implicit_casts(Expr* expr) {
         switch (cast->kind) {
             case ImplicitCastTypes::LVALUE_TO_RVALUE:
             case ImplicitCastTypes::ARRAY_TO_POINTER:
+            case ImplicitCastTypes::FUNCTION_TO_POINTER:
             case ImplicitCastTypes::RAW_CAST:
             case ImplicitCastTypes::ARITH_CAST:
                 expr = cast->expr.get();
@@ -802,13 +807,16 @@ ConstEvalResult eval_expr_as_typed_const_value(Expr* expr,
     return ConstEvalResult::constant(*casted);
 }
 
-ConstEvalResult eval_local_constexpr_variable_initializer(
+ConstEvalResult eval_constexpr_variable_initializer(
     const Symbol* sym,
     ConstEvalMode mode,
-    size_t depth) {
+    size_t depth,
+    bool allow_static_storage_duration) {
     if (!sym || sym->kind != SymbolKind::VARIABLE || !sym->is_constexpr ||
-        has_static_storage_duration(sym) || !sym->variable_definition ||
-        !sym->variable_definition->init) {
+        !sym->variable_definition || !sym->variable_definition->init) {
+        return ConstEvalResult::not_evaluated();
+    }
+    if (!allow_static_storage_duration && has_static_storage_duration(sym)) {
         return ConstEvalResult::not_evaluated();
     }
 
@@ -1631,6 +1639,12 @@ ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size
             "constexpr interpreter cannot evaluate call without visible function definition",
             call->location);
     }
+    if (is_cpp_core_constant_expression_mode(mode) &&
+        !function_decl->is_constexpr) {
+        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
+            "call to non-constexpr function is not a constant expression",
+            call->location);
+    }
     if (!g_interpreter_session->frames.empty()) {
         g_interpreter_session->frames.back().function_decl = function_decl;
     }
@@ -1818,6 +1832,18 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
                 return ConstEvalResult::constant(ConstValue::boolean(true));
             }
         }
+        if (is_cpp_core_constant_expression_mode(mode) && var_ref->symref) {
+            ConstEvalResult constexpr_value =
+                eval_constexpr_variable_initializer(
+                    var_ref->symref.get(),
+                    mode,
+                    depth + 1,
+                    true);
+            if (constexpr_value.status == ConstEvalStatus::Constant &&
+                constexpr_value.value.has_value()) {
+                return constexpr_value;
+            }
+        }
         if (is_cpp_non_type_template_argument_mode(mode) && var_ref->symref) {
             if (var_ref->symref->kind == SymbolKind::FUNCTION ||
                 has_static_storage_duration(var_ref->symref.get())) {
@@ -1825,10 +1851,11 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
                     ConstValue::address(var_ref->symref));
             }
             ConstEvalResult constexpr_value =
-                eval_local_constexpr_variable_initializer(
+                eval_constexpr_variable_initializer(
                     var_ref->symref.get(),
                     mode,
-                    depth + 1);
+                    depth + 1,
+                    false);
             if (constexpr_value.status == ConstEvalStatus::Constant &&
                 constexpr_value.value.has_value()) {
                 return constexpr_value;

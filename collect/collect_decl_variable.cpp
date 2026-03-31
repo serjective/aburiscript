@@ -387,9 +387,15 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
     if (is_constexpr && init) {
         std::string constexpr_failure;
         SrcLoc constexpr_failure_loc = loc;
+        ConstEvalMode constexpr_mode = lang_opts_.is_cxx_mode()
+            ? ConstEvalMode::cpp_core_constant_expression()
+            : ConstEvalMode::c23_constexpr_initializer();
         if (!validate_constexpr_initializer_expr(
                 *this,
-                init.get(), constexpr_failure, constexpr_failure_loc)) {
+                init.get(),
+                constexpr_mode,
+                constexpr_failure,
+                constexpr_failure_loc)) {
             report_error(
                 "constexpr initializer is not a constant expression: " + constexpr_failure,
                 constexpr_failure_loc);

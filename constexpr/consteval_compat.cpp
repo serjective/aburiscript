@@ -10,6 +10,7 @@ ConstEvalResult evaluate_with_consteval_compat(Expr* expr, ConstEvalMode mode) {
 
     LangOptions options;
     options.enable_consteval_engine = true;
+    options.enable_consteval_function_interpreter = true;
     ConstEvalEngine engine(options);
     return engine.evaluate(expr, mode);
 }

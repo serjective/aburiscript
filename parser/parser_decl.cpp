@@ -107,6 +107,7 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
         decl_parser->asm_label,
         loc,
         current_decl_language_linkage());
+    fin_funcdecl->is_constexpr = decl_parser->is_constexpr;
     auto synthesize_parameter_decls_from_function_type =
         [&](FuncDecl* decl) {
             if (!decl || !decl->parameters.empty()) {
