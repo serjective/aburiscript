@@ -1981,6 +1981,14 @@ private:
         OverloadImplicitObjectArgKind implicit_arg_kind,
         std::vector<OverloadCallCandidate>& candidates_out) ;
 
+    void append_unqualified_function_template_overload_candidates(
+        std::string_view function_name,
+        Expr* implicit_object_arg,
+        OverloadImplicitObjectArgKind implicit_arg_kind,
+        const std::vector<std::unique_ptr<Expr>>& explicit_args,
+        std::vector<OverloadCallCandidate>& candidates_out,
+        SrcLoc loc) ;
+
     std::unique_ptr<Expr> select_overload_candidate(
         std::string_view callee_name,
         const std::vector<OverloadCallCandidate>& candidates,

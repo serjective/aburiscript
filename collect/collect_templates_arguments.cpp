@@ -1169,6 +1169,34 @@ bool Collect::complete_template_argument_bindings_with_substituted_defaults(
                     finalize_deferred_semantic_type(
                         rewritten_default.value_type,
                         loc);
+                if (auto* non_type_parameter = dyn_cast<TemplateNonTypeParmDecl>(
+                        parameter)) {
+                    QualType expected_type =
+                        substitute_template_type_with_bindings(
+                            non_type_parameter->type,
+                            template_decl->parameters,
+                            bindings_out,
+                            loc);
+                    expected_type =
+                        finalize_deferred_semantic_type(expected_type, loc);
+                    if (rewritten_default.is_dependent) {
+                        rewritten_default.value_type = expected_type;
+                    } else {
+                        std::string normalize_error;
+                        if (!template_sema_internal::
+                                normalize_concrete_template_value_argument(
+                                rewritten_default,
+                                expected_type,
+                                &normalize_error)) {
+                            set_template_default_completion_error(
+                                error_out,
+                                normalize_error.empty()
+                                    ? "failed to normalize default template value argument"
+                                    : normalize_error);
+                            return false;
+                        }
+                    }
+                }
                 break;
             case TemplateArgumentKind::Template:
                 break;

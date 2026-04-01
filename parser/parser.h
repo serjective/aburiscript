@@ -398,6 +398,11 @@ private:
         CppMethodDecl* method_decl,
         const ClassTemplateDecl* owner_class_template,
         SrcLoc declarator_loc);
+    void remap_out_of_line_primary_template_static_member(
+        QualType& declared_type,
+        std::unique_ptr<Expr>& init_expr,
+        const ClassTemplateDecl* owner_class_template,
+        SrcLoc declarator_loc);
     DeclaratorHandlingResult handle_typedef_declarator(
         DeclarationParser& decl_parser,
         Token declarator_token,

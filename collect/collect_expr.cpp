@@ -3116,6 +3116,13 @@ std::unique_ptr<Expr> Collect::select_cpp_allocation_like_function(
             operator_name,
             OverloadImplicitObjectArgKind::None,
             overload_candidates);
+        append_unqualified_function_template_overload_candidates(
+            operator_name,
+            nullptr,
+            OverloadImplicitObjectArgKind::None,
+            call_args,
+            overload_candidates,
+            loc);
         if (overload_candidates.empty()) {
             auto default_symbol =
                 make_default_allocation_like_operator_symbol(operator_name);
@@ -3145,6 +3152,13 @@ std::unique_ptr<Expr> Collect::select_cpp_allocation_like_function(
             selected_symbol_out,
             selected_implicit_arg_kind)) {
         return overload_error;
+    }
+    if (auto completion_error =
+            complete_selected_function_template_specialization_symbol(
+                selected_symbol_out,
+                loc,
+                "failed to instantiate selected allocation function template specialization")) {
+        return completion_error;
     }
     return nullptr;
 }
@@ -3732,10 +3746,22 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
                     loc)) {
                 return candidate_error;
             }
+            std::vector<std::unique_ptr<Expr>> explicit_args;
+            if (unary_operator_is_postfix_incdec(uop)) {
+                explicit_args.push_back(
+                    collect_integer_literal("0", get_builtin_int(), loc));
+            }
             append_unqualified_overload_candidates(
                 op_name,
                 OverloadImplicitObjectArgKind::Regular,
                 overload_candidates);
+            append_unqualified_function_template_overload_candidates(
+                op_name,
+                expr.get(),
+                OverloadImplicitObjectArgKind::Regular,
+                explicit_args,
+                overload_candidates,
+                loc);
 
             if (overload_candidates.empty() && had_member_match) {
                 if (auto inaccessible_error = report_inaccessible_member(
@@ -3746,12 +3772,6 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
                     return inaccessible_error;
                 }
             } else {
-                std::vector<std::unique_ptr<Expr>> explicit_args;
-                if (unary_operator_is_postfix_incdec(uop)) {
-                    explicit_args.push_back(
-                        collect_integer_literal("0", get_builtin_int(), loc));
-                }
-
                 std::shared_ptr<Symbol> selected_symbol = nullptr;
                 OverloadImplicitObjectArgKind selected_implicit_object_arg_kind =
                     OverloadImplicitObjectArgKind::None;
@@ -3767,6 +3787,13 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
                 }
 
                 if (selected_symbol) {
+                    if (auto completion_error =
+                            complete_selected_function_template_specialization_symbol(
+                                selected_symbol,
+                                loc,
+                                "failed to instantiate selected operator function template specialization")) {
+                        return completion_error;
+                    }
                     auto implicit_object_arg =
                         build_overload_implicit_object_arg(
                             selected_implicit_object_arg_kind,
@@ -3932,8 +3959,31 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
     if (lang_opts_.is_cxx_mode() &&
         (expression_depends_on_template_parameters(lhs.get()) ||
          expression_depends_on_template_parameters(rhs.get()))) {
-        QualType dependent_result_type(
-            std::make_shared<AutoType>(AutoTypeFlavor::TemplateNonType));
+        auto dependent_assignment_result_type = [&]() -> QualType {
+            QualType lhs_type = lhs ? lhs->get_type() : QualType();
+            if (canonical_type_kind(lhs_type, ast_ctx_.get()) == TypeKind::Reference) {
+                return remove_reference(lhs_type, ast_ctx_.get());
+            }
+            return lhs_type;
+        };
+        QualType dependent_result_type;
+        if (is_assignment_binop(bop)) {
+            dependent_result_type = dependent_assignment_result_type();
+        } else if (bop == BinOpTypes::COMMA && rhs) {
+            dependent_result_type = rhs->get_type();
+        } else if (bop == BinOpTypes::LOGICAL_AND ||
+                   bop == BinOpTypes::LOGICAL_OR ||
+                   bop == BinOpTypes::LESS_THAN ||
+                   bop == BinOpTypes::GREATER_THAN ||
+                   bop == BinOpTypes::LESS_EQUAL_THAN ||
+                   bop == BinOpTypes::GREATER_EQUAL_THAN ||
+                   bop == BinOpTypes::EQUAL ||
+                   bop == BinOpTypes::NOT_EQUAL) {
+            dependent_result_type = QualType(get_builtin_int());
+        } else {
+            dependent_result_type =
+                QualType(std::make_shared<AutoType>(AutoTypeFlavor::TemplateNonType));
+        }
         return collect_make<DependentBinaryExpr>(
             std::move(lhs),
             std::move(rhs),
@@ -4517,8 +4567,17 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
             loc)) {
         return candidate_error;
     }
+    std::vector<std::unique_ptr<Expr>> explicit_args;
+    explicit_args.push_back(std::move(rhs));
     append_unqualified_overload_candidates(
         op_name, OverloadImplicitObjectArgKind::Regular, overload_candidates);
+    append_unqualified_function_template_overload_candidates(
+        op_name,
+        lhs.get(),
+        OverloadImplicitObjectArgKind::Regular,
+        explicit_args,
+        overload_candidates,
+        loc);
 
     if (overload_candidates.empty()) {
         if (had_member_match) {
@@ -4527,9 +4586,6 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
         }
         return nullptr;
     }
-
-    std::vector<std::unique_ptr<Expr>> explicit_args;
-    explicit_args.push_back(std::move(rhs));
 
     std::shared_ptr<Symbol> selected_symbol = nullptr;
     OverloadImplicitObjectArgKind selected_implicit_object_arg_kind =
@@ -4546,6 +4602,13 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
     }
     if (!selected_symbol) {
         return nullptr;
+    }
+    if (auto completion_error =
+            complete_selected_function_template_specialization_symbol(
+                selected_symbol,
+                loc,
+                "failed to instantiate selected operator function template specialization")) {
+        return completion_error;
     }
 
     auto implicit_object_arg = build_overload_implicit_object_arg(
@@ -5358,6 +5421,9 @@ Collect::ValueCategory Collect::classify_value_category(Expr* expr) const {
     if (auto* binary = dyn_cast<DependentBinaryExpr>(expr)) {
         if (binary->bop == BinOpTypes::COMMA) {
             return classify_value_category(binary->right.get());
+        }
+        if (lang_opts_.is_cxx_mode() && is_assignment_binop(binary->bop)) {
+            return ValueCategory::LValue;
         }
         return ValueCategory::PRValue;
     }

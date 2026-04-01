@@ -3,6 +3,7 @@
 
 #include "../helpers/auto_type_utils.h"
 #include "../ast/ast_clone.h"
+#include "../ast/expr_clone.h"
 #include "../collect/lookup_engine.h"
 #include "../collect/collect_templates_internal.h"
 #include "../helpers/qualified_name_utils.h"
@@ -2538,6 +2539,104 @@ void Parser::remap_out_of_line_primary_template_method(
     }
 }
 
+void Parser::remap_out_of_line_primary_template_static_member(
+    QualType& declared_type,
+    std::unique_ptr<Expr>& init_expr,
+    const ClassTemplateDecl* owner_class_template,
+    SrcLoc declarator_loc) {
+    if (!owner_class_template || active_template_parameter_stack_.empty()) {
+        return;
+    }
+
+    const auto& active_parameters = active_template_parameter_stack_.back();
+    if (active_parameters.size() != owner_class_template->parameters.size()) {
+        error_custloc(
+            "internal error: out-of-line template head does not match owner template parameter list",
+            declarator_loc);
+    }
+
+    ASTCloneContext clone_ctx;
+    clone_ctx.ast_ctx = ast_ctx.get();
+    std::unordered_map<const TemplateParameterDecl*, const TemplateParameterDecl*>
+        parameter_rebinds;
+    parameter_rebinds.reserve(active_parameters.size());
+
+    for (size_t idx = 0; idx < active_parameters.size(); ++idx) {
+        const auto* active_parameter = active_parameters[idx];
+        const auto* canonical_parameter =
+            owner_class_template->parameters[idx].get();
+        if (!active_parameter || !canonical_parameter ||
+            active_parameter->get_kind() != canonical_parameter->get_kind()) {
+            error_custloc(
+                "internal error: out-of-line template head is not structurally compatible with the owner template",
+                declarator_loc);
+        }
+        parameter_rebinds.emplace(active_parameter, canonical_parameter);
+
+        if (auto* canonical_type =
+                dyn_cast<TemplateTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(canonical_parameter))) {
+            (void)canonical_type;
+            continue;
+        }
+
+        if (auto* canonical_non_type =
+                dyn_cast<TemplateNonTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(canonical_parameter))) {
+            auto* active_non_type =
+                dyn_cast<TemplateNonTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(active_parameter));
+            if (active_non_type && active_non_type->sym &&
+                canonical_non_type->sym) {
+                clone_ctx.symbol_remap.emplace(
+                    active_non_type->sym.get(),
+                    canonical_non_type->sym);
+            }
+            continue;
+        }
+
+        error_custloc(
+            "internal error: unsupported out-of-line owner template parameter kind",
+            declarator_loc);
+    }
+
+    clone_ctx.rewrite_type = [&](QualType type) -> QualType {
+        return template_sema_internal::remap_template_parameter_types_in_type(
+            type,
+            parameter_rebinds);
+    };
+    clone_ctx.rewrite_symbol =
+        [&](const std::shared_ptr<Symbol>& sym) -> std::shared_ptr<Symbol> {
+        if (!sym) {
+            return nullptr;
+        }
+        if (auto it = clone_ctx.symbol_remap.find(sym.get());
+            it != clone_ctx.symbol_remap.end()) {
+            return it->second;
+        }
+        return sym;
+    };
+
+    declared_type = clone_ctx.rewrite_type(declared_type);
+
+    if (init_expr) {
+        std::string clone_error;
+        auto remapped_init =
+            clone_expr_with_substitution(
+                init_expr.get(),
+                clone_ctx,
+                &clone_error);
+        if (!remapped_init) {
+            error_custloc(
+                clone_error.empty()
+                    ? "failed to remap out-of-line template static data member initializer"
+                    : clone_error,
+                init_expr->location);
+        }
+        init_expr = std::move(remapped_init);
+    }
+}
+
 Parser::DeclaratorHandlingResult Parser::handle_typedef_declarator(
     DeclarationParser& decl_parser,
     Token declarator_token,
@@ -3194,6 +3293,19 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
         init_expr = parse_paren_init_list();
     } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_BRACE)) {
         init_expr = parse_init_list();
+    }
+
+    if (qualified_declarator.owner_record_decl &&
+        qualified_declarator.targets_template_pattern &&
+        qualified_declarator.owner_class_template) {
+        remap_out_of_line_primary_template_static_member(
+            declared_type,
+            init_expr,
+            qualified_declarator.owner_class_template,
+            qualified_declarator.loc);
+        if (declared_sym) {
+            declared_sym->type = desugar_type(declared_type);
+        }
     }
 
     auto var_decl_base = collect_->collect_variable_declaration(

@@ -1,5 +1,6 @@
 #include "collect.h"
 #include "collect_templates_internal.h"
+#include "../helpers/auto_type_utils.h"
 
 #include <optional>
 
@@ -826,6 +827,14 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                         return true;
                     }
 
+                    QualType resolved_value_type =
+                        finalize_deferred_semantic_type(
+                            cloned_expr->get_type(),
+                            loc);
+                    if (resolved_value_type) {
+                        new_argument.value_type = resolved_value_type;
+                    }
+
                     ConstEvalResult eval = evaluate_with_consteval_compat(
                         cloned_expr.get(),
                         ConstEvalMode::cpp_non_type_template_argument());
@@ -851,7 +860,10 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                     }
                 }
 
-                if (!new_argument.is_dependent) {
+                if (!new_argument.is_dependent &&
+                    new_argument.value_type &&
+                    auto_type_utils::auto_type_flavors_in(
+                        new_argument.value_type.get_shared()) == 0) {
                     std::string normalize_error;
                     if (!normalize_concrete_template_value_argument(
                             new_argument,

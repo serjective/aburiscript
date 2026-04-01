@@ -528,6 +528,18 @@ QualType Collect::resolve_deferred_template_specialization_type(
         specialization.arguments,
         loc,
         mode);
+    query_publish_template_specialization_resolved_type(
+        &specialization,
+        nullptr);
+    specialization.is_dependent = false;
+    for (const auto& argument : specialization.arguments) {
+        if (template_argument_depends_on_template_parameters(
+                argument,
+                ast_ctx_.get())) {
+            specialization.is_dependent = true;
+            break;
+        }
+    }
     auto resolved_type =
         query_lookup_template_specialization_resolved_type(&specialization);
     if (specialization.is_dependent || resolved_type) {
@@ -642,6 +654,7 @@ QualType Collect::resolve_deferred_dependent_name_type(
         dependent_name.template_arguments,
         loc,
         mode);
+    query_publish_dependent_name_resolved_type(&dependent_name, nullptr);
     auto resolved_type =
         query_lookup_dependent_name_resolved_type(&dependent_name);
     if (resolved_type) {

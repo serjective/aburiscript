@@ -210,6 +210,48 @@ bool is_function_template_specialization_symbol(
         get_symbol_function_template_specialization(symbol.get()) != nullptr;
 }
 
+void append_unique_function_template_candidate(
+    std::vector<const FunctionTemplateDecl*>& candidates,
+    const Decl* decl) {
+    auto* function_template = dyn_cast<FunctionTemplateDecl>(decl);
+    if (!function_template) {
+        return;
+    }
+    for (const auto* existing : candidates) {
+        if (existing == function_template) {
+            return;
+        }
+    }
+    candidates.push_back(function_template);
+}
+
+std::vector<const FunctionTemplateDecl*> lookup_unqualified_function_templates(
+    std::string_view callee_name,
+    const std::shared_ptr<Scope>& current_scope) {
+    std::vector<const FunctionTemplateDecl*> template_candidates;
+    if (!current_scope) {
+        return template_candidates;
+    }
+
+    const DeclBinding* template_binding =
+        LookupEngine::lookup_unqualified_template_binding(
+            std::string(callee_name),
+            current_scope,
+            true,
+            LookupNamespace::Ordinary);
+    if (!template_binding) {
+        return template_candidates;
+    }
+
+    append_unique_function_template_candidate(
+        template_candidates,
+        template_binding->template_decl);
+    for (const auto* decl : template_binding->template_overload_candidates) {
+        append_unique_function_template_candidate(template_candidates, decl);
+    }
+    return template_candidates;
+}
+
 const FunctionTemplateDecl* function_template_primary_for_symbol(
     const std::shared_ptr<Symbol>& symbol) {
     const auto* specialization_info =
@@ -482,6 +524,71 @@ void Collect::append_unqualified_overload_candidates(
         call_candidate.symbol = fn_sym;
         call_candidate.implicit_object_arg_kind = implicit_arg_kind;
         candidates_out.push_back(std::move(call_candidate));
+    }
+}
+
+void Collect::append_unqualified_function_template_overload_candidates(
+    std::string_view function_name,
+    Expr* implicit_object_arg,
+    OverloadImplicitObjectArgKind implicit_arg_kind,
+    const std::vector<std::unique_ptr<Expr>>& explicit_args,
+    std::vector<OverloadCallCandidate>& candidates_out,
+    SrcLoc loc) {
+    if (!session_.current_scope_) {
+        return;
+    }
+    if (implicit_arg_kind != OverloadImplicitObjectArgKind::None &&
+        !implicit_object_arg) {
+        return;
+    }
+
+    auto template_candidates =
+        lookup_unqualified_function_templates(function_name, session_.current_scope_);
+    if (template_candidates.empty()) {
+        return;
+    }
+
+    std::vector<Expr*> deduction_args;
+    deduction_args.reserve(
+        explicit_args.size() +
+        (implicit_arg_kind == OverloadImplicitObjectArgKind::None ? 0u : 1u));
+    if (implicit_arg_kind != OverloadImplicitObjectArgKind::None) {
+        deduction_args.push_back(implicit_object_arg);
+    }
+    for (const auto& arg : explicit_args) {
+        deduction_args.push_back(arg.get());
+    }
+
+    candidates_out.reserve(candidates_out.size() + template_candidates.size());
+    for (const auto* function_template : template_candidates) {
+        if (!function_template) {
+            continue;
+        }
+
+        std::vector<TemplateArgument> specialization_arguments;
+        if (!deduce_function_template_call_arguments(
+                function_template,
+                deduction_args,
+                specialization_arguments)) {
+            continue;
+        }
+
+        std::shared_ptr<Symbol> specialization_symbol = nullptr;
+        auto* specialization_decl =
+            instantiate_function_template_specialization(
+                function_template,
+                specialization_arguments,
+                loc,
+                &specialization_symbol,
+                /*instantiate_definition=*/false);
+        if (!specialization_decl || !specialization_symbol) {
+            continue;
+        }
+
+        OverloadCallCandidate candidate;
+        candidate.symbol = std::move(specialization_symbol);
+        candidate.implicit_object_arg_kind = implicit_arg_kind;
+        candidates_out.push_back(std::move(candidate));
     }
 }
 
