@@ -862,8 +862,14 @@ bool TemplateArgument::equals(const TemplateArgument& other) const {
         return false;
     }
     switch (kind) {
-        case TemplateArgumentKind::Type:
+        case TemplateArgumentKind::Type: {
+            QualType lhs = desugar_type(type);
+            QualType rhs = desugar_type(other.type);
+            if (lhs && rhs) {
+                return lhs.equals_qualified(rhs);
+            }
             return type.equals_qualified(other.type);
+        }
         case TemplateArgumentKind::Value:
             if (!value_type.equals_qualified(other.value_type) ||
                 is_dependent != other.is_dependent) {

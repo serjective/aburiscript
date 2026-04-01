@@ -841,7 +841,7 @@ std::unique_ptr<Expr> make_constant_expr_for_template_argument(
 }
 
 void append_type_cache_key(std::string& out, QualType type) {
-    auto canonical = desugar_typedefs(type);
+    auto canonical = desugar_type(type);
     if (!canonical) {
         out += "null";
         return;

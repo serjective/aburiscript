@@ -469,7 +469,7 @@ void append_template_argument_semantic_fingerprint(
 }
 
 void append_type_semantic_fingerprint(std::string& out, QualType type) {
-    auto canonical = desugar_typedefs(type);
+    auto canonical = desugar_type(type);
     if (!canonical) {
         out += "null";
         return;
