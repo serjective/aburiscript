@@ -200,6 +200,12 @@ bool collect_pack_expansion_shape_in_type(
         return collect_pack_expansion_shape_in_type(
             ref->referred_type, parameters, shape_out);
     }
+    if (auto transform = dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
+        return collect_pack_expansion_shape_in_type(
+            transform->operand_type,
+            parameters,
+            shape_out);
+    }
     if (auto mem_ptr = dyn_cast_shared<MemberPointerType>(raw)) {
         return collect_pack_expansion_shape_in_type(
                    mem_ptr->class_type, parameters, shape_out) &&

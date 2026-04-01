@@ -301,6 +301,23 @@ QualType Collect::substitute_template_type_with_bindings(
             quals);
     }
 
+    if (auto transform_type = dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
+        auto substituted_operand = substitute_template_type_with_bindings(
+            transform_type->operand_type,
+            parameters,
+            argument_bindings,
+            loc,
+            allow_unsubstituted_parameters);
+        if (substituted_operand.equals_qualified(transform_type->operand_type)) {
+            return type;
+        }
+        return QualType(
+            std::make_shared<BuiltinTypeTransformType>(
+                transform_type->transform_kind,
+                substituted_operand),
+            quals);
+    }
+
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
         const Decl* rewritten_primary = specialization->primary_template;
         std::string rewritten_name = specialization->template_name;

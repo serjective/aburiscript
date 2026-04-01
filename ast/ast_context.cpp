@@ -543,6 +543,16 @@ void append_type_semantic_fingerprint(std::string& out, QualType type) {
             }
             return;
         }
+        case TypeKind::BuiltinTypeTransform: {
+            auto transform =
+                static_cast<const BuiltinTypeTransformType*>(raw.get());
+            out += "BTT";
+            out += std::to_string(static_cast<int>(transform->transform_kind));
+            out += "(";
+            append_type_semantic_fingerprint(out, transform->operand_type);
+            out += ")";
+            return;
+        }
         case TypeKind::Typedef:
             out += "Typedef(";
             append_type_semantic_fingerprint(

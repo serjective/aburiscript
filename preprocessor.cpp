@@ -3438,6 +3438,14 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                             result = builtin_available ? 1 : 0;
                             // Also check our dedicated builtins not in the registry
                             if (!result) {
+                                BuiltinTypeTransformKind builtin_transform_kind;
+                                if (lookup_builtin_type_transform_kind(
+                                        query,
+                                        builtin_transform_kind)) {
+                                    result = 1;
+                                }
+                            }
+                            if (!result) {
                                 if (query == "__builtin_va_start" || query == "__builtin_va_end" ||
                                     query == "__builtin_va_arg" || query == "__builtin_va_copy" ||
                                     query == "__builtin_va_list" || query == "__builtin_offsetof") {

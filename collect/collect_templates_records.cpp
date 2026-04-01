@@ -109,6 +109,21 @@ QualType replace_record_decl_in_type(QualType type,
             std::make_shared<ReferenceType>(rewritten, ref->reference_kind),
             quals);
     }
+    if (auto transform = dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
+        auto rewritten = replace_record_decl_in_type(
+            transform->operand_type,
+            pattern_decl,
+            replacement_type,
+            ast_ctx);
+        if (rewritten.equals_qualified(transform->operand_type)) {
+            return type;
+        }
+        return QualType(
+            std::make_shared<BuiltinTypeTransformType>(
+                transform->transform_kind,
+                rewritten),
+            quals);
+    }
     if (auto mem_ptr = dyn_cast_shared<MemberPointerType>(raw)) {
         auto rewritten_class = replace_record_decl_in_type(
             mem_ptr->class_type,

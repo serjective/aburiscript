@@ -54,7 +54,7 @@ enum class TypeKind {
     CppTypeInfo,
     Typedef, Vector, Complex, BlockPointer, TemplateTypeParm,
     TemplateSpecialization, DependentName, Other, Placeholder, Auto,
-    TypeofExpr, DecltypeExpr
+    TypeofExpr, DecltypeExpr, BuiltinTypeTransform
 };
 std::string to_string_type_kind(TypeKind tkind);
 
@@ -72,6 +72,10 @@ enum class AutoTypeFlavor : uint8_t {
 enum class ReferenceKind : uint8_t {
     LValue,
     RValue
+};
+
+enum class BuiltinTypeTransformKind : uint8_t {
+    RemoveReference,
 };
 
 // Qualifier flags — bitmask
@@ -276,6 +280,32 @@ public:
             result += type->to_string();
         }
         return result;
+    }
+};
+
+// Represents builtin type transformations such as __remove_reference(_Tp)
+// before sema resolves the transformed type.
+struct BuiltinTypeTransformType : CType {
+    BuiltinTypeTransformKind transform_kind;
+    QualType operand_type;
+
+    explicit BuiltinTypeTransformType(BuiltinTypeTransformKind transform_kind,
+                                      QualType operand_type)
+        : CType(TypeKind::BuiltinTypeTransform),
+          transform_kind(transform_kind),
+          operand_type(std::move(operand_type)) {}
+    bool isIncomplete() const override { return true; }
+    std::string to_string() const override;
+    bool equals(const CType& other) override {
+        if (other.kind != TypeKind::BuiltinTypeTransform) {
+            return false;
+        }
+        const auto& rhs = static_cast<const BuiltinTypeTransformType&>(other);
+        return rhs.transform_kind == transform_kind &&
+               operand_type.equals_qualified(rhs.operand_type);
+    }
+    static bool classof(const CType *t) {
+        return t->kind == TypeKind::BuiltinTypeTransform;
     }
 };
 
@@ -1720,6 +1750,17 @@ QualType make_reference_type(QualType referred, ReferenceKind kind);
 std::shared_ptr<CType> make_reference_type(
     const std::shared_ptr<CType>& referred,
     ReferenceKind kind);
+
+bool lookup_builtin_type_transform_kind(
+    std::string_view name,
+    BuiltinTypeTransformKind& out);
+QualType apply_builtin_type_transform(
+    BuiltinTypeTransformKind kind,
+    QualType operand_type);
+QualType apply_builtin_type_transform(
+    BuiltinTypeTransformKind kind,
+    QualType operand_type,
+    const ASTContext* ast_ctx);
 
 bool type_contains_vla(const std::shared_ptr<CType>& type);
 // inline TypeContext global_type_context;

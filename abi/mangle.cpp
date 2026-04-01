@@ -776,6 +776,29 @@ void append_type_substitution_key(std::string& out, QualType qt) {
             append_type_substitution_key(out, typedef_type->underlying_type);
             return;
         }
+        case TypeKind::BuiltinTypeTransform: {
+            auto transform =
+                static_cast<BuiltinTypeTransformType*>(raw.get());
+            auto resolved = apply_builtin_type_transform(
+                transform->transform_kind,
+                transform->operand_type);
+            if (resolved) {
+                append_type_substitution_key(
+                    out,
+                    QualType(
+                        resolved.get_shared(),
+                        static_cast<uint8_t>(
+                            canonical.get_qualifiers() |
+                            resolved.get_qualifiers())));
+                return;
+            }
+            out += "builtin-type-transform:";
+            out += std::to_string(static_cast<int>(transform->transform_kind));
+            out += "(";
+            append_type_substitution_key(out, transform->operand_type);
+            out += ")";
+            return;
+        }
         case TypeKind::Placeholder:
         case TypeKind::Other:
         case TypeKind::Auto:

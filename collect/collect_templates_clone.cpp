@@ -445,6 +445,20 @@ QualType remap_template_parameter_types_in_type(
         return QualType(collapsed.get_shared(), quals);
     }
 
+    if (auto transform = dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
+        auto remapped_operand = remap_template_parameter_types_in_type(
+            transform->operand_type,
+            parameter_rebinds);
+        if (remapped_operand.equals_qualified(transform->operand_type)) {
+            return type;
+        }
+        return QualType(
+            std::make_shared<BuiltinTypeTransformType>(
+                transform->transform_kind,
+                remapped_operand),
+            quals);
+    }
+
     if (auto mem_ptr = dyn_cast_shared<MemberPointerType>(raw)) {
         auto remapped_class = remap_template_parameter_types_in_type(
             mem_ptr->class_type,

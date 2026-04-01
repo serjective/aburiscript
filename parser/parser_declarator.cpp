@@ -575,6 +575,26 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                             std::make_move_iterator(parsed_attrs.end()));
                         continue;
                     }
+                    if (t.type == TokenType::IDENTIFIER && !typedef_resolved_type) {
+                        BuiltinTypeTransformKind builtin_transform_kind;
+                        if (lookup_builtin_type_transform_kind(
+                                t.value,
+                                builtin_transform_kind)) {
+                            mgnt->advance();
+                            mgnt->check_and_consume(TokenType::LEFT_PAREN);
+                            auto transform_dp = DeclarationParser(this->pars);
+                            auto operand_type = transform_dp.parse_declaration();
+                            if (operand_type == nullptr) {
+                                error("Error parsing type in builtin type transform");
+                            }
+                            typedef_resolved_type =
+                                std::make_shared<BuiltinTypeTransformType>(
+                                    builtin_transform_kind,
+                                    operand_type);
+                            mgnt->check_and_consume(TokenType::RIGHT_PAREN);
+                            continue;
+                        }
+                    }
                     // Check if this token sequence names a type-name, but only if we
                     // haven't already seen any type specifiers (to avoid consuming
                     // declarator names e.g. in "typedef int MyInt;" where MyInt is the

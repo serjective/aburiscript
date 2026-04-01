@@ -606,6 +606,10 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
             type = expr_type;
             continue;
         }
+        if (auto transform = dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
+            type = transform->operand_type;
+            continue;
+        }
         if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
             if (specialization->is_dependent) {
                 return true;
@@ -2489,6 +2493,7 @@ std::string to_string_type_kind(TypeKind tkind) {
         case TypeKind::Auto: return "Auto";
         case TypeKind::TypeofExpr: return "TypeofExpr";
         case TypeKind::DecltypeExpr: return "DecltypeExpr";
+        case TypeKind::BuiltinTypeTransform: return "BuiltinTypeTransform";
         default: return "Unknown";
     }
 }
@@ -2818,6 +2823,46 @@ std::shared_ptr<CType> make_reference_type(
     return make_reference_type(QualType(referred), kind).get_shared();
 }
 
+namespace {
+const char* builtin_type_transform_name(BuiltinTypeTransformKind kind) {
+    switch (kind) {
+        case BuiltinTypeTransformKind::RemoveReference:
+            return "__remove_reference";
+    }
+    return "__builtin_type_transform";
+}
+} // namespace
+
+bool lookup_builtin_type_transform_kind(
+    std::string_view name,
+    BuiltinTypeTransformKind& out) {
+    if (name == "__remove_reference" || name == "__remove_reference_t") {
+        out = BuiltinTypeTransformKind::RemoveReference;
+        return true;
+    }
+    return false;
+}
+
+QualType apply_builtin_type_transform(
+    BuiltinTypeTransformKind kind,
+    QualType operand_type) {
+    return apply_builtin_type_transform(
+        kind,
+        operand_type,
+        get_active_side_table_ast_context());
+}
+
+QualType apply_builtin_type_transform(
+    BuiltinTypeTransformKind kind,
+    QualType operand_type,
+    const ASTContext* ast_ctx) {
+    switch (kind) {
+        case BuiltinTypeTransformKind::RemoveReference:
+            return remove_reference(operand_type, ast_ctx);
+    }
+    return operand_type;
+}
+
 std::string PointerType::to_string() const {
     return pointed_type.to_string() + " *";
 }
@@ -2825,6 +2870,11 @@ std::string PointerType::to_string() const {
 std::string ReferenceType::to_string() const {
     return referred_type.to_string() +
         (reference_kind == ReferenceKind::RValue ? " &&" : " &");
+}
+
+std::string BuiltinTypeTransformType::to_string() const {
+    return std::string(builtin_type_transform_name(transform_kind)) +
+        "(" + operand_type.to_string() + ")";
 }
 
 std::string ArrayType::to_string() const {
@@ -3048,6 +3098,11 @@ bool type_contains_vla(const std::shared_ptr<CType>& type) {
             }
             return false;
         }
+        case TypeKind::BuiltinTypeTransform:
+            return type_contains_vla(
+                static_cast<BuiltinTypeTransformType*>(raw.get())
+                    ->operand_type
+                    .get_shared());
         default:
             // VLAs cannot appear in struct fields (C99 6.7.2.1), so no need to recurse
             return false;

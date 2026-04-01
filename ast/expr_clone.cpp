@@ -158,6 +158,21 @@ QualType remap_lambda_template_parameter_types(
             quals);
     }
 
+    if (auto transform = dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
+        auto rewritten =
+            remap_lambda_template_parameter_types(
+                transform->operand_type,
+                parameter_rebinds);
+        if (rewritten.equals_qualified(transform->operand_type)) {
+            return type;
+        }
+        return QualType(
+            std::make_shared<BuiltinTypeTransformType>(
+                transform->transform_kind,
+                rewritten),
+            quals);
+    }
+
     if (auto member_pointer = dyn_cast_shared<MemberPointerType>(raw)) {
         auto rewritten_class =
             remap_lambda_template_parameter_types(

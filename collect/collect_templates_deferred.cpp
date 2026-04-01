@@ -271,7 +271,8 @@ bool Collect::contains_deferred_semantic_type(
         return false;
     }
     if (isa<TypeofExprType>(type.get()) ||
-        isa<DecltypeExprType>(type.get())) {
+        isa<DecltypeExprType>(type.get()) ||
+        isa<BuiltinTypeTransformType>(type.get())) {
         return true;
     }
     if (auto typedef_type = dyn_cast_shared<TypedefType>(type)) {
@@ -749,6 +750,44 @@ QualType Collect::resolve_deferred_semantic_type_impl(
             type,
             loc,
             mode);
+    }
+
+    if (auto* transform_type = dyn_cast<BuiltinTypeTransformType>(raw.get())) {
+        auto operand_type = resolve_deferred_semantic_type_impl(
+            transform_type->operand_type,
+            loc,
+            mode);
+        if (!operand_type) {
+            if (mode == DeferredTypeResolutionMode::Finalize) {
+                report_error(
+                    "cannot determine operand type of builtin type transform",
+                    loc);
+            }
+            return QualType();
+        }
+
+        transform_type->operand_type = operand_type;
+        if (type_depends_on_template_parameters(operand_type, ast_ctx_.get())) {
+            return type;
+        }
+
+        auto transformed =
+            apply_builtin_type_transform(
+                transform_type->transform_kind,
+                operand_type,
+                ast_ctx_.get());
+        if (!transformed) {
+            if (mode == DeferredTypeResolutionMode::Finalize) {
+                report_error(
+                    "cannot resolve builtin type transform",
+                    loc);
+            }
+            return QualType();
+        }
+        return QualType(
+            transformed.get_shared(),
+            static_cast<uint8_t>(
+                type.get_qualifiers() | transformed.get_qualifiers()));
     }
 
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
