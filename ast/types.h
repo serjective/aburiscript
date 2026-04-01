@@ -75,7 +75,13 @@ enum class ReferenceKind : uint8_t {
 };
 
 enum class BuiltinTypeTransformKind : uint8_t {
+    RemoveConst,
+    RemoveVolatile,
+    RemoveCV,
     RemoveReference,
+    AddPointer,
+    AddLValueReference,
+    AddRValueReference,
 };
 
 // Qualifier flags — bitmask

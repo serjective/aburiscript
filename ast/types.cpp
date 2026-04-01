@@ -2824,10 +2824,40 @@ std::shared_ptr<CType> make_reference_type(
 }
 
 namespace {
+QualType remove_top_level_qualifiers(QualType type, uint8_t qualifiers_to_strip) {
+    if (!type) {
+        return type;
+    }
+    return QualType(
+        type.get_shared(),
+        static_cast<uint8_t>(type.get_qualifiers() & ~qualifiers_to_strip));
+}
+
+bool is_referenceable_type(QualType type, const ASTContext* ast_ctx) {
+    type = remove_reference(type, ast_ctx);
+    type = desugar_type(type, ast_ctx);
+    if (!type) {
+        return false;
+    }
+    return !type->isVoid();
+}
+
 const char* builtin_type_transform_name(BuiltinTypeTransformKind kind) {
     switch (kind) {
+        case BuiltinTypeTransformKind::RemoveConst:
+            return "__remove_const";
+        case BuiltinTypeTransformKind::RemoveVolatile:
+            return "__remove_volatile";
+        case BuiltinTypeTransformKind::RemoveCV:
+            return "__remove_cv";
         case BuiltinTypeTransformKind::RemoveReference:
             return "__remove_reference";
+        case BuiltinTypeTransformKind::AddPointer:
+            return "__add_pointer";
+        case BuiltinTypeTransformKind::AddLValueReference:
+            return "__add_lvalue_reference";
+        case BuiltinTypeTransformKind::AddRValueReference:
+            return "__add_rvalue_reference";
     }
     return "__builtin_type_transform";
 }
@@ -2836,8 +2866,32 @@ const char* builtin_type_transform_name(BuiltinTypeTransformKind kind) {
 bool lookup_builtin_type_transform_kind(
     std::string_view name,
     BuiltinTypeTransformKind& out) {
+    if (name == "__remove_const") {
+        out = BuiltinTypeTransformKind::RemoveConst;
+        return true;
+    }
+    if (name == "__remove_volatile") {
+        out = BuiltinTypeTransformKind::RemoveVolatile;
+        return true;
+    }
+    if (name == "__remove_cv") {
+        out = BuiltinTypeTransformKind::RemoveCV;
+        return true;
+    }
     if (name == "__remove_reference" || name == "__remove_reference_t") {
         out = BuiltinTypeTransformKind::RemoveReference;
+        return true;
+    }
+    if (name == "__add_pointer") {
+        out = BuiltinTypeTransformKind::AddPointer;
+        return true;
+    }
+    if (name == "__add_lvalue_reference") {
+        out = BuiltinTypeTransformKind::AddLValueReference;
+        return true;
+    }
+    if (name == "__add_rvalue_reference") {
+        out = BuiltinTypeTransformKind::AddRValueReference;
         return true;
     }
     return false;
@@ -2857,8 +2911,41 @@ QualType apply_builtin_type_transform(
     QualType operand_type,
     const ASTContext* ast_ctx) {
     switch (kind) {
+        case BuiltinTypeTransformKind::RemoveConst:
+            return remove_top_level_qualifiers(operand_type, QUAL_CONST);
+        case BuiltinTypeTransformKind::RemoveVolatile:
+            return remove_top_level_qualifiers(operand_type, QUAL_VOLATILE);
+        case BuiltinTypeTransformKind::RemoveCV:
+            return remove_top_level_qualifiers(
+                operand_type,
+                static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
         case BuiltinTypeTransformKind::RemoveReference:
             return remove_reference(operand_type, ast_ctx);
+        case BuiltinTypeTransformKind::AddPointer: {
+            auto pointee_type = remove_reference(operand_type, ast_ctx);
+            if (!pointee_type) {
+                return QualType();
+            }
+            auto canonical_pointee = desugar_type(pointee_type, ast_ctx);
+            if (!canonical_pointee) {
+                return QualType();
+            }
+            if (!canonical_pointee->isVoid() &&
+                !is_referenceable_type(operand_type, ast_ctx)) {
+                return operand_type;
+            }
+            return QualType(std::make_shared<PointerType>(pointee_type));
+        }
+        case BuiltinTypeTransformKind::AddLValueReference:
+            if (!is_referenceable_type(operand_type, ast_ctx)) {
+                return operand_type;
+            }
+            return make_reference_type(operand_type, ReferenceKind::LValue);
+        case BuiltinTypeTransformKind::AddRValueReference:
+            if (!is_referenceable_type(operand_type, ast_ctx)) {
+                return operand_type;
+            }
+            return make_reference_type(operand_type, ReferenceKind::RValue);
     }
     return operand_type;
 }
