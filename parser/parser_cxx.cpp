@@ -2931,6 +2931,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
     }
     advance(); // consume namespace
 
+    std::vector<ParsedAttribute> namespace_head_attrs = try_parse_attributes();
+
     struct NamespacePathComponent {
         std::string name;
         SrcLoc loc;
@@ -3008,6 +3010,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
         DeclContext* semantic_context = nullptr;
         bool is_anonymous = false;
         bool is_inline = false;
+        std::vector<ParsedAttribute> attrs;
     };
     std::vector<NamespaceDeclBuildInfo> namespace_decl_infos;
 
@@ -3282,7 +3285,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                         component.loc,
                         current_context.get(),
                         false,
-                        component.is_inline});
+                        component.is_inline,
+                        {}});
             }
             ++entered_namespace_depth;
             return;
@@ -3315,7 +3319,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                     component.loc,
                     current_context.get(),
                     false,
-                    component.is_inline});
+                    component.is_inline,
+                    {}});
         }
         ++entered_namespace_depth;
     };
@@ -3334,13 +3339,21 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                         namespace_loc,
                         current_context.get(),
                         true,
-                        false});
+                        false,
+                        {}});
             }
             ++entered_namespace_depth;
         } else {
             for (const auto& component : namespace_path) {
                 enter_named_namespace(component);
             }
+        }
+        if (!namespace_decl_infos.empty() && !namespace_head_attrs.empty()) {
+            auto& outermost_info = namespace_decl_infos.front();
+            outermost_info.attrs.insert(
+                outermost_info.attrs.end(),
+                std::make_move_iterator(namespace_head_attrs.begin()),
+                std::make_move_iterator(namespace_head_attrs.end()));
         }
 
         size_t last_recovery_idx = std::numeric_limits<size_t>::max();
@@ -3424,6 +3437,12 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_namespace_definition() {
                         namespace_decl_ptr;
                 } else {
                     namespace_decl_ptr->canonical_decl = namespace_decl_ptr;
+                }
+
+                if (ast_ctx && !info.attrs.empty()) {
+                    ast_ctx->append_attrs(
+                        namespace_decl_ptr->node_id,
+                        std::vector<ParsedAttribute>(info.attrs));
                 }
 
                 current_members.clear();
