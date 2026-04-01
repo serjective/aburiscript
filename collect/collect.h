@@ -1988,11 +1988,26 @@ private:
         const std::vector<std::unique_ptr<Expr>>& explicit_args,
         std::vector<OverloadCallCandidate>& candidates_out,
         SrcLoc loc) ;
+    void append_unqualified_function_template_overload_candidates(
+        std::string_view function_name,
+        Expr* implicit_object_arg,
+        OverloadImplicitObjectArgKind implicit_arg_kind,
+        const std::vector<Expr*>& explicit_args,
+        std::vector<OverloadCallCandidate>& candidates_out,
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> select_overload_candidate(
         std::string_view callee_name,
         const std::vector<OverloadCallCandidate>& candidates,
         const std::vector<std::unique_ptr<Expr>>& explicit_args,
+        Expr* implicit_object_arg,
+        SrcLoc loc,
+        std::shared_ptr<Symbol>& selected_symbol_out,
+        OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) ;
+    std::unique_ptr<Expr> select_overload_candidate(
+        std::string_view callee_name,
+        const std::vector<OverloadCallCandidate>& candidates,
+        const std::vector<Expr*>& explicit_args,
         Expr* implicit_object_arg,
         SrcLoc loc,
         std::shared_ptr<Symbol>& selected_symbol_out,
@@ -2027,6 +2042,14 @@ private:
         SrcLoc loc,
         std::shared_ptr<Symbol>& selected_symbol_out,
         OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) ;
+    std::unique_ptr<Expr> resolve_overloaded_call_candidates(
+        std::string_view callee_name,
+        const std::vector<OverloadCallCandidate>& candidates,
+        const std::vector<Expr*>& explicit_args,
+        Expr* implicit_object_arg,
+        SrcLoc loc,
+        std::shared_ptr<Symbol>& selected_symbol_out,
+        OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) ;
 
     ImplicitConversionSequence evaluate_overload_implicit_object_conversion(
         Expr* object_arg,
@@ -2044,6 +2067,11 @@ private:
     OverloadCandidateEval evaluate_overload_call_candidate(
         const OverloadCallCandidate& candidate_info,
         const std::vector<std::unique_ptr<Expr>>& explicit_args,
+        Expr* implicit_object_arg,
+        OverloadConversionMemoCache* conversion_cache = nullptr) ;
+    OverloadCandidateEval evaluate_overload_call_candidate(
+        const OverloadCallCandidate& candidate_info,
+        const std::vector<Expr*>& explicit_args,
         Expr* implicit_object_arg,
         OverloadConversionMemoCache* conversion_cache = nullptr) ;
 

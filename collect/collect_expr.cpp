@@ -4567,15 +4567,15 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
             loc)) {
         return candidate_error;
     }
-    std::vector<std::unique_ptr<Expr>> explicit_args;
-    explicit_args.push_back(std::move(rhs));
+    std::vector<Expr*> probe_args;
+    probe_args.push_back(rhs.get());
     append_unqualified_overload_candidates(
         op_name, OverloadImplicitObjectArgKind::Regular, overload_candidates);
     append_unqualified_function_template_overload_candidates(
         op_name,
         lhs.get(),
         OverloadImplicitObjectArgKind::Regular,
-        explicit_args,
+        probe_args,
         overload_candidates,
         loc);
 
@@ -4593,7 +4593,7 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
     if (auto overload_error = select_overload_candidate(
             op_name,
             overload_candidates,
-            explicit_args,
+            probe_args,
             lhs.get(),
             loc,
             selected_symbol,
@@ -4617,6 +4617,8 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
         /*object_expr_is_pointer=*/false,
         loc);
 
+    std::vector<std::unique_ptr<Expr>> explicit_args;
+    explicit_args.push_back(std::move(rhs));
     if (selected_implicit_object_arg_kind != OverloadImplicitObjectArgKind::None &&
         implicit_object_arg) {
         explicit_args.insert(explicit_args.begin(), std::move(implicit_object_arg));

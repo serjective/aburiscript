@@ -210,6 +210,16 @@ bool is_function_template_specialization_symbol(
         get_symbol_function_template_specialization(symbol.get()) != nullptr;
 }
 
+std::vector<Expr*> make_raw_explicit_args(
+    const std::vector<std::unique_ptr<Expr>>& explicit_args) {
+    std::vector<Expr*> raw_args;
+    raw_args.reserve(explicit_args.size());
+    for (const auto& arg : explicit_args) {
+        raw_args.push_back(arg.get());
+    }
+    return raw_args;
+}
+
 void append_unique_function_template_candidate(
     std::vector<const FunctionTemplateDecl*>& candidates,
     const Decl* decl) {
@@ -534,6 +544,22 @@ void Collect::append_unqualified_function_template_overload_candidates(
     const std::vector<std::unique_ptr<Expr>>& explicit_args,
     std::vector<OverloadCallCandidate>& candidates_out,
     SrcLoc loc) {
+    append_unqualified_function_template_overload_candidates(
+        function_name,
+        implicit_object_arg,
+        implicit_arg_kind,
+        make_raw_explicit_args(explicit_args),
+        candidates_out,
+        loc);
+}
+
+void Collect::append_unqualified_function_template_overload_candidates(
+    std::string_view function_name,
+    Expr* implicit_object_arg,
+    OverloadImplicitObjectArgKind implicit_arg_kind,
+    const std::vector<Expr*>& explicit_args,
+    std::vector<OverloadCallCandidate>& candidates_out,
+    SrcLoc loc) {
     if (!session_.current_scope_) {
         return;
     }
@@ -555,8 +581,8 @@ void Collect::append_unqualified_function_template_overload_candidates(
     if (implicit_arg_kind != OverloadImplicitObjectArgKind::None) {
         deduction_args.push_back(implicit_object_arg);
     }
-    for (const auto& arg : explicit_args) {
-        deduction_args.push_back(arg.get());
+    for (Expr* arg : explicit_args) {
+        deduction_args.push_back(arg);
     }
 
     candidates_out.reserve(candidates_out.size() + template_candidates.size());
@@ -597,6 +623,24 @@ std::unique_ptr<Expr> Collect::select_overload_candidate(
     std::string_view callee_name,
     const std::vector<OverloadCallCandidate>& candidates,
     const std::vector<std::unique_ptr<Expr>>& explicit_args,
+    Expr* implicit_object_arg,
+    SrcLoc loc,
+    std::shared_ptr<Symbol>& selected_symbol_out,
+    OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) {
+    return select_overload_candidate(
+        callee_name,
+        candidates,
+        make_raw_explicit_args(explicit_args),
+        implicit_object_arg,
+        loc,
+        selected_symbol_out,
+        selected_implicit_object_arg_kind_out);
+}
+
+std::unique_ptr<Expr> Collect::select_overload_candidate(
+    std::string_view callee_name,
+    const std::vector<OverloadCallCandidate>& candidates,
+    const std::vector<Expr*>& explicit_args,
     Expr* implicit_object_arg,
     SrcLoc loc,
     std::shared_ptr<Symbol>& selected_symbol_out,
@@ -1712,6 +1756,18 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
     const std::vector<std::unique_ptr<Expr>>& explicit_args,
     Expr* implicit_object_arg,
     OverloadConversionMemoCache* conversion_cache) {
+    return evaluate_overload_call_candidate(
+        candidate_info,
+        make_raw_explicit_args(explicit_args),
+        implicit_object_arg,
+        conversion_cache);
+}
+
+Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
+    const OverloadCallCandidate& candidate_info,
+    const std::vector<Expr*>& explicit_args,
+    Expr* implicit_object_arg,
+    OverloadConversionMemoCache* conversion_cache) {
 
     bump_overload_candidate_evaluations();
     OverloadCandidateEval eval;
@@ -1853,7 +1909,7 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
             QualType param_type =
                 decay_parameter_type(candidate_fn->parameters[param_index]);
             auto seq = build_cpp_overload_conversion_sequence_cached(
-                explicit_args[i].get(),
+                explicit_args[i],
                 param_type,
                 /*allow_user_defined=*/true,
                 conversion_cache);
@@ -2195,6 +2251,24 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
     std::string_view callee_name,
     const std::vector<OverloadCallCandidate>& candidates,
     const std::vector<std::unique_ptr<Expr>>& explicit_args,
+    Expr* implicit_object_arg,
+    SrcLoc loc,
+    std::shared_ptr<Symbol>& selected_symbol_out,
+    OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) {
+    return resolve_overloaded_call_candidates(
+        callee_name,
+        candidates,
+        make_raw_explicit_args(explicit_args),
+        implicit_object_arg,
+        loc,
+        selected_symbol_out,
+        selected_implicit_object_arg_kind_out);
+}
+
+std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
+    std::string_view callee_name,
+    const std::vector<OverloadCallCandidate>& candidates,
+    const std::vector<Expr*>& explicit_args,
     Expr* implicit_object_arg,
     SrcLoc loc,
     std::shared_ptr<Symbol>& selected_symbol_out,
