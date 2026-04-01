@@ -806,9 +806,13 @@ llvm::Constant* ASTToLLVM::emit_constant_initializer(Expr* expr) {
         !llvm::isa<ExplicitCast>(expr) && !llvm::isa<ImplicitCast>(expr);
     llvm::Type* expr_ty = convert_type(expr->get_type());
     bool expr_is_unsigned = expr->get_type() && expr->get_type()->isUnsigned();
+    ConstEvalMode consteval_mode =
+        lang_opts.is_cxx_mode()
+            ? ConstEvalMode::cpp_core_constant_expression()
+            : ConstEvalMode::c_static_initializer();
     if (allow_consteval_fast_path && expr_ty) {
         if (auto* lowered = lower_consteval_to_llvm_constant(
-                expr, expr_ty, expr_is_unsigned, ConstEvalMode::c_static_initializer())) {
+                expr, expr_ty, expr_is_unsigned, consteval_mode)) {
             return lowered;
         }
     }

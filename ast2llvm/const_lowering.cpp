@@ -142,6 +142,89 @@ llvm::Constant* lower_pointer_constant(const ConstValue& value, llvm::Type* targ
     // until pointer-sized constant semantics are fully unified.
     return nullptr;
 }
+
+llvm::Constant* lower_value_constant(const ConstValue& value,
+                                     llvm::Type* target_type,
+                                     bool target_is_unsigned);
+
+llvm::Constant* lower_array_constant(const ConstValue& value, llvm::Type* target_type) {
+    auto* array_type = llvm::dyn_cast<llvm::ArrayType>(target_type);
+    if (!array_type ||
+        value.kind != ConstValueKind::Object ||
+        !value.object_value ||
+        value.object_value->kind != ConstObjectValueKind::Array ||
+        value.object_value->elements.size() != array_type->getNumElements()) {
+        return nullptr;
+    }
+
+    std::vector<llvm::Constant*> elements;
+    elements.reserve(value.object_value->elements.size());
+    llvm::Type* element_type = array_type->getElementType();
+    for (const auto& element : value.object_value->elements) {
+        llvm::Constant* lowered = lower_value_constant(
+            element,
+            element_type,
+            element.kind == ConstValueKind::Integer && element.int_value.is_unsigned);
+        if (!lowered) {
+            return nullptr;
+        }
+        elements.push_back(lowered);
+    }
+    return llvm::ConstantArray::get(array_type, elements);
+}
+
+llvm::Constant* lower_struct_constant(const ConstValue& value, llvm::Type* target_type) {
+    auto* struct_type = llvm::dyn_cast<llvm::StructType>(target_type);
+    if (!struct_type ||
+        value.kind != ConstValueKind::Object ||
+        !value.object_value ||
+        value.object_value->kind != ConstObjectValueKind::Record ||
+        value.object_value->elements.size() != struct_type->getNumElements()) {
+        return nullptr;
+    }
+
+    std::vector<llvm::Constant*> elements;
+    elements.reserve(value.object_value->elements.size());
+    for (size_t index = 0; index < value.object_value->elements.size(); ++index) {
+        const auto& element = value.object_value->elements[index];
+        llvm::Type* field_type = struct_type->getElementType(static_cast<unsigned>(index));
+        llvm::Constant* lowered = lower_value_constant(
+            element,
+            field_type,
+            element.kind == ConstValueKind::Integer && element.int_value.is_unsigned);
+        if (!lowered) {
+            return nullptr;
+        }
+        elements.push_back(lowered);
+    }
+    return llvm::ConstantStruct::get(struct_type, elements);
+}
+
+llvm::Constant* lower_value_constant(const ConstValue& value,
+                                     llvm::Type* target_type,
+                                     bool target_is_unsigned) {
+    if (!target_type) {
+        return nullptr;
+    }
+
+    if (target_type->isIntegerTy()) {
+        return lower_integer_constant(value, target_type, target_is_unsigned);
+    }
+    if (target_type->isFloatingPointTy()) {
+        return lower_floating_constant(value, target_type);
+    }
+    if (target_type->isPointerTy()) {
+        return lower_pointer_constant(value, target_type);
+    }
+    if (target_type->isArrayTy()) {
+        return lower_array_constant(value, target_type);
+    }
+    if (target_type->isStructTy()) {
+        return lower_struct_constant(value, target_type);
+    }
+
+    return nullptr;
+}
 }
 
 llvm::Constant* lower_consteval_to_llvm_constant(
@@ -155,6 +238,7 @@ llvm::Constant* lower_consteval_to_llvm_constant(
 
     LangOptions options;
     options.enable_consteval_engine = true;
+    options.enable_consteval_function_interpreter = true;
     ConstEvalEngine engine(options);
     ConstEvalResult eval_result = engine.evaluate(expr, mode);
     if (eval_result.status != ConstEvalStatus::Constant || !eval_result.value.has_value()) {
@@ -162,16 +246,5 @@ llvm::Constant* lower_consteval_to_llvm_constant(
     }
 
     const ConstValue& value = eval_result.value.value();
-
-    if (target_type->isIntegerTy()) {
-        return lower_integer_constant(value, target_type, target_is_unsigned);
-    }
-    if (target_type->isFloatingPointTy()) {
-        return lower_floating_constant(value, target_type);
-    }
-    if (target_type->isPointerTy()) {
-        return lower_pointer_constant(value, target_type);
-    }
-
-    return nullptr;
+    return lower_value_constant(value, target_type, target_is_unsigned);
 }

@@ -859,6 +859,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 ctor_decl->name,
                 ctor_decl->type,
                 ctor_decl->storage_class,
+                ctor_decl->is_constexpr,
                 ctor_decl->is_inline,
                 ctor_decl->body != nullptr || ctor_decl->has_deferred_inline_body(),
                 ctor_decl->location,
@@ -907,6 +908,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 dtor_decl->name,
                 dtor_decl->type,
                 dtor_decl->storage_class,
+                dtor_decl->is_constexpr,
                 dtor_decl->is_inline,
                 dtor_decl->body != nullptr || dtor_decl->has_deferred_inline_body(),
                 dtor_decl->location,
@@ -991,6 +993,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 method_decl->name,
                 method_decl->type,
                 method_decl->storage_class,
+                method_decl->is_constexpr,
                 method_decl->is_inline,
                 method_decl->body != nullptr || method_decl->has_deferred_inline_body(),
                 method_decl->location,
@@ -3023,7 +3026,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
          decl_parser.trailing_function_ref_qualifier != 0)) {
         error("non-member function cannot have cv/ref qualifier");
     }
-    if (declaration_is_constexpr) {
+    if (declaration_is_constexpr && !is_cxx_mode_active()) {
         error("'constexpr' can only be applied to object declarations");
     }
     validate_cpp_operator_function_declaration(
@@ -3039,6 +3042,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             decl_parser.name,
             QualType(parsed_decl_type),
             storage_class,
+            declaration_is_constexpr,
             decl_parser.is_inline,
             false,
             declarator_token.loc,
@@ -3054,6 +3058,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             decl_parser.name,
             QualType(parsed_decl_type),
             storage_class,
+            declaration_is_constexpr,
             decl_parser.is_inline,
             is_definition,
             declarator_token.loc,

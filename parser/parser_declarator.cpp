@@ -982,8 +982,17 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                 auto saved_pos = mgnt->get_token_idx();
                 if (pars->isTokenDeclarationSpec(mgnt->current_token())) {
                     std::vector<QualType> args;
+                    std::vector<std::unique_ptr<DeclarationParser>> local_args;
                     bool found_ellipsis = false;
                     bool parse_ok = true;
+                    bool saw_default_argument = false;
+                    pars->collect_->collect_enter_scope(ScopeFlags::PrototypeScope);
+                    struct ParamScopeGuard {
+                        Parser* parser;
+                        ~ParamScopeGuard() {
+                            parser->collect_->collect_leave_scope();
+                        }
+                    } param_scope_guard{pars};
                     while (true) {
                         if (mgnt->gentle_check_and_consume(TokenType::ELLIPSIS)) {
                             found_ellipsis = true;
@@ -996,13 +1005,51 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                             parse_ok = false;
                             break;
                         }
+                        if (!dp->name.empty()) {
+                            auto temp_sym = std::make_shared<Symbol>(
+                                dp->name,
+                                SymbolKind::VARIABLE,
+                                QualType(ctype, dp->qualifiers),
+                                dp->str_class,
+                                VariableLinkage::NONE);
+                            pars->collect_->collect_bind_symbol_in_current_scope(
+                                dp->name, temp_sym);
+                            dp->preparsed_sym = temp_sym;
+                        }
                         args.push_back(ctype);
+                        local_args.push_back(std::move(dp));
+                        auto* parsed_param = local_args.back().get();
+                        bool has_default_argument = false;
+                        if (mgnt->gentle_check(TokenType::ASSIGN)) {
+                            if (!pars->is_cxx_mode_active()) {
+                                error("default arguments are only allowed in C++ declarations");
+                            }
+                            mgnt->advance(); // '='
+                            parsed_param->default_argument =
+                                pars->parse_assignment_expression();
+                            if (!parsed_param->default_argument) {
+                                error("invalid default argument expression");
+                            }
+                            has_default_argument = true;
+                        }
+                        if (has_default_argument) {
+                            saw_default_argument = true;
+                        } else if (saw_default_argument) {
+                            error("parameter without a default argument follows parameter with a default argument");
+                        }
+                        while (is_gnu_attribute_token(mgnt->current_token())) {
+                            pars->try_parse_attributes();
+                        }
                         if (mgnt->gentle_check_and_consume(TokenType::COMMA)) {
                             continue;
                         }
                         break;
                     }
                     if (parse_ok && mgnt->gentle_check_and_consume(TokenType::RIGHT_PAREN)) {
+                        if (!captured_func_args) {
+                            func_args = std::move(local_args);
+                            captured_func_args = true;
+                        }
                         auto func_type = std::make_shared<FunctionType>();
                         func_type->parameters = std::move(args);
                         func_type->is_variadic = found_ellipsis;

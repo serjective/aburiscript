@@ -161,7 +161,9 @@ ConstEvalResult make_constant_int(ConstIntValue value) {
 
 struct InterpScopeBindings {
     std::unordered_map<const Symbol*, ConstValue> symbol_values;
+    std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_owners;
     std::unordered_map<std::string, ConstValue> named_values;
+    std::unordered_map<std::string, std::shared_ptr<Symbol>> named_symbols;
 };
 
 struct InterpFrame {
@@ -325,31 +327,79 @@ bool bind_interpreter_local(
     }
     if (sym) {
         scope->symbol_values[sym.get()] = value;
+        scope->symbol_owners[sym.get()] = sym;
     }
     if (!name.empty()) {
         scope->named_values[name] = value;
+        if (sym) {
+            scope->named_symbols[name] = sym;
+        }
     }
     return true;
 }
 
-bool assign_interpreter_local(const VarRef* var_ref, const ConstValue& value) {
-    if (!g_interpreter_session || g_interpreter_session->frames.empty() || !var_ref) {
+bool assign_interpreter_symbol_value(const Symbol* sym, const ConstValue& value) {
+    if (!g_interpreter_session || g_interpreter_session->frames.empty() || !sym) {
         return false;
     }
     auto& current_frame = g_interpreter_session->frames.back();
     for (auto scope_it = current_frame.scopes.rbegin();
          scope_it != current_frame.scopes.rend(); ++scope_it) {
-        if (var_ref->symref) {
-            auto sym_it = scope_it->symbol_values.find(var_ref->symref.get());
-            if (sym_it != scope_it->symbol_values.end()) {
-                sym_it->second = value;
-                return true;
+        auto sym_it = scope_it->symbol_values.find(sym);
+        if (sym_it != scope_it->symbol_values.end()) {
+            sym_it->second = value;
+            for (auto& [name, named_sym] : scope_it->named_symbols) {
+                if (named_sym && named_sym.get() == sym) {
+                    scope_it->named_values[name] = value;
+                }
             }
+            return true;
         }
+    }
+    return false;
+}
+
+bool assign_interpreter_local(const VarRef* var_ref, const ConstValue& value) {
+    if (!var_ref) {
+        return false;
+    }
+    if (var_ref->symref &&
+        assign_interpreter_symbol_value(var_ref->symref.get(), value)) {
+        return true;
+    }
+    if (!g_interpreter_session || g_interpreter_session->frames.empty()) {
+        return false;
+    }
+    auto& current_frame = g_interpreter_session->frames.back();
+    for (auto scope_it = current_frame.scopes.rbegin();
+         scope_it != current_frame.scopes.rend(); ++scope_it) {
         if (!var_ref->get_name().empty()) {
             auto name_it = scope_it->named_values.find(var_ref->get_name());
             if (name_it != scope_it->named_values.end()) {
                 name_it->second = value;
+                if (auto sym_it = scope_it->named_symbols.find(var_ref->get_name());
+                    sym_it != scope_it->named_symbols.end() &&
+                    sym_it->second) {
+                    scope_it->symbol_values[sym_it->second.get()] = value;
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool lookup_interpreter_symbol_value(const Symbol* sym, ConstValue& value_out) {
+    if (!g_interpreter_session || !sym) {
+        return false;
+    }
+    for (auto frame_it = g_interpreter_session->frames.rbegin();
+         frame_it != g_interpreter_session->frames.rend(); ++frame_it) {
+        for (auto scope_it = frame_it->scopes.rbegin();
+             scope_it != frame_it->scopes.rend(); ++scope_it) {
+            auto sym_it = scope_it->symbol_values.find(sym);
+            if (sym_it != scope_it->symbol_values.end()) {
+                value_out = sym_it->second;
                 return true;
             }
         }
@@ -361,17 +411,14 @@ bool lookup_interpreter_local(const VarRef* var_ref, ConstValue& value_out) {
     if (!g_interpreter_session || !var_ref) {
         return false;
     }
+    if (var_ref->symref &&
+        lookup_interpreter_symbol_value(var_ref->symref.get(), value_out)) {
+        return true;
+    }
     for (auto frame_it = g_interpreter_session->frames.rbegin();
          frame_it != g_interpreter_session->frames.rend(); ++frame_it) {
         for (auto scope_it = frame_it->scopes.rbegin();
              scope_it != frame_it->scopes.rend(); ++scope_it) {
-            if (var_ref->symref) {
-                auto sym_it = scope_it->symbol_values.find(var_ref->symref.get());
-                if (sym_it != scope_it->symbol_values.end()) {
-                    value_out = sym_it->second;
-                    return true;
-                }
-            }
             if (!var_ref->get_name().empty()) {
                 auto name_it = scope_it->named_values.find(var_ref->get_name());
                 if (name_it != scope_it->named_values.end()) {
@@ -382,6 +429,336 @@ bool lookup_interpreter_local(const VarRef* var_ref, ConstValue& value_out) {
         }
     }
     return false;
+}
+
+bool lookup_interpreter_named_value(const std::string& name, ConstValue& value_out) {
+    if (!g_interpreter_session || name.empty()) {
+        return false;
+    }
+    for (auto frame_it = g_interpreter_session->frames.rbegin();
+         frame_it != g_interpreter_session->frames.rend(); ++frame_it) {
+        for (auto scope_it = frame_it->scopes.rbegin();
+             scope_it != frame_it->scopes.rend(); ++scope_it) {
+            auto name_it = scope_it->named_values.find(name);
+            if (name_it != scope_it->named_values.end()) {
+                value_out = name_it->second;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+std::shared_ptr<Symbol> lookup_interpreter_named_symbol(const std::string& name) {
+    if (!g_interpreter_session || name.empty()) {
+        return nullptr;
+    }
+    for (auto frame_it = g_interpreter_session->frames.rbegin();
+         frame_it != g_interpreter_session->frames.rend(); ++frame_it) {
+        for (auto scope_it = frame_it->scopes.rbegin();
+             scope_it != frame_it->scopes.rend(); ++scope_it) {
+            auto name_it = scope_it->named_symbols.find(name);
+            if (name_it != scope_it->named_symbols.end()) {
+                return name_it->second;
+            }
+        }
+    }
+    return nullptr;
+}
+
+namespace {
+std::shared_ptr<ConstObjectValue> clone_const_object_value(
+    const std::shared_ptr<ConstObjectValue>& object_value);
+
+ConstValue clone_const_value(const ConstValue& value) {
+    ConstValue cloned = value;
+    if (value.kind == ConstValueKind::Object && value.object_value) {
+        cloned.object_value = clone_const_object_value(value.object_value);
+    }
+    return cloned;
+}
+
+std::shared_ptr<ConstObjectValue> clone_const_object_value(
+    const std::shared_ptr<ConstObjectValue>& object_value) {
+    if (!object_value) {
+        return nullptr;
+    }
+    auto cloned = std::make_shared<ConstObjectValue>();
+    cloned->kind = object_value->kind;
+    cloned->elements.reserve(object_value->elements.size());
+    for (const auto& element : object_value->elements) {
+        cloned->elements.push_back(clone_const_value(element));
+    }
+    return cloned;
+}
+} // namespace
+
+enum class InterpLocationComponentKind : uint8_t {
+    RecordField,
+    ArrayElement,
+};
+
+struct InterpLocationComponent {
+    InterpLocationComponentKind kind = InterpLocationComponentKind::RecordField;
+    size_t index = 0;
+};
+
+struct InterpLocation {
+    std::shared_ptr<Symbol> root_symbol = nullptr;
+    QualType root_type;
+    QualType value_type;
+    int64_t byte_offset = 0;
+    std::vector<InterpLocationComponent> path;
+};
+
+ConstEvalResult eval_constexpr_variable_initializer(
+    const Symbol* sym,
+    ConstEvalMode mode,
+    size_t depth,
+    bool allow_static_storage_duration);
+
+bool append_record_field_to_location(InterpLocation& location, size_t field_index) {
+    auto record_type =
+        desugar_type(remove_reference(location.value_type)).as_shared<ObjectType>();
+    if (!record_type) {
+        return false;
+    }
+    const auto& fields = record_type->semantic_fields();
+    if (field_index >= fields.size()) {
+        return false;
+    }
+    const auto& field = fields[field_index];
+    location.path.push_back(
+        {InterpLocationComponentKind::RecordField, field_index});
+    location.byte_offset += static_cast<int64_t>(field.offset);
+    location.value_type = field.type;
+    return true;
+}
+
+bool append_array_index_to_location(InterpLocation& location, size_t array_index) {
+    auto array_type =
+        desugar_type(remove_reference(location.value_type)).as_shared<ArrayType>();
+    if (!array_type || !array_type->element_type) {
+        return false;
+    }
+    if (array_type->size_kind == ArraySizeKind::Constant &&
+        array_type->size.has_value() &&
+        array_index >= *array_type->size) {
+        return false;
+    }
+    int64_t element_size = array_type->element_type->getWidthBytes();
+    if (element_size <= 0) {
+        return false;
+    }
+    location.path.push_back(
+        {InterpLocationComponentKind::ArrayElement, array_index});
+    location.byte_offset +=
+        element_size * static_cast<int64_t>(array_index);
+    location.value_type = array_type->element_type;
+    return true;
+}
+
+bool append_location_path_for_byte_offset(InterpLocation& location,
+                                          int64_t remaining_offset) {
+    if (remaining_offset < 0) {
+        return false;
+    }
+    if (remaining_offset == 0) {
+        return true;
+    }
+
+    QualType current_type = desugar_type(remove_reference(location.value_type));
+    if (auto array_type = current_type.as_shared<ArrayType>()) {
+        if (!array_type->element_type) {
+            return false;
+        }
+        int64_t element_size = array_type->element_type->getWidthBytes();
+        if (element_size <= 0 || remaining_offset % element_size != 0) {
+            return false;
+        }
+        size_t array_index = static_cast<size_t>(remaining_offset / element_size);
+        if (!append_array_index_to_location(location, array_index)) {
+            return false;
+        }
+        return true;
+    }
+
+    auto record_type = current_type.as_shared<ObjectType>();
+    if (!record_type) {
+        return false;
+    }
+
+    const auto& fields = record_type->semantic_fields();
+    for (size_t field_index = 0; field_index < fields.size(); ++field_index) {
+        const auto& field = fields[field_index];
+        int64_t field_offset = static_cast<int64_t>(field.offset);
+        if (field_offset > remaining_offset) {
+            continue;
+        }
+
+        int64_t field_size = 0;
+        if (field.storage_size_override > 0) {
+            field_size =
+                static_cast<int64_t>((field.storage_size_override + 7) / 8);
+        } else if (field.type) {
+            field_size = field.type->getWidthBytes();
+        }
+
+        bool maybe_matches =
+            remaining_offset == field_offset ||
+            (field_size > 0 && remaining_offset < field_offset + field_size);
+        if (!maybe_matches) {
+            continue;
+        }
+
+        if (!append_record_field_to_location(location, field_index)) {
+            return false;
+        }
+        return append_location_path_for_byte_offset(
+            location, remaining_offset - field_offset);
+    }
+    return false;
+}
+
+bool resolve_location_from_address_value(const ConstAddressValue& address_value,
+                                         InterpLocation& location_out) {
+    if (!address_value.symbol ||
+        address_value.symbol->kind != SymbolKind::VARIABLE) {
+        return false;
+    }
+    location_out = {};
+    location_out.root_symbol = address_value.symbol;
+    location_out.root_type = address_value.symbol->type;
+    location_out.value_type = address_value.symbol->type;
+    if (!location_out.root_type) {
+        return false;
+    }
+    if (address_value.byte_offset == 0) {
+        return true;
+    }
+    return append_location_path_for_byte_offset(
+        location_out, address_value.byte_offset);
+}
+
+bool load_interpreter_root_symbol_value(const std::shared_ptr<Symbol>& sym,
+                                        ConstEvalMode mode,
+                                        size_t depth,
+                                        ConstValue& value_out) {
+    if (!sym || sym->kind != SymbolKind::VARIABLE) {
+        return false;
+    }
+    if (lookup_interpreter_symbol_value(sym.get(), value_out)) {
+        return true;
+    }
+    if (is_cpp_core_constant_expression_mode(mode) ||
+        is_cpp_non_type_template_argument_mode(mode)) {
+        ConstEvalResult constexpr_value =
+            eval_constexpr_variable_initializer(
+                sym.get(),
+                mode,
+                depth + 1,
+                true);
+        if (constexpr_value.status == ConstEvalStatus::Constant &&
+            constexpr_value.value.has_value()) {
+            value_out = *constexpr_value.value;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool load_const_subvalue(const ConstValue& current,
+                         const std::vector<InterpLocationComponent>& path,
+                         size_t path_index,
+                         ConstValue& value_out) {
+    if (path_index >= path.size()) {
+        value_out = current;
+        return true;
+    }
+    if (current.kind != ConstValueKind::Object || !current.object_value) {
+        return false;
+    }
+    size_t element_index = path[path_index].index;
+    if (element_index >= current.object_value->elements.size()) {
+        return false;
+    }
+    return load_const_subvalue(
+        current.object_value->elements[element_index],
+        path,
+        path_index + 1,
+        value_out);
+}
+
+bool store_const_subvalue(ConstValue& current,
+                          const std::vector<InterpLocationComponent>& path,
+                          size_t path_index,
+                          const ConstValue& replacement) {
+    if (path_index >= path.size()) {
+        current = clone_const_value(replacement);
+        return true;
+    }
+    if (current.kind != ConstValueKind::Object || !current.object_value) {
+        return false;
+    }
+    current.object_value = clone_const_object_value(current.object_value);
+    size_t element_index = path[path_index].index;
+    if (element_index >= current.object_value->elements.size()) {
+        return false;
+    }
+    return store_const_subvalue(
+        current.object_value->elements[element_index],
+        path,
+        path_index + 1,
+        replacement);
+}
+
+bool load_interpreter_location_value(const InterpLocation& location,
+                                     ConstEvalMode mode,
+                                     size_t depth,
+                                     ConstValue& value_out) {
+    if (!location.root_symbol) {
+        return false;
+    }
+    ConstValue root_value;
+    if (!load_interpreter_root_symbol_value(
+            location.root_symbol, mode, depth, root_value)) {
+        return false;
+    }
+    return load_const_subvalue(root_value, location.path, 0, value_out);
+}
+
+bool store_interpreter_location_value(const InterpLocation& location,
+                                      const ConstValue& value) {
+    if (!location.root_symbol) {
+        return false;
+    }
+    ConstValue root_value;
+    if (!lookup_interpreter_symbol_value(location.root_symbol.get(), root_value)) {
+        return false;
+    }
+    if (!store_const_subvalue(root_value, location.path, 0, value)) {
+        return false;
+    }
+    return assign_interpreter_symbol_value(location.root_symbol.get(), root_value);
+}
+
+bool materialize_interpreter_temporary(QualType type,
+                                       const ConstValue& value,
+                                       std::shared_ptr<Symbol>& symbol_out) {
+    static size_t temporary_counter = 0;
+    std::string temporary_name =
+        "__constexpr_tmp_" + std::to_string(++temporary_counter);
+    auto temporary_symbol = std::make_shared<Symbol>(
+        temporary_name,
+        SymbolKind::VARIABLE,
+        type,
+        StorageClass::AUTO,
+        VariableLinkage::NONE);
+    if (!bind_interpreter_local(temporary_symbol, temporary_name, value)) {
+        return false;
+    }
+    symbol_out = std::move(temporary_symbol);
+    return true;
 }
 
 // ====== Type conversion & casting ======
@@ -666,6 +1043,216 @@ ConstEvalResult eval_expr_as_typed_const_value(Expr* expr,
                                                ConstEvalMode mode,
                                                size_t depth);
 
+bool evaluate_constant_index(Expr* expr,
+                             ConstEvalMode mode,
+                             size_t depth,
+                             size_t& index_out) {
+    if (!expr) {
+        return false;
+    }
+    ConstEvalResult index_eval = eval_expr(expr, mode, depth + 1);
+    if (index_eval.status != ConstEvalStatus::Constant ||
+        !index_eval.value.has_value()) {
+        return false;
+    }
+    IntShape shape = infer_integer_shape(expr->get_type());
+    ConstIntValue index_int{};
+    if (!const_value_to_int(*index_eval.value, shape, index_int) ||
+        index_int.to_signed_i64() < 0) {
+        return false;
+    }
+    index_out = static_cast<size_t>(index_int.to_unsigned_u64());
+    return true;
+}
+
+bool append_member_expr_path_to_location(InterpLocation& location,
+                                         const MemberExpr* member_expr) {
+    if (!member_expr) {
+        return false;
+    }
+    if (!member_expr->field_path.empty()) {
+        for (uint32_t field_index : member_expr->field_path) {
+            if (!append_record_field_to_location(location, field_index)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return append_record_field_to_location(location, member_expr->field_index);
+}
+
+bool traverse_member_expr_value(const ConstValue& base_value,
+                                const MemberExpr* member_expr,
+                                ConstValue& value_out) {
+    if (!member_expr) {
+        return false;
+    }
+    ConstValue current = base_value;
+    const auto advance_to_field = [&](ConstValue& target, uint32_t field_index) -> bool {
+        if (target.kind != ConstValueKind::Object ||
+            !target.object_value ||
+            target.object_value->kind != ConstObjectValueKind::Record ||
+            field_index >= target.object_value->elements.size()) {
+            return false;
+        }
+        target = target.object_value->elements[field_index];
+        return true;
+    };
+
+    if (!member_expr->field_path.empty()) {
+        for (uint32_t field_index : member_expr->field_path) {
+            if (!advance_to_field(current, field_index)) {
+                return false;
+            }
+        }
+        value_out = current;
+        return true;
+    }
+
+    if (!advance_to_field(current, member_expr->field_index)) {
+        return false;
+    }
+    value_out = current;
+    return true;
+}
+
+bool resolve_expr_location(Expr* expr,
+                           ConstEvalMode mode,
+                           size_t depth,
+                           InterpLocation& location_out) {
+    if (!expr || depth > kMaxConstEvalDepth) {
+        return false;
+    }
+
+    if (auto* cast = dyn_cast<ImplicitCast>(expr)) {
+        auto reference_type =
+            desugar_type(cast->get_type()).as_shared<ReferenceType>();
+        if (reference_type) {
+            if (resolve_expr_location(cast->expr.get(), mode, depth + 1, location_out)) {
+                return true;
+            }
+            ConstEvalResult temporary_value =
+                eval_expr(cast->expr.get(), mode, depth + 1);
+            if (temporary_value.status != ConstEvalStatus::Constant ||
+                !temporary_value.value.has_value()) {
+                return false;
+            }
+            std::shared_ptr<Symbol> temporary_symbol;
+            if (!materialize_interpreter_temporary(
+                    remove_reference(cast->get_type()),
+                    *temporary_value.value,
+                    temporary_symbol)) {
+                return false;
+            }
+            location_out = {};
+            location_out.root_symbol = temporary_symbol;
+            location_out.root_type = temporary_symbol->type;
+            location_out.value_type = temporary_symbol->type;
+            return true;
+        }
+    }
+
+    Expr* core = strip_noop_implicit_casts(expr);
+    if (!core) {
+        return false;
+    }
+
+    if (auto* var_ref = dyn_cast<VarRef>(core)) {
+        std::shared_ptr<Symbol> bound_symbol = var_ref->symref;
+        if (!bound_symbol && !var_ref->get_name().empty()) {
+            bound_symbol = lookup_interpreter_named_symbol(var_ref->get_name());
+        }
+        if (!bound_symbol || bound_symbol->kind != SymbolKind::VARIABLE) {
+            return false;
+        }
+        location_out = {};
+        location_out.root_symbol = std::move(bound_symbol);
+        location_out.root_type = location_out.root_symbol->type;
+        location_out.value_type = location_out.root_type;
+        return static_cast<bool>(location_out.value_type);
+    }
+
+    if (isa<CppThisExpr>(core)) {
+        ConstValue this_value;
+        if (!lookup_interpreter_named_value("this", this_value) ||
+            this_value.kind != ConstValueKind::Address) {
+            return false;
+        }
+        return resolve_location_from_address_value(
+            this_value.address_value, location_out);
+    }
+
+    if (auto* member_expr = dyn_cast<MemberExpr>(core)) {
+        InterpLocation base_location;
+        if (member_expr->isArrow) {
+            ConstEvalResult base_value =
+                eval_expr(member_expr->base.get(), mode, depth + 1);
+            if (base_value.status != ConstEvalStatus::Constant ||
+                !base_value.value.has_value() ||
+                base_value.value->kind != ConstValueKind::Address ||
+                !resolve_location_from_address_value(
+                    base_value.value->address_value, base_location)) {
+                return false;
+            }
+        } else if (!resolve_expr_location(
+                       member_expr->base.get(),
+                       mode,
+                       depth + 1,
+                       base_location)) {
+            return false;
+        }
+        if (!append_member_expr_path_to_location(base_location, member_expr)) {
+            return false;
+        }
+        location_out = std::move(base_location);
+        return true;
+    }
+
+    if (auto* subscript = dyn_cast<ArraySubscriptExpr>(core)) {
+        size_t index = 0;
+        if (!evaluate_constant_index(subscript->index.get(), mode, depth + 1, index)) {
+            return false;
+        }
+
+        InterpLocation base_location;
+        if (resolve_expr_location(subscript->array.get(), mode, depth + 1, base_location) &&
+            append_array_index_to_location(base_location, index)) {
+            location_out = std::move(base_location);
+            return true;
+        }
+
+        ConstEvalResult base_value = eval_expr(subscript->array.get(), mode, depth + 1);
+        if (base_value.status != ConstEvalStatus::Constant ||
+            !base_value.value.has_value() ||
+            base_value.value->kind != ConstValueKind::Address) {
+            return false;
+        }
+
+        QualType element_type = nullptr;
+        auto base_type =
+            desugar_type(remove_reference(subscript->array->get_type()));
+        if (auto pointer_type = base_type.as_shared<PointerType>()) {
+            element_type = pointer_type->pointed_type;
+        } else if (auto array_type = base_type.as_shared<ArrayType>()) {
+            element_type = array_type->element_type;
+        }
+        if (!element_type) {
+            return false;
+        }
+        int64_t element_size = element_type->getWidthBytes();
+        if (element_size <= 0) {
+            return false;
+        }
+
+        ConstAddressValue indexed_address = base_value.value->address_value;
+        indexed_address.byte_offset +=
+            element_size * static_cast<int64_t>(index);
+        return resolve_location_from_address_value(indexed_address, location_out);
+    }
+
+    return false;
+}
+
 ConstEvalResult eval_init_list_as_typed_const_value(InitListExpr* init_list,
                                                     QualType target_type,
                                                     ConstEvalMode mode,
@@ -838,6 +1425,8 @@ struct InterpExecResult {
     enum class Kind {
         Continue,
         Return,
+        Break,
+        LoopContinue,
         Fail
     };
 
@@ -881,12 +1470,97 @@ InterpExecResult make_interp_return_result(ConstEvalResult result) {
     return exec_result;
 }
 
+InterpExecResult make_interp_break_result() {
+    InterpExecResult exec_result;
+    exec_result.kind = InterpExecResult::Kind::Break;
+    return exec_result;
+}
+
+InterpExecResult make_interp_loop_continue_result() {
+    InterpExecResult exec_result;
+    exec_result.kind = InterpExecResult::Kind::LoopContinue;
+    return exec_result;
+}
+
 InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t depth);
 ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size_t depth);
 
 ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth);
 bool is_c23_integer_constant_expr(Expr* expr, ConstEvalMode mode, size_t depth);
 bool is_c23_address_constant_expr(Expr* expr, ConstEvalMode mode, size_t depth);
+
+bool eval_condition_truthiness(Expr* condition,
+                               ConstEvalMode mode,
+                               size_t depth,
+                               bool& truthy_out,
+                               ConstEvalResult& failure_out) {
+    if (!condition) {
+        failure_out = make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "statement condition is missing",
+            SrcLoc());
+        return false;
+    }
+
+    ConstEvalResult condition_result = eval_expr(condition, mode, depth + 1);
+    if (condition_result.status != ConstEvalStatus::Constant ||
+        !condition_result.value.has_value()) {
+        failure_out = std::move(condition_result);
+        return false;
+    }
+    if (!const_value_to_bool(*condition_result.value, truthy_out)) {
+        failure_out = make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "statement condition must be scalar in constexpr interpreter",
+            condition->location);
+        return false;
+    }
+    return true;
+}
+
+struct SwitchLabelInfo {
+    bool is_default = false;
+    const Expr* const_expr = nullptr;
+    const Expr* range_end = nullptr;
+};
+
+struct SwitchEntry {
+    std::vector<SwitchLabelInfo> labels;
+    Stmt* body = nullptr;
+};
+
+void collect_switch_entries_from_stmt(Stmt* stmt,
+                                      std::vector<SwitchEntry>& entries) {
+    if (!stmt) {
+        return;
+    }
+
+    if (auto* compound = dyn_cast<CompoundStmt>(stmt)) {
+        for (const auto& child : compound->statements) {
+            collect_switch_entries_from_stmt(child.get(), entries);
+        }
+        return;
+    }
+
+    SwitchEntry entry;
+    Stmt* current = stmt;
+    while (current) {
+        if (auto* case_stmt = dyn_cast<CaseStmt>(current)) {
+            entry.labels.push_back(
+                {false, case_stmt->const_expr.get(), case_stmt->range_end.get()});
+            current = case_stmt->stmt.get();
+            continue;
+        }
+        if (auto* default_stmt = dyn_cast<DefaultStmt>(current)) {
+            entry.labels.push_back({true, nullptr, nullptr});
+            current = default_stmt->stmt.get();
+            continue;
+        }
+        break;
+    }
+    entry.body = current;
+    entries.push_back(std::move(entry));
+}
 
 // ====== Constant expression classification (C23) ======
 
@@ -1044,6 +1718,120 @@ ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_
             unary->location);
     }
 
+    if (unary->uop == UnaryOpTypes::ADDRESS_OF) {
+        Expr* core = strip_noop_implicit_casts(unary->exp.get());
+        if (auto* var_ref = dyn_cast<VarRef>(core)) {
+            if (var_ref->symref &&
+                var_ref->symref->kind == SymbolKind::FUNCTION) {
+                return ConstEvalResult::constant(
+                    ConstValue::address(var_ref->symref));
+            }
+        }
+
+        InterpLocation location;
+        if (resolve_expr_location(unary->exp.get(), mode, depth + 1, location) &&
+            location.root_symbol) {
+            return ConstEvalResult::constant(
+                ConstValue::address(location.root_symbol, location.byte_offset));
+        }
+
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "address-of expression is not a supported constant expression",
+            unary->location);
+    }
+
+    if (unary->uop == UnaryOpTypes::DEREFERENCE) {
+        ConstEvalResult pointer_result = eval_expr(unary->exp.get(), mode, depth + 1);
+        if (pointer_result.status != ConstEvalStatus::Constant ||
+            !pointer_result.value.has_value() ||
+            pointer_result.value->kind != ConstValueKind::Address) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "dereference operand is not a supported address constant",
+                unary->location);
+        }
+        InterpLocation location;
+        if (!resolve_location_from_address_value(
+                pointer_result.value->address_value, location)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "dereference operand does not refer to interpreter-managed storage",
+                unary->location);
+        }
+        ConstValue pointee_value;
+        if (!load_interpreter_location_value(location, mode, depth + 1, pointee_value)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "dereference operand does not denote a constant object",
+                unary->location);
+        }
+        return ConstEvalResult::constant(pointee_value);
+    }
+
+    if (g_interpreter_session &&
+        (unary->uop == UnaryOpTypes::INCREMENT_PREFIX ||
+         unary->uop == UnaryOpTypes::DECREMENT_PREFIX ||
+         unary->uop == UnaryOpTypes::INCREMENT_POSTFIX ||
+         unary->uop == UnaryOpTypes::DECREMENT_POSTFIX)) {
+        InterpLocation location;
+        if (!resolve_expr_location(unary->exp.get(), mode, depth + 1, location)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "increment/decrement operand is not assignable in constexpr interpreter",
+                unary->location);
+        }
+
+        ConstValue current_value;
+        if (!load_interpreter_location_value(location, mode, depth + 1, current_value)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "increment/decrement operand is not available in constexpr interpreter storage",
+                unary->location);
+        }
+
+        IntShape shape = infer_integer_shape(unary->exp->get_type());
+        ConstIntValue current_int{};
+        if (!const_value_to_int(current_value, shape, current_int)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "increment/decrement requires integer-like operand",
+                unary->location);
+        }
+
+        ConstIntValue updated_int =
+            shape.is_unsigned
+                ? ConstIntValue::from_unsigned(
+                      current_int.to_unsigned_u64() +
+                          ((unary->uop == UnaryOpTypes::INCREMENT_PREFIX ||
+                            unary->uop == UnaryOpTypes::INCREMENT_POSTFIX)
+                               ? 1u
+                               : uint64_t(-1)),
+                      shape.width)
+                : ConstIntValue::from_signed(
+                      current_int.to_signed_i64() +
+                          ((unary->uop == UnaryOpTypes::INCREMENT_PREFIX ||
+                            unary->uop == UnaryOpTypes::INCREMENT_POSTFIX)
+                               ? 1
+                               : -1),
+                      shape.width);
+        auto casted =
+            cast_const_value_to_type(ConstValue::integer(updated_int), location.value_type);
+        if (!casted.has_value() ||
+            !store_interpreter_location_value(location, *casted)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "increment/decrement failed to update constexpr interpreter storage",
+                unary->location);
+        }
+
+        bool is_postfix =
+            unary->uop == UnaryOpTypes::INCREMENT_POSTFIX ||
+            unary->uop == UnaryOpTypes::DECREMENT_POSTFIX;
+        return ConstEvalResult::constant(
+            is_postfix ? current_value : *casted);
+    }
+
     ConstEvalResult inner = eval_expr(unary->exp.get(), mode, depth + 1);
     if (inner.status != ConstEvalStatus::Constant || !inner.value.has_value()) {
         return inner;
@@ -1086,6 +1874,216 @@ ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_
     }
 }
 
+BinOpTypes normalize_compound_assignment_binop(BinOpTypes bop) {
+    switch (bop) {
+        case BinOpTypes::ASSIGN_ADD:
+            return BinOpTypes::ADD;
+        case BinOpTypes::ASSIGN_SUB:
+            return BinOpTypes::SUB;
+        case BinOpTypes::ASSIGN_MUL:
+            return BinOpTypes::MULT;
+        case BinOpTypes::ASSIGN_DIV:
+            return BinOpTypes::DIV;
+        case BinOpTypes::ASSIGN_MOD:
+            return BinOpTypes::MOD;
+        case BinOpTypes::ASSIGN_LSHIFT:
+            return BinOpTypes::SHIFT_LEFT;
+        case BinOpTypes::ASSIGN_RSHIFT:
+            return BinOpTypes::SHIFT_RIGHT;
+        case BinOpTypes::ASSIGN_AND:
+            return BinOpTypes::BITWISE_AND;
+        case BinOpTypes::ASSIGN_XOR:
+            return BinOpTypes::BITWISE_XOR;
+        case BinOpTypes::ASSIGN_OR:
+            return BinOpTypes::BITWISE_OR;
+        default:
+            return bop;
+    }
+}
+
+ConstEvalResult eval_assignment_to_location(Expr* lhs_expr,
+                                            Expr* rhs_expr,
+                                            BinOpTypes assign_kind,
+                                            SrcLoc loc,
+                                            ConstEvalMode mode,
+                                            size_t depth) {
+    if (!lhs_expr || !rhs_expr || !g_interpreter_session) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "assignment is not supported in this constant-expression context",
+            loc);
+    }
+
+    InterpLocation lhs_location;
+    if (!resolve_expr_location(lhs_expr, mode, depth + 1, lhs_location)) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "assignment target is not assignable in constexpr interpreter",
+            loc);
+    }
+
+    ConstEvalResult rhs_res = eval_expr(rhs_expr, mode, depth + 1);
+    if (rhs_res.status != ConstEvalStatus::Constant || !rhs_res.value.has_value()) {
+        return rhs_res;
+    }
+
+    ConstValue assigned_value;
+    if (assign_kind == BinOpTypes::ASSIGN) {
+        auto casted =
+            cast_const_value_to_type(rhs_res.value.value(), lhs_location.value_type);
+        if (!casted.has_value()) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "unable to assign expression to target type in constexpr interpreter",
+                loc);
+        }
+        assigned_value = *casted;
+    } else {
+        ConstValue lhs_current_value;
+        if (!load_interpreter_location_value(
+                lhs_location, mode, depth + 1, lhs_current_value)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "assignment target is not available in constexpr interpreter storage",
+                loc);
+        }
+
+        IntShape operand_shape = infer_integer_shape(lhs_location.value_type);
+        ConstIntValue lhs_int{};
+        ConstIntValue rhs_int{};
+        if (!const_value_to_int(lhs_current_value, operand_shape, lhs_int) ||
+            !const_value_to_int(rhs_res.value.value(), operand_shape, rhs_int)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "compound assignment currently supports integer-like operands",
+                loc);
+        }
+
+        ConstIntValue updated_int{};
+        switch (normalize_compound_assignment_binop(assign_kind)) {
+            case BinOpTypes::MULT:
+                updated_int = operand_shape.is_unsigned
+                    ? ConstIntValue::from_unsigned(
+                          lhs_int.to_unsigned_u64() * rhs_int.to_unsigned_u64(),
+                          operand_shape.width)
+                    : ConstIntValue::from_signed(
+                          lhs_int.to_signed_i64() * rhs_int.to_signed_i64(),
+                          operand_shape.width);
+                break;
+            case BinOpTypes::DIV: {
+                auto div_res = const_int_div(lhs_int, rhs_int);
+                if (!div_res.value.has_value()) {
+                    return make_error(
+                        ConstEvalDiagCode::DivisionByZero,
+                        "division by zero in constant expression",
+                        loc);
+                }
+                updated_int = *div_res.value;
+                break;
+            }
+            case BinOpTypes::MOD: {
+                auto mod_res = const_int_mod(lhs_int, rhs_int);
+                if (!mod_res.value.has_value()) {
+                    return make_error(
+                        ConstEvalDiagCode::DivisionByZero,
+                        "modulo by zero in constant expression",
+                        loc);
+                }
+                updated_int = *mod_res.value;
+                break;
+            }
+            case BinOpTypes::ADD:
+                updated_int = operand_shape.is_unsigned
+                    ? ConstIntValue::from_unsigned(
+                          lhs_int.to_unsigned_u64() + rhs_int.to_unsigned_u64(),
+                          operand_shape.width)
+                    : ConstIntValue::from_signed(
+                          lhs_int.to_signed_i64() + rhs_int.to_signed_i64(),
+                          operand_shape.width);
+                break;
+            case BinOpTypes::SUB:
+                updated_int = operand_shape.is_unsigned
+                    ? ConstIntValue::from_unsigned(
+                          lhs_int.to_unsigned_u64() - rhs_int.to_unsigned_u64(),
+                          operand_shape.width)
+                    : ConstIntValue::from_signed(
+                          lhs_int.to_signed_i64() - rhs_int.to_signed_i64(),
+                          operand_shape.width);
+                break;
+            case BinOpTypes::SHIFT_LEFT: {
+                auto shl_res = const_int_shl(lhs_int, rhs_int);
+                if (!shl_res.value.has_value()) {
+                    return make_error(
+                        ConstEvalDiagCode::InvalidShiftAmount,
+                        "invalid left-shift amount in constant expression",
+                        loc);
+                }
+                updated_int = *shl_res.value;
+                break;
+            }
+            case BinOpTypes::SHIFT_RIGHT: {
+                uint64_t shift = rhs_int.to_unsigned_u64();
+                if (shift >= lhs_int.bit_width) {
+                    return make_error(
+                        ConstEvalDiagCode::InvalidShiftAmount,
+                        "invalid right-shift amount in constant expression",
+                        loc);
+                }
+                updated_int = lhs_int.is_unsigned
+                    ? ConstIntValue::from_unsigned(
+                          lhs_int.to_unsigned_u64() >> shift,
+                          lhs_int.bit_width)
+                    : ConstIntValue::from_signed(
+                          lhs_int.to_signed_i64() >> shift,
+                          lhs_int.bit_width);
+                break;
+            }
+            case BinOpTypes::BITWISE_AND:
+                updated_int = ConstIntValue::from_unsigned(
+                    lhs_int.to_unsigned_u64() & rhs_int.to_unsigned_u64(),
+                    operand_shape.width).cast(
+                    operand_shape.width, operand_shape.is_unsigned);
+                break;
+            case BinOpTypes::BITWISE_XOR:
+                updated_int = ConstIntValue::from_unsigned(
+                    lhs_int.to_unsigned_u64() ^ rhs_int.to_unsigned_u64(),
+                    operand_shape.width).cast(
+                    operand_shape.width, operand_shape.is_unsigned);
+                break;
+            case BinOpTypes::BITWISE_OR:
+                updated_int = ConstIntValue::from_unsigned(
+                    lhs_int.to_unsigned_u64() | rhs_int.to_unsigned_u64(),
+                    operand_shape.width).cast(
+                    operand_shape.width, operand_shape.is_unsigned);
+                break;
+            default:
+                return make_not_evaluated(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "compound assignment operator is not supported by constexpr interpreter yet",
+                    loc);
+        }
+
+        auto casted =
+            cast_const_value_to_type(ConstValue::integer(updated_int), lhs_location.value_type);
+        if (!casted.has_value()) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "compound assignment result is not convertible to target type",
+                loc);
+        }
+        assigned_value = *casted;
+    }
+
+    if (!store_interpreter_location_value(lhs_location, assigned_value)) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "assignment target is not available in current constexpr interpreter scope",
+            loc);
+    }
+
+    return ConstEvalResult::constant(assigned_value);
+}
+
 ConstEvalResult eval_binary_expr(BinaryOperation* bin, ConstEvalMode mode, size_t depth) {
     if (!bin || !bin->left || !bin->right) {
         return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
@@ -1100,34 +2098,14 @@ ConstEvalResult eval_binary_expr(BinaryOperation* bin, ConstEvalMode mode, size_
         return eval_expr(bin->right.get(), mode, depth + 1);
     }
 
-    if (bin->bop == BinOpTypes::ASSIGN && g_interpreter_session) {
-        Expr* lhs_core = strip_noop_implicit_casts(bin->left.get());
-        auto* lhs_var = dyn_cast<VarRef>(lhs_core);
-        if (!lhs_var) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "interpreter assignment currently supports variable targets only",
-                bin->location);
-        }
-
-        ConstEvalResult rhs_res = eval_expr(bin->right.get(), mode, depth + 1);
-        if (rhs_res.status != ConstEvalStatus::Constant || !rhs_res.value.has_value()) {
-            return rhs_res;
-        }
-
-        auto casted = cast_const_value_to_type(rhs_res.value.value(), lhs_var->get_type());
-        if (!casted.has_value()) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "unable to assign expression to variable type in constexpr interpreter",
-                bin->location);
-        }
-
-        if (!assign_interpreter_local(lhs_var, casted.value())) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "assignment target is not available in current constexpr interpreter scope",
-                bin->location);
-        }
-
-        return ConstEvalResult::constant(casted.value());
+    if (is_assignment_binop(bin->bop) && g_interpreter_session) {
+        return eval_assignment_to_location(
+            bin->left.get(),
+            bin->right.get(),
+            bin->bop,
+            bin->location,
+            mode,
+            depth);
     }
 
     if (is_c23_constexpr_initializer_mode(mode) &&
@@ -1521,23 +2499,15 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
     }
 
     if (auto* if_stmt = dyn_cast<IfStmt>(stmt)) {
-        if (!if_stmt->condition) {
-            return make_interp_fail_result(make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "if statement has no condition", if_stmt->location));
-        }
-
-        ConstEvalResult cond_result = eval_expr(if_stmt->condition.get(), mode, depth + 1);
-        if (cond_result.status != ConstEvalStatus::Constant || !cond_result.value.has_value()) {
-            return make_interp_fail_result(std::move(cond_result));
-        }
-
         bool condition_truthy = false;
-        if (!const_value_to_bool(cond_result.value.value(), condition_truthy)) {
-            return make_interp_fail_result(make_not_evaluated(
-                ConstEvalDiagCode::UnsupportedExpression,
-                "if condition must be scalar in constexpr interpreter",
-                if_stmt->condition->location));
+        ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
+        if (!eval_condition_truthiness(
+                if_stmt->condition.get(),
+                mode,
+                depth + 1,
+                condition_truthy,
+                condition_failure)) {
+            return make_interp_fail_result(std::move(condition_failure));
         }
 
         if (condition_truthy) {
@@ -1549,11 +2519,245 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
         return make_interp_continue_result();
     }
 
-    if (auto* return_stmt = dyn_cast<ReturnStmt>(stmt)) {
-        if (!return_stmt->expression) {
+    if (auto* while_stmt = dyn_cast<WhileStmt>(stmt)) {
+        while (true) {
+            bool condition_truthy = false;
+            ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
+            if (!eval_condition_truthiness(
+                    while_stmt->condition.get(),
+                    mode,
+                    depth + 1,
+                    condition_truthy,
+                    condition_failure)) {
+                return make_interp_fail_result(std::move(condition_failure));
+            }
+            if (!condition_truthy) {
+                return make_interp_continue_result();
+            }
+
+            InterpExecResult body_result =
+                eval_interpreter_stmt(while_stmt->body_stmt.get(), mode, depth + 1);
+            if (body_result.kind == InterpExecResult::Kind::Continue ||
+                body_result.kind == InterpExecResult::Kind::LoopContinue) {
+                continue;
+            }
+            if (body_result.kind == InterpExecResult::Kind::Break) {
+                return make_interp_continue_result();
+            }
+            return body_result;
+        }
+    }
+
+    if (auto* do_while_stmt = dyn_cast<DoWhileStmt>(stmt)) {
+        while (true) {
+            InterpExecResult body_result =
+                eval_interpreter_stmt(do_while_stmt->body_stmt.get(), mode, depth + 1);
+            if (body_result.kind == InterpExecResult::Kind::Break) {
+                return make_interp_continue_result();
+            }
+            if (body_result.kind != InterpExecResult::Kind::Continue &&
+                body_result.kind != InterpExecResult::Kind::LoopContinue) {
+                return body_result;
+            }
+
+            bool condition_truthy = false;
+            ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
+            if (!eval_condition_truthiness(
+                    do_while_stmt->condition.get(),
+                    mode,
+                    depth + 1,
+                    condition_truthy,
+                    condition_failure)) {
+                return make_interp_fail_result(std::move(condition_failure));
+            }
+            if (!condition_truthy) {
+                return make_interp_continue_result();
+            }
+        }
+    }
+
+    if (auto* for_stmt = dyn_cast<ForStmt>(stmt)) {
+        push_interpreter_scope();
+        if (for_stmt->init) {
+            InterpExecResult init_result =
+                eval_interpreter_stmt(for_stmt->init.get(), mode, depth + 1);
+            if (init_result.kind != InterpExecResult::Kind::Continue) {
+                pop_interpreter_scope();
+                return init_result;
+            }
+        }
+
+        while (true) {
+            if (for_stmt->cond) {
+                bool condition_truthy = false;
+                ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
+                if (!eval_condition_truthiness(
+                        for_stmt->cond.get(),
+                        mode,
+                        depth + 1,
+                        condition_truthy,
+                        condition_failure)) {
+                    pop_interpreter_scope();
+                    return make_interp_fail_result(std::move(condition_failure));
+                }
+                if (!condition_truthy) {
+                    pop_interpreter_scope();
+                    return make_interp_continue_result();
+                }
+            }
+
+            InterpExecResult body_result =
+                eval_interpreter_stmt(for_stmt->body_stmt.get(), mode, depth + 1);
+            if (body_result.kind == InterpExecResult::Kind::Return ||
+                body_result.kind == InterpExecResult::Kind::Fail) {
+                pop_interpreter_scope();
+                return body_result;
+            }
+            if (body_result.kind == InterpExecResult::Kind::Break) {
+                pop_interpreter_scope();
+                return make_interp_continue_result();
+            }
+
+            if (for_stmt->action) {
+                ConstEvalResult action_result =
+                    eval_expr(for_stmt->action.get(), mode, depth + 1);
+                if (action_result.status != ConstEvalStatus::Constant ||
+                    !action_result.value.has_value()) {
+                    pop_interpreter_scope();
+                    return make_interp_fail_result(std::move(action_result));
+                }
+            }
+        }
+    }
+
+    if (auto* switch_stmt = dyn_cast<SwitchStmt>(stmt)) {
+        ConstEvalResult cond_result =
+            eval_expr(switch_stmt->condition.get(), mode, depth + 1);
+        if (cond_result.status != ConstEvalStatus::Constant ||
+            !cond_result.value.has_value()) {
+            return make_interp_fail_result(std::move(cond_result));
+        }
+
+        IntShape switch_shape = infer_integer_shape(switch_stmt->condition->get_type());
+        ConstIntValue switch_value{};
+        if (!const_value_to_int(*cond_result.value, switch_shape, switch_value)) {
             return make_interp_fail_result(make_not_evaluated(
                 ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter does not support valueless return statements yet",
+                "switch condition must be integer-like in constexpr interpreter",
+                switch_stmt->condition->location));
+        }
+
+        std::vector<SwitchEntry> entries;
+        collect_switch_entries_from_stmt(switch_stmt->stmt.get(), entries);
+
+        size_t start_index = entries.size();
+        size_t default_index = entries.size();
+        for (size_t entry_index = 0; entry_index < entries.size(); ++entry_index) {
+            for (const auto& label : entries[entry_index].labels) {
+                if (label.is_default) {
+                    if (default_index == entries.size()) {
+                        default_index = entry_index;
+                    }
+                    continue;
+                }
+                if (!label.const_expr) {
+                    continue;
+                }
+                ConstEvalResult case_start =
+                    eval_expr(const_cast<Expr*>(label.const_expr), mode, depth + 1);
+                if (case_start.status != ConstEvalStatus::Constant ||
+                    !case_start.value.has_value()) {
+                    return make_interp_fail_result(std::move(case_start));
+                }
+                ConstIntValue case_start_int{};
+                if (!const_value_to_int(*case_start.value, switch_shape, case_start_int)) {
+                    return make_interp_fail_result(make_not_evaluated(
+                        ConstEvalDiagCode::UnsupportedExpression,
+                        "switch case label must be integer-like in constexpr interpreter",
+                        label.const_expr->location));
+                }
+
+                bool matches = false;
+                if (label.range_end) {
+                    ConstEvalResult case_end =
+                        eval_expr(const_cast<Expr*>(label.range_end), mode, depth + 1);
+                    if (case_end.status != ConstEvalStatus::Constant ||
+                        !case_end.value.has_value()) {
+                        return make_interp_fail_result(std::move(case_end));
+                    }
+                    ConstIntValue case_end_int{};
+                    if (!const_value_to_int(*case_end.value, switch_shape, case_end_int)) {
+                        return make_interp_fail_result(make_not_evaluated(
+                            ConstEvalDiagCode::UnsupportedExpression,
+                            "switch case range must be integer-like in constexpr interpreter",
+                            label.range_end->location));
+                    }
+                    if (switch_shape.is_unsigned) {
+                        uint64_t current = switch_value.to_unsigned_u64();
+                        matches =
+                            current >= case_start_int.to_unsigned_u64() &&
+                            current <= case_end_int.to_unsigned_u64();
+                    } else {
+                        int64_t current = switch_value.to_signed_i64();
+                        matches =
+                            current >= case_start_int.to_signed_i64() &&
+                            current <= case_end_int.to_signed_i64();
+                    }
+                } else if (switch_shape.is_unsigned) {
+                    matches =
+                        switch_value.to_unsigned_u64() ==
+                        case_start_int.to_unsigned_u64();
+                } else {
+                    matches =
+                        switch_value.to_signed_i64() ==
+                        case_start_int.to_signed_i64();
+                }
+
+                if (matches) {
+                    start_index = entry_index;
+                    break;
+                }
+            }
+            if (start_index != entries.size()) {
+                break;
+            }
+        }
+
+        if (start_index == entries.size()) {
+            if (default_index == entries.size()) {
+                return make_interp_continue_result();
+            }
+            start_index = default_index;
+        }
+
+        for (size_t entry_index = start_index; entry_index < entries.size(); ++entry_index) {
+            InterpExecResult entry_result =
+                eval_interpreter_stmt(entries[entry_index].body, mode, depth + 1);
+            if (entry_result.kind == InterpExecResult::Kind::Continue) {
+                continue;
+            }
+            if (entry_result.kind == InterpExecResult::Kind::Break) {
+                return make_interp_continue_result();
+            }
+            return entry_result;
+        }
+        return make_interp_continue_result();
+    }
+
+    if (auto* return_stmt = dyn_cast<ReturnStmt>(stmt)) {
+        if (!return_stmt->expression) {
+            QualType return_type = nullptr;
+            if (g_interpreter_session && !g_interpreter_session->frames.empty()) {
+                return_type = extract_function_return_type(
+                    g_interpreter_session->frames.back().function_decl);
+            }
+            if (return_type && return_type->isVoid()) {
+                return make_interp_return_result(
+                    ConstEvalResult::constant(ConstValue::invalid()));
+            }
+            return make_interp_fail_result(make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "non-void constexpr function requires a return value",
                 return_stmt->location));
         }
 
@@ -1575,6 +2779,14 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
                 return_stmt->location));
         }
         return make_interp_return_result(ConstEvalResult::constant(casted.value()));
+    }
+
+    if (isa<BreakStmt>(stmt)) {
+        return make_interp_break_result();
+    }
+
+    if (isa<ContinueStmt>(stmt)) {
+        return make_interp_loop_continue_result();
     }
 
     if (isa<EmptyStmt>(stmt)) {
@@ -1698,21 +2910,243 @@ ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size
     if (exec_result.kind == InterpExecResult::Kind::Fail) {
         return exec_result.value;
     }
+    QualType call_type = call->get_type();
+    if (exec_result.kind == InterpExecResult::Kind::Continue &&
+        call_type && call_type->isVoid()) {
+        return ConstEvalResult::constant(ConstValue::invalid());
+    }
     if (exec_result.kind != InterpExecResult::Kind::Return ||
         exec_result.value.status != ConstEvalStatus::Constant ||
         !exec_result.value.value.has_value()) {
-        return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
             "constexpr interpreter reached end of function without a return value",
             function_decl->location);
     }
 
-    auto casted_call_value = cast_const_value_to_type(exec_result.value.value.value(), call->get_type());
+    if (call_type && call_type->isVoid()) {
+        return ConstEvalResult::constant(ConstValue::invalid());
+    }
+
+    auto casted_call_value =
+        cast_const_value_to_type(exec_result.value.value.value(), call_type);
     if (!casted_call_value.has_value()) {
         return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
             "constexpr interpreter failed to convert call result to expression type",
             call->location);
     }
     return ConstEvalResult::constant(casted_call_value.value());
+}
+
+ConstEvalResult eval_cpp_construct_expr(CppConstructExpr* construct,
+                                        ConstEvalMode mode,
+                                        size_t depth) {
+    if (!construct || !construct->ctype) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constructor expression is missing a target object type",
+            construct ? construct->location : SrcLoc());
+    }
+    if (!g_interpreter_session || !g_interpreter_session->state ||
+        !interpreter_mode_enabled(mode)) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constructor expression is not a constant expression in this mode",
+            construct ? construct->location : SrcLoc());
+    }
+    if (!construct->ctor_sym || construct->ctor_sym->kind != SymbolKind::FUNCTION) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constructor expression has no resolved constructor symbol",
+            construct->location);
+    }
+
+    auto* ctor_decl =
+        dyn_cast<CppConstructorDecl>(construct->ctor_sym->function_definition);
+    if (!ctor_decl || !ctor_decl->body) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter cannot evaluate constructor without a visible definition",
+            construct->location);
+    }
+    if (is_cpp_core_constant_expression_mode(mode) && !ctor_decl->is_constexpr) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "call to non-constexpr constructor is not a constant expression",
+            construct->location);
+    }
+
+    auto initial_object = default_const_value_for_type(construct->ctype);
+    if (!initial_object.has_value()) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter could not create the constructed object state",
+            construct->location);
+    }
+
+    std::string ctor_name =
+        construct->ctor_sym->name.empty() ? "<constructor>" : construct->ctor_sym->name;
+    InterpreterFrameGuard frame_guard(*g_interpreter_session, ctor_name, ctor_decl);
+    if (!frame_guard.entered()) {
+        return make_error(
+            ConstEvalDiagCode::RecursionLimitExceeded,
+            "constexpr function interpreter recursion limit exceeded",
+            construct->location);
+    }
+    if (!g_interpreter_session->frames.empty()) {
+        g_interpreter_session->frames.back().function_decl = ctor_decl;
+    }
+
+    std::shared_ptr<Symbol> object_symbol;
+    if (!materialize_interpreter_temporary(
+            construct->ctype, *initial_object, object_symbol)) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter failed to materialize constructed object storage",
+            construct->location);
+    }
+
+    std::vector<const ParamDecl*> params;
+    params.reserve(ctor_decl->parameters.size());
+    for (const auto& param : ctor_decl->parameters) {
+        auto* param_decl = dyn_cast<ParamDecl>(param.get());
+        if (!param_decl) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constexpr interpreter encountered unsupported constructor parameter declaration",
+                param ? param->location : ctor_decl->location);
+        }
+        params.push_back(param_decl);
+    }
+
+    size_t user_param_start = 0;
+    if (!params.empty() && params.front() && params.front()->get_name() == "this") {
+        auto this_value = ConstValue::address(object_symbol);
+        auto casted_this =
+            cast_const_value_to_type(this_value, params.front()->type);
+        if (!casted_this.has_value() ||
+            !bind_interpreter_local(
+                params.front()->sym, params.front()->get_name(), *casted_this)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constexpr interpreter failed to bind constructor object parameter",
+                construct->location);
+        }
+        user_param_start = 1;
+    }
+
+    if (construct->args.size() + user_param_start != params.size()) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter argument count mismatch for constructor call",
+            construct->location);
+    }
+
+    for (size_t arg_index = 0; arg_index < construct->args.size(); ++arg_index) {
+        ConstEvalResult arg_result =
+            eval_expr(construct->args[arg_index].get(), mode, depth + 1);
+        if (arg_result.status != ConstEvalStatus::Constant ||
+            !arg_result.value.has_value()) {
+            return arg_result;
+        }
+        const ParamDecl* param = params[user_param_start + arg_index];
+        auto casted_arg =
+            cast_const_value_to_type(*arg_result.value, param->type);
+        if (!casted_arg.has_value() ||
+            !bind_interpreter_local(param->sym, param->get_name(), *casted_arg)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constexpr interpreter failed to bind constructor argument",
+                construct->location);
+        }
+    }
+
+    for (const auto& initializer : ctor_decl->ctor_initializers) {
+        if (!initializer.init_expr) {
+            continue;
+        }
+
+        if (initializer.is_base_initializer) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constexpr interpreter does not support constructor base initializers yet",
+                initializer.location);
+        }
+
+        ConstEvalResult init_value =
+            eval_expr(initializer.init_expr.get(), mode, depth + 1);
+        if (init_value.status != ConstEvalStatus::Constant ||
+            !init_value.value.has_value()) {
+            return init_value;
+        }
+
+        if (initializer.is_delegating_initializer) {
+            auto casted_object =
+                cast_const_value_to_type(*init_value.value, construct->ctype);
+            if (!casted_object.has_value() ||
+                !assign_interpreter_symbol_value(object_symbol.get(), *casted_object)) {
+                return make_not_evaluated(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "constexpr interpreter failed to apply delegating constructor initializer",
+                    initializer.location);
+            }
+            continue;
+        }
+
+        if (!initializer.member_expr) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constructor member initializer is missing its target member expression",
+                initializer.location);
+        }
+
+        InterpLocation member_location;
+        if (!resolve_expr_location(
+                initializer.member_expr.get(), mode, depth + 1, member_location)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constexpr interpreter could not resolve constructor member initializer target",
+                initializer.location);
+        }
+        auto casted_member =
+            cast_const_value_to_type(*init_value.value, member_location.value_type);
+        if (!casted_member.has_value() ||
+            !store_interpreter_location_value(member_location, *casted_member)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constexpr interpreter failed to apply constructor member initializer",
+                initializer.location);
+        }
+    }
+
+    InterpExecResult body_result =
+        eval_interpreter_stmt(ctor_decl->body.get(), mode, depth + 1);
+    if (body_result.kind == InterpExecResult::Kind::Fail) {
+        return body_result.value;
+    }
+    if (body_result.kind == InterpExecResult::Kind::Break ||
+        body_result.kind == InterpExecResult::Kind::LoopContinue) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr constructor encountered unsupported control flow",
+            construct->location);
+    }
+
+    ConstValue final_object;
+    if (!lookup_interpreter_symbol_value(object_symbol.get(), final_object)) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter lost constructed object state",
+            construct->location);
+    }
+    auto casted_object = cast_const_value_to_type(final_object, construct->ctype);
+    if (!casted_object.has_value()) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter failed to convert constructed object to the target type",
+            construct->location);
+    }
+    return ConstEvalResult::constant(*casted_object);
 }
 
 // ====== Main expression recursive evaluator ======
@@ -1808,6 +3242,17 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
         return make_constant_int(ConstIntValue::from_signed(char_lit->int_value, shape.width));
     }
 
+    if (isa<CppThisExpr>(expr)) {
+        ConstValue this_value;
+        if (lookup_interpreter_named_value("this", this_value)) {
+            return ConstEvalResult::constant(this_value);
+        }
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "'this' is not available in the current constexpr evaluation context",
+            expr->location);
+    }
+
     if (auto* var_ref = dyn_cast<VarRef>(expr)) {
         ConstValue local_value;
         if (lookup_interpreter_local(var_ref, local_value)) {
@@ -1865,6 +3310,72 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
             "variable reference is not a constant expression", expr->location);
     }
 
+    if (auto* member_expr = dyn_cast<MemberExpr>(expr)) {
+        InterpLocation member_location;
+        if (resolve_expr_location(member_expr, mode, depth + 1, member_location)) {
+            ConstValue member_value;
+            if (load_interpreter_location_value(
+                    member_location, mode, depth + 1, member_value)) {
+                return ConstEvalResult::constant(member_value);
+            }
+        }
+
+        if (!member_expr->isArrow) {
+            ConstEvalResult base_result =
+                eval_expr(member_expr->base.get(), mode, depth + 1);
+            if (base_result.status != ConstEvalStatus::Constant ||
+                !base_result.value.has_value()) {
+                return base_result;
+            }
+            ConstValue member_value;
+            if (traverse_member_expr_value(
+                    *base_result.value, member_expr, member_value)) {
+                return ConstEvalResult::constant(member_value);
+            }
+        }
+
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "member access is not a supported constant expression",
+            expr->location);
+    }
+
+    if (auto* subscript = dyn_cast<ArraySubscriptExpr>(expr)) {
+        InterpLocation element_location;
+        if (resolve_expr_location(subscript, mode, depth + 1, element_location)) {
+            ConstValue element_value;
+            if (load_interpreter_location_value(
+                    element_location, mode, depth + 1, element_value)) {
+                return ConstEvalResult::constant(element_value);
+            }
+        }
+
+        ConstEvalResult base_result =
+            eval_expr(subscript->array.get(), mode, depth + 1);
+        if (base_result.status != ConstEvalStatus::Constant ||
+            !base_result.value.has_value()) {
+            return base_result;
+        }
+        size_t index = 0;
+        if (!evaluate_constant_index(subscript->index.get(), mode, depth + 1, index)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "array subscript index is not a constant expression",
+                subscript->index ? subscript->index->location : subscript->location);
+        }
+        if (base_result.value->kind == ConstValueKind::Object &&
+            base_result.value->object_value &&
+            base_result.value->object_value->kind == ConstObjectValueKind::Array &&
+            index < base_result.value->object_value->elements.size()) {
+            return ConstEvalResult::constant(
+                base_result.value->object_value->elements[index]);
+        }
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "array subscript is not a supported constant expression",
+            expr->location);
+    }
+
     if (auto* call = dyn_cast<FuncCall>(expr)) {
         if (is_c23_constexpr_initializer_mode(mode)) {
             return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
@@ -1898,12 +3409,32 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
         return eval_function_call_expr(call->lowered_call.get(), mode, depth + 1);
     }
 
+    if (auto* construct = dyn_cast<CppConstructExpr>(expr)) {
+        if (is_c23_constexpr_initializer_mode(mode)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constructor expression is not allowed in C23 constexpr initializer",
+                expr->location);
+        }
+        return eval_cpp_construct_expr(construct, mode, depth + 1);
+    }
+
     if (auto* unary = dyn_cast<UnaryOperation>(expr)) {
         return eval_unary_expr(unary, mode, depth);
     }
 
     if (auto* binary = dyn_cast<BinaryOperation>(expr)) {
         return eval_binary_expr(binary, mode, depth);
+    }
+
+    if (auto* compound_assign = dyn_cast<CompoundAssignOperation>(expr)) {
+        return eval_assignment_to_location(
+            compound_assign->left.get(),
+            compound_assign->right.get(),
+            compound_assign->bop,
+            compound_assign->location,
+            mode,
+            depth);
     }
 
     if (auto* cond = dyn_cast<CondExpr>(expr)) {

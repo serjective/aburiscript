@@ -792,6 +792,28 @@ public:
                                                             const std::string& name,
                                                             QualType type,
                                                             StorageClass storage_class,
+                                                            bool is_constexpr,
+                                                            bool is_inline,
+                                                            bool is_definition,
+                                                            SrcLoc loc,
+                                                            LanguageLinkage language_linkage = LanguageLinkage::None,
+                                                            bool is_cpp_member_function = false) ;
+
+    std::shared_ptr<Symbol> collect_declare_function_symbol(std::shared_ptr<Scope> scope,
+                                                            std::shared_ptr<GlobalIdentTracker> global_scope,
+                                                            const std::string& name,
+                                                            QualType type,
+                                                            StorageClass storage_class,
+                                                            bool is_inline,
+                                                            bool is_definition,
+                                                            SrcLoc loc,
+                                                            LanguageLinkage language_linkage = LanguageLinkage::None,
+                                                            bool is_cpp_member_function = false) ;
+
+    std::shared_ptr<Symbol> collect_declare_function_symbol(const std::string& name,
+                                                            QualType type,
+                                                            StorageClass storage_class,
+                                                            bool is_constexpr,
                                                             bool is_inline,
                                                             bool is_definition,
                                                             SrcLoc loc,

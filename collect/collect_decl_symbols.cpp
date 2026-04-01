@@ -290,7 +290,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::stri
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function) {
 
     if (!scope || name.empty()) {
         return nullptr;
@@ -435,6 +435,9 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
                 return existing;
             }
             report_linkage_conflict_if_any(existing);
+            if (existing->is_constexpr != is_constexpr) {
+                report_error("conflicting constexpr specifier for '" + name + "'", loc);
+            }
             bool static_after_non_static_conflict = false;
             if (is_definition) {
                 if (existing->is_defined) {
@@ -454,6 +457,9 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
                 existing->is_inline = true;
             } else {
                 existing->had_non_inline_declaration = true;
+            }
+            if (is_constexpr) {
+                existing->is_constexpr = true;
             }
             if (existing->storage_class == StorageClass::STATIC) {
                 existing->linkage = VariableLinkage::INTERNAL;
@@ -483,6 +489,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         set_symbol_cxx_qualifier_prefix(sym.get(), *ns_prefix);
     }
     sym->is_defined = is_definition;
+    sym->is_constexpr = is_constexpr;
     sym->set_language_linkage(requested_language_linkage);
     if (global_scope) {
         record_global_scope_mutation(global_scope);
@@ -496,7 +503,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function) {
 
     return collect_declare_function_symbol(
         session_.current_scope_,
@@ -504,6 +511,37 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::stri
         name,
         type,
         storage_class,
+        is_constexpr,
+        is_inline,
+        is_definition,
+        loc,
+        language_linkage,
+        is_cpp_member_function);
+}
+
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function) {
+
+    return collect_declare_function_symbol(
+        std::move(scope),
+        std::move(global_scope),
+        name,
+        type,
+        storage_class,
+        false,
+        is_inline,
+        is_definition,
+        loc,
+        language_linkage,
+        is_cpp_member_function);
+}
+
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function) {
+
+    return collect_declare_function_symbol(
+        name,
+        type,
+        storage_class,
+        false,
         is_inline,
         is_definition,
         loc,

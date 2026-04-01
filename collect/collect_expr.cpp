@@ -1760,6 +1760,7 @@ bool Collect::finalize_cpp_lambda_semantics(
             synthesized_method->name,
             QualType(synthesized_method->type),
             synthesized_method->storage_class,
+            synthesized_method->is_constexpr,
             synthesized_method->is_inline,
             synthesized_method->body != nullptr,
             synthesized_method->location,
