@@ -686,6 +686,11 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
         ptr = phi;
         ctype = cond->get_type().get_shared();
     } else if (auto* bin = dyn_cast<BinaryOperation>(expr)) {
+        if (lang_opts.is_cxx_mode() &&
+            is_assignment_binop(bin->bop)) {
+            convert_assign_expr(bin);
+            return get_lvalue(bin->left.get());
+        }
         if (bin->bop == BinOpTypes::COMMA) {
             // C comma operator in lvalue context: evaluate LHS for side effects,
             // then take lvalue of RHS when available.
@@ -699,6 +704,11 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
                 break;
             }
             return get_lvalue(rhs);
+        }
+    } else if (auto* comp_assign = dyn_cast<CompoundAssignOperation>(expr)) {
+        if (lang_opts.is_cxx_mode()) {
+            convert_compound_assignment(comp_assign);
+            return get_lvalue(comp_assign->left.get());
         }
     } else if (auto* deref = dyn_cast<UnaryOperation>(expr)) {
         if (deref->uop == UnaryOpTypes::REAL_PART || deref->uop == UnaryOpTypes::IMAG_PART) {

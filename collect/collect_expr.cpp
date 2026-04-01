@@ -5397,10 +5397,17 @@ Collect::ValueCategory Collect::classify_value_category(Expr* expr) const {
         if (binary->bop == BinOpTypes::COMMA) {
             return classify_value_category(binary->right.get());
         }
+        if (lang_opts_.is_cxx_mode() &&
+            binary->bop == BinOpTypes::ASSIGN) {
+            return ValueCategory::LValue;
+        }
         return ValueCategory::PRValue;
     }
 
     if (dyn_cast<CompoundAssignOperation>(expr)) {
+        if (lang_opts_.is_cxx_mode()) {
+            return ValueCategory::LValue;
+        }
         return ValueCategory::PRValue;
     }
 
