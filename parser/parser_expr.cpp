@@ -1721,6 +1721,50 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
     }
 
     if (tok.type == TokenType::IDENTIFIER) {
+        if (const auto* builtin_info =
+                BuiltinRegistry::instance().lookup(tok.value);
+            builtin_info &&
+            is_builtin_type_trait_kind(builtin_info->kind)) {
+            advance(); // consume builtin trait identifier
+            check_and_consume(TokenType::LEFT_PAREN);
+
+            std::vector<QualType> type_args;
+            while (!gentle_check(TokenType::RIGHT_PAREN) &&
+                   !gentle_check(TokenType::Eof)) {
+                auto parse_decl = DeclarationParser(this);
+                auto type_arg = parse_decl.parse_declaration();
+                if (type_arg == nullptr) {
+                    error_custloc(
+                        "Error parsing type operand in " +
+                            std::string(builtin_info->name),
+                        tok.loc);
+                    return nullptr;
+                }
+                retain_type_specifier_decl_if_needed(parse_decl);
+                type_args.push_back(type_arg);
+                if (!gentle_check_and_consume(TokenType::COMMA)) {
+                    break;
+                }
+            }
+            check_and_consume(TokenType::RIGHT_PAREN);
+
+            int arg_count = static_cast<int>(type_args.size());
+            if (arg_count < builtin_info->min_args ||
+                (builtin_info->max_args >= 0 &&
+                 arg_count > builtin_info->max_args)) {
+                error_custloc(
+                    std::string(builtin_info->name) + " requires " +
+                        std::to_string(builtin_info->min_args) +
+                        " type argument(s)",
+                    tok.loc);
+                return nullptr;
+            }
+
+            return collect_->collect_builtin_type_trait_expression(
+                builtin_info->kind,
+                std::move(type_args),
+                tok.loc);
+        }
         // Handle __builtin_convertvector(expr, type)
         if (tok.value == "__builtin_convertvector") {
             advance(); // consume '__builtin_convertvector'

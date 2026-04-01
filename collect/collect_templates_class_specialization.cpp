@@ -2242,6 +2242,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         semantic_dtor.name = cloned_decl->name;
         semantic_dtor.type = QualType(canonical_type);
         semantic_dtor.declared_access = declared_access;
+        semantic_dtor.is_implicit = false;
+        semantic_dtor.is_defaulted = cloned_decl->is_defaulted;
         semantic_dtor.is_deleted = cloned_decl->is_deleted;
         semantic_dtor.is_virtual = cloned_decl->is_virtual;
         semantic_dtor.is_override = cloned_decl->is_override;

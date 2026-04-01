@@ -1082,6 +1082,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             dtor.name = dtor_decl->name;
             dtor.type = dtor_decl->type;
             dtor.declared_access = current_access;
+            dtor.is_implicit = false;
+            dtor.is_defaulted = dtor_decl->is_defaulted;
             dtor.is_deleted = dtor_decl->is_deleted;
             dtor.is_virtual = dtor_decl->is_virtual;
             dtor.is_override = dtor_decl->is_override;
@@ -1386,6 +1388,8 @@ void Collect::collect_record_synthesize_implicit_members(
         implicit_dtor.name = "~" + ctx.record_name;
         implicit_dtor.type = QualType(implicit_dtor_type);
         implicit_dtor.declared_access = RecordMemberAccess::Public;
+        implicit_dtor.is_implicit = true;
+        implicit_dtor.is_defaulted = false;
         implicit_dtor.is_deleted = implicit_destructor_deleted;
         implicit_dtor.is_virtual = false;
         implicit_dtor.is_override = false;

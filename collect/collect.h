@@ -460,6 +460,14 @@ public:
     std::unique_ptr<Expr> collect_builtin_types_compatible_expression(QualType lhs,
                                                                       QualType rhs,
                                                                       SrcLoc loc) ;
+    std::unique_ptr<Expr> collect_builtin_type_trait_expression(
+        BuiltinKind kind,
+        std::vector<QualType> type_args,
+        SrcLoc loc) ;
+    std::optional<bool> evaluate_builtin_type_trait(
+        BuiltinKind kind,
+        const std::vector<QualType>& type_args,
+        SrcLoc loc) const ;
 
     std::unique_ptr<Expr> collect_builtin_choose_expression(std::unique_ptr<Expr> const_expr,
                                                             std::unique_ptr<Expr> true_expr,

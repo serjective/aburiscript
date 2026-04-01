@@ -2402,6 +2402,108 @@ std::unique_ptr<Expr> Collect::collect_builtin_types_compatible_expression(QualT
     return node;
 }
 
+std::optional<bool> Collect::evaluate_builtin_type_trait(
+    BuiltinKind kind,
+    const std::vector<QualType>& type_args,
+    SrcLoc loc) const {
+    auto get_canonical_arg = [&](size_t index) -> std::optional<QualType> {
+        if (index >= type_args.size() || !type_args[index]) {
+            report_error("builtin type trait is missing a type operand", loc);
+            return std::nullopt;
+        }
+        QualType type_arg = type_args[index];
+        if (type_depends_on_template_parameters(type_arg, ast_ctx_.get())) {
+            return std::nullopt;
+        }
+        return desugar_type(type_arg, ast_ctx_.get());
+    };
+
+    switch (kind) {
+        case BuiltinKind::IS_SAME: {
+            auto lhs = get_canonical_arg(0);
+            auto rhs = get_canonical_arg(1);
+            if (!lhs || !rhs) {
+                return std::nullopt;
+            }
+            return lhs->equals_qualified(*rhs);
+        }
+        case BuiltinKind::IS_FUNCTION: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return type_arg->get()->kind == TypeKind::Function;
+        }
+        case BuiltinKind::IS_REFERENCE: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return type_arg->as_shared<ReferenceType>() != nullptr;
+        }
+        case BuiltinKind::IS_LVALUE_REFERENCE: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto ref_type = type_arg->as_shared<ReferenceType>();
+            return ref_type && ref_type->isLValueReference();
+        }
+        case BuiltinKind::IS_RVALUE_REFERENCE: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto ref_type = type_arg->as_shared<ReferenceType>();
+            return ref_type && ref_type->isRValueReference();
+        }
+        case BuiltinKind::IS_DESTRUCTIBLE: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return cpp_type_is_destructible(*type_arg, false, ast_ctx_.get());
+        }
+        case BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE:
+        case BuiltinKind::HAS_TRIVIAL_DESTRUCTOR: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return cpp_type_is_trivially_destructible(
+                *type_arg, ast_ctx_.get());
+        }
+        default:
+            return std::nullopt;
+    }
+}
+
+std::unique_ptr<Expr> Collect::collect_builtin_type_trait_expression(
+    BuiltinKind kind,
+    std::vector<QualType> type_args,
+    SrcLoc loc) {
+    for (auto& type_arg : type_args) {
+        if (type_arg &&
+            contains_deferred_semantic_type(type_arg.get_shared())) {
+            type_arg = resolve_typeof_types(type_arg, loc);
+        }
+    }
+
+    std::vector<std::unique_ptr<Expr>> args;
+    auto bool_type = QualType(get_builtin_bool());
+    auto node = collect_make<BuiltinCallExpr>(
+        kind,
+        std::move(args),
+        std::move(type_args),
+        bool_type,
+        loc);
+    if (auto value =
+            evaluate_builtin_type_trait(node->kind, node->type_args, loc)) {
+        node->const_value = *value ? 1 : 0;
+    }
+    return node;
+}
+
 
 std::unique_ptr<Expr> Collect::collect_builtin_choose_expression(std::unique_ptr<Expr> const_expr, std::unique_ptr<Expr> true_expr, std::unique_ptr<Expr> false_expr, SrcLoc loc) const {
 

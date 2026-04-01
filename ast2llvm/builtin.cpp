@@ -18,6 +18,18 @@ namespace {
         return try_evaluate_with_consteval_compat(expr, mode);
     }
 
+    llvm::Value* lower_builtin_const_integer(
+        ASTToLLVM& lower,
+        BuiltinCallExpr* expr,
+        int64_t value) {
+        auto& ctx = *lower.context;
+        llvm::Type* result_type = lower.convert_type(expr->result_type);
+        if (auto* int_type = llvm::dyn_cast<llvm::IntegerType>(result_type)) {
+            return llvm::ConstantInt::get(int_type, value, true);
+        }
+        return llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), value, true);
+    }
+
 }
 // Helper: get or declare an external libc function
 static llvm::FunctionCallee get_or_declare_libc_func(
@@ -1687,10 +1699,8 @@ llvm::Value* ASTToLLVM::convert_builtin_call_expr(BuiltinCallExpr *expr) {
     }
     case BuiltinKind::CONSTANT_P: {
         // __builtin_constant_p(expr) -> compile-time constant check
-        if (expr->const_value.has_value()) {
-            return llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), *expr->const_value);
-        }
-        return llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 0);
+        return lower_builtin_const_integer(
+            *this, expr, expr->const_value.value_or(0));
     }
     case BuiltinKind::AVAILABLE: {
         // Compatibility behavior: treat __builtin_available(...) as always true.
@@ -1785,9 +1795,19 @@ llvm::Value* ASTToLLVM::convert_builtin_call_expr(BuiltinCallExpr *expr) {
     }
     case BuiltinKind::TYPES_COMPATIBLE_P: {
         // Compile-time constant, evaluated in sema
-        int64_t val = expr->const_value.value_or(0);
-        return llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), val);
+        return lower_builtin_const_integer(
+            *this, expr, expr->const_value.value_or(0));
     }
+    case BuiltinKind::IS_SAME:
+    case BuiltinKind::IS_FUNCTION:
+    case BuiltinKind::IS_REFERENCE:
+    case BuiltinKind::IS_LVALUE_REFERENCE:
+    case BuiltinKind::IS_RVALUE_REFERENCE:
+    case BuiltinKind::IS_DESTRUCTIBLE:
+    case BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE:
+    case BuiltinKind::HAS_TRIVIAL_DESTRUCTOR:
+        return lower_builtin_const_integer(
+            *this, expr, expr->const_value.value_or(0));
     case BuiltinKind::CHOOSE_EXPR: {
         // Sema should have already replaced this with the chosen expression
         // but if we get here, evaluate the chosen expression
@@ -1974,8 +1994,8 @@ llvm::Value* ASTToLLVM::convert_builtin_call_expr(BuiltinCallExpr *expr) {
     }
     case BuiltinKind::CLASSIFY_TYPE: {
         // Compile-time constant evaluated in sema
-        int64_t val = expr->const_value.value_or(0);
-        return llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), val);
+        return lower_builtin_const_integer(
+            *this, expr, expr->const_value.value_or(0));
     }
     case BuiltinKind::BUILTIN_FILE: {
         // Compile-time constant: emit as string literal
@@ -1987,8 +2007,8 @@ llvm::Value* ASTToLLVM::convert_builtin_call_expr(BuiltinCallExpr *expr) {
         return builder.CreateGlobalStringPtr("", "builtin_file");
     }
     case BuiltinKind::BUILTIN_LINE: {
-        int64_t val = expr->const_value.value_or(0);
-        return llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), val);
+        return lower_builtin_const_integer(
+            *this, expr, expr->const_value.value_or(0));
     }
     case BuiltinKind::BUILTIN_FUNCTION: {
         if (!expr->args.empty()) {

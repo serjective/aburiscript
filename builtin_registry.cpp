@@ -15,6 +15,22 @@ bool BuiltinRegistry::is_builtin(std::string_view name) const {
     return builtins.count(name) > 0;
 }
 
+bool is_builtin_type_trait_kind(BuiltinKind kind) {
+    switch (kind) {
+        case BuiltinKind::IS_SAME:
+        case BuiltinKind::IS_FUNCTION:
+        case BuiltinKind::IS_REFERENCE:
+        case BuiltinKind::IS_LVALUE_REFERENCE:
+        case BuiltinKind::IS_RVALUE_REFERENCE:
+        case BuiltinKind::IS_DESTRUCTIBLE:
+        case BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE:
+        case BuiltinKind::HAS_TRIVIAL_DESTRUCTOR:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void BuiltinRegistry::register_builtin(BuiltinInfo info) {
     builtins[info.name] = info;
 }
@@ -30,6 +46,14 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__builtin_object_size", BuiltinKind::OBJECT_SIZE, 2, 2, false, false});
     register_builtin({"__builtin_dynamic_object_size", BuiltinKind::DYNAMIC_OBJECT_SIZE, 2, 2, false, false});
     register_builtin({"__builtin_available", BuiltinKind::AVAILABLE, 1, -1, false, false});
+    register_builtin({"__is_same", BuiltinKind::IS_SAME, 2, 2, true, true});
+    register_builtin({"__is_function", BuiltinKind::IS_FUNCTION, 1, 1, true, true});
+    register_builtin({"__is_reference", BuiltinKind::IS_REFERENCE, 1, 1, true, true});
+    register_builtin({"__is_lvalue_reference", BuiltinKind::IS_LVALUE_REFERENCE, 1, 1, true, true});
+    register_builtin({"__is_rvalue_reference", BuiltinKind::IS_RVALUE_REFERENCE, 1, 1, true, true});
+    register_builtin({"__is_destructible", BuiltinKind::IS_DESTRUCTIBLE, 1, 1, true, true});
+    register_builtin({"__is_trivially_destructible", BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE, 1, 1, true, true});
+    register_builtin({"__has_trivial_destructor", BuiltinKind::HAS_TRIVIAL_DESTRUCTOR, 1, 1, true, true});
 
     // Tier 2: Overflow builtins
     register_builtin({"__builtin_add_overflow", BuiltinKind::ADD_OVERFLOW, 3, 3, false, false});

@@ -930,6 +930,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             dtor.name = dtor_decl->name;
             dtor.type = dtor_decl->type;
             dtor.declared_access = current_access;
+            dtor.is_implicit = false;
+            dtor.is_defaulted = dtor_decl->is_defaulted;
             dtor.is_deleted = dtor_decl->is_deleted;
             dtor.is_virtual = dtor_decl->is_virtual;
             dtor.is_override = dtor_decl->is_override;
@@ -5127,10 +5129,12 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
                 if (init) {
                     auto eval = try_evaluate_with_consteval_compat(
                         init.get(), ConstEvalMode::c_ice());
-                    if (!eval.has_value()) {
+                    if (!eval.has_value() &&
+                        !collect_->expression_depends_on_template_parameters(
+                            init.get())) {
                         diag_engine->report_error(
                             "enumerator value is not an integer constant expression", loc);
-                    } else {
+                    } else if (eval.has_value()) {
                         enum_value = *eval;
                     }
                 }

@@ -16,6 +16,14 @@ enum class BuiltinKind {
     OBJECT_SIZE,
     DYNAMIC_OBJECT_SIZE,
     AVAILABLE,
+    IS_SAME,
+    IS_FUNCTION,
+    IS_REFERENCE,
+    IS_LVALUE_REFERENCE,
+    IS_RVALUE_REFERENCE,
+    IS_DESTRUCTIBLE,
+    IS_TRIVIALLY_DESTRUCTIBLE,
+    HAS_TRIVIAL_DESTRUCTOR,
 
     // Tier 2: Overflow builtins
     ADD_OVERFLOW,
@@ -277,5 +285,7 @@ private:
 
     std::unordered_map<std::string_view, BuiltinInfo> builtins;
 };
+
+bool is_builtin_type_trait_kind(BuiltinKind kind);
 
 #endif //ABURI_BUILTIN_REGISTRY_H

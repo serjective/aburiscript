@@ -1985,6 +1985,24 @@ bool Collect::resolve_dependent_expr_after_substitution(
         }
         return true;
     }
+    if (auto* builtin = dyn_cast<BuiltinCallExpr>(expr.get())) {
+        if (!is_builtin_type_trait_kind(builtin->kind)) {
+            return true;
+        }
+        auto rewritten = collect_builtin_type_trait_expression(
+            builtin->kind,
+            builtin->type_args,
+            builtin->location);
+        if (!rewritten) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to resolve builtin type trait after substitution";
+            }
+            return false;
+        }
+        expr = std::move(rewritten);
+        return true;
+    }
 
     auto strip_stale_dependent_implicit_casts =
         [&](std::unique_ptr<Expr>& candidate) {

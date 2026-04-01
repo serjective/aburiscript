@@ -33,6 +33,15 @@ bool cpp_record_has_viable_destructor(
     const RecordSemanticState* state,
     bool allow_protected_access);
 
+bool cpp_type_is_destructible(
+    QualType type,
+    bool allow_protected_access = false,
+    const ASTContext* ast_ctx = nullptr);
+
+bool cpp_type_is_trivially_destructible(
+    QualType type,
+    const ASTContext* ast_ctx = nullptr);
+
 void cpp_recompute_default_constructor_traits(
     RecordSemanticState::DefinitionData& definition_data,
     const std::vector<RecordSemanticState::Constructor>& constructors);

@@ -1386,6 +1386,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
         }
         dtor.decl = matched_dtor_decl;
         dtor.type = QualType(matched_dtor_decl->type);
+        dtor.is_implicit = false;
+        dtor.is_defaulted = matched_dtor_decl->is_defaulted;
         dtor.is_deleted = matched_dtor_decl->is_deleted;
         dtor.is_override = matched_dtor_decl->is_override;
         dtor.is_final = matched_dtor_decl->is_final;

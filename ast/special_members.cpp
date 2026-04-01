@@ -1,6 +1,28 @@
 #include "special_members.h"
 
+#include "ast.h"
 #include "symbols.h"
+
+namespace {
+const RecordSemanticState* lookup_record_state_for_type(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    auto record_type =
+        desugar_type(type, ast_ctx).as_shared<ObjectType>();
+    if (!record_type) {
+        return nullptr;
+    }
+    auto* record_decl = dyn_cast<ObjectDecl>(record_type->get_decl());
+    if (!record_decl) {
+        return nullptr;
+    }
+    return record_semantics_cache_lookup(record_decl, ast_ctx);
+}
+
+bool cpp_record_is_trivially_destructible(
+    const RecordSemanticState* state,
+    const ASTContext* ast_ctx);
+} // namespace
 
 bool cpp_access_allows_member(RecordMemberAccess access,
                               bool allow_protected_access) {
@@ -117,6 +139,109 @@ bool cpp_record_has_viable_destructor(
     return false;
 }
 
+bool cpp_type_is_destructible(
+    QualType type,
+    bool allow_protected_access,
+    const ASTContext* ast_ctx) {
+    if (!type) {
+        return false;
+    }
+
+    QualType canonical = desugar_type(type, ast_ctx);
+    if (!canonical) {
+        return false;
+    }
+
+    if (canonical.as_shared<ReferenceType>()) {
+        return true;
+    }
+
+    if (canonical->isVoid()) {
+        return false;
+    }
+
+    switch (canonical->kind) {
+        case TypeKind::Function:
+            return false;
+        case TypeKind::Array: {
+            auto array_type = canonical.as_shared<ArrayType>();
+            if (!array_type) {
+                return false;
+            }
+            if (array_type->size_kind != ArraySizeKind::Constant ||
+                !array_type->size.has_value()) {
+                return false;
+            }
+            return cpp_type_is_destructible(
+                array_type->element_type,
+                allow_protected_access,
+                ast_ctx);
+        }
+        case TypeKind::Object: {
+            const RecordSemanticState* state =
+                lookup_record_state_for_type(canonical, ast_ctx);
+            return cpp_record_has_viable_destructor(
+                state, allow_protected_access);
+        }
+        case TypeKind::Builtin:
+        case TypeKind::Pointer:
+        case TypeKind::MemberPointer:
+        case TypeKind::Enum:
+        case TypeKind::BlockPointer:
+        case TypeKind::Vector:
+        case TypeKind::Complex:
+            return true;
+        default:
+            return canonical->isScalar();
+    }
+}
+
+bool cpp_type_is_trivially_destructible(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    if (!cpp_type_is_destructible(type, false, ast_ctx)) {
+        return false;
+    }
+
+    QualType canonical = desugar_type(type, ast_ctx);
+    if (!canonical) {
+        return false;
+    }
+
+    if (canonical.as_shared<ReferenceType>()) {
+        return true;
+    }
+
+    switch (canonical->kind) {
+        case TypeKind::Array: {
+            auto array_type = canonical.as_shared<ArrayType>();
+            if (!array_type ||
+                array_type->size_kind != ArraySizeKind::Constant ||
+                !array_type->size.has_value()) {
+                return false;
+            }
+            return cpp_type_is_trivially_destructible(
+                array_type->element_type,
+                ast_ctx);
+        }
+        case TypeKind::Object: {
+            const RecordSemanticState* state =
+                lookup_record_state_for_type(canonical, ast_ctx);
+            return cpp_record_is_trivially_destructible(state, ast_ctx);
+        }
+        case TypeKind::Builtin:
+        case TypeKind::Pointer:
+        case TypeKind::MemberPointer:
+        case TypeKind::Enum:
+        case TypeKind::BlockPointer:
+        case TypeKind::Vector:
+        case TypeKind::Complex:
+            return true;
+        default:
+            return canonical->isScalar();
+    }
+}
+
 void cpp_recompute_default_constructor_traits(
     RecordSemanticState::DefinitionData& definition_data,
     const std::vector<RecordSemanticState::Constructor>& constructors) {
@@ -134,3 +259,54 @@ void cpp_recompute_default_constructor_traits(
         }
     }
 }
+
+namespace {
+bool cpp_record_is_trivially_destructible(
+    const RecordSemanticState* state,
+    const ASTContext* ast_ctx) {
+    if (!state || state->is_incomplete) {
+        return false;
+    }
+    if (!cpp_record_has_viable_destructor(state, false)) {
+        return false;
+    }
+    if (state->has_virtual_destructor) {
+        return false;
+    }
+
+    if (!state->destructors.empty()) {
+        for (const auto& dtor : state->destructors) {
+            if (!cpp_destructor_is_viable_candidate(dtor, false)) {
+                continue;
+            }
+            if (dtor.is_virtual) {
+                return false;
+            }
+            if (!dtor.is_implicit && !dtor.is_defaulted) {
+                return false;
+            }
+            break;
+        }
+    }
+
+    for (const auto& base : state->bases) {
+        if (!cpp_type_is_trivially_destructible(base.type, ast_ctx)) {
+            return false;
+        }
+    }
+    for (const auto& virtual_base : state->virtual_bases) {
+        if (!cpp_type_is_trivially_destructible(virtual_base.type, ast_ctx)) {
+            return false;
+        }
+    }
+    for (const auto& field : state->fields) {
+        if (field.is_base_subobject || field.is_virtual_base_storage) {
+            continue;
+        }
+        if (!cpp_type_is_trivially_destructible(field.type, ast_ctx)) {
+            return false;
+        }
+    }
+    return true;
+}
+} // namespace
