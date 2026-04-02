@@ -462,6 +462,58 @@ bool collect_pack_expansion_shape_in_expr(
                        parameters,
                        shape_out);
         }
+        case StmtKind::ConceptSpecializationExpr: {
+            const auto* concept_expr =
+                static_cast<const ConceptSpecializationExpr*>(expr);
+            return collect_pack_expansion_shape_in_template_arguments(
+                concept_expr->arguments,
+                parameters,
+                shape_out);
+        }
+        case StmtKind::RequiresExpr: {
+            const auto* requires_expr = static_cast<const RequiresExpr*>(expr);
+            for (const auto& parameter : requires_expr->parameters) {
+                if (!parameter) {
+                    continue;
+                }
+                if (!collect_pack_expansion_shape_in_type(
+                        parameter->type,
+                        parameters,
+                        shape_out) ||
+                    !collect_pack_expansion_shape_in_type(
+                        QualType(parameter->original_type),
+                        parameters,
+                        shape_out)) {
+                    return false;
+                }
+                if (const Expr* default_arg =
+                        get_param_decl_default_argument(parameter.get())) {
+                    if (!collect_pack_expansion_shape_in_expr(
+                            default_arg,
+                            parameters,
+                            shape_out)) {
+                        return false;
+                    }
+                }
+            }
+            for (const auto& requirement : requires_expr->requirements) {
+                if (!collect_pack_expansion_shape_in_expr(
+                        requirement.expr.get(),
+                        parameters,
+                        shape_out) ||
+                    !collect_pack_expansion_shape_in_type(
+                        requirement.type_requirement,
+                        parameters,
+                        shape_out) ||
+                    !collect_pack_expansion_shape_in_expr(
+                        requirement.return_constraint.get(),
+                        parameters,
+                        shape_out)) {
+                    return false;
+                }
+            }
+            return true;
+        }
         case StmtKind::CppMemberCallExpr: {
             const auto* call = static_cast<const CppMemberCallExpr*>(expr);
             return collect_pack_expansion_shape_in_expr(

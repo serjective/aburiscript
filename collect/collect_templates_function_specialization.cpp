@@ -313,6 +313,16 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             flatten_template_argument_bindings(specialization_bindings);
         specialization_is_dependent =
             template_arguments_depend_on_template_parameters(normalized_arguments);
+        if (!specialization_is_dependent &&
+            !collect.are_template_constraints_satisfied_with_bindings(
+                function_template,
+                specialization_bindings,
+                loc)) {
+            return fail(
+                "constraints not satisfied for function template '" +
+                    pattern->name + "'",
+                loc);
+        }
         return true;
     }
 

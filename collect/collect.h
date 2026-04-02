@@ -468,6 +468,30 @@ public:
         BuiltinKind kind,
         const std::vector<QualType>& type_args,
         SrcLoc loc) const ;
+    std::unique_ptr<Expr> collect_concept_specialization_expression(
+        const ConceptDecl* concept_decl,
+        std::string concept_name,
+        std::vector<TemplateArgument> arguments,
+        SrcLoc loc) ;
+    std::optional<bool> evaluate_concept_specialization(
+        const ConceptDecl* concept_decl,
+        const std::vector<TemplateArgument>& arguments,
+        SrcLoc loc) ;
+    std::unique_ptr<Expr> collect_requires_expression(
+        std::vector<std::unique_ptr<ParamDecl>> parameters,
+        std::vector<ConstraintRequirement> requirements,
+        SrcLoc loc) ;
+    std::optional<bool> evaluate_requires_expression(
+        const RequiresExpr* requires_expr,
+        SrcLoc loc) ;
+    bool are_template_constraints_satisfied(
+        const TemplateDecl* template_decl,
+        const std::vector<TemplateArgument>& arguments,
+        SrcLoc loc) ;
+    bool are_template_constraints_satisfied_with_bindings(
+        const TemplateDecl* template_decl,
+        const TemplateArgumentBindings& bindings,
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_builtin_choose_expression(std::unique_ptr<Expr> const_expr,
                                                             std::unique_ptr<Expr> true_expr,
@@ -873,6 +897,8 @@ public:
 
     void collect_add_variable_template_decl(const std::string& name,
                                             const Decl* decl) ;
+    void collect_add_concept_decl(const std::string& name,
+                                  const Decl* decl) ;
 
     std::unique_ptr<Expr> collect_binary_operation(std::unique_ptr<Expr> lhs,
                                                    std::unique_ptr<Expr> rhs,

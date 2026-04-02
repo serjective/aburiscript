@@ -174,6 +174,20 @@ public:
         return variable_template_specializations_;
     }
 
+    ConceptSpecializationEntry* lookup_concept_specialization(
+        const ConceptDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments);
+    const ConceptSpecializationEntry* lookup_concept_specialization(
+        const ConceptDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments) const;
+    ConceptSpecializationEntry& get_or_create_concept_specialization(
+        const ConceptDecl* primary_template,
+        std::vector<TemplateArgument> arguments);
+    const std::vector<std::unique_ptr<ConceptSpecializationEntry>>&
+    concept_specializations() const {
+        return concept_specializations_;
+    }
+
     bool push_template_instantiation_frame(size_t max_depth = 64);
     void pop_template_instantiation_frame();
     size_t template_instantiation_depth() const {
@@ -233,6 +247,12 @@ private:
         TemplateSpecializationSemanticKeyHash> variable_template_specialization_lookup_;
     std::vector<std::unique_ptr<VariableTemplateSpecializationEntry>>
         variable_template_specializations_;
+    std::unordered_map<
+        TemplateSpecializationSemanticKey,
+        size_t,
+        TemplateSpecializationSemanticKeyHash> concept_specialization_lookup_;
+    std::vector<std::unique_ptr<ConceptSpecializationEntry>>
+        concept_specializations_;
     std::vector<std::unique_ptr<Decl>> retained_external_decls_;
     uint64_t record_semantics_cache_epoch_ = 1;
     size_t template_instantiation_depth_ = 0;

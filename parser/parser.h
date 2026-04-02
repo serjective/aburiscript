@@ -303,6 +303,7 @@ private:
     std::unique_ptr<Stmt> parse_continue();
 
     std::unique_ptr<Expr> parse_primary_expression();
+    std::unique_ptr<Expr> parse_cpp_requires_expression();
     std::unique_ptr<Expr> parse_block_literal_expression();
     std::unique_ptr<Expr> parse_cpp_lambda_expression();
     TemplateParameterList lower_generic_lambda_parameter_placeholders(
@@ -484,6 +485,9 @@ private:
         bool member_template_declaration,
         bool angle_brackets_already_consumed = false);
     TemplateParameterList parse_cpp_template_parameter_list(uint32_t depth);
+    std::unique_ptr<Expr> parse_cpp_constraint_expression();
+    std::unique_ptr<Expr> parse_cpp_constraint_logical_or_expression();
+    std::unique_ptr<Expr> parse_cpp_constraint_primary_expression();
     bool is_cpp_template_argument_boundary_here();
     const TemplateParameterDecl* find_active_template_parameter(
         std::string_view name) const;
@@ -498,6 +502,12 @@ private:
     std::vector<TemplateArgument> parse_cpp_template_argument_list();
     void consume_cpp_template_argument_list_close();
     std::optional<ParsedCppTypeNameSpecifier> try_parse_cpp_named_type_specifier();
+    std::unique_ptr<Expr> try_parse_cpp_constraint_name_expression(
+        bool append_placeholder_type_argument,
+        uint32_t depth,
+        uint32_t index,
+        bool is_parameter_pack,
+        SrcLoc start_loc = SrcLoc());
     QualType resolve_cpp_unqualified_type_component(
         const std::string& component_name,
         const std::vector<TemplateArgument>& component_arguments,
@@ -732,6 +742,7 @@ struct DeclarationParser {
     bool is_thread_local = false;
     bool is_block_byref = false;
     bool is_constexpr = false;
+    std::unique_ptr<Expr> trailing_requires_clause = nullptr;
     uint8_t qualifiers = QUAL_NONE; // outermost type qualifiers (for the variable itself)
     std::optional<std::string> asm_label;
     uint8_t base_qualifiers = QUAL_NONE; // qualifiers from declaration specifiers (preserved across declarators)

@@ -29,6 +29,7 @@ struct TemplateDecl;
 struct ClassTemplateDecl;
 struct FunctionTemplateDecl;
 struct VariableTemplateDecl;
+struct ConceptDecl;
 struct TemplateParameterDecl;
 struct EnumDecl;
 class CollectSemanticStore;
@@ -254,6 +255,23 @@ struct VariableTemplateSpecializationEntry {
     bool is_instantiating = false;
     bool is_instantiated = false;
     bool instantiation_failed = false;
+
+    void note_first_required_loc(SrcLoc loc) {
+        if (!loc.isInvalid() && first_required_loc.isInvalid()) {
+            first_required_loc = loc;
+        }
+    }
+};
+
+struct ConceptSpecializationEntry {
+    const ConceptDecl* primary_template = nullptr;
+    TemplateSpecializationSemanticKey semantic_key;
+    std::vector<TemplateArgument> arguments;
+    SrcLoc first_required_loc;
+    bool is_evaluating = false;
+    bool is_evaluated = false;
+    bool evaluation_failed = false;
+    bool satisfaction = false;
 
     void note_first_required_loc(SrcLoc loc) {
         if (!loc.isInvalid() && first_required_loc.isInvalid()) {
@@ -574,6 +592,18 @@ public:
         std::shared_ptr<Symbol> specialization_symbol);
     const std::vector<std::unique_ptr<VariableTemplateSpecializationEntry>>&
     variable_template_specializations() const;
+
+    ConceptSpecializationEntry* lookup_concept_specialization(
+        const ConceptDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments);
+    const ConceptSpecializationEntry* lookup_concept_specialization(
+        const ConceptDecl* primary_template,
+        const std::vector<TemplateArgument>& arguments) const;
+    ConceptSpecializationEntry& get_or_create_concept_specialization(
+        const ConceptDecl* primary_template,
+        std::vector<TemplateArgument> arguments);
+    const std::vector<std::unique_ptr<ConceptSpecializationEntry>>&
+    concept_specializations() const;
 
     bool push_template_instantiation_frame(size_t max_depth = 64);
     void pop_template_instantiation_frame();

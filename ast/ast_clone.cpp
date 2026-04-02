@@ -104,6 +104,57 @@ bool rewrite_optional_template_arguments(
 }
 
 std::shared_ptr<Symbol> remap_symbol(const std::shared_ptr<Symbol>& sym,
+                                     ASTCloneContext& ctx);
+bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
+                       ASTCloneContext& ctx,
+                       std::string* error_out);
+
+bool rewrite_param_decl_in_place(ParamDecl* param,
+                                 ASTCloneContext& ctx,
+                                 std::string* error_out) {
+    if (!param) {
+        return true;
+    }
+    param->type = rewrite_type(param->type, ctx);
+    param->original_type =
+        rewrite_type(QualType(param->original_type), ctx).get_shared();
+    param->sym = remap_symbol(param->sym, ctx);
+    if (param->sym) {
+        param->sym->type = rewrite_type(param->sym->type, ctx);
+    }
+    if (const Expr* default_arg = get_param_decl_default_argument(param)) {
+        auto cloned_default = clone_expr_with_substitution(
+            default_arg,
+            ctx,
+            error_out);
+        if (!cloned_default) {
+            return false;
+        }
+        set_param_decl_default_argument(param, std::move(cloned_default));
+    }
+    return true;
+}
+
+bool rewrite_constraint_requirements_in_place(
+    std::vector<ConstraintRequirement>& requirements,
+    ASTCloneContext& ctx,
+    std::string* error_out) {
+    for (auto& requirement : requirements) {
+        if (requirement.expr &&
+            !rewrite_expr_tree(requirement.expr, ctx, error_out)) {
+            return false;
+        }
+        requirement.type_requirement =
+            rewrite_type(requirement.type_requirement, ctx);
+        if (requirement.return_constraint &&
+            !rewrite_expr_tree(requirement.return_constraint, ctx, error_out)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::shared_ptr<Symbol> remap_symbol(const std::shared_ptr<Symbol>& sym,
                                      ASTCloneContext& ctx) {
     if (!sym) {
         return nullptr;
@@ -994,6 +1045,39 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
                 type_arg = rewrite_type(type_arg, ctx);
             }
             builtin->result_type = rewrite_type(builtin->result_type, ctx);
+            return true;
+        }
+        case StmtKind::ConceptSpecializationExpr: {
+            auto* concept_expr =
+                static_cast<ConceptSpecializationExpr*>(expr.get());
+            concept_expr->arguments = rewrite_template_arguments(
+                concept_expr->arguments,
+                ctx,
+                error_out);
+            concept_expr->result_type =
+                rewrite_type(concept_expr->result_type, ctx);
+            concept_expr->satisfaction.reset();
+            return true;
+        }
+        case StmtKind::RequiresExpr: {
+            auto* requires_expr = static_cast<RequiresExpr*>(expr.get());
+            for (auto& parameter : requires_expr->parameters) {
+                if (!rewrite_param_decl_in_place(
+                        parameter.get(),
+                        ctx,
+                        error_out)) {
+                    return false;
+                }
+            }
+            if (!rewrite_constraint_requirements_in_place(
+                    requires_expr->requirements,
+                    ctx,
+                    error_out)) {
+                return false;
+            }
+            requires_expr->result_type =
+                rewrite_type(requires_expr->result_type, ctx);
+            requires_expr->satisfaction.reset();
             return true;
         }
         case StmtKind::ErrorExpr:

@@ -35,6 +35,7 @@ set(COLLECT_SOURCES
         collect/collect_convert_pointer.cpp
         collect/collect_convert_diag.cpp
         collect/collect_expr.cpp
+        collect/collect_concepts.cpp
         collect/collect_overload.cpp
         collect/collect_calls.cpp
         collect/collect_member_access.cpp

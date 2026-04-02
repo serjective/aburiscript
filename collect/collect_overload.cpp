@@ -492,6 +492,12 @@ std::unique_ptr<Expr> Collect::append_member_template_overload_candidates(
                 specialization_arguments)) {
             continue;
         }
+        if (!are_template_constraints_satisfied(
+                function_template,
+                specialization_arguments,
+                loc)) {
+            continue;
+        }
 
         std::shared_ptr<Symbol> specialization_symbol = nullptr;
         auto* specialization_decl =
@@ -596,6 +602,12 @@ void Collect::append_unqualified_function_template_overload_candidates(
                 function_template,
                 deduction_args,
                 specialization_arguments)) {
+            continue;
+        }
+        if (!are_template_constraints_satisfied(
+                function_template,
+                specialization_arguments,
+                loc)) {
             continue;
         }
 

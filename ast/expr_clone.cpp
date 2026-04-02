@@ -59,6 +59,55 @@ std::vector<std::unique_ptr<Expr>> clone_expr_vector_impl(
     return result;
 }
 
+std::vector<std::unique_ptr<ParamDecl>> clone_requires_param_list(
+    const std::vector<std::unique_ptr<ParamDecl>>& input,
+    ASTContext* ast_ctx,
+    std::string* error_out) {
+    ASTCloneContext clone_ctx;
+    clone_ctx.ast_ctx = ast_ctx;
+    std::vector<std::unique_ptr<ParamDecl>> result;
+    result.reserve(input.size());
+    for (const auto& parameter : input) {
+        if (!parameter) {
+            result.push_back(nullptr);
+            continue;
+        }
+        auto cloned_decl =
+            clone_decl_tree(parameter.get(), clone_ctx, error_out);
+        auto* cloned_param = dyn_cast<ParamDecl>(cloned_decl.release());
+        if (!cloned_param) {
+            return {};
+        }
+        result.emplace_back(cloned_param);
+    }
+    return result;
+}
+
+bool clone_constraint_requirement_impl(const ConstraintRequirement& input,
+                                       ConstraintRequirement& output,
+                                       ASTContext* ast_ctx,
+                                       std::string* error_out) {
+    output.kind = input.kind;
+    output.type_requirement = input.type_requirement;
+    output.is_noexcept = input.is_noexcept;
+    output.location = input.location;
+
+    if (input.expr) {
+        output.expr = clone_expr_impl(input.expr.get(), ast_ctx, error_out);
+        if (!output.expr) {
+            return false;
+        }
+    }
+    if (input.return_constraint) {
+        output.return_constraint =
+            clone_expr_impl(input.return_constraint.get(), ast_ctx, error_out);
+        if (!output.return_constraint) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool clone_designator_impl(const Designator& input,
                            Designator& output,
                            ASTContext* ast_ctx,
@@ -1479,6 +1528,50 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
             }
             assign_node_id(result.get(), ast_ctx);
             result->const_value = builtin_expr->const_value;
+            return result;
+        }
+        case StmtKind::ConceptSpecializationExpr: {
+            const auto* concept_expr =
+                static_cast<const ConceptSpecializationExpr*>(expr);
+            auto result = std::make_unique<ConceptSpecializationExpr>(
+                concept_expr->concept_decl,
+                concept_expr->concept_name,
+                concept_expr->arguments,
+                concept_expr->result_type,
+                concept_expr->location);
+            assign_node_id(result.get(), ast_ctx);
+            result->satisfaction = concept_expr->satisfaction;
+            return result;
+        }
+        case StmtKind::RequiresExpr: {
+            const auto* requires_expr = static_cast<const RequiresExpr*>(expr);
+            auto cloned_parameters = clone_requires_param_list(
+                requires_expr->parameters,
+                ast_ctx,
+                error_out);
+            if (cloned_parameters.size() != requires_expr->parameters.size()) {
+                return {};
+            }
+            std::vector<ConstraintRequirement> cloned_requirements;
+            cloned_requirements.reserve(requires_expr->requirements.size());
+            for (const auto& requirement : requires_expr->requirements) {
+                ConstraintRequirement cloned_requirement;
+                if (!clone_constraint_requirement_impl(
+                        requirement,
+                        cloned_requirement,
+                        ast_ctx,
+                        error_out)) {
+                    return {};
+                }
+                cloned_requirements.push_back(std::move(cloned_requirement));
+            }
+            auto result = std::make_unique<RequiresExpr>(
+                std::move(cloned_parameters),
+                std::move(cloned_requirements),
+                requires_expr->result_type,
+                requires_expr->location);
+            assign_node_id(result.get(), ast_ctx);
+            result->satisfaction = requires_expr->satisfaction;
             return result;
         }
         case StmtKind::ErrorExpr: {

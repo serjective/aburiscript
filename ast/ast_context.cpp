@@ -40,6 +40,10 @@ const TemplateDecl* template_decl_from_decl(const Decl* decl) {
             dyn_cast<ClassTemplateDecl>(const_cast<Decl*>(decl))) {
         return class_template;
     }
+    if (const auto* concept_decl =
+            dyn_cast<ConceptDecl>(const_cast<Decl*>(decl))) {
+        return concept_decl;
+    }
     if (const auto* partial_specialization =
             dyn_cast<ClassTemplatePartialSpecializationDecl>(
                 const_cast<Decl*>(decl))) {
@@ -1197,6 +1201,35 @@ ASTContext::get_or_create_variable_template_specialization(
 const std::vector<std::unique_ptr<VariableTemplateSpecializationEntry>>&
 ASTContext::variable_template_specializations() const {
     return semantic_store_->variable_template_specializations();
+}
+
+ConceptSpecializationEntry* ASTContext::lookup_concept_specialization(
+    const ConceptDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) {
+    return semantic_store_->lookup_concept_specialization(
+        primary_template,
+        arguments);
+}
+
+const ConceptSpecializationEntry* ASTContext::lookup_concept_specialization(
+    const ConceptDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) const {
+    return semantic_store_->lookup_concept_specialization(
+        primary_template,
+        arguments);
+}
+
+ConceptSpecializationEntry& ASTContext::get_or_create_concept_specialization(
+    const ConceptDecl* primary_template,
+    std::vector<TemplateArgument> arguments) {
+    return semantic_store_->get_or_create_concept_specialization(
+        primary_template,
+        std::move(arguments));
+}
+
+const std::vector<std::unique_ptr<ConceptSpecializationEntry>>&
+ASTContext::concept_specializations() const {
+    return semantic_store_->concept_specializations();
 }
 
 bool ASTContext::push_template_instantiation_frame(size_t max_depth) {

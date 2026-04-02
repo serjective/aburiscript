@@ -2021,6 +2021,204 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
 
     while (true) {
         Token param_tok = current_token();
+        if (lang_opts.is_cxx20_or_later() &&
+            (param_tok.type == TokenType::IDENTIFIER ||
+             param_tok.type == TokenType::SCOPE_RESOLUTION ||
+             (param_tok.type == TokenType::COLON &&
+              peek_token().type == TokenType::COLON))) {
+            auto try_parse_constrained_type_parameter =
+                [&]() -> std::unique_ptr<TemplateTypeParmDecl> {
+                    TentativeParsingAction tentative(*this);
+
+                    bool has_global_qualifier = consume_cpp_scope_resolution();
+                    std::vector<std::string> qualifier_components;
+                    std::string concept_name;
+                    SrcLoc concept_loc = current_token().loc;
+                    while (gentle_check(TokenType::IDENTIFIER)) {
+                        std::string component = current_token().value;
+                        concept_loc = current_token().loc;
+                        advance();
+                        if (!is_cpp_scope_resolution_here()) {
+                            concept_name = std::move(component);
+                            break;
+                        }
+                        qualifier_components.push_back(std::move(component));
+                        consume_cpp_scope_resolution();
+                    }
+                    if (concept_name.empty()) {
+                        return nullptr;
+                    }
+
+                    std::vector<TemplateArgument> concept_arguments;
+                    if (gentle_check(TokenType::LESS_THAN)) {
+                        concept_arguments = parse_cpp_template_argument_list();
+                    }
+
+                    bool is_parameter_pack =
+                        gentle_check_and_consume(TokenType::ELLIPSIS);
+
+                    std::string param_name;
+                    SrcLoc param_loc = concept_loc;
+                    if (gentle_check(TokenType::IDENTIFIER)) {
+                        param_name = current_token().value;
+                        param_loc = current_token().loc;
+                        advance();
+                    }
+
+                    auto current_scope = collect_->collect_current_scope();
+                    auto current_context = collect_->get_current_decl_context();
+                    auto tu_context = collect_->get_translation_unit_decl_context();
+                    auto global_scope = current_scope;
+                    while (global_scope && global_scope->parent) {
+                        global_scope = global_scope->parent;
+                    }
+
+                    auto lookup_scope =
+                        has_global_qualifier ? global_scope : current_scope;
+                    const DeclContext* lookup_context =
+                        has_global_qualifier
+                            ? (tu_context ? tu_context.get() : nullptr)
+                            : (current_context ? current_context.get()
+                                               : nullptr);
+
+                    for (size_t idx = 0; idx < qualifier_components.size(); ++idx) {
+                        if (!lookup_context) {
+                            return nullptr;
+                        }
+                        auto namespace_scope = resolve_named_namespace_scope(
+                            lookup_context,
+                            qualifier_components[idx],
+                            !has_global_qualifier && idx == 0);
+                        if (!namespace_scope ||
+                            !namespace_scope->associated_decl_context) {
+                            return nullptr;
+                        }
+                        lookup_scope = namespace_scope;
+                        lookup_context = namespace_scope->associated_decl_context;
+                    }
+
+                    auto find_concept_candidate =
+                        [](const DeclBinding* binding) -> const ConceptDecl* {
+                            if (!binding) {
+                                return nullptr;
+                            }
+                            if (auto* concept_candidate =
+                                    dyn_cast<ConceptDecl>(
+                                        const_cast<Decl*>(binding->template_decl))) {
+                                return concept_candidate;
+                            }
+                            const ConceptDecl* selected = nullptr;
+                            for (const auto* candidate :
+                                 binding->template_overload_candidates) {
+                                auto* concept_candidate =
+                                    dyn_cast<ConceptDecl>(
+                                        const_cast<Decl*>(candidate));
+                                if (!concept_candidate) {
+                                    continue;
+                                }
+                                if (selected &&
+                                    selected != concept_candidate) {
+                                    return nullptr;
+                                }
+                                selected = concept_candidate;
+                            }
+                            return selected;
+                        };
+
+                    const ConceptDecl* concept_decl = nullptr;
+                    if (qualifier_components.empty()) {
+                        concept_decl = find_concept_candidate(
+                            LookupEngine::lookup_unqualified_template_binding(
+                                concept_name,
+                                lookup_scope,
+                                !has_global_qualifier,
+                                LookupNamespace::Ordinary));
+                    } else if (lookup_context) {
+                        auto qualified_lookup = LookupEngine::lookup_qualified(
+                            concept_name,
+                            lookup_context,
+                            LookupNamespace::Ordinary);
+                        if (qualified_lookup.status ==
+                            LookupEngine::QualifiedLookupStatus::Found) {
+                            concept_decl = find_concept_candidate(
+                                qualified_lookup.binding);
+                        }
+                    }
+                    if (!concept_decl) {
+                        return nullptr;
+                    }
+
+                    auto param_type = std::make_shared<TemplateTypeParmType>(
+                        param_name,
+                        depth,
+                        static_cast<uint32_t>(parameters.size()),
+                        is_parameter_pack);
+                    auto param_decl = make_ast<TemplateTypeParmDecl>(
+                        *ast_ctx,
+                        param_name,
+                        depth,
+                        static_cast<uint32_t>(parameters.size()),
+                        param_type,
+                        is_parameter_pack,
+                        param_loc);
+                    param_type->parameter_decl = param_decl.get();
+
+                    concept_arguments.push_back(
+                        TemplateArgument(QualType(param_type)));
+                    std::string display_name =
+                        qualified_name_utils::format_cpp_qualified_name(
+                            has_global_qualifier,
+                            qualifier_components,
+                            concept_name);
+                    param_decl->type_constraint =
+                        collect_->collect_concept_specialization_expression(
+                            concept_decl,
+                            std::move(display_name),
+                            std::move(concept_arguments),
+                            concept_loc);
+                    tentative.commit();
+                    return param_decl;
+                };
+
+            if (auto constrained_param = try_parse_constrained_type_parameter()) {
+                std::optional<TemplateArgument> default_argument;
+                if (gentle_check(TokenType::ASSIGN)) {
+                    if (constrained_param->is_parameter_pack) {
+                        fail_cpp_unsupported(
+                            "default template argument on template parameter pack",
+                            current_token().loc);
+                    }
+                    advance();
+                    default_argument = parse_cpp_template_argument();
+                }
+                if (default_argument.has_value()) {
+                    if (default_argument->kind != TemplateArgumentKind::Type) {
+                        error_custloc(
+                            "type template parameter default must be a type-id",
+                            constrained_param->location);
+                    }
+                    set_template_parameter_default_argument(
+                        constrained_param.get(),
+                        std::move(default_argument));
+                }
+                if (!constrained_param->name.empty()) {
+                    collect_->collect_declare_type_name_symbol(
+                        constrained_param->name,
+                        QualType(constrained_param->type),
+                        constrained_param->location);
+                }
+                parameters.push_back(std::move(constrained_param));
+                if (!active_template_parameter_stack_.empty()) {
+                    active_template_parameter_stack_.back().push_back(
+                        parameters.back().get());
+                }
+                if (!gentle_check_and_consume(TokenType::COMMA)) {
+                    break;
+                }
+                continue;
+            }
+        }
+
         if (param_tok.type == TokenType::TEMPLATE) {
             advance();
             TemplateParameterList nested_parameters;
@@ -2336,6 +2534,12 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     } active_template_parameter_guard{&active_template_parameter_stack_};
 
     auto parameters = parse_cpp_template_parameter_list(parameter_depth);
+    std::unique_ptr<Expr> leading_requires_clause = nullptr;
+    if (lang_opts.is_cxx20_or_later() &&
+        gentle_check(TokenType::REQUIRES_KW)) {
+        advance(); // 'requires'
+        leading_requires_clause = parse_cpp_constraint_expression();
+    }
     if (parameters.empty()) {
         collect_->collect_leave_scope();
         template_scope_guard.active = false;
@@ -2374,6 +2578,28 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
             parse_cpp_record_specifier(&record_specialization_arguments);
         check_and_consume(TokenType::SEMICOLON);
         templated_decls.push_back(std::move(record_decl));
+    } else if (lang_opts.is_cxx20_or_later() &&
+               gentle_check(TokenType::CONCEPT_KW)) {
+        if (member_template_declaration) {
+            fail_cpp_unsupported("member concept declaration", current_token().loc);
+        }
+        advance(); // 'concept'
+        Token name_tok = current_token();
+        check_and_consume(TokenType::IDENTIFIER);
+        check_and_consume(TokenType::ASSIGN);
+        auto constraint_expr = parse_cpp_constraint_expression();
+        check_and_consume(TokenType::SEMICOLON);
+        templated_decls.push_back(make_ast<NopDecl>(*ast_ctx, template_tok.loc));
+        auto concept_decl = make_ast<ConceptDecl>(
+            *ast_ctx,
+            std::move(parameters),
+            name_tok.value,
+            std::move(constraint_expr),
+            template_tok.loc);
+        concept_decl->associated_constraint = std::move(leading_requires_clause);
+        // Delayed finalization below, once the shared template-redeclaration helpers
+        // are in scope.
+        templated_decls.front() = std::move(concept_decl);
     } else if (member_template_declaration &&
                gentle_check(TokenType::USING)) {
         templated_decls = parse_cpp_using_alias_declaration();
@@ -2763,6 +2989,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
 
     std::vector<std::unique_ptr<Decl>> wrapped_decls;
     if (prepared_class_template) {
+        prepared_class_template->associated_constraint =
+            std::move(leading_requires_clause);
         finalize_primary_template_decl(
             prepared_class_template.get(),
             prepared_class_template_name,
@@ -2776,12 +3004,29 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
         return wrapped_decls;
     }
     if (prepared_class_partial_specialization) {
+        prepared_class_partial_specialization->associated_constraint =
+            std::move(leading_requires_clause);
         wrapped_decls.push_back(std::move(prepared_class_partial_specialization));
         return wrapped_decls;
     }
     if (prepared_variable_partial_specialization) {
+        prepared_variable_partial_specialization->associated_constraint =
+            std::move(leading_requires_clause);
         wrapped_decls.push_back(
             std::move(prepared_variable_partial_specialization));
+        return wrapped_decls;
+    }
+    if (templated_decls.size() == 1 &&
+        templated_decls.front() &&
+        isa<ConceptDecl>(templated_decls.front().get())) {
+        auto* concept_decl =
+            static_cast<ConceptDecl*>(templated_decls.front().get());
+        finalize_primary_template_decl(
+            concept_decl,
+            concept_decl->name,
+            LookupNamespace::Ordinary);
+        collect_->collect_add_concept_decl(concept_decl->name, concept_decl);
+        wrapped_decls.push_back(std::move(templated_decls.front()));
         return wrapped_decls;
     }
 
@@ -2800,6 +3045,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
             std::move(parameters),
             std::move(templated_decls.front()),
             template_tok.loc);
+        template_decl->associated_constraint = std::move(leading_requires_clause);
         finalize_primary_template_decl(
             template_decl.get(),
             template_name,
@@ -2810,6 +3056,33 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                 template_decl.get());
         }
         wrapped_decls.push_back(std::move(template_decl));
+        return wrapped_decls;
+    }
+
+    if (lang_opts.is_cxx20_or_later() &&
+        gentle_check(TokenType::CONCEPT_KW)) {
+        if (member_template_declaration) {
+            fail_cpp_unsupported("member concept declaration", current_token().loc);
+        }
+        advance(); // 'concept'
+        Token name_tok = current_token();
+        check_and_consume(TokenType::IDENTIFIER);
+        check_and_consume(TokenType::ASSIGN);
+        auto constraint_expr = parse_cpp_constraint_expression();
+        check_and_consume(TokenType::SEMICOLON);
+        auto concept_decl = make_ast<ConceptDecl>(
+            *ast_ctx,
+            std::move(parameters),
+            name_tok.value,
+            std::move(constraint_expr),
+            template_tok.loc);
+        concept_decl->associated_constraint = std::move(leading_requires_clause);
+        finalize_primary_template_decl(
+            concept_decl.get(),
+            name_tok.value,
+            LookupNamespace::Ordinary);
+        collect_->collect_add_concept_decl(name_tok.value, concept_decl.get());
+        wrapped_decls.push_back(std::move(concept_decl));
         return wrapped_decls;
     }
 
@@ -2827,6 +3100,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
             std::move(parameters),
             std::move(templated_decls.front()),
             template_tok.loc);
+        template_decl->associated_constraint = std::move(leading_requires_clause);
         finalize_primary_template_decl(
             template_decl.get(),
             template_name,
@@ -2858,6 +3132,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
             std::move(parameters),
             std::move(templated_decls.front()),
             template_tok.loc);
+        template_decl->associated_constraint = std::move(leading_requires_clause);
         finalize_primary_template_decl(
             template_decl.get(),
             template_name,
@@ -2870,6 +3145,141 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     }
     fail_cpp_unsupported("template-declaration form", templated_decls.front()->location);
     return wrapped_decls;
+}
+
+std::unique_ptr<Expr> Parser::parse_cpp_constraint_primary_expression() {
+    if (gentle_check(TokenType::REQUIRES_KW)) {
+        return parse_cpp_requires_expression();
+    }
+    return parse_primary_expression();
+}
+
+std::unique_ptr<Expr> Parser::parse_cpp_constraint_logical_or_expression() {
+    return parse_conditional_expression();
+}
+
+std::unique_ptr<Expr> Parser::parse_cpp_constraint_expression() {
+    return parse_cpp_constraint_logical_or_expression();
+}
+
+std::unique_ptr<Expr> Parser::parse_cpp_requires_expression() {
+    if (!is_cxx_mode_active() || !lang_opts.is_cxx20_or_later() ||
+        !gentle_check(TokenType::REQUIRES_KW)) {
+        return nullptr;
+    }
+
+    Token requires_tok = current_token();
+    advance(); // 'requires'
+
+    std::vector<std::unique_ptr<ParamDecl>> parameters;
+    std::vector<ConstraintRequirement> requirements;
+
+    bool entered_scope = false;
+    if (gentle_check(TokenType::LEFT_PAREN)) {
+        advance();
+        collect_->collect_enter_scope(ScopeFlags::BlockScope);
+        entered_scope = true;
+        if (!gentle_check(TokenType::RIGHT_PAREN)) {
+            while (true) {
+                DeclarationParser param_parser(this);
+                param_parser.in_function_parameter = true;
+                auto param_base_type = param_parser.parse_declaration();
+                if (!param_base_type) {
+                    error_custloc(
+                        "invalid requires-expression parameter declaration",
+                        current_token().loc);
+                }
+                QualType parameter_type(param_base_type, param_parser.qualifiers);
+                parameter_type =
+                    collect_->collect_try_realize_deferred_semantic_type(
+                        parameter_type);
+                std::shared_ptr<Symbol> parameter_symbol = nullptr;
+                if (!param_parser.name.empty()) {
+                    parameter_symbol = collect_->collect_declare_variable_symbol(
+                        param_parser.name,
+                        parameter_type,
+                        StorageClass::NONE,
+                        false,
+                        false,
+                        param_parser.loc.isInvalid()
+                            ? requires_tok.loc
+                            : param_parser.loc);
+                }
+                auto parameter_decl = make_ast<ParamDecl>(
+                    *ast_ctx,
+                    parameter_type,
+                    param_parser.name,
+                    parameter_symbol,
+                    StorageClass::NONE,
+                    param_parser.loc.isInvalid()
+                        ? requires_tok.loc
+                        : param_parser.loc);
+                parameters.push_back(std::move(parameter_decl));
+                if (!gentle_check_and_consume(TokenType::COMMA)) {
+                    break;
+                }
+            }
+        }
+        check_and_consume(TokenType::RIGHT_PAREN);
+    }
+
+    struct ScopeGuard {
+        Collect* collect = nullptr;
+        bool active = false;
+        ~ScopeGuard() {
+            if (active && collect) {
+                collect->collect_leave_scope();
+            }
+        }
+    } scope_guard{collect_.get(), entered_scope};
+
+    check_and_consume(TokenType::LEFT_BRACE);
+    while (!gentle_check(TokenType::RIGHT_BRACE) &&
+           !gentle_check(TokenType::Eof)) {
+        ConstraintRequirement requirement;
+        requirement.location = current_token().loc;
+
+        if (gentle_check(TokenType::TYPENAME)) {
+            requirement.kind = ConstraintRequirementKind::Type;
+            advance(); // 'typename'
+            auto parsed_type = try_parse_cpp_named_type_specifier();
+            if (!parsed_type) {
+                error_custloc(
+                    "expected qualified type name after 'typename'",
+                    current_token().loc);
+            }
+            requirement.type_requirement = parsed_type->type;
+            check_and_consume(TokenType::SEMICOLON);
+        } else if (gentle_check(TokenType::REQUIRES_KW)) {
+            requirement.kind = ConstraintRequirementKind::Nested;
+            advance(); // nested 'requires'
+            requirement.expr = parse_cpp_constraint_expression();
+            check_and_consume(TokenType::SEMICOLON);
+        } else if (gentle_check(TokenType::LEFT_BRACE)) {
+            requirement.kind = ConstraintRequirementKind::Compound;
+            advance();
+            requirement.expr = parse_expression();
+            check_and_consume(TokenType::RIGHT_BRACE);
+            if (gentle_check(TokenType::NOEXCEPT_KW)) {
+                requirement.is_noexcept = true;
+                advance();
+            }
+            if (gentle_check_and_consume(TokenType::ARROW)) {
+                requirement.return_constraint = parse_cpp_constraint_expression();
+            }
+            check_and_consume(TokenType::SEMICOLON);
+        } else {
+            requirement.kind = ConstraintRequirementKind::Simple;
+            requirement.expr = parse_expression();
+            check_and_consume(TokenType::SEMICOLON);
+        }
+        requirements.push_back(std::move(requirement));
+    }
+    check_and_consume(TokenType::RIGHT_BRACE);
+    return collect_->collect_requires_expression(
+        std::move(parameters),
+        std::move(requirements),
+        requires_tok.loc);
 }
 
 bool Parser::is_cpp_qualified_id_start() {

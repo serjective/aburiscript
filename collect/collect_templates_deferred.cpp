@@ -82,6 +82,55 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
         case StmtKind::PackExpansionExpr:
         case StmtKind::FoldExpr:
             return true;
+        case StmtKind::ConceptSpecializationExpr: {
+            const auto* concept_expr =
+                static_cast<const ConceptSpecializationExpr*>(stripped);
+            for (const auto& argument : concept_expr->arguments) {
+                if (template_argument_depends_on_template_parameters(
+                        argument,
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case StmtKind::RequiresExpr: {
+            const auto* requires_expr =
+                static_cast<const RequiresExpr*>(stripped);
+            for (const auto& parameter : requires_expr->parameters) {
+                if (!parameter) {
+                    continue;
+                }
+                if (type_depends_on_template_parameters(parameter->type, ast_ctx) ||
+                    type_depends_on_template_parameters(
+                        QualType(parameter->original_type),
+                        ast_ctx)) {
+                    return true;
+                }
+                if (const Expr* default_arg =
+                        get_param_decl_default_argument(parameter.get())) {
+                    if (expr_depends_on_template_parameters_impl(
+                            default_arg,
+                            ast_ctx)) {
+                        return true;
+                    }
+                }
+            }
+            for (const auto& requirement : requires_expr->requirements) {
+                if (expr_depends_on_template_parameters_impl(
+                        requirement.expr.get(),
+                        ast_ctx) ||
+                    type_depends_on_template_parameters(
+                        requirement.type_requirement,
+                        ast_ctx) ||
+                    expr_depends_on_template_parameters_impl(
+                        requirement.return_constraint.get(),
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         case StmtKind::UnaryOperation:
             return expr_depends_on_template_parameters_impl(
                 static_cast<const UnaryOperation*>(stripped)->exp.get(),
@@ -382,6 +431,20 @@ bool Collect::decltype_expression_requires_deferred_resolution(
         case StmtKind::DependentMemberPointerAccessExpr:
         case StmtKind::FoldExpr:
             return true;
+        case StmtKind::ConceptSpecializationExpr: {
+            const auto* concept_expr =
+                static_cast<const ConceptSpecializationExpr*>(stripped);
+            for (const auto& argument : concept_expr->arguments) {
+                if (template_argument_depends_on_template_parameters(
+                        argument,
+                        ast_ctx_.get())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case StmtKind::RequiresExpr:
+            return expression_depends_on_template_parameters(stripped);
         case StmtKind::UnresolvedMemberExpr: {
             const auto* member =
                 static_cast<const UnresolvedMemberExpr*>(stripped);

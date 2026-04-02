@@ -144,6 +144,16 @@ struct Collect::VariableTemplateSpecializationInstantiator {
             flatten_template_argument_bindings(specialization_bindings);
         specialization_is_dependent =
             template_arguments_depend_on_template_parameters(normalized_arguments);
+        if (!specialization_is_dependent &&
+            !collect.are_template_constraints_satisfied_with_bindings(
+                variable_template,
+                specialization_bindings,
+                loc)) {
+            return fail(
+                "constraints not satisfied for variable template '" +
+                    pattern->name + "'",
+                loc);
+        }
         return true;
     }
 
@@ -405,6 +415,12 @@ struct Collect::VariableTemplateSpecializationInstantiator {
                     partial_bindings,
                     "variable template partial specialization")) {
                 return false;
+            }
+            if (!collect.are_template_constraints_satisfied_with_bindings(
+                    partial,
+                    partial_bindings,
+                    loc)) {
+                continue;
             }
             matches.push_back(PartialMatch{partial, std::move(partial_bindings)});
         }

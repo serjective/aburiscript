@@ -798,6 +798,7 @@ void DeclarationParser::reset_declarator_parsing_state() {
         kr_param_names.clear();
         preparsed_sym = nullptr;
         default_argument.reset();
+        trailing_requires_clause.reset();
         is_parameter_pack = false;
         is_kr_style = false;
         asm_label = std::nullopt;
@@ -1425,6 +1426,15 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                     }
                 }
                 pars->parse_cpp_optional_noexcept_spec(*func_type);
+                if (pars->lang_opts.is_cxx20_or_later() &&
+                    mgnt->gentle_check(TokenType::REQUIRES_KW)) {
+                    mgnt->advance(); // consume 'requires'
+                    trailing_requires_clause =
+                        pars->parse_cpp_constraint_expression();
+                    if (!trailing_requires_clause) {
+                        error("invalid trailing requires-clause");
+                    }
+                }
                 // C11 6.7.6.3: A function declarator shall not return a function type
                 if (new_type && canonical_type_kind(new_type) == TypeKind::Function) {
                     error("function cannot return a function type (use a function pointer instead)");

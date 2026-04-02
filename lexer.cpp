@@ -157,7 +157,20 @@ TokenType lookup_keyword(const std::string_view ident, const LangOptions& lang_o
         const auto& cxx_keywords = cxx_keyword_table();
         auto cxx_it = cxx_keywords.find(ident);
         if (cxx_it != cxx_keywords.end()) {
+            if ((cxx_it->second == TokenType::CONCEPT_KW ||
+                 cxx_it->second == TokenType::REQUIRES_KW) &&
+                !lang_opts.is_cxx20_or_later()) {
+                return TokenType::IDENTIFIER;
+            }
             return cxx_it->second;
+        }
+        if (lang_opts.is_cxx20_or_later()) {
+            if (ident == "concept") {
+                return TokenType::CONCEPT_KW;
+            }
+            if (ident == "requires") {
+                return TokenType::REQUIRES_KW;
+            }
         }
     }
     const auto& common_keywords = common_keyword_table();
@@ -1419,6 +1432,8 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::FRIEND_KW: return "'friend'";
         case TokenType::EXPLICIT_KW: return "'explicit'";
         case TokenType::CONSTEXPR_KW: return "'constexpr'";
+        case TokenType::CONCEPT_KW: return "'concept'";
+        case TokenType::REQUIRES_KW: return "'requires'";
         case TokenType::NULLABILITY_QUALIFIER: return "nullability qualifier";
         case TokenType::IDENTIFIER: return "identifier";
         case TokenType::INTEGER_CONST: return "integer constant";

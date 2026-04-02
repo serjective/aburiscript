@@ -876,6 +876,8 @@ void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
     if (lookup_namespace == LookupNamespace::Tag ||
         isa<TemplateTemplateParmDecl>(decl)) {
         binding.symbol_kind = SymbolKind::TYPE;
+    } else if (isa<ConceptDecl>(decl)) {
+        binding.symbol_kind = SymbolKind::TYPE;
     } else if (isa<VariableTemplateDecl>(decl)) {
         binding.symbol_kind = SymbolKind::VARIABLE;
     }
@@ -909,6 +911,11 @@ void Collect::collect_add_alias_template_decl(const std::string& name,
 
 void Collect::collect_add_variable_template_decl(const std::string& name,
                                                  const Decl* decl) {
+    collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);
+}
+
+void Collect::collect_add_concept_decl(const std::string& name,
+                                       const Decl* decl) {
     collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);
 }
 

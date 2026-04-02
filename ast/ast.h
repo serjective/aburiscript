@@ -141,6 +141,8 @@ enum class StmtKind : uint8_t {
     BlockByrefAccessExpr,
     BlockExpr,
     CppLambdaExpr,
+    ConceptSpecializationExpr,
+    RequiresExpr,
     ErrorExpr,
     LastExpr = ErrorExpr,
 };
@@ -158,6 +160,7 @@ enum class DeclKind : uint8_t {
     FunctionTemplateDecl,
     VariableTemplateDecl,
     ClassTemplateDecl,
+    ConceptDecl,
     VariableTemplatePartialSpecializationDecl,
     ClassTemplatePartialSpecializationDecl,
     TemplateExplicitSpecializationDecl,
@@ -464,8 +467,28 @@ protected:
           is_parameter_pack(is_parameter_pack) {}
 };
 
+enum class ConstraintRequirementKind : uint8_t {
+    Simple,
+    Type,
+    Compound,
+    Nested,
+};
+
+struct ConstraintRequirement {
+    ConstraintRequirementKind kind = ConstraintRequirementKind::Simple;
+    std::unique_ptr<Expr> expr;
+    QualType type_requirement = nullptr;
+    uint8_t is_noexcept : 1;
+    std::unique_ptr<Expr> return_constraint;
+    SrcLoc location;
+
+    ConstraintRequirement()
+        : is_noexcept(false) {}
+};
+
 struct TemplateTypeParmDecl : TemplateParameterDecl {
     std::shared_ptr<TemplateTypeParmType> type;
+    std::unique_ptr<Expr> type_constraint;
 
     TemplateTypeParmDecl(std::string name,
                          uint32_t depth,
@@ -560,6 +583,7 @@ struct FuncDecl: Decl {
     std::shared_ptr<Scope> scope;
     const std::string* asm_label;
     StorageClass storage_class;
+    std::unique_ptr<Expr> trailing_requires_clause;
     bool has_explicit_specialization_argument_list = false;
     uint8_t is_inline : 1;
     uint8_t has_prior_non_inline_declaration : 1;
@@ -2567,6 +2591,7 @@ struct CppRecordDecl : Decl {
 struct TemplateDecl : Decl {
     TemplateParameterList parameters;
     std::unique_ptr<Decl> templated_decl;
+    std::unique_ptr<Expr> associated_constraint;
     mutable uint32_t external_semantic_owner_id = 0; // See ownership conventions at top of file
     mutable const TemplateDecl* canonical_decl = nullptr;
     mutable const TemplateDecl* pattern_template_decl = nullptr;
@@ -2882,6 +2907,26 @@ struct AliasTemplateDecl : TemplateDecl {
 
     static bool classof(const Decl* d) {
         return d->get_kind() == DeclKind::AliasTemplateDecl;
+    }
+};
+
+struct ConceptDecl : TemplateDecl {
+    std::string name;
+    std::unique_ptr<Expr> constraint_expr;
+
+    ConceptDecl(TemplateParameterList parameters,
+                std::string name,
+                std::unique_ptr<Expr> constraint_expr,
+                SrcLoc loc = SrcLoc())
+        : TemplateDecl(DeclKind::ConceptDecl,
+                       std::move(parameters),
+                       nullptr,
+                       loc),
+          name(std::move(name)),
+          constraint_expr(std::move(constraint_expr)) {}
+
+    static bool classof(const Decl* d) {
+        return d->get_kind() == DeclKind::ConceptDecl;
     }
 };
 
@@ -3739,6 +3784,55 @@ struct BuiltinCallExpr : Expr {
     bool isLValue() override { return false; }
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::BuiltinCallExpr; }
+};
+
+struct ConceptSpecializationExpr : Expr {
+    const ConceptDecl* concept_decl = nullptr;
+    std::string concept_name;
+    std::vector<TemplateArgument> arguments;
+    QualType result_type;
+    std::optional<bool> satisfaction;
+
+    ConceptSpecializationExpr(const ConceptDecl* concept_decl,
+                              std::string concept_name,
+                              std::vector<TemplateArgument> arguments,
+                              QualType result_type,
+                              SrcLoc loc = SrcLoc())
+        : Expr(StmtKind::ConceptSpecializationExpr, loc),
+          concept_decl(concept_decl),
+          concept_name(std::move(concept_name)),
+          arguments(std::move(arguments)),
+          result_type(std::move(result_type)) {}
+
+    QualType get_type() override { return result_type; }
+    bool isLValue() override { return false; }
+
+    static bool classof(const Stmt* s) {
+        return s->get_kind() == StmtKind::ConceptSpecializationExpr;
+    }
+};
+
+struct RequiresExpr : Expr {
+    std::vector<std::unique_ptr<ParamDecl>> parameters;
+    std::vector<ConstraintRequirement> requirements;
+    QualType result_type;
+    std::optional<bool> satisfaction;
+
+    RequiresExpr(std::vector<std::unique_ptr<ParamDecl>> parameters,
+                 std::vector<ConstraintRequirement> requirements,
+                 QualType result_type,
+                 SrcLoc loc = SrcLoc())
+        : Expr(StmtKind::RequiresExpr, loc),
+          parameters(std::move(parameters)),
+          requirements(std::move(requirements)),
+          result_type(std::move(result_type)) {}
+
+    QualType get_type() override { return result_type; }
+    bool isLValue() override { return false; }
+
+    static bool classof(const Stmt* s) {
+        return s->get_kind() == StmtKind::RequiresExpr;
+    }
 };
 
 #endif //ABURI_AST_H

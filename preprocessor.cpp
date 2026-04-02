@@ -646,7 +646,13 @@ static bool has_feature_name(const std::string& name,
     static const std::unordered_set<std::string> kFeatures = {
         "attribute_deprecated_with_message"
     };
-    return kFeatures.contains(name);
+    if (kFeatures.contains(name)) {
+        return true;
+    }
+    if (name == "cxx_concepts") {
+        return lang_opts.is_cxx20_or_later();
+    }
+    return false;
 }
 
 inline bool is_hspace(char c) {
@@ -1201,6 +1207,9 @@ void PreProcess::init_builtin_macros() {
     }
     if (lang_opts.cplusplus_macro_value().has_value()) {
         add_builtin("__cplusplus", MacroDefinition::BuiltinKind::CPlusPlus);
+    }
+    if (lang_opts.is_cxx20_or_later()) {
+        define_object_macro("__cpp_concepts", "202002L");
     }
     if (lang_opts.is_c_mode()) {
         if (lang_opts.uses_gnu_inline_semantics()) {

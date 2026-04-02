@@ -480,6 +480,20 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         selected_parameters = &class_template->parameters;
         pattern_semantic_decl = class_template->pattern_semantic_decl();
 
+        bool specialization_is_dependent =
+            template_arguments_depend_on_template_parameters(normalized_arguments);
+        if (!specialization_is_dependent &&
+            !collect.are_template_constraints_satisfied_with_bindings(
+                class_template,
+                specialization_bindings,
+                loc)) {
+            collect.report_error(
+                "constraints not satisfied for class template '" +
+                    primary_pattern->name + "'",
+                loc);
+            return false;
+        }
+
         std::vector<ClassTemplatePartialSpecializationMatch> matching_partials;
         matching_partials.reserve(class_template->partial_specializations().size());
         for (const auto* partial_specialization :
@@ -492,6 +506,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     partial_specialization,
                     normalized_arguments,
                     partial_bindings)) {
+                continue;
+            }
+            auto partial_arguments =
+                flatten_template_argument_bindings(partial_bindings);
+            if (!template_arguments_depend_on_template_parameters(partial_arguments) &&
+                !collect.are_template_constraints_satisfied_with_bindings(
+                    partial_specialization,
+                    partial_bindings,
+                    loc)) {
                 continue;
             }
             matching_partials.push_back(ClassTemplatePartialSpecializationMatch{

@@ -93,6 +93,8 @@ constexpr auto kAllStmtKinds = std::to_array<StmtKind>({
     StmtKind::BlockByrefAccessExpr,
     StmtKind::BlockExpr,
     StmtKind::CppLambdaExpr,
+    StmtKind::ConceptSpecializationExpr,
+    StmtKind::RequiresExpr,
     StmtKind::ErrorExpr,
 });
 
@@ -108,6 +110,7 @@ constexpr auto kAllDeclKinds = std::to_array<DeclKind>({
     DeclKind::FunctionTemplateDecl,
     DeclKind::VariableTemplateDecl,
     DeclKind::ClassTemplateDecl,
+    DeclKind::ConceptDecl,
     DeclKind::VariableTemplatePartialSpecializationDecl,
     DeclKind::ClassTemplatePartialSpecializationDecl,
     DeclKind::TemplateExplicitSpecializationDecl,
@@ -219,6 +222,7 @@ const char* decl_kind_name(DeclKind kind) {
         case DeclKind::FunctionTemplateDecl: return "FunctionTemplateDecl";
         case DeclKind::VariableTemplateDecl: return "VariableTemplateDecl";
         case DeclKind::ClassTemplateDecl: return "ClassTemplateDecl";
+        case DeclKind::ConceptDecl: return "ConceptDecl";
         case DeclKind::VariableTemplatePartialSpecializationDecl:
             return "VariableTemplatePartialSpecializationDecl";
         case DeclKind::ClassTemplatePartialSpecializationDecl:
@@ -543,6 +547,17 @@ private:
                     visit_decl(param.get());
                 }
                 visit_decl(node->templated_decl.get());
+                return;
+            }
+            case DeclKind::ConceptDecl: {
+                auto* node = static_cast<const ConceptDecl*>(decl);
+                record_decl<ConceptDecl>(DeclKind::ConceptDecl);
+                ast_vector_backing_bytes_ += vector_backing_bytes(node->parameters);
+                for (const auto& param : node->parameters) {
+                    visit_decl(param.get());
+                }
+                visit_stmt(node->associated_constraint.get());
+                visit_stmt(node->constraint_expr.get());
                 return;
             }
             case DeclKind::VariableTemplatePartialSpecializationDecl: {
@@ -1237,6 +1252,30 @@ private:
                 ast_vector_backing_bytes_ += vector_backing_bytes(node->type_args);
                 for (const auto& arg : node->args) {
                     visit_stmt(arg.get());
+                }
+                return;
+            }
+            case StmtKind::ConceptSpecializationExpr: {
+                auto* node = static_cast<const ConceptSpecializationExpr*>(stmt);
+                record_stmt<ConceptSpecializationExpr>(
+                    StmtKind::ConceptSpecializationExpr);
+                ast_vector_backing_bytes_ += vector_backing_bytes(node->arguments);
+                add_ast_string(node->concept_name);
+                return;
+            }
+            case StmtKind::RequiresExpr: {
+                auto* node = static_cast<const RequiresExpr*>(stmt);
+                record_stmt<RequiresExpr>(StmtKind::RequiresExpr);
+                ast_vector_backing_bytes_ +=
+                    vector_backing_bytes(node->parameters);
+                ast_vector_backing_bytes_ +=
+                    vector_backing_bytes(node->requirements);
+                for (const auto& parameter : node->parameters) {
+                    visit_decl(parameter.get());
+                }
+                for (const auto& requirement : node->requirements) {
+                    visit_stmt(requirement.expr.get());
+                    visit_stmt(requirement.return_constraint.get());
                 }
                 return;
             }

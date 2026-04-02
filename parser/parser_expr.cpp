@@ -1493,6 +1493,10 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
         if (qualified_id_probe == TPResult::True) {
             return parse_cpp_qualified_primary_expression();
         }
+        if (lang_opts.is_cxx20_or_later() &&
+            tok.type == TokenType::REQUIRES_KW) {
+            return parse_cpp_requires_expression();
+        }
         if (tok.type == TokenType::IDENTIFIER) {
             const std::string& ident = tok.value;
             if (ident == "typeid") {

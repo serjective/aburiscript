@@ -52,6 +52,21 @@ void append_unique_variable_template_candidate(
     candidates.push_back(variable_template);
 }
 
+void append_unique_concept_candidate(
+    std::vector<const ConceptDecl*>& candidates,
+    const Decl* decl) {
+    auto* concept_decl = dyn_cast<ConceptDecl>(decl);
+    if (!concept_decl) {
+        return;
+    }
+    for (const auto* existing : candidates) {
+        if (existing == concept_decl) {
+            return;
+        }
+    }
+    candidates.push_back(concept_decl);
+}
+
 std::vector<const FunctionTemplateDecl*> lookup_unqualified_function_templates(
     std::string_view callee_name,
     const std::shared_ptr<Scope>& current_scope) {
@@ -104,6 +119,33 @@ std::vector<const VariableTemplateDecl*> lookup_unqualified_variable_templates(
         append_unique_variable_template_candidate(template_candidates, decl);
     }
     return template_candidates;
+}
+
+std::vector<const ConceptDecl*> lookup_unqualified_concepts(
+    std::string_view name,
+    const std::shared_ptr<Scope>& current_scope) {
+    std::vector<const ConceptDecl*> concept_candidates;
+    if (!current_scope) {
+        return concept_candidates;
+    }
+
+    const DeclBinding* template_binding =
+        LookupEngine::lookup_unqualified_template_binding(
+            std::string(name),
+            current_scope,
+            true,
+            LookupNamespace::Ordinary);
+    if (!template_binding) {
+        return concept_candidates;
+    }
+
+    append_unique_concept_candidate(
+        concept_candidates,
+        template_binding->template_decl);
+    for (const auto* decl : template_binding->template_overload_candidates) {
+        append_unique_concept_candidate(concept_candidates, decl);
+    }
+    return concept_candidates;
 }
 
 std::vector<std::shared_ptr<Symbol>> lookup_qualified_function_candidates(
@@ -221,6 +263,40 @@ std::vector<const VariableTemplateDecl*> lookup_qualified_variable_templates(
         append_unique_variable_template_candidate(template_candidates, decl);
     }
     return template_candidates;
+}
+
+std::vector<const ConceptDecl*> lookup_qualified_concepts(
+    std::string_view name,
+    const CppQualifiedExprInfo& qualified_info,
+    const DeclContext* current_decl_context) {
+    std::vector<const ConceptDecl*> concept_candidates;
+    if (!current_decl_context) {
+        return concept_candidates;
+    }
+
+    LookupEngine::QualifiedNameSpec name_spec;
+    name_spec.has_global_qualifier = qualified_info.has_global_qualifier;
+    name_spec.qualifiers = qualified_info.qualifiers;
+    name_spec.terminal_name = std::string(name);
+    auto qualified_lookup = LookupEngine::lookup_qualified_name(
+        name_spec,
+        current_decl_context,
+        LookupNamespace::Ordinary);
+    const DeclBinding* template_binding =
+        qualified_lookup.status == LookupEngine::QualifiedLookupStatus::Found
+            ? qualified_lookup.binding
+            : nullptr;
+    if (!template_binding) {
+        return concept_candidates;
+    }
+
+    append_unique_concept_candidate(
+        concept_candidates,
+        template_binding->template_decl);
+    for (const auto* decl : template_binding->template_overload_candidates) {
+        append_unique_concept_candidate(concept_candidates, decl);
+    }
+    return concept_candidates;
 }
 
 } // namespace
@@ -352,6 +428,12 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
                     function_template,
                     call->args,
                     deduced_arguments)) {
+                continue;
+            }
+            if (!are_template_constraints_satisfied(
+                    function_template,
+                    deduced_arguments,
+                    loc)) {
                 continue;
             }
 
@@ -539,6 +621,12 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
         std::vector<TemplateArgument> deduced_arguments;
         if (!deduce_function_template_call_arguments(
                 function_template, call->args, deduced_arguments)) {
+            continue;
+        }
+        if (!are_template_constraints_satisfied(
+                function_template,
+                deduced_arguments,
+                loc)) {
             continue;
         }
 
@@ -1006,6 +1094,12 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                     &explicit_bindings)) {
                 continue;
             }
+            if (!are_template_constraints_satisfied(
+                    function_template,
+                    specialization_arguments,
+                    loc)) {
+                continue;
+            }
 
             std::shared_ptr<Symbol> specialization_symbol = nullptr;
             auto* specialization_decl =
@@ -1281,6 +1375,12 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                     &explicit_bindings)) {
                 continue;
             }
+            if (!are_template_constraints_satisfied(
+                    function_template,
+                    specialization_arguments,
+                    loc)) {
+                continue;
+            }
 
             std::shared_ptr<Symbol> specialization_symbol = nullptr;
             auto* specialization_decl =
@@ -1440,6 +1540,12 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                 args,
                 specialization_arguments,
                 &explicit_bindings)) {
+            continue;
+        }
+        if (!are_template_constraints_satisfied(
+                function_template,
+                specialization_arguments,
+                loc)) {
             continue;
         }
 
@@ -1647,12 +1753,85 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
             : lookup_unqualified_variable_templates(
                   callee_name,
                   session_.current_scope_);
+    auto concept_templates =
+        qualified_info
+            ? lookup_qualified_concepts(
+                  callee_name,
+                  *qualified_info,
+                  get_current_decl_context().get())
+            : lookup_unqualified_concepts(
+                  callee_name,
+                  session_.current_scope_);
 
-    if (function_templates.empty() && variable_templates.empty()) {
+    if (function_templates.empty() &&
+        variable_templates.empty() &&
+        concept_templates.empty()) {
         report_error(
             "no template named '" + display_name + "'",
             loc);
         return collect_make<ErrorExpr>("missing template", loc);
+    }
+
+    if (!concept_templates.empty()) {
+        if (!function_templates.empty() || !variable_templates.empty()) {
+            report_error(
+                "explicit template-id '" + display_name +
+                    "' is ambiguous between concept and non-concept templates",
+                loc);
+            return collect_make<ErrorExpr>("ambiguous template-id", loc);
+        }
+
+        std::unique_ptr<Expr> selected_expr;
+        for (const auto* concept_template : concept_templates) {
+            if (!concept_template) {
+                continue;
+            }
+
+            TemplateArgumentBindings specialization_bindings;
+            std::string binding_error;
+            if (!bind_template_arguments_for_specialization(
+                    concept_template,
+                    explicit_template_args,
+                    specialization_bindings,
+                    loc,
+                    &binding_error)) {
+                continue;
+            }
+
+            auto specialization_arguments =
+                flatten_template_argument_bindings(specialization_bindings);
+            auto specialization_expr =
+                collect_concept_specialization_expression(
+                    concept_template,
+                    display_name,
+                    std::move(specialization_arguments),
+                    loc);
+            if (!specialization_expr) {
+                continue;
+            }
+
+            if (selected_expr) {
+                report_error(
+                    "explicit concept-id '" + display_name +
+                        "' is ambiguous",
+                    loc);
+                return collect_make<ErrorExpr>(
+                    "ambiguous concept-id",
+                    loc);
+            }
+            selected_expr = std::move(specialization_expr);
+        }
+
+        if (!selected_expr) {
+            report_error(
+                "no matching concept specialization for '" +
+                    display_name + "'",
+                loc);
+            return collect_make<ErrorExpr>(
+                "no matching concept specialization",
+                loc);
+        }
+        return selected_expr;
     }
 
     if (!variable_templates.empty()) {
@@ -1684,6 +1863,12 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
 
             auto specialization_arguments =
                 flatten_template_argument_bindings(specialization_bindings);
+            if (!are_template_constraints_satisfied(
+                    variable_template,
+                    specialization_arguments,
+                    loc)) {
+                continue;
+            }
             std::shared_ptr<Symbol> specialization_symbol = nullptr;
             auto* specialization_decl =
                 instantiate_variable_template_specialization(
@@ -1750,6 +1935,12 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
 
         auto specialization_arguments =
             flatten_template_argument_bindings(specialization_bindings);
+        if (!are_template_constraints_satisfied(
+                function_template,
+                specialization_arguments,
+                loc)) {
+            continue;
+        }
         std::shared_ptr<Symbol> specialization_symbol = nullptr;
         auto* specialization_decl =
             instantiate_function_template_specialization(

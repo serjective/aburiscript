@@ -167,6 +167,10 @@ const TemplateDecl* template_decl_from_decl(const Decl* decl) {
             dyn_cast<ClassTemplateDecl>(const_cast<Decl*>(decl))) {
         return class_template;
     }
+    if (const auto* concept_decl =
+            dyn_cast<ConceptDecl>(const_cast<Decl*>(decl))) {
+        return concept_decl;
+    }
     if (const auto* partial_specialization =
             dyn_cast<ClassTemplatePartialSpecializationDecl>(
                 const_cast<Decl*>(decl))) {
@@ -1769,6 +1773,65 @@ CollectSemanticStore::get_or_create_variable_template_specialization(
     variable_template_specialization_lookup_.emplace(entry->semantic_key, index);
     variable_template_specializations_.push_back(std::move(entry));
     return *variable_template_specializations_.back();
+}
+
+ConceptSpecializationEntry*
+CollectSemanticStore::lookup_concept_specialization(
+    const ConceptDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) {
+    ASTContextSideTableScope side_table_scope(owner_ast_ctx_);
+    auto key =
+        make_template_specialization_semantic_key(primary_template, arguments);
+    auto it = concept_specialization_lookup_.find(key);
+    if (it == concept_specialization_lookup_.end()) {
+        return nullptr;
+    }
+    if (it->second >= concept_specializations_.size()) {
+        return nullptr;
+    }
+    return concept_specializations_[it->second].get();
+}
+
+const ConceptSpecializationEntry*
+CollectSemanticStore::lookup_concept_specialization(
+    const ConceptDecl* primary_template,
+    const std::vector<TemplateArgument>& arguments) const {
+    ASTContextSideTableScope side_table_scope(owner_ast_ctx_);
+    auto key =
+        make_template_specialization_semantic_key(primary_template, arguments);
+    auto it = concept_specialization_lookup_.find(key);
+    if (it == concept_specialization_lookup_.end()) {
+        return nullptr;
+    }
+    if (it->second >= concept_specializations_.size()) {
+        return nullptr;
+    }
+    return concept_specializations_[it->second].get();
+}
+
+ConceptSpecializationEntry&
+CollectSemanticStore::get_or_create_concept_specialization(
+    const ConceptDecl* primary_template,
+    std::vector<TemplateArgument> arguments) {
+    ASTContextSideTableScope side_table_scope(owner_ast_ctx_);
+    auto semantic_key =
+        make_template_specialization_semantic_key(primary_template, arguments);
+    auto existing_it = concept_specialization_lookup_.find(semantic_key);
+    if (existing_it != concept_specialization_lookup_.end() &&
+        existing_it->second < concept_specializations_.size()) {
+        return *concept_specializations_[existing_it->second];
+    }
+
+    auto entry = std::make_unique<ConceptSpecializationEntry>();
+    entry->primary_template = dyn_cast<ConceptDecl>(
+        const_cast<TemplateDecl*>(semantic_key.primary_template));
+    entry->semantic_key = std::move(semantic_key);
+    entry->arguments = entry->semantic_key.arguments;
+
+    size_t index = concept_specializations_.size();
+    concept_specialization_lookup_.emplace(entry->semantic_key, index);
+    concept_specializations_.push_back(std::move(entry));
+    return *concept_specializations_.back();
 }
 
 bool CollectSemanticStore::push_template_instantiation_frame(size_t max_depth) {

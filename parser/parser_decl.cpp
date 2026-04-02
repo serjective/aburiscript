@@ -108,6 +108,8 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
         loc,
         current_decl_language_linkage());
     fin_funcdecl->is_constexpr = decl_parser->is_constexpr;
+    fin_funcdecl->trailing_requires_clause =
+        std::move(decl_parser->trailing_requires_clause);
     auto synthesize_parameter_decls_from_function_type =
         [&](FuncDecl* decl) {
             if (!decl || !decl->parameters.empty()) {

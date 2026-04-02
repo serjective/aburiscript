@@ -159,6 +159,64 @@ ConstEvalResult make_constant_int(ConstIntValue value) {
     return ConstEvalResult::constant(ConstValue::integer(value));
 }
 
+Expr* strip_noop_implicit_casts(Expr* expr);
+
+bool const_value_to_constraint_bool(const ConstValue& value, bool& out) {
+    switch (value.kind) {
+        case ConstValueKind::Integer:
+            out = value.int_value.to_unsigned_u64() != 0;
+            return true;
+        case ConstValueKind::Boolean:
+            out = value.bool_value;
+            return true;
+        case ConstValueKind::Floating:
+            out = value.float_value.value != 0.0L;
+            return true;
+        case ConstValueKind::NullPointer:
+            out = false;
+            return true;
+        case ConstValueKind::Address:
+        case ConstValueKind::MemberPointer:
+            out = true;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool expression_is_known_noexcept_for_requires(const Expr* expr) {
+    if (!expr) {
+        return false;
+    }
+    auto* stripped = strip_noop_implicit_casts(const_cast<Expr*>(expr));
+    if (!stripped) {
+        return false;
+    }
+
+    auto is_nothrow_function_type = [](QualType function_like_type) -> bool {
+        auto function_type =
+            desugar_type(function_like_type).as_shared<FunctionType>();
+        return function_type &&
+               function_type->exception_spec ==
+                   FunctionExceptionSpecKind::NonThrowing;
+    };
+
+    if (auto* call = dyn_cast<FuncCall>(stripped)) {
+        return call->func && is_nothrow_function_type(call->func->get_type());
+    }
+    if (auto* member_call = dyn_cast<CppMemberCallExpr>(stripped)) {
+        return member_call->lowered_call &&
+               member_call->lowered_call->func &&
+               is_nothrow_function_type(
+                   member_call->lowered_call->func->get_type());
+    }
+    if (auto* construct = dyn_cast<CppConstructExpr>(stripped)) {
+        return construct->ctor_sym &&
+               is_nothrow_function_type(construct->ctor_sym->type);
+    }
+    return false;
+}
+
 struct InterpScopeBindings {
     std::unordered_map<const Symbol*, ConstValue> symbol_values;
     std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_owners;
@@ -1037,6 +1095,105 @@ std::optional<ConstValue> default_const_value_for_type(QualType type) {
 // ====== Typed expression evaluation & initialization ======
 
 ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth);
+
+ConstEvalResult eval_requires_expr(RequiresExpr* requires_expr,
+                                   ConstEvalMode mode,
+                                   size_t depth) {
+    if (!requires_expr) {
+        return make_error(
+            ConstEvalDiagCode::NullExpression,
+            "cannot evaluate a null requires-expression",
+            SrcLoc());
+    }
+    if (requires_expr->satisfaction.has_value()) {
+        return ConstEvalResult::constant(
+            ConstValue::boolean(*requires_expr->satisfaction));
+    }
+
+    for (const auto& parameter : requires_expr->parameters) {
+        if (!parameter) {
+            continue;
+        }
+        if (type_depends_on_template_parameters(parameter->type) ||
+            type_depends_on_template_parameters(
+                QualType(parameter->original_type))) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "requires-expression parameter is still dependent",
+                requires_expr->location);
+        }
+    }
+
+    for (const auto& requirement : requires_expr->requirements) {
+        switch (requirement.kind) {
+            case ConstraintRequirementKind::Simple:
+                if (!requirement.expr ||
+                    isa<ErrorExpr>(requirement.expr.get())) {
+                    return ConstEvalResult::constant(ConstValue::boolean(false));
+                }
+                break;
+            case ConstraintRequirementKind::Type:
+                if (!requirement.type_requirement ||
+                    type_depends_on_template_parameters(
+                        requirement.type_requirement)) {
+                    return ConstEvalResult::constant(ConstValue::boolean(false));
+                }
+                break;
+            case ConstraintRequirementKind::Nested: {
+                if (!requirement.expr) {
+                    return ConstEvalResult::constant(ConstValue::boolean(false));
+                }
+                ConstEvalResult nested =
+                    eval_expr(requirement.expr.get(), mode, depth + 1);
+                if (nested.status != ConstEvalStatus::Constant ||
+                    !nested.value.has_value()) {
+                    return nested;
+                }
+                bool nested_value = false;
+                if (!const_value_to_constraint_bool(
+                        *nested.value,
+                        nested_value) ||
+                    !nested_value) {
+                    return ConstEvalResult::constant(ConstValue::boolean(false));
+                }
+                break;
+            }
+            case ConstraintRequirementKind::Compound: {
+                if (!requirement.expr ||
+                    isa<ErrorExpr>(requirement.expr.get())) {
+                    return ConstEvalResult::constant(ConstValue::boolean(false));
+                }
+                if (requirement.is_noexcept &&
+                    !expression_is_known_noexcept_for_requires(
+                        requirement.expr.get())) {
+                    return ConstEvalResult::constant(ConstValue::boolean(false));
+                }
+                if (requirement.return_constraint) {
+                    ConstEvalResult nested =
+                        eval_expr(
+                            requirement.return_constraint.get(),
+                            mode,
+                            depth + 1);
+                    if (nested.status != ConstEvalStatus::Constant ||
+                        !nested.value.has_value()) {
+                        return nested;
+                    }
+                    bool nested_value = false;
+                    if (!const_value_to_constraint_bool(
+                            *nested.value,
+                            nested_value) ||
+                        !nested_value) {
+                        return ConstEvalResult::constant(
+                            ConstValue::boolean(false));
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    return ConstEvalResult::constant(ConstValue::boolean(true));
+}
 
 ConstEvalResult eval_expr_as_typed_const_value(Expr* expr,
                                                QualType target_type,
@@ -3240,6 +3397,21 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
                 static_cast<uint64_t>(char_lit->int_value), shape.width));
         }
         return make_constant_int(ConstIntValue::from_signed(char_lit->int_value, shape.width));
+    }
+
+    if (auto* concept_expr = dyn_cast<ConceptSpecializationExpr>(expr)) {
+        if (!concept_expr->satisfaction.has_value()) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "concept-id is not fully resolved for constant evaluation",
+                expr->location);
+        }
+        return ConstEvalResult::constant(
+            ConstValue::boolean(*concept_expr->satisfaction));
+    }
+
+    if (auto* requires_expr = dyn_cast<RequiresExpr>(expr)) {
+        return eval_requires_expr(requires_expr, mode, depth + 1);
     }
 
     if (isa<CppThisExpr>(expr)) {

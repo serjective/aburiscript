@@ -1948,6 +1948,7 @@ void ASTToLLVM::convert_declaration(Decl *decl) {
         case DeclKind::VariableTemplatePartialSpecializationDecl:
         case DeclKind::ClassTemplateDecl:
         case DeclKind::ClassTemplatePartialSpecializationDecl:
+        case DeclKind::ConceptDecl:
             return;
         case DeclKind::TemplateExplicitSpecializationDecl: {
             auto* explicit_specialization =
