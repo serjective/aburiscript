@@ -7,6 +7,93 @@
 // Keep semantic construction in Collect; keep grammar ownership and ambiguity
 // decisions here so declaration and expression parsing share one seam.
 
+const Decl* Parser::lookup_cpp_unqualified_type_template_decl(
+    const std::string& component_name,
+    const std::shared_ptr<Scope>& start_scope,
+    bool allow_enclosing_lookup) const {
+    if (!collect_ || !start_scope || component_name.empty()) {
+        return nullptr;
+    }
+
+    auto select_template_decl =
+        [](const DeclBinding* binding,
+           LookupNamespace lookup_namespace) -> const Decl* {
+            if (!binding) {
+                return nullptr;
+            }
+
+            const Decl* primary_template = binding->template_decl;
+            if (!primary_template &&
+                binding->template_overload_candidates.size() == 1) {
+                primary_template =
+                    binding->template_overload_candidates.front();
+            }
+
+            if (lookup_namespace == LookupNamespace::Ordinary) {
+                if (isa<AliasTemplateDecl>(primary_template) ||
+                    isa<TemplateTemplateParmDecl>(primary_template)) {
+                    return primary_template;
+                }
+                return nullptr;
+            }
+
+            if (isa<ClassTemplateDecl>(primary_template)) {
+                return primary_template;
+            }
+            return nullptr;
+        };
+
+    auto lookup_from_scope =
+        [&](const std::shared_ptr<Scope>& scope) -> const Decl* {
+            if (!scope) {
+                return nullptr;
+            }
+
+            if (const Decl* ordinary_template =
+                    select_template_decl(
+                        LookupEngine::lookup_unqualified_template_binding(
+                            component_name,
+                            scope,
+                            allow_enclosing_lookup,
+                            LookupNamespace::Ordinary),
+                        LookupNamespace::Ordinary)) {
+                return ordinary_template;
+            }
+
+            return select_template_decl(
+                LookupEngine::lookup_unqualified_template_binding(
+                    component_name,
+                    scope,
+                    allow_enclosing_lookup,
+                    LookupNamespace::Tag),
+                LookupNamespace::Tag);
+        };
+
+    if (const Decl* primary_template = lookup_from_scope(start_scope)) {
+        return primary_template;
+    }
+
+    if (cxx_record_parse_stack_.empty() ||
+        cxx_record_parse_stack_.back().name != component_name) {
+        return nullptr;
+    }
+
+    if (cxx_record_parse_stack_.back().primary_class_template) {
+        return cxx_record_parse_stack_.back().primary_class_template;
+    }
+
+    for (auto scope = start_scope; scope; scope = scope->parent) {
+        const DeclContext* context = scope->associated_decl_context;
+        if (!context || context->kind() != DeclContextKind::Record) {
+            continue;
+        }
+
+        return lookup_from_scope(scope->parent);
+    }
+
+    return nullptr;
+}
+
 QualType Parser::resolve_cpp_unqualified_type_component(
     const std::string& component_name,
     const std::vector<TemplateArgument>& component_arguments,
@@ -29,39 +116,11 @@ QualType Parser::resolve_cpp_unqualified_type_component(
         return QualType();
     }
 
-    const DeclBinding* ordinary_template_binding =
-        LookupEngine::lookup_unqualified_template_binding(
+    const Decl* primary_template =
+        lookup_cpp_unqualified_type_template_decl(
             component_name,
             current_scope,
-            true,
-            LookupNamespace::Ordinary);
-    const DeclBinding* tag_template_binding =
-        LookupEngine::lookup_unqualified_template_binding(
-            component_name,
-            current_scope,
-            true,
-            LookupNamespace::Tag);
-    const Decl* primary_template = nullptr;
-    if (ordinary_template_binding) {
-        primary_template = ordinary_template_binding->template_decl;
-        if (!primary_template &&
-            ordinary_template_binding->template_overload_candidates.size() == 1) {
-            primary_template =
-                ordinary_template_binding->template_overload_candidates.front();
-        }
-    }
-    if (!isa<AliasTemplateDecl>(primary_template) &&
-        !isa<TemplateTemplateParmDecl>(primary_template)) {
-        primary_template = nullptr;
-        if (tag_template_binding) {
-            primary_template = tag_template_binding->template_decl;
-            if (!primary_template &&
-                tag_template_binding->template_overload_candidates.size() == 1) {
-                primary_template =
-                    tag_template_binding->template_overload_candidates.front();
-            }
-        }
-    }
+            true);
     if (!isa<AliasTemplateDecl>(primary_template) &&
         !isa<ClassTemplateDecl>(primary_template) &&
         !isa<TemplateTemplateParmDecl>(primary_template)) {
@@ -224,45 +283,10 @@ Parser::resolve_cpp_qualified_owner_chain(
         [&](const std::shared_ptr<Scope>& scope,
             bool allow_enclosing_lookup,
             const std::string& name) -> const Decl* {
-            const DeclBinding* ordinary_template_binding =
-                LookupEngine::lookup_unqualified_template_binding(
-                    name,
-                    scope,
-                    allow_enclosing_lookup,
-                    LookupNamespace::Ordinary);
-            const Decl* ordinary_template = nullptr;
-            if (ordinary_template_binding) {
-                ordinary_template = ordinary_template_binding->template_decl;
-                if (!ordinary_template &&
-                    ordinary_template_binding->template_overload_candidates.size() == 1) {
-                    ordinary_template =
-                        ordinary_template_binding->template_overload_candidates.front();
-                }
-            }
-            if (isa<AliasTemplateDecl>(ordinary_template) ||
-                isa<TemplateTemplateParmDecl>(ordinary_template)) {
-                return ordinary_template;
-            }
-
-            const DeclBinding* tag_template_binding =
-                LookupEngine::lookup_unqualified_template_binding(
-                    name,
-                    scope,
-                    allow_enclosing_lookup,
-                    LookupNamespace::Tag);
-            const Decl* tag_template = nullptr;
-            if (tag_template_binding) {
-                tag_template = tag_template_binding->template_decl;
-                if (!tag_template &&
-                    tag_template_binding->template_overload_candidates.size() == 1) {
-                    tag_template =
-                        tag_template_binding->template_overload_candidates.front();
-                }
-            }
-            if (isa<ClassTemplateDecl>(tag_template)) {
-                return tag_template;
-            }
-            return nullptr;
+            return lookup_cpp_unqualified_type_template_decl(
+                name,
+                scope,
+                allow_enclosing_lookup);
         };
 
     auto build_current_instantiation_arguments =

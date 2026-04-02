@@ -513,6 +513,10 @@ private:
         const std::vector<TemplateArgument>& component_arguments,
         bool component_has_template_argument_list,
         SrcLoc component_loc);
+    const Decl* lookup_cpp_unqualified_type_template_decl(
+        const std::string& component_name,
+        const std::shared_ptr<Scope>& start_scope,
+        bool allow_enclosing_lookup) const;
     std::optional<CppDependentOwnerAnalysis> analyze_cpp_qualified_type_owner(
         std::string_view qualifier_name,
         const std::vector<TemplateArgument>& qualifier_arguments,
@@ -715,6 +719,7 @@ private:
         CppRecordKind kind = CppRecordKind::Class;
         std::string name;
         const ObjectDecl* semantic_owner = nullptr;
+        const ClassTemplateDecl* primary_class_template = nullptr;
     };
     std::vector<CppRecordParseFrame> cxx_record_parse_stack_;
     // Owns temporary semantic decls created during C++ class parsing before

@@ -1,15 +1,42 @@
 #include "collect.h"
 
+namespace {
+bool sizeof_alignof_target_still_dependent(QualType target_type,
+                                           const ASTContext* ast_ctx) {
+    return target_type &&
+           type_depends_on_template_parameters(target_type, ast_ctx);
+}
+}
+
 void Collect::finalize_sizeof_node(SizeOfExpr* node, const std::shared_ptr<CType>& target_type, SrcLoc loc) {
 
     if (!node) {
         return;
     }
+    auto size_t_type = get_builtin_ulong();
+    node->result_type = size_t_type ? QualType(size_t_type) : QualType(get_builtin_int());
     if (!target_type) {
         report_error("sizeof applied to expression with unknown type", loc);
         return;
     }
-    auto resolved_target = finalize_deferred_semantic_type(QualType(target_type), loc);
+    QualType target_qt(target_type);
+    if (sizeof_alignof_target_still_dependent(target_qt, ast_ctx_.get())) {
+        if (node->type_operand) {
+            node->type_operand = target_qt;
+        }
+        node->is_runtime_sizeof = false;
+        return;
+    }
+
+    auto resolved_target = finalize_deferred_semantic_type(target_qt, loc);
+    if (!resolved_target ||
+        sizeof_alignof_target_still_dependent(resolved_target, ast_ctx_.get())) {
+        if (node->type_operand) {
+            node->type_operand = resolved_target ? resolved_target : target_qt;
+        }
+        node->is_runtime_sizeof = false;
+        return;
+    }
     auto canonical_target = desugar_type(resolved_target, ast_ctx_.get());
     if (node->type_operand) {
         node->type_operand = canonical_target;
@@ -22,8 +49,6 @@ void Collect::finalize_sizeof_node(SizeOfExpr* node, const std::shared_ptr<CType
     if ((canonical_target->isIncomplete() && !canonical_target->isVoid()) || incomplete_array) {
         report_error("sizeof cannot be applied to incomplete type", loc);
     }
-    auto size_t_type = get_builtin_ulong();
-    node->result_type = size_t_type ? QualType(size_t_type) : QualType(get_builtin_int());
     node->is_runtime_sizeof = type_contains_vla(canonical_target.get_shared());
 }
 
@@ -39,7 +64,18 @@ void Collect::finalize_alignof_node(AlignOfExpr* node, const std::shared_ptr<CTy
         report_error("_Alignof applied to expression with unknown type", loc);
         return;
     }
-    auto resolved_target = finalize_deferred_semantic_type(QualType(target_type), loc);
+    QualType target_qt(target_type);
+    if (sizeof_alignof_target_still_dependent(target_qt, ast_ctx_.get())) {
+        node->type_operand = target_qt;
+        return;
+    }
+
+    auto resolved_target = finalize_deferred_semantic_type(target_qt, loc);
+    if (!resolved_target ||
+        sizeof_alignof_target_still_dependent(resolved_target, ast_ctx_.get())) {
+        node->type_operand = resolved_target ? resolved_target : target_qt;
+        return;
+    }
     auto canonical_target = desugar_type(resolved_target, ast_ctx_.get());
     node->type_operand = canonical_target;
     bool incomplete_array = false;

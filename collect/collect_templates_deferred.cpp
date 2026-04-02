@@ -251,8 +251,11 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
         case StmtKind::SizeOfExpr: {
             const auto* sizeof_expr = static_cast<const SizeOfExpr*>(stripped);
             return expr_depends_on_template_parameters_impl(
-                sizeof_expr->expr_operand.get(),
-                ast_ctx);
+                       sizeof_expr->expr_operand.get(),
+                       ast_ctx) ||
+                   type_depends_on_template_parameters(
+                       sizeof_expr->type_operand,
+                       ast_ctx);
         }
         case StmtKind::SizeOfPackExpr:
             return true;
@@ -260,8 +263,11 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
             const auto* alignof_expr =
                 static_cast<const AlignOfExpr*>(stripped);
             return expr_depends_on_template_parameters_impl(
-                alignof_expr->expr_operand.get(),
-                ast_ctx);
+                       alignof_expr->expr_operand.get(),
+                       ast_ctx) ||
+                   type_depends_on_template_parameters(
+                       alignof_expr->type_operand,
+                       ast_ctx);
         }
         case StmtKind::GenericExpr: {
             const auto* generic = static_cast<const GenericExpr*>(stripped);

@@ -141,6 +141,8 @@ const std::unordered_map<std::string_view, TokenType>& cxx_keyword_table() {
         {"false", TokenType::FALSE_KW},
         {"nullptr", TokenType::NULLPTR_KW},
         {"decltype", TokenType::DECLTYPE_KW},
+        {"alignof", TokenType::ALIGNOF},
+        {"alignas", TokenType::ALIGNAS},
         {"public", TokenType::PUBLIC_KW},
         {"private", TokenType::PRIVATE_KW},
         {"protected", TokenType::PROTECTED_KW},

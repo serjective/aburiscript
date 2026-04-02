@@ -2194,6 +2194,42 @@ bool Collect::resolve_dependent_expr_after_substitution(
         expr = std::move(rewritten);
         return true;
     }
+    if (auto* sizeof_expr = dyn_cast<SizeOfExpr>(expr.get())) {
+        QualType target_type = sizeof_expr->type_operand;
+        if (sizeof_expr->expr_operand) {
+            if (expression_depends_on_template_parameters(
+                    sizeof_expr->expr_operand.get())) {
+                return true;
+            }
+            target_type = sizeof_expr->expr_operand->get_type();
+        }
+        if (type_depends_on_template_parameters(target_type, ast_ctx_.get())) {
+            return true;
+        }
+        finalize_sizeof_node(
+            sizeof_expr,
+            target_type.get_shared(),
+            sizeof_expr->location);
+        return true;
+    }
+    if (auto* alignof_expr = dyn_cast<AlignOfExpr>(expr.get())) {
+        QualType target_type = alignof_expr->type_operand;
+        if (alignof_expr->expr_operand) {
+            if (expression_depends_on_template_parameters(
+                    alignof_expr->expr_operand.get())) {
+                return true;
+            }
+            target_type = alignof_expr->expr_operand->get_type();
+        }
+        if (type_depends_on_template_parameters(target_type, ast_ctx_.get())) {
+            return true;
+        }
+        finalize_alignof_node(
+            alignof_expr,
+            target_type.get_shared(),
+            alignof_expr->location);
+        return true;
+    }
 
     auto strip_stale_dependent_implicit_casts =
         [&](std::unique_ptr<Expr>& candidate) {

@@ -777,45 +777,10 @@ Parser::try_parse_cpp_named_type_specifier() {
             [&](const std::shared_ptr<Scope>& scope,
                 bool allow_enclosing_lookup,
                 const std::string& name) -> const Decl* {
-                const DeclBinding* ordinary_template_binding =
-                    LookupEngine::lookup_unqualified_template_binding(
-                        name,
-                        scope,
-                        allow_enclosing_lookup,
-                        LookupNamespace::Ordinary);
-                const Decl* ordinary_template = nullptr;
-                if (ordinary_template_binding) {
-                    ordinary_template = ordinary_template_binding->template_decl;
-                    if (!ordinary_template &&
-                        ordinary_template_binding->template_overload_candidates.size() == 1) {
-                        ordinary_template =
-                            ordinary_template_binding->template_overload_candidates.front();
-                    }
-                }
-                if (isa<AliasTemplateDecl>(ordinary_template) ||
-                    isa<TemplateTemplateParmDecl>(ordinary_template)) {
-                    return ordinary_template;
-                }
-
-                const DeclBinding* tag_template_binding =
-                    LookupEngine::lookup_unqualified_template_binding(
-                        name,
-                        scope,
-                        allow_enclosing_lookup,
-                        LookupNamespace::Tag);
-                const Decl* tag_template = nullptr;
-                if (tag_template_binding) {
-                    tag_template = tag_template_binding->template_decl;
-                    if (!tag_template &&
-                        tag_template_binding->template_overload_candidates.size() == 1) {
-                        tag_template =
-                            tag_template_binding->template_overload_candidates.front();
-                    }
-                }
-                if (isa<ClassTemplateDecl>(tag_template)) {
-                    return tag_template;
-                }
-                return nullptr;
+                return lookup_cpp_unqualified_type_template_decl(
+                    name,
+                    scope,
+                    allow_enclosing_lookup);
             };
 
         std::shared_ptr<Scope> lookup_scope =
@@ -5612,6 +5577,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
     check_and_consume(TokenType::LEFT_BRACE);
 
     const ObjectDecl* semantic_owner = nullptr;
+    const ClassTemplateDecl* primary_class_template = nullptr;
     if (specialization_arguments_out && !specialization_arguments_out->empty()) {
         semantic_owner =
             ensure_cpp_specialized_record_semantic_owner(
@@ -5619,9 +5585,39 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 name,
                 *specialization_arguments_out,
                 key_tok.loc);
+        if (!name.empty()) {
+            auto lookup_scope = collect_->collect_current_scope();
+            while (lookup_scope &&
+                   scope_flags_contains(
+                       lookup_scope->flags,
+                       ScopeFlags::TemplateParameterScope)) {
+                lookup_scope = lookup_scope->parent;
+            }
+            const DeclBinding* template_binding =
+                LookupEngine::lookup_unqualified_template_binding(
+                    name,
+                    lookup_scope ? lookup_scope : collect_->collect_current_scope(),
+                    true,
+                    LookupNamespace::Tag);
+            const Decl* primary_template = nullptr;
+            if (template_binding) {
+                primary_template = template_binding->template_decl;
+                if (!primary_template &&
+                    template_binding->template_overload_candidates.size() == 1) {
+                    primary_template =
+                        template_binding->template_overload_candidates.front();
+                }
+            }
+            primary_class_template =
+                dyn_cast<ClassTemplateDecl>(primary_template);
+        }
     }
     cxx_record_parse_stack_.push_back(
-        CppRecordParseFrame{record_kind, name, semantic_owner});
+        CppRecordParseFrame{
+            record_kind,
+            name,
+            semantic_owner,
+            primary_class_template});
     struct CppRecordStackGuard {
         std::vector<Parser::CppRecordParseFrame>* stack = nullptr;
         ~CppRecordStackGuard() {

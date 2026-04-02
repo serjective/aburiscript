@@ -2162,21 +2162,30 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
     if (tok.type == TokenType::ALIGNOF) {
         advance(); // consume '_Alignof' / '__alignof__'
         check_and_consume(TokenType::LEFT_PAREN);
-        if (isTokenDeclarationSpec(current_token())) {
-            auto parse_decl = DeclarationParser(this);
-            auto type = parse_decl.parse_declaration();
-            if (type == nullptr) {
-                error_custloc("Error parsing type in alignof() operator", tok.loc);
+        {
+            TentativeParsingAction tentative(*this);
+            try {
+                if (current_token().type != TokenType::EXTENSION_KW) {
+                    auto parse_decl = DeclarationParser(this);
+                    auto type = parse_decl.parse_declaration();
+                    if (type &&
+                        parse_decl.name.empty() &&
+                        gentle_check_and_consume(TokenType::RIGHT_PAREN) &&
+                        !gentle_check(TokenType::LEFT_BRACE)) {
+                        retain_type_specifier_decl_if_needed(parse_decl);
+                        tentative.commit();
+                        return collect_->collect_alignof_type(type, tok.loc);
+                    }
+                }
+            } catch (const ParseError&) {
+            } catch (const FatalErrorLimitReached&) {
             }
-            retain_type_specifier_decl_if_needed(parse_decl);
-            check_and_consume(TokenType::RIGHT_PAREN);
-            return collect_->collect_alignof_type(type, tok.loc);
-        } else {
-            // GCC extension: __alignof__(expression)
-            auto expr = parse_assignment_expression();
-            check_and_consume(TokenType::RIGHT_PAREN);
-            return collect_->collect_alignof_expression(std::move(expr), tok.loc);
         }
+
+        // GCC extension: __alignof__(expression)
+        auto expr = parse_assignment_expression();
+        check_and_consume(TokenType::RIGHT_PAREN);
+        return collect_->collect_alignof_expression(std::move(expr), tok.loc);
     }
 
     // Handle sizeof operator
