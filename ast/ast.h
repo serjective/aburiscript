@@ -1702,8 +1702,22 @@ struct CondExpr: Expr {
         }
         QualType true_type = true_operand->get_type();
         QualType false_type = false_expr->get_type();
-        if (!true_type || !false_type ||
-            !true_type.equals_unqualified(false_type)) {
+        if (!true_type || !false_type) {
+            return false;
+        }
+        bool same_glvalue_type = true_type.equals_unqualified(false_type);
+        if (!same_glvalue_type) {
+            auto true_ref = desugar_type(true_type).as_shared<ReferenceType>();
+            auto false_ref = desugar_type(false_type).as_shared<ReferenceType>();
+            same_glvalue_type =
+                true_ref &&
+                false_ref &&
+                true_ref->reference_kind == ReferenceKind::LValue &&
+                false_ref->reference_kind == ReferenceKind::LValue &&
+                true_ref->referred_type.equals_unqualified(
+                    false_ref->referred_type);
+        }
+        if (!same_glvalue_type) {
             return false;
         }
         return true_operand->isLValue() && false_expr->isLValue();

@@ -14,6 +14,51 @@ using namespace collect_internal;
 
 namespace {
 
+std::optional<QualType> merge_cpp_conditional_glvalue_type(
+    QualType lhs_type,
+    QualType rhs_type,
+    Collect::ValueCategory lhs_category,
+    Collect::ValueCategory rhs_category) {
+    bool lhs_is_glvalue =
+        lhs_category == Collect::ValueCategory::LValue ||
+        lhs_category == Collect::ValueCategory::XValue;
+    bool rhs_is_glvalue =
+        rhs_category == Collect::ValueCategory::LValue ||
+        rhs_category == Collect::ValueCategory::XValue;
+    if (!lhs_is_glvalue ||
+        !rhs_is_glvalue ||
+        lhs_category != rhs_category ||
+        !lhs_type ||
+        !rhs_type) {
+        return std::nullopt;
+    }
+
+    if (lhs_type.equals_unqualified(rhs_type)) {
+        return QualType(
+            lhs_type.get_shared(),
+            static_cast<uint8_t>(
+                lhs_type.get_qualifiers() | rhs_type.get_qualifiers()));
+    }
+
+    auto lhs_ref = desugar_type(lhs_type).as_shared<ReferenceType>();
+    auto rhs_ref = desugar_type(rhs_type).as_shared<ReferenceType>();
+    if (!lhs_ref ||
+        !rhs_ref ||
+        lhs_ref->reference_kind != rhs_ref->reference_kind ||
+        !lhs_ref->referred_type ||
+        !rhs_ref->referred_type ||
+        !lhs_ref->referred_type.equals_unqualified(rhs_ref->referred_type)) {
+        return std::nullopt;
+    }
+
+    QualType merged_referred(
+        lhs_ref->referred_type.get_shared(),
+        static_cast<uint8_t>(
+            lhs_ref->referred_type.get_qualifiers() |
+            rhs_ref->referred_type.get_qualifiers()));
+    return make_reference_type(merged_referred, lhs_ref->reference_kind);
+}
+
 void collect_lambda_local_symbols_from_decl(
     const Decl* decl,
     std::unordered_set<const Symbol*>& local_symbols);
@@ -1015,6 +1060,27 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
     SrcLoc loc) {
 
     auto sym = collect_lookup_variable_symbol(name, true);
+    const DeclBinding* ordinary_template_binding = nullptr;
+    if (lang_opts_.is_cxx_mode() &&
+        might_be_template_id &&
+        session_.current_scope_) {
+        ordinary_template_binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                name,
+                session_.current_scope_,
+                true,
+                LookupNamespace::Ordinary);
+        if (sym &&
+            sym->kind == SymbolKind::FUNCTION &&
+            ordinary_template_binding &&
+            type_depends_on_template_parameters(sym->type, ast_ctx_.get())) {
+            // Template definitions keep a transient ordinary function symbol
+            // around so recursive parsing inside the pattern can still see the
+            // function. Once a real template binding exists, prefer the
+            // template name over that dependent function-pattern symbol.
+            sym.reset();
+        }
+    }
     bool symbol_is_local = is_local_variable_or_parameter_symbol(sym);
     bool symbol_is_template_parameter =
         sym && sym->template_parameter_decl != nullptr;
@@ -1224,12 +1290,7 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
     }
     if (lang_opts_.is_cxx_mode() &&
         might_be_template_id &&
-        session_.current_scope_ &&
-        LookupEngine::lookup_unqualified_template_binding(
-            name,
-            session_.current_scope_,
-            true,
-            LookupNamespace::Ordinary)) {
+        ordinary_template_binding) {
         return collect_identifier_reference(name, nullptr, loc);
     }
     if (!looks_like_call) {
@@ -2494,7 +2555,7 @@ std::unique_ptr<Expr> Collect::collect_builtin_types_compatible_expression(QualT
 std::optional<bool> Collect::evaluate_builtin_type_trait(
     BuiltinKind kind,
     const std::vector<QualType>& type_args,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     auto trait_source_value_category = [&](QualType source_type) {
         auto source_canonical = desugar_type(source_type, ast_ctx_.get());
         auto ref_type = source_canonical.as_shared<ReferenceType>();
@@ -2516,6 +2577,15 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             return std::nullopt;
         }
         QualType type_arg = type_args[index];
+        if (contains_deferred_semantic_type(type_arg.get_shared())) {
+            type_arg = finalize_deferred_semantic_type(type_arg, loc);
+            if (!type_arg) {
+                report_error(
+                    "builtin type trait operand could not be resolved",
+                    loc);
+                return std::nullopt;
+            }
+        }
         if (type_depends_on_template_parameters(type_arg, ast_ctx_.get())) {
             return std::nullopt;
         }
@@ -6007,6 +6077,7 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
     }
 
     QualType result_type = forced_type;
+    bool preserve_cpp_glvalue_result = false;
     if (!result_type) {
         auto true_ty = true_expr ? true_expr->get_type() : (cond ? cond->get_type() : QualType());
         auto false_ty = false_expr ? false_expr->get_type() : QualType();
@@ -6018,8 +6089,20 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
                    is_nullptr_type(true_ty, ast_ctx_.get()) &&
                    is_nullptr_type(false_ty, ast_ctx_.get())) {
             result_type = true_ty;
+        } else if (lang_opts_.is_cxx_mode() && true_expr && false_expr) {
+            auto true_category = classify_value_category(true_expr.get());
+            auto false_category = classify_value_category(false_expr.get());
+            if (auto merged_glvalue_type =
+                    merge_cpp_conditional_glvalue_type(
+                        true_ty,
+                        false_ty,
+                        true_category,
+                        false_category)) {
+                result_type = *merged_glvalue_type;
+                preserve_cpp_glvalue_result = true;
+            }
         } else if ((true_ty &&
-                    is_scoped_enum_type(true_ty, ast_ctx_.get())) ||
+                   is_scoped_enum_type(true_ty, ast_ctx_.get())) ||
                    (false_ty &&
                     is_scoped_enum_type(false_ty, ast_ctx_.get()))) {
             result_type = QualType();
@@ -6095,10 +6178,15 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
             result_type = QualType(get_builtin_int());
         }
     }
-    if (result_type && !result_type->isVoid() && true_expr) {
+    if (!preserve_cpp_glvalue_result &&
+        result_type &&
+        !result_type->isVoid() &&
+        true_expr) {
         true_expr = cast_if_needed(std::move(true_expr), result_type);
     }
-    if (result_type && !result_type->isVoid()) {
+    if (!preserve_cpp_glvalue_result &&
+        result_type &&
+        !result_type->isVoid()) {
         false_expr = cast_if_needed(std::move(false_expr), result_type);
     }
     auto node = make_ast<CondExpr>(*ast_ctx_, std::move(cond), std::move(true_expr), std::move(false_expr), result_type);
@@ -6757,24 +6845,13 @@ Collect::ValueCategory Collect::classify_value_category(Expr* expr) const {
         Expr* true_operand = cond->true_expr ? cond->true_expr.get() : cond->condition.get();
         auto true_category = classify_value_category(true_operand);
         auto false_category = classify_value_category(cond->false_expr.get());
-
-        bool true_is_glvalue =
-            true_category == ValueCategory::LValue || true_category == ValueCategory::XValue;
-        bool false_is_glvalue =
-            false_category == ValueCategory::LValue || false_category == ValueCategory::XValue;
-        if (!true_is_glvalue || !false_is_glvalue) {
-            return ValueCategory::PRValue;
-        }
-        if (true_category != false_category) {
-            return ValueCategory::PRValue;
-        }
-
         auto true_type = true_operand ? true_operand->get_type() : QualType();
         auto false_type = cond->false_expr ? cond->false_expr->get_type() : QualType();
-        if (!true_type || !false_type) {
-            return ValueCategory::PRValue;
-        }
-        if (!true_type.equals_unqualified(false_type)) {
+        if (!merge_cpp_conditional_glvalue_type(
+                true_type,
+                false_type,
+                true_category,
+                false_category)) {
             return ValueCategory::PRValue;
         }
         return true_category;
