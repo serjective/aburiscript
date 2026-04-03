@@ -2460,7 +2460,9 @@ bool Collect::resolve_dependent_expr_after_substitution(
         if (!dependent_unary->operand ||
             type_depends_on_template_parameters(
                 dependent_unary->operand->get_type(),
-                ast_ctx_.get())) {
+                ast_ctx_.get()) ||
+            expression_depends_on_template_parameters(
+                dependent_unary->operand.get())) {
             return true;
         }
         auto owned_unary = std::unique_ptr<DependentUnaryExpr>(

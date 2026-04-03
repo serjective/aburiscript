@@ -4710,7 +4710,8 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
     }
 
     if (lang_opts_.is_cxx_mode() &&
-        type_depends_on_template_parameters(exp_type, ast_ctx_.get())) {
+        (type_depends_on_template_parameters(exp_type, ast_ctx_.get()) ||
+         expression_depends_on_template_parameters(node->exp.get()))) {
         QualType dependent_result_type(
             std::make_shared<AutoType>(AutoTypeFlavor::TemplateNonType));
         return collect_make<DependentUnaryExpr>(
