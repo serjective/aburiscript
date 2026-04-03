@@ -2442,6 +2442,21 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
     BuiltinKind kind,
     const std::vector<QualType>& type_args,
     SrcLoc loc) const {
+    auto trait_source_value_category = [&](QualType source_type) {
+        auto source_canonical = desugar_type(source_type, ast_ctx_.get());
+        auto ref_type = source_canonical.as_shared<ReferenceType>();
+        if (!ref_type) {
+            return ValueCategory::PRValue;
+        }
+        return ref_type->isLValueReference()
+            ? ValueCategory::LValue
+            : ValueCategory::XValue;
+    };
+
+    auto materialize_trait_source_type = [&](QualType source_type) {
+        return remove_reference(source_type, ast_ctx_.get());
+    };
+
     auto get_canonical_arg = [&](size_t index) -> std::optional<QualType> {
         if (index >= type_args.size() || !type_args[index]) {
             report_error("builtin type trait is missing a type operand", loc);
@@ -2452,6 +2467,384 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             return std::nullopt;
         }
         return desugar_type(type_arg, ast_ctx_.get());
+    };
+
+    std::function<bool(QualType, QualType)> trait_is_convertible_to_target;
+
+    auto trait_reference_binding_viable = [&](QualType from_type,
+                                             QualType to_type) -> bool {
+        auto to_ref = desugar_type(to_type, ast_ctx_.get()).as_shared<ReferenceType>();
+        if (!to_ref || !to_ref->referred_type) {
+            return false;
+        }
+
+        QualType source_type = materialize_trait_source_type(from_type);
+        QualType target_type = to_ref->referred_type;
+        QualType canonical_source_type = desugar_type(source_type, ast_ctx_.get());
+        QualType canonical_target_type = desugar_type(target_type, ast_ctx_.get());
+        auto source_category = trait_source_value_category(from_type);
+
+        auto direct_binding_matches = [&]() -> bool {
+            bool same_qualified_type =
+                source_type.equals_qualified(target_type) ||
+                (canonical_source_type &&
+                 canonical_target_type &&
+                 canonical_source_type.equals_qualified(canonical_target_type));
+            if (same_qualified_type) {
+                return true;
+            }
+            bool same_unqualified_type =
+                source_type.equals_unqualified(target_type) ||
+                (canonical_source_type &&
+                 canonical_target_type &&
+                 canonical_source_type.equals_unqualified(canonical_target_type));
+            if (same_unqualified_type &&
+                target_type.has_all_qualifiers_of(source_type)) {
+                return true;
+            }
+            return can_convert_derived_to_base_object(source_type, target_type);
+        };
+
+        auto temporary_binding_matches = [&]() -> bool {
+            return build_implicit_conversion_sequence(
+                       source_type,
+                       target_type,
+                       ExprUseContext::CallArgument)
+                .viable;
+        };
+
+        if (to_ref->isLValueReference()) {
+            if (source_category == ValueCategory::LValue) {
+                if (direct_binding_matches()) {
+                    return true;
+                }
+                return target_type.is_const() && temporary_binding_matches();
+            }
+            if (!target_type.is_const()) {
+                return false;
+            }
+            return direct_binding_matches() || temporary_binding_matches();
+        }
+
+        if (source_category == ValueCategory::LValue) {
+            return false;
+        }
+        return direct_binding_matches() || temporary_binding_matches();
+    };
+
+    auto trait_record_constructible_from =
+        [&](QualType target_type,
+            const std::vector<QualType>& argument_types,
+            bool allow_explicit_constructors,
+            bool require_nothrow,
+            bool require_trivial) -> bool {
+            auto object_type =
+                desugar_type(target_type, ast_ctx_.get()).as_shared<ObjectType>();
+            if (!object_type) {
+                return false;
+            }
+            const auto* record_decl = canonical_record_decl(
+                dyn_cast<ObjectDecl>(object_type->get_decl()));
+            if (!record_decl) {
+                return false;
+            }
+            const auto* state = query_lookup_record_semantics(record_decl);
+            if (!state || state->is_incomplete) {
+                return false;
+            }
+
+            auto ctor_matches_requirements =
+                [&](const RecordSemanticState::Constructor& ctor) -> bool {
+                    if (ctor.is_deleted ||
+                        !cpp_access_allows_member(
+                            ctor.declared_access,
+                            /*allow_protected_access=*/false)) {
+                        return false;
+                    }
+                    if (!allow_explicit_constructors && ctor.is_explicit) {
+                        return false;
+                    }
+                    auto fn_type =
+                        desugar_type(ctor.type, ast_ctx_.get()).as_shared<FunctionType>();
+                    if (!fn_type) {
+                        return false;
+                    }
+                    if (require_nothrow &&
+                        fn_type->exception_spec !=
+                            FunctionExceptionSpecKind::NonThrowing) {
+                        return false;
+                    }
+                    if (require_trivial && !ctor.is_implicit) {
+                        return false;
+                    }
+
+                    CppConstructorUserParamInfo info =
+                        cpp_compute_constructor_user_param_info(ctor);
+                    if (argument_types.size() < info.required_user_param_count ||
+                        argument_types.size() > info.max_user_param_count) {
+                        return false;
+                    }
+
+                    for (size_t index = 0; index < argument_types.size(); ++index) {
+                        size_t param_index = info.user_param_start + index;
+                        if (param_index >= fn_type->parameters.size()) {
+                            return false;
+                        }
+                        if (!trait_is_convertible_to_target(
+                                argument_types[index],
+                                fn_type->parameters[param_index])) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+
+            if (argument_types.empty()) {
+                if (!cpp_record_has_viable_default_constructor(
+                        state,
+                        /*allow_protected_access=*/false)) {
+                    return false;
+                }
+                if (!require_nothrow && !require_trivial) {
+                    return true;
+                }
+                for (const auto& ctor : state->constructors) {
+                    if (ctor_matches_requirements(ctor)) {
+                        return true;
+                    }
+                }
+                return require_trivial
+                    ? !state->definition_data.has_user_declared_constructor
+                    : state->constructors.empty();
+            }
+
+            for (const auto& ctor : state->constructors) {
+                if (ctor_matches_requirements(ctor)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+    std::function<bool(QualType,
+                       const std::vector<QualType>&,
+                       bool,
+                       bool)> trait_is_constructible_from;
+    trait_is_constructible_from =
+        [&](QualType target_type,
+            const std::vector<QualType>& argument_types,
+            bool require_nothrow,
+            bool require_trivial) -> bool {
+            if (!target_type) {
+                return false;
+            }
+
+            QualType canonical_target = desugar_type(target_type, ast_ctx_.get());
+            if (!canonical_target) {
+                return false;
+            }
+
+            if (canonical_target->kind == TypeKind::Reference) {
+                return argument_types.size() == 1 &&
+                       trait_reference_binding_viable(
+                           argument_types.front(),
+                           canonical_target);
+            }
+
+            if (canonical_target->isVoid() ||
+                canonical_target->kind == TypeKind::Function) {
+                return false;
+            }
+
+            if (canonical_target->kind == TypeKind::Array) {
+                auto array_type = canonical_target.as_shared<ArrayType>();
+                if (!array_type ||
+                    array_type->size_kind != ArraySizeKind::Constant ||
+                    !array_type->size.has_value()) {
+                    return false;
+                }
+                return argument_types.empty() &&
+                       trait_is_constructible_from(
+                           array_type->element_type,
+                           {},
+                           require_nothrow,
+                           require_trivial);
+            }
+
+            if (canonical_target->kind == TypeKind::Object) {
+                return trait_record_constructible_from(
+                    canonical_target,
+                    argument_types,
+                    /*allow_explicit_constructors=*/true,
+                    require_nothrow,
+                    require_trivial);
+            }
+
+            if (argument_types.empty()) {
+                if (target_type.is_const()) {
+                    return false;
+                }
+                return canonical_target->isScalar() ||
+                       canonical_target->kind == TypeKind::Complex ||
+                       canonical_target->kind == TypeKind::Vector;
+            }
+
+            if (argument_types.size() != 1) {
+                return false;
+            }
+
+            if (require_trivial &&
+                canonical_target->kind == TypeKind::Object) {
+                return false;
+            }
+
+            return trait_is_convertible_to_target(
+                argument_types.front(),
+                canonical_target);
+        };
+
+    trait_is_convertible_to_target =
+        [&](QualType from_type, QualType to_type) -> bool {
+            if (!from_type || !to_type) {
+                return false;
+            }
+
+            QualType source_type = materialize_trait_source_type(from_type);
+            QualType canonical_source = desugar_type(source_type, ast_ctx_.get());
+            QualType canonical_target = desugar_type(to_type, ast_ctx_.get());
+            if (!canonical_source || !canonical_target) {
+                return false;
+            }
+
+            if (canonical_target->kind == TypeKind::Reference) {
+                return trait_reference_binding_viable(from_type, to_type);
+            }
+
+            if (canonical_target->isVoid()) {
+                return true;
+            }
+            if (canonical_source->isVoid()) {
+                return false;
+            }
+
+            if (canonical_target->kind == TypeKind::Object) {
+                return trait_record_constructible_from(
+                    canonical_target,
+                    {from_type},
+                    /*allow_explicit_constructors=*/false,
+                    /*require_nothrow=*/false,
+                    /*require_trivial=*/false);
+            }
+
+            return build_implicit_conversion_sequence(
+                       source_type,
+                       canonical_target,
+                       ExprUseContext::CallArgument)
+                .viable;
+        };
+
+    std::function<bool(QualType)> trait_is_standard_layout_type;
+    std::function<bool(QualType)> trait_is_trivial_type;
+    std::function<bool(QualType)> trait_is_pod_type;
+
+    trait_is_standard_layout_type = [&](QualType type_arg) -> bool {
+        if (!type_arg) {
+            return false;
+        }
+        QualType canonical = desugar_type(type_arg, ast_ctx_.get());
+        if (!canonical) {
+            return false;
+        }
+        if (canonical->isVoid()) {
+            return false;
+        }
+        switch (canonical->kind) {
+            case TypeKind::Function:
+            case TypeKind::Reference:
+                return false;
+            case TypeKind::Array: {
+                auto array_type = canonical.as_shared<ArrayType>();
+                return array_type &&
+                       trait_is_standard_layout_type(array_type->element_type);
+            }
+            case TypeKind::Object: {
+                auto object_type = canonical.as_shared<ObjectType>();
+                if (!object_type) {
+                    return false;
+                }
+                const auto* record_decl = canonical_record_decl(
+                    dyn_cast<ObjectDecl>(object_type->get_decl()));
+                if (!record_decl) {
+                    return false;
+                }
+                const auto* state = query_lookup_record_semantics(record_decl);
+                if (!state || state->is_incomplete) {
+                    return false;
+                }
+                if (state->is_polymorphic || !state->virtual_bases.empty()) {
+                    return false;
+                }
+                for (const auto& base : state->bases) {
+                    if (base.is_virtual ||
+                        base.declared_access != RecordMemberAccess::Public) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            default:
+                return canonical->isScalar() || canonical->kind == TypeKind::Complex;
+        }
+    };
+
+    trait_is_trivial_type = [&](QualType type_arg) -> bool {
+        if (!type_arg) {
+            return false;
+        }
+        QualType canonical = desugar_type(type_arg, ast_ctx_.get());
+        if (!canonical) {
+            return false;
+        }
+        if (canonical->isVoid()) {
+            return false;
+        }
+        switch (canonical->kind) {
+            case TypeKind::Reference:
+            case TypeKind::Function:
+                return false;
+            case TypeKind::Array: {
+                auto array_type = canonical.as_shared<ArrayType>();
+                return array_type &&
+                       array_type->size_kind == ArraySizeKind::Constant &&
+                       array_type->size.has_value() &&
+                       trait_is_trivial_type(array_type->element_type);
+            }
+            case TypeKind::Object: {
+                auto object_type = canonical.as_shared<ObjectType>();
+                if (!object_type) {
+                    return false;
+                }
+                const auto* record_decl = canonical_record_decl(
+                    dyn_cast<ObjectDecl>(object_type->get_decl()));
+                if (!record_decl) {
+                    return false;
+                }
+                const auto* state = query_lookup_record_semantics(record_decl);
+                if (!state || state->is_incomplete) {
+                    return false;
+                }
+                return trait_is_standard_layout_type(canonical) &&
+                       !state->definition_data.has_user_declared_constructor &&
+                       cpp_type_is_trivially_destructible(canonical, ast_ctx_.get());
+            }
+            default:
+                return canonical->isScalar() || canonical->kind == TypeKind::Complex;
+        }
+    };
+
+    trait_is_pod_type = [&](QualType type_arg) -> bool {
+        return trait_is_standard_layout_type(type_arg) &&
+               trait_is_trivial_type(type_arg);
     };
 
     switch (kind) {
@@ -2534,6 +2927,59 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             }
             return canonical_type_kind(*type_arg, ast_ctx_.get()) == TypeKind::Array;
         }
+        case BuiltinKind::IS_CONST: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return !type_arg->as_shared<ReferenceType>() && type_arg->is_const();
+        }
+        case BuiltinKind::IS_EMPTY: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto object_type = type_arg->as_shared<ObjectType>();
+            if (!object_type || object_type->is_union) {
+                return false;
+            }
+            const auto* record_decl = canonical_record_decl(
+                dyn_cast<ObjectDecl>(object_type->get_decl()));
+            if (!record_decl) {
+                return false;
+            }
+            const auto* state = query_lookup_record_semantics(record_decl);
+            if (!state || state->is_incomplete) {
+                return false;
+            }
+            return !state->is_polymorphic &&
+                   state->bases.empty() &&
+                   state->virtual_bases.empty() &&
+                   state->fields.empty();
+        }
+        case BuiltinKind::IS_ENUM: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return canonical_type_kind(*type_arg, ast_ctx_.get()) == TypeKind::Enum;
+        }
+        case BuiltinKind::IS_SCOPED_ENUM: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return is_scoped_enum_type(*type_arg, ast_ctx_.get());
+        }
+        case BuiltinKind::IS_FUNDAMENTAL: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return (*type_arg)->isVoid() ||
+                   (*type_arg)->isArithmetic() ||
+                   is_nullptr_type(*type_arg, ast_ctx_.get());
+        }
         case BuiltinKind::IS_ASSIGNABLE: {
             auto lhs = get_canonical_arg(0);
             auto rhs = get_canonical_arg(1);
@@ -2558,6 +3004,40 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                        target_type,
                        ExprUseContext::CallArgument)
                 .viable;
+        }
+        case BuiltinKind::IS_TRIVIALLY_ASSIGNABLE:
+        case BuiltinKind::IS_NOTHROW_ASSIGNABLE: {
+            auto lhs = get_canonical_arg(0);
+            auto rhs = get_canonical_arg(1);
+            if (!lhs || !rhs) {
+                return std::nullopt;
+            }
+            auto lhs_ref = lhs->as_shared<ReferenceType>();
+            if (!lhs_ref || !lhs_ref->isLValueReference()) {
+                return false;
+            }
+            QualType target_type = lhs_ref->referred_type;
+            if (!target_type || target_type.is_const()) {
+                return false;
+            }
+            auto target_kind = canonical_type_kind(target_type, ast_ctx_.get());
+            if (target_type->isVoid() || target_kind == TypeKind::Function ||
+                target_kind == TypeKind::Array) {
+                return false;
+            }
+            bool assignable = build_implicit_conversion_sequence(
+                                  *rhs,
+                                  target_type,
+                                  ExprUseContext::CallArgument)
+                                  .viable;
+            if (!assignable) {
+                return false;
+            }
+            if (kind == BuiltinKind::IS_TRIVIALLY_ASSIGNABLE &&
+                target_kind == TypeKind::Object) {
+                return false;
+            }
+            return true;
         }
         case BuiltinKind::IS_BASE_OF: {
             auto base = get_canonical_arg(0);
@@ -2588,12 +3068,164 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             auto object_type = type_arg->as_shared<ObjectType>();
             return object_type && !object_type->is_union;
         }
+        case BuiltinKind::IS_MEMBER_POINTER: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return canonical_type_kind(*type_arg, ast_ctx_.get()) ==
+                TypeKind::MemberPointer;
+        }
+        case BuiltinKind::IS_MEMBER_OBJECT_POINTER:
+        case BuiltinKind::IS_MEMBER_FUNCTION_POINTER: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto member_ptr =
+                desugar_type(*type_arg, ast_ctx_.get()).as_shared<MemberPointerType>();
+            if (!member_ptr || !member_ptr->member_type) {
+                return false;
+            }
+            bool member_is_function =
+                canonical_type_kind(member_ptr->member_type, ast_ctx_.get()) ==
+                TypeKind::Function;
+            return kind == BuiltinKind::IS_MEMBER_FUNCTION_POINTER
+                ? member_is_function
+                : !member_is_function;
+        }
         case BuiltinKind::IS_NULL_POINTER: {
             auto type_arg = get_canonical_arg(0);
             if (!type_arg) {
                 return std::nullopt;
             }
             return is_nullptr_type(*type_arg, ast_ctx_.get());
+        }
+        case BuiltinKind::IS_OBJECT: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return !(*type_arg)->isVoid() &&
+                   canonical_type_kind(*type_arg, ast_ctx_.get()) != TypeKind::Function &&
+                   canonical_type_kind(*type_arg, ast_ctx_.get()) != TypeKind::Reference;
+        }
+        case BuiltinKind::IS_POINTER: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return canonical_type_kind(*type_arg, ast_ctx_.get()) == TypeKind::Pointer;
+        }
+        case BuiltinKind::IS_POLYMORPHIC: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto object_type = type_arg->as_shared<ObjectType>();
+            if (!object_type || object_type->is_union) {
+                return false;
+            }
+            const auto* record_decl = canonical_record_decl(
+                dyn_cast<ObjectDecl>(object_type->get_decl()));
+            if (!record_decl) {
+                return false;
+            }
+            const auto* state = query_lookup_record_semantics(record_decl);
+            return state && state->is_polymorphic;
+        }
+        case BuiltinKind::IS_STANDARD_LAYOUT: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return trait_is_standard_layout_type(*type_arg);
+        }
+        case BuiltinKind::IS_TRIVIAL: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return trait_is_trivial_type(*type_arg);
+        }
+        case BuiltinKind::IS_POD: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return trait_is_pod_type(*type_arg);
+        }
+        case BuiltinKind::IS_SIGNED: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto canonical = desugar_type(*type_arg, ast_ctx_.get());
+            if (!canonical) {
+                return false;
+            }
+            if (auto builtin = canonical.as_shared<BuiltinType>()) {
+                if (builtin->isFloatingPoint()) {
+                    return true;
+                }
+                return builtin->isInteger() &&
+                       builtin->builtin_kind != BuiltinTypes::Bool &&
+                       !builtin->isUnsigned();
+            }
+            if (auto enum_type = canonical.as_shared<EnumType>()) {
+                QualType underlying(enum_type->semantic_underlying_type());
+                auto builtin = underlying.as_shared<BuiltinType>();
+                return builtin && builtin->isInteger() && !builtin->isUnsigned();
+            }
+            return false;
+        }
+        case BuiltinKind::IS_CONSTRUCTIBLE:
+        case BuiltinKind::IS_TRIVIALLY_CONSTRUCTIBLE:
+        case BuiltinKind::IS_NOTHROW_CONSTRUCTIBLE: {
+            auto target_type = get_canonical_arg(0);
+            if (!target_type) {
+                return std::nullopt;
+            }
+            std::vector<QualType> argument_types;
+            argument_types.reserve(type_args.size() > 0 ? type_args.size() - 1 : 0);
+            for (size_t index = 1; index < type_args.size(); ++index) {
+                auto argument_type = get_canonical_arg(index);
+                if (!argument_type) {
+                    return std::nullopt;
+                }
+                argument_types.push_back(*argument_type);
+            }
+            return trait_is_constructible_from(
+                *target_type,
+                argument_types,
+                kind == BuiltinKind::IS_NOTHROW_CONSTRUCTIBLE,
+                kind == BuiltinKind::IS_TRIVIALLY_CONSTRUCTIBLE);
+        }
+        case BuiltinKind::IS_CONVERTIBLE:
+        case BuiltinKind::IS_NOTHROW_CONVERTIBLE: {
+            auto from_type = get_canonical_arg(0);
+            auto to_type = get_canonical_arg(1);
+            if (!from_type || !to_type) {
+                return std::nullopt;
+            }
+            bool convertible = trait_is_convertible_to_target(*from_type, *to_type);
+            if (!convertible) {
+                return false;
+            }
+            if (kind == BuiltinKind::IS_NOTHROW_CONVERTIBLE) {
+                auto target_object =
+                    desugar_type(*to_type, ast_ctx_.get()).as_shared<ObjectType>();
+                if (!target_object) {
+                    return true;
+                }
+                return trait_record_constructible_from(
+                    *to_type,
+                    {*from_type},
+                    /*allow_explicit_constructors=*/false,
+                    /*require_nothrow=*/true,
+                    /*require_trivial=*/false);
+            }
+            return true;
         }
         case BuiltinKind::IS_DESTRUCTIBLE: {
             auto type_arg = get_canonical_arg(0);

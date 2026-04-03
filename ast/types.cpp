@@ -2854,6 +2854,8 @@ const char* builtin_type_transform_name(BuiltinTypeTransformKind kind) {
             return "__remove_cvref";
         case BuiltinTypeTransformKind::RemoveReference:
             return "__remove_reference";
+        case BuiltinTypeTransformKind::RemoveAllExtents:
+            return "__remove_all_extents";
         case BuiltinTypeTransformKind::Decay:
             return "__decay";
         case BuiltinTypeTransformKind::AddPointer:
@@ -2888,6 +2890,10 @@ bool lookup_builtin_type_transform_kind(
     }
     if (name == "__remove_reference" || name == "__remove_reference_t") {
         out = BuiltinTypeTransformKind::RemoveReference;
+        return true;
+    }
+    if (name == "__remove_all_extents") {
+        out = BuiltinTypeTransformKind::RemoveAllExtents;
         return true;
     }
     if (name == "__decay") {
@@ -2937,6 +2943,17 @@ QualType apply_builtin_type_transform(
                 static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
         case BuiltinTypeTransformKind::RemoveReference:
             return remove_reference(operand_type, ast_ctx);
+        case BuiltinTypeTransformKind::RemoveAllExtents: {
+            QualType current = operand_type;
+            while (current) {
+                auto current_array = desugar_type(current, ast_ctx).as_shared<ArrayType>();
+                if (!current_array) {
+                    break;
+                }
+                current = current_array->element_type;
+            }
+            return current;
+        }
         case BuiltinTypeTransformKind::Decay: {
             auto decayed = remove_reference(operand_type, ast_ctx);
             auto canonical_decayed = desugar_type(decayed, ast_ctx);

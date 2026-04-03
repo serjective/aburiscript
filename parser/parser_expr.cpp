@@ -1745,6 +1745,9 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
                     return nullptr;
                 }
                 retain_type_specifier_decl_if_needed(parse_decl);
+                if (gentle_check(TokenType::ELLIPSIS)) {
+                    advance(); // consume pack expansion marker; the type already carries pack-ness
+                }
                 type_args.push_back(type_arg);
                 if (!gentle_check_and_consume(TokenType::COMMA)) {
                     break;

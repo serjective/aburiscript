@@ -25,10 +25,32 @@ bool is_builtin_type_trait_kind(BuiltinKind kind) {
         case BuiltinKind::HAS_VIRTUAL_DESTRUCTOR:
         case BuiltinKind::IS_ABSTRACT:
         case BuiltinKind::IS_ARRAY:
+        case BuiltinKind::IS_CONST:
+        case BuiltinKind::IS_EMPTY:
+        case BuiltinKind::IS_ENUM:
+        case BuiltinKind::IS_SCOPED_ENUM:
+        case BuiltinKind::IS_FUNDAMENTAL:
         case BuiltinKind::IS_ASSIGNABLE:
+        case BuiltinKind::IS_TRIVIALLY_ASSIGNABLE:
+        case BuiltinKind::IS_NOTHROW_ASSIGNABLE:
         case BuiltinKind::IS_BASE_OF:
         case BuiltinKind::IS_CLASS:
+        case BuiltinKind::IS_MEMBER_POINTER:
+        case BuiltinKind::IS_MEMBER_OBJECT_POINTER:
+        case BuiltinKind::IS_MEMBER_FUNCTION_POINTER:
         case BuiltinKind::IS_NULL_POINTER:
+        case BuiltinKind::IS_OBJECT:
+        case BuiltinKind::IS_POINTER:
+        case BuiltinKind::IS_POLYMORPHIC:
+        case BuiltinKind::IS_STANDARD_LAYOUT:
+        case BuiltinKind::IS_TRIVIAL:
+        case BuiltinKind::IS_POD:
+        case BuiltinKind::IS_SIGNED:
+        case BuiltinKind::IS_CONSTRUCTIBLE:
+        case BuiltinKind::IS_TRIVIALLY_CONSTRUCTIBLE:
+        case BuiltinKind::IS_NOTHROW_CONSTRUCTIBLE:
+        case BuiltinKind::IS_CONVERTIBLE:
+        case BuiltinKind::IS_NOTHROW_CONVERTIBLE:
         case BuiltinKind::IS_DESTRUCTIBLE:
         case BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE:
         case BuiltinKind::HAS_TRIVIAL_DESTRUCTOR:
@@ -61,10 +83,32 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__has_virtual_destructor", BuiltinKind::HAS_VIRTUAL_DESTRUCTOR, 1, 1, true, true});
     register_builtin({"__is_abstract", BuiltinKind::IS_ABSTRACT, 1, 1, true, true});
     register_builtin({"__is_array", BuiltinKind::IS_ARRAY, 1, 1, true, true});
+    register_builtin({"__is_const", BuiltinKind::IS_CONST, 1, 1, true, true});
+    register_builtin({"__is_empty", BuiltinKind::IS_EMPTY, 1, 1, true, true});
+    register_builtin({"__is_enum", BuiltinKind::IS_ENUM, 1, 1, true, true});
+    register_builtin({"__is_scoped_enum", BuiltinKind::IS_SCOPED_ENUM, 1, 1, true, true});
+    register_builtin({"__is_fundamental", BuiltinKind::IS_FUNDAMENTAL, 1, 1, true, true});
     register_builtin({"__is_assignable", BuiltinKind::IS_ASSIGNABLE, 2, 2, true, true});
+    register_builtin({"__is_trivially_assignable", BuiltinKind::IS_TRIVIALLY_ASSIGNABLE, 2, 2, true, true});
+    register_builtin({"__is_nothrow_assignable", BuiltinKind::IS_NOTHROW_ASSIGNABLE, 2, 2, true, true});
     register_builtin({"__is_base_of", BuiltinKind::IS_BASE_OF, 2, 2, true, true});
     register_builtin({"__is_class", BuiltinKind::IS_CLASS, 1, 1, true, true});
+    register_builtin({"__is_member_pointer", BuiltinKind::IS_MEMBER_POINTER, 1, 1, true, true});
+    register_builtin({"__is_member_object_pointer", BuiltinKind::IS_MEMBER_OBJECT_POINTER, 1, 1, true, true});
+    register_builtin({"__is_member_function_pointer", BuiltinKind::IS_MEMBER_FUNCTION_POINTER, 1, 1, true, true});
     register_builtin({"__is_null_pointer", BuiltinKind::IS_NULL_POINTER, 1, 1, true, true});
+    register_builtin({"__is_object", BuiltinKind::IS_OBJECT, 1, 1, true, true});
+    register_builtin({"__is_pointer", BuiltinKind::IS_POINTER, 1, 1, true, true});
+    register_builtin({"__is_polymorphic", BuiltinKind::IS_POLYMORPHIC, 1, 1, true, true});
+    register_builtin({"__is_standard_layout", BuiltinKind::IS_STANDARD_LAYOUT, 1, 1, true, true});
+    register_builtin({"__is_trivial", BuiltinKind::IS_TRIVIAL, 1, 1, true, true});
+    register_builtin({"__is_pod", BuiltinKind::IS_POD, 1, 1, true, true});
+    register_builtin({"__is_signed", BuiltinKind::IS_SIGNED, 1, 1, true, true});
+    register_builtin({"__is_constructible", BuiltinKind::IS_CONSTRUCTIBLE, 1, -1, true, true});
+    register_builtin({"__is_trivially_constructible", BuiltinKind::IS_TRIVIALLY_CONSTRUCTIBLE, 1, -1, true, true});
+    register_builtin({"__is_nothrow_constructible", BuiltinKind::IS_NOTHROW_CONSTRUCTIBLE, 1, -1, true, true});
+    register_builtin({"__is_convertible", BuiltinKind::IS_CONVERTIBLE, 2, 2, true, true});
+    register_builtin({"__is_nothrow_convertible", BuiltinKind::IS_NOTHROW_CONVERTIBLE, 2, 2, true, true});
     register_builtin({"__is_destructible", BuiltinKind::IS_DESTRUCTIBLE, 1, 1, true, true});
     register_builtin({"__is_trivially_destructible", BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE, 1, 1, true, true});
     register_builtin({"__has_trivial_destructor", BuiltinKind::HAS_TRIVIAL_DESTRUCTOR, 1, 1, true, true});
