@@ -3285,6 +3285,20 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                    (*type_arg)->isArithmetic() ||
                    is_nullptr_type(*type_arg, ast_ctx_.get());
         }
+        case BuiltinKind::IS_INTEGRAL: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto canonical = desugar_type(*type_arg, ast_ctx_.get());
+            if (!canonical) {
+                return false;
+            }
+            if (auto builtin = canonical.as_shared<BuiltinType>()) {
+                return builtin->isInteger();
+            }
+            return false;
+        }
         case BuiltinKind::IS_ASSIGNABLE: {
             auto lhs = get_canonical_arg(0);
             auto rhs = get_canonical_arg(1);

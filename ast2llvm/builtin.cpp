@@ -1806,6 +1806,7 @@ llvm::Value* ASTToLLVM::convert_builtin_call_expr(BuiltinCallExpr *expr) {
     case BuiltinKind::IS_REFERENCE:
     case BuiltinKind::IS_LVALUE_REFERENCE:
     case BuiltinKind::IS_RVALUE_REFERENCE:
+    case BuiltinKind::IS_INTEGRAL:
     case BuiltinKind::IS_DESTRUCTIBLE:
     case BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE:
     case BuiltinKind::HAS_TRIVIAL_DESTRUCTOR:
