@@ -143,10 +143,11 @@ const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
     const std::string& name,
     const std::vector<TemplateArgument>& specialization_arguments,
     SrcLoc loc,
-    const ClassTemplateDecl* primary_class_template) {
+    const ClassTemplateDecl* primary_class_template,
+    bool has_specialization_argument_list) {
     if (!collect_ ||
         name.empty() ||
-        specialization_arguments.empty()) {
+        !has_specialization_argument_list) {
         return nullptr;
     }
 
@@ -1487,7 +1488,8 @@ Parser::parse_cpp_explicit_specialization_declaration(
                     dyn_cast<CppRecordDecl>(
                         const_cast<Decl*>(
                             explicit_specialization->get_specialized_decl()))) {
-                if (!explicit_specialization->specialization_arguments.empty()) {
+                if (explicit_specialization->has_explicit_argument_list ||
+                    !explicit_specialization->specialization_arguments.empty()) {
                     return format_class_specialization_name(
                         specialized_record->name.empty()
                             ? explicit_specialization_primary_name(primary_template)
@@ -1752,9 +1754,11 @@ Parser::parse_cpp_explicit_specialization_declaration(
         gentle_check(TokenType::STRUCT) ||
         gentle_check(TokenType::UNION)) {
         std::vector<TemplateArgument> specialization_arguments;
+        bool has_specialization_argument_list = false;
         auto specialized_record =
             parse_cpp_record_specifier(
                 &specialization_arguments,
+                &has_specialization_argument_list,
                 true);
         check_and_consume(TokenType::SEMICOLON);
 
@@ -1769,7 +1773,7 @@ Parser::parse_cpp_explicit_specialization_declaration(
                 "anonymous explicit specialization",
                 record_decl->location);
         }
-        if (specialization_arguments.empty()) {
+        if (!has_specialization_argument_list) {
             error_custloc(
                 "explicit specialization of class template '" +
                     record_decl->name +
@@ -2539,11 +2543,14 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
 
     std::vector<std::unique_ptr<Decl>> templated_decls;
     std::vector<TemplateArgument> record_specialization_arguments;
+    bool record_has_specialization_argument_list = false;
     if (gentle_check(TokenType::CLASS) ||
         gentle_check(TokenType::STRUCT) ||
         gentle_check(TokenType::UNION)) {
         auto record_decl =
-            parse_cpp_record_specifier(&record_specialization_arguments);
+            parse_cpp_record_specifier(
+                &record_specialization_arguments,
+                &record_has_specialization_argument_list);
         check_and_consume(TokenType::SEMICOLON);
         templated_decls.push_back(std::move(record_decl));
     } else if (lang_opts.is_cxx20_or_later() &&
@@ -2590,7 +2597,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                 fail_cpp_unsupported("anonymous class template", record_decl->location);
             }
             prepared_class_template_name = record_decl->name;
-            if (record_specialization_arguments.empty()) {
+            if (!record_has_specialization_argument_list) {
                 prepared_class_template = make_ast<ClassTemplateDecl>(
                     *ast_ctx,
                     std::move(parameters),
@@ -5402,6 +5409,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
 
 std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
     std::vector<TemplateArgument>* specialization_arguments_out,
+    bool* has_specialization_argument_list_out,
     bool suppress_placeholder_type) {
     Token key_tok = current_token();
     CppRecordKind record_kind = CppRecordKind::Class;
@@ -5428,7 +5436,13 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         advance();
     }
 
+    if (has_specialization_argument_list_out) {
+        *has_specialization_argument_list_out = false;
+    }
     if (specialization_arguments_out && gentle_check(TokenType::LESS_THAN)) {
+        if (has_specialization_argument_list_out) {
+            *has_specialization_argument_list_out = true;
+        }
         *specialization_arguments_out = parse_cpp_template_argument_list();
     }
 
@@ -5581,13 +5595,17 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
 
     const ObjectDecl* semantic_owner = nullptr;
     const ClassTemplateDecl* primary_class_template = nullptr;
-    if (specialization_arguments_out && !specialization_arguments_out->empty()) {
+    if (specialization_arguments_out &&
+        has_specialization_argument_list_out &&
+        *has_specialization_argument_list_out) {
         semantic_owner =
             ensure_cpp_specialized_record_semantic_owner(
                 record_kind,
                 name,
                 *specialization_arguments_out,
-                key_tok.loc);
+                key_tok.loc,
+                nullptr,
+                true);
         if (!name.empty()) {
             auto lookup_scope = collect_->collect_current_scope();
             while (lookup_scope &&

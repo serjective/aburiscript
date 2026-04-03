@@ -443,6 +443,7 @@ private:
     std::unique_ptr<Decl> parse_struct_specifier();
     std::unique_ptr<Decl> parse_cpp_record_specifier(
         std::vector<TemplateArgument>* specialization_arguments_out = nullptr,
+        bool* has_specialization_argument_list_out = nullptr,
         bool suppress_placeholder_type = false);
     std::unique_ptr<Decl> parse_cpp_constructor_member();
     std::unique_ptr<Decl> parse_cpp_destructor_member();
@@ -461,7 +462,8 @@ private:
         const std::string& name,
         const std::vector<TemplateArgument>& specialization_arguments,
         SrcLoc loc,
-        const ClassTemplateDecl* primary_class_template = nullptr);
+        const ClassTemplateDecl* primary_class_template = nullptr,
+        bool has_specialization_argument_list = false);
     template <typename TemplateDeclT>
     void prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_template);
     void prepare_cpp_template_pattern_record(ClassTemplateDecl& class_template);
