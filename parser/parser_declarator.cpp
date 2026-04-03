@@ -429,9 +429,11 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     // _Alignas(type-name) or _Alignas(constant-expression)
                     mgnt->advance(); // consume _Alignas
                     mgnt->check_and_consume(TokenType::LEFT_PAREN);
-                    int64_t alignment = 0;
+                    AttributeArg alignment_arg;
+                    bool have_alignment_arg = false;
                     if (pars->isTokenDeclarationSpec(mgnt->current_token())) {
                         // _Alignas(type-name) uses the type's alignment requirement.
+                        int64_t alignment = 0;
                         auto align_dp = DeclarationParser(this->pars);
                         auto align_type = align_dp.parse_declaration();
                         if (align_type == nullptr) {
@@ -463,33 +465,50 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                         } else if (align_cursor) {
                             alignment = align_cursor->getWidthBytes();
                         }
+                        alignment_arg = AttributeArg::make_int(alignment, t.loc);
+                        have_alignment_arg = true;
                     } else {
                         // _Alignas(constant-expression)
                         auto align_expr = pars->parse_conditional_expression();
                         auto val = try_evaluate_with_consteval_compat(
                             align_expr.get(), ConstEvalMode::c_ice());
-                        if (!val.has_value()) {
+                        if (val.has_value()) {
+                            alignment_arg = AttributeArg::make_int(*val, t.loc);
+                            have_alignment_arg = true;
+                        } else if (pars->is_cxx_mode_active() &&
+                                   pars->expr_depends_on_active_template_parameter(
+                                       align_expr.get())) {
+                            alignment_arg = AttributeArg::make_expr(
+                                std::shared_ptr<Expr>(align_expr.release()),
+                                t.loc);
+                            have_alignment_arg = true;
+                        } else {
                             error("_Alignas requires a constant expression");
                         }
-                        alignment = *val;
                     }
                     mgnt->check_and_consume(TokenType::RIGHT_PAREN);
-                    if (alignment < 0) {
-                        error("_Alignas requires a non-negative alignment");
+                    if (!have_alignment_arg) {
+                        error("_Alignas requires a constant expression");
                     }
-                    if (alignment == 0) {
-                        // C11/C23: _Alignas(0) has no effect.
-                        continue;
-                    }
-                    if ((alignment & (alignment - 1)) != 0) {
-                        error("_Alignas requires a power-of-two alignment");
+                    if (alignment_arg.kind == AttributeArg::Kind::INTEGER) {
+                        int64_t alignment = alignment_arg.int_value;
+                        if (alignment < 0) {
+                            error("_Alignas requires a non-negative alignment");
+                        }
+                        if (alignment == 0) {
+                            // C11/C23: _Alignas(0) has no effect.
+                            continue;
+                        }
+                        if ((alignment & (alignment - 1)) != 0) {
+                            error("_Alignas requires a power-of-two alignment");
+                        }
                     }
                     // Create an ALIGNED attribute
                     ParsedAttribute aligned_attr;
                     aligned_attr.name = "aligned";
                     aligned_attr.loc = t.loc;
                     aligned_attr.resolved_kind = AttributeKind::ALIGNED;
-                    aligned_attr.args.push_back(AttributeArg::make_int(alignment, t.loc));
+                    aligned_attr.args.push_back(std::move(alignment_arg));
                     leading_attrs.push_back(std::move(aligned_attr));
                     continue; // don't advance, we already consumed
                 }

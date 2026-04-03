@@ -5,7 +5,10 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include <memory>
 #include "source_mgnt.h"
+
+struct Expr;
 
 // What kind of entity can this attribute be applied to?
 enum class AttributeTarget : uint16_t {
@@ -33,12 +36,13 @@ inline bool operator&(AttributeTarget a, AttributeTarget b) {
 
 // Attribute argument: can be an identifier, integer constant, string, or expression
 struct AttributeArg {
-    enum class Kind { IDENTIFIER, INTEGER, STRING, FLOAT, KEY_VALUE };
+    enum class Kind { IDENTIFIER, INTEGER, STRING, FLOAT, KEY_VALUE, EXPR };
     Kind kind;
     std::string str_value;
     std::string key;
     int64_t int_value = 0;
     double float_value = 0.0;
+    std::shared_ptr<Expr> expr_value;
     SrcLoc loc;
 
     AttributeArg() : kind(Kind::IDENTIFIER), int_value(0), float_value(0.0) {}
@@ -77,6 +81,13 @@ struct AttributeArg {
         a.kind = Kind::KEY_VALUE;
         a.key = k;
         a.str_value = v;
+        a.loc = loc;
+        return a;
+    }
+    static AttributeArg make_expr(std::shared_ptr<Expr> expr, SrcLoc loc = SrcLoc()) {
+        AttributeArg a;
+        a.kind = Kind::EXPR;
+        a.expr_value = std::move(expr);
         a.loc = loc;
         return a;
     }

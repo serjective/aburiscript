@@ -40,6 +40,88 @@ const ObjectDecl* cpp_base_record_decl_from_type(QualType base_type) {
     return base_object ? dyn_cast<ObjectDecl>(base_object->get_decl()) : nullptr;
 }
 
+std::optional<size_t> collect_aligned_attribute_value(Collect& collect,
+                                                      const AttributeArg& arg,
+                                                      std::string* error_out) {
+    int64_t raw_alignment = 0;
+    if (arg.kind == AttributeArg::Kind::INTEGER) {
+        raw_alignment = arg.int_value;
+    } else if (arg.kind == AttributeArg::Kind::EXPR && arg.expr_value) {
+        if (collect.expression_depends_on_template_parameters(arg.expr_value.get())) {
+            return std::nullopt;
+        }
+        auto evaluated = try_evaluate_with_consteval_compat(
+            arg.expr_value.get(),
+            ConstEvalMode::c_ice());
+        if (!evaluated.has_value()) {
+            if (error_out && error_out->empty()) {
+                *error_out = "_Alignas requires a constant expression";
+            }
+            return std::nullopt;
+        }
+        raw_alignment = *evaluated;
+    } else {
+        return std::nullopt;
+    }
+
+    if (raw_alignment < 0) {
+        if (error_out && error_out->empty()) {
+            *error_out = "_Alignas requires a non-negative alignment";
+        }
+        return std::nullopt;
+    }
+    if (raw_alignment == 0) {
+        return size_t{0};
+    }
+    if ((raw_alignment & (raw_alignment - 1)) != 0) {
+        if (error_out && error_out->empty()) {
+            *error_out = "_Alignas requires a power-of-two alignment";
+        }
+        return std::nullopt;
+    }
+    return static_cast<size_t>(raw_alignment);
+}
+
+size_t collect_requested_alignment_from_attrs(Collect& collect,
+                                              ASTContext* ast_ctx,
+                                              uint32_t node_id,
+                                              SrcLoc loc,
+                                              std::string* error_out = nullptr,
+                                              SrcLoc* error_loc_out = nullptr) {
+    if (!ast_ctx || !ast_ctx->has_attrs(node_id)) {
+        return 0;
+    }
+
+    size_t best = 0;
+    for (const auto& attr : ast_ctx->get_attrs(node_id).attrs) {
+        if (attr.resolved_kind != AttributeKind::ALIGNED || attr.args.empty()) {
+            continue;
+        }
+        std::string local_error;
+        auto requested = collect_aligned_attribute_value(
+            collect,
+            attr.args.front(),
+            &local_error);
+        SrcLoc attr_loc = attr.loc.isInvalid() ? loc : attr.loc;
+        if (!local_error.empty()) {
+            if (error_out && error_out->empty()) {
+                *error_out = local_error;
+            }
+            if (error_loc_out) {
+                *error_loc_out = attr_loc;
+            }
+            return 0;
+        }
+        if (!requested.has_value()) {
+            continue;
+        }
+        if (*requested > best) {
+            best = *requested;
+        }
+    }
+    return best;
+}
+
 bool cpp_base_type_is_dependent(QualType base_type) {
     auto dependent_base_raw = desugar_type(base_type).get_shared();
     if (!dependent_base_raw) {
@@ -363,6 +445,23 @@ public:
             ctx.semantic_state.non_virtual_alignment = 1;
             if (const auto* definition_data = record_.get_definition_data()) {
                 ctx.semantic_state.definition_data = *definition_data;
+            }
+            if (record_type) {
+                std::string alignment_error;
+                SrcLoc alignment_error_loc = record_.location;
+                size_t requested_alignment = collect_requested_alignment_from_attrs(
+                    collect_,
+                    collect_.ast_ctx_.get(),
+                    record_.node_id,
+                    record_.location,
+                    &alignment_error,
+                    &alignment_error_loc);
+                if (!alignment_error.empty()) {
+                    collect_.report_error(alignment_error, alignment_error_loc);
+                }
+                if (requested_alignment > record_type->requested_alignment) {
+                    record_type->requested_alignment = requested_alignment;
+                }
             }
             ctx.fields.reserve(record_.members.size());
             ctx.methods.reserve(record_.members.size());
@@ -866,6 +965,18 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 member_info.is_destructor = false;
                 ast_ctx_->set_cpp_member_decl_info(field_decl->node_id, member_info);
             }
+            std::string alignment_error;
+            SrcLoc alignment_error_loc = field_decl->location;
+            size_t forced_alignment = collect_requested_alignment_from_attrs(
+                *this,
+                ast_ctx_.get(),
+                field_decl->node_id,
+                field_decl->location,
+                &alignment_error,
+                &alignment_error_loc);
+            if (!alignment_error.empty()) {
+                report_error(alignment_error, alignment_error_loc);
+            }
             if (field_decl->is_bitfield()) {
                 ctx.fields.emplace_back(
                     field_decl->name,
@@ -875,12 +986,14 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                     field_decl->bitfield_width,
                     0,
                     current_access);
+                ctx.fields.back().forced_alignment = forced_alignment;
             } else {
                 ctx.fields.emplace_back(
                     field_decl->name,
                     field_decl->type,
                     0,
                     current_access);
+                ctx.fields.back().forced_alignment = forced_alignment;
             }
             bool requires_ctor_member_init =
                 field_decl->type.is_const() ||
@@ -1865,6 +1978,8 @@ void Collect::collect_record_compute_layout(CollectRecordBuildContext& ctx) cons
     std::vector<ObjectType::Field> layout_fields;
     layout_fields.reserve(
         ctx.fields.size() + ctx.bases.size() + (inject_own_vptr_field ? 1 : 0));
+    size_t requested_alignment =
+        ctx.record_type ? ctx.record_type->requested_alignment : 0;
     std::vector<size_t> direct_base_layout_field_indices(
         ctx.bases.size(),
         std::numeric_limits<size_t>::max());
@@ -1921,7 +2036,7 @@ void Collect::collect_record_compute_layout(CollectRecordBuildContext& ctx) cons
         std::move(layout_fields),
         ctx.is_union_record,
         false,
-        0,
+        requested_alignment,
         0,
         record_is_incomplete,
         abi_policy);
@@ -2012,7 +2127,7 @@ void Collect::collect_record_compute_layout(CollectRecordBuildContext& ctx) cons
             std::move(complete_layout_fields),
             ctx.is_union_record,
             false,
-            0,
+            requested_alignment,
             0,
             record_is_incomplete,
             abi_policy);

@@ -354,6 +354,9 @@ private:
         } else {
             add_ast_string(arg.str_value);
             add_ast_string(arg.key);
+            if (arg.expr_value) {
+                visit_stmt(arg.expr_value.get());
+            }
         }
     }
 

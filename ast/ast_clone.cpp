@@ -77,6 +77,85 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
     return ctx.rewrite_type(type);
 }
 
+bool clone_attribute_list(const AttributeList& source,
+                          AttributeList& destination,
+                          ASTCloneContext& ctx,
+                          std::string* error_out) {
+    destination.attrs.reserve(source.attrs.size());
+    for (const auto& attr : source.attrs) {
+        ParsedAttribute cloned_attr;
+        cloned_attr.ns = attr.ns;
+        cloned_attr.name = attr.name;
+        cloned_attr.loc = attr.loc;
+        cloned_attr.resolved_kind = attr.resolved_kind;
+        cloned_attr.args.reserve(attr.args.size());
+        for (const auto& arg : attr.args) {
+            AttributeArg cloned_arg;
+            cloned_arg.kind = arg.kind;
+            cloned_arg.str_value = arg.str_value;
+            cloned_arg.key = arg.key;
+            cloned_arg.int_value = arg.int_value;
+            cloned_arg.float_value = arg.float_value;
+            cloned_arg.loc = arg.loc;
+            if (arg.expr_value) {
+                auto cloned_expr = clone_expr_with_substitution(
+                    arg.expr_value.get(),
+                    ctx,
+                    error_out);
+                if (!cloned_expr) {
+                    return false;
+                }
+                cloned_arg.expr_value =
+                    std::shared_ptr<Expr>(cloned_expr.release());
+            }
+            cloned_attr.args.push_back(std::move(cloned_arg));
+        }
+        destination.attrs.push_back(std::move(cloned_attr));
+    }
+    return true;
+}
+
+bool rewrite_attribute_list_in_place(AttributeList& attrs,
+                                     ASTCloneContext& ctx,
+                                     std::string* error_out) {
+    for (auto& attr : attrs.attrs) {
+        for (auto& arg : attr.args) {
+            if (!arg.expr_value) {
+                continue;
+            }
+            auto rewritten_expr = clone_expr_with_substitution(
+                arg.expr_value.get(),
+                ctx,
+                error_out);
+            if (!rewritten_expr) {
+                return false;
+            }
+            arg.expr_value = std::shared_ptr<Expr>(rewritten_expr.release());
+        }
+    }
+    return true;
+}
+
+bool copy_decl_side_tables(const Decl* source,
+                           Decl* destination,
+                           ASTCloneContext& ctx,
+                           std::string* error_out) {
+    if (!source || !destination || !ctx.ast_ctx ||
+        !ctx.ast_ctx->has_attrs(source->node_id)) {
+        return true;
+    }
+    AttributeList cloned_attrs;
+    if (!clone_attribute_list(
+            ctx.ast_ctx->get_attrs(source->node_id),
+            cloned_attrs,
+            ctx,
+            error_out)) {
+        return false;
+    }
+    ctx.ast_ctx->set_attrs(destination->node_id, std::move(cloned_attrs));
+    return true;
+}
+
 std::vector<TemplateArgument> rewrite_template_arguments(
     const std::vector<TemplateArgument>& arguments,
     ASTCloneContext& ctx,
@@ -1110,6 +1189,37 @@ bool rewrite_decl_tree_in_place_impl(std::unique_ptr<Decl>& decl,
         case DeclKind::NamespaceDecl:
         case DeclKind::ErrorDecl:
             return true;
+        case DeclKind::FieldDecl: {
+            auto* field_decl = static_cast<FieldDecl*>(decl.get());
+            field_decl->type = rewrite_type(field_decl->type, ctx);
+            if (ctx.ast_ctx && ctx.ast_ctx->has_attrs(field_decl->node_id) &&
+                !rewrite_attribute_list_in_place(
+                    ctx.ast_ctx->get_attrs_mut(field_decl->node_id),
+                    ctx,
+                    error_out)) {
+                return false;
+            }
+            return true;
+        }
+        case DeclKind::CppAccessSpecDecl:
+            return true;
+        case DeclKind::CppRecordDecl: {
+            auto* record_decl = static_cast<CppRecordDecl*>(decl.get());
+            for (auto& base : record_decl->bases) {
+                base.type = rewrite_type(base.type, ctx);
+            }
+            if (!rewrite_decl_vector(record_decl->members, ctx, error_out)) {
+                return false;
+            }
+            if (ctx.ast_ctx && ctx.ast_ctx->has_attrs(record_decl->node_id) &&
+                !rewrite_attribute_list_in_place(
+                    ctx.ast_ctx->get_attrs_mut(record_decl->node_id),
+                    ctx,
+                    error_out)) {
+                return false;
+            }
+            return true;
+        }
         case DeclKind::TypedefDecl: {
             auto* typedef_decl = static_cast<TypedefDecl*>(decl.get());
             typedef_decl->type = rewrite_type(typedef_decl->type, ctx);
@@ -1697,6 +1807,9 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
         case DeclKind::NopDecl: {
             auto result = std::make_unique<NopDecl>(decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
             return result;
         }
         case DeclKind::NamespaceDecl: {
@@ -1710,6 +1823,81 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 namespace_decl->location);
             result->canonical_decl = result.get();
             assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::FieldDecl: {
+            const auto* field_decl = static_cast<const FieldDecl*>(decl);
+            auto cloned_type = rewrite_type(field_decl->type, ctx);
+            std::unique_ptr<FieldDecl> result;
+            if (field_decl->is_bitfield()) {
+                result = std::make_unique<FieldDecl>(
+                    cloned_type,
+                    field_decl->name,
+                    field_decl->bitfield_width,
+                    field_decl->location);
+            } else {
+                result = std::make_unique<FieldDecl>(
+                    cloned_type,
+                    field_decl->name,
+                    field_decl->location);
+            }
+            assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::CppAccessSpecDecl: {
+            const auto* access_spec_decl =
+                static_cast<const CppAccessSpecDecl*>(decl);
+            auto result = std::make_unique<CppAccessSpecDecl>(
+                access_spec_decl->access,
+                access_spec_decl->location);
+            assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::CppRecordDecl: {
+            const auto* record_decl = static_cast<const CppRecordDecl*>(decl);
+            std::vector<CppBaseSpecifier> cloned_bases;
+            cloned_bases.reserve(record_decl->bases.size());
+            for (const auto& base : record_decl->bases) {
+                CppBaseSpecifier cloned_base;
+                cloned_base.type_name = base.type_name;
+                cloned_base.type = rewrite_type(base.type, ctx);
+                cloned_base.access = base.access;
+                cloned_base.is_virtual_base = base.is_virtual_base;
+                cloned_base.is_pack_expansion = base.is_pack_expansion;
+                cloned_base.location = base.location;
+                cloned_bases.push_back(std::move(cloned_base));
+            }
+            std::vector<std::unique_ptr<Decl>> cloned_members;
+            cloned_members.reserve(record_decl->members.size());
+            for (const auto& member : record_decl->members) {
+                auto cloned_member = clone_decl_impl(member.get(), ctx, error_out);
+                if (member && !cloned_member) {
+                    return nullptr;
+                }
+                cloned_members.push_back(std::move(cloned_member));
+            }
+            auto result = std::make_unique<CppRecordDecl>(
+                record_decl->record_kind,
+                record_decl->name,
+                std::move(cloned_bases),
+                std::move(cloned_members),
+                record_decl->is_definition != 0,
+                record_decl->location);
+            result->default_access = record_decl->default_access;
+            result->definition_data = record_decl->definition_data;
+            assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
             return result;
         }
         case DeclKind::TypedefDecl: {
@@ -1728,6 +1916,9 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 std::move(cloned_sym),
                 typedef_decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
             return result;
         }
         case DeclKind::VariableDecl: {
@@ -1774,6 +1965,9 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
             if (result->sym) {
                 result->sym->variable_definition = result.get();
             }
+            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
             return result;
         }
         case DeclKind::ParamDecl: {
@@ -1810,6 +2004,9 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                     result.get(),
                     std::move(cloned_default));
             }
+            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
             return result;
         }
         case DeclKind::StaticAssertDecl: {
@@ -1825,6 +2022,9 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 static_assert_decl->has_message != 0,
                 static_assert_decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
             return result;
         }
         case DeclKind::ErrorDecl: {
@@ -1833,6 +2033,9 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 error_decl->error_message,
                 error_decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
             return result;
         }
         default:

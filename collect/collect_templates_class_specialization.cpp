@@ -64,6 +64,89 @@ bool same_qualifier_prefix(const std::string* lhs, const std::string* rhs) {
     return *lhs == *rhs;
 }
 
+std::optional<size_t> aligned_attribute_value_after_substitution(
+    Collect& collect,
+    const AttributeArg& arg,
+    std::string* error_out) {
+    int64_t raw_alignment = 0;
+    if (arg.kind == AttributeArg::Kind::INTEGER) {
+        raw_alignment = arg.int_value;
+    } else if (arg.kind == AttributeArg::Kind::EXPR && arg.expr_value) {
+        if (collect.expression_depends_on_template_parameters(arg.expr_value.get())) {
+            return std::nullopt;
+        }
+        auto evaluated = try_evaluate_with_consteval_compat(
+            arg.expr_value.get(),
+            ConstEvalMode::c_ice());
+        if (!evaluated.has_value()) {
+            if (error_out && error_out->empty()) {
+                *error_out = "_Alignas requires a constant expression";
+            }
+            return std::nullopt;
+        }
+        raw_alignment = *evaluated;
+    } else {
+        return std::nullopt;
+    }
+
+    if (raw_alignment < 0) {
+        if (error_out && error_out->empty()) {
+            *error_out = "_Alignas requires a non-negative alignment";
+        }
+        return std::nullopt;
+    }
+    if (raw_alignment == 0) {
+        return size_t{0};
+    }
+    if ((raw_alignment & (raw_alignment - 1)) != 0) {
+        if (error_out && error_out->empty()) {
+            *error_out = "_Alignas requires a power-of-two alignment";
+        }
+        return std::nullopt;
+    }
+    return static_cast<size_t>(raw_alignment);
+}
+
+size_t requested_alignment_from_decl_attrs(Collect& collect,
+                                           ASTContext* ast_ctx,
+                                           uint32_t node_id,
+                                           SrcLoc loc,
+                                           std::string* error_out = nullptr,
+                                           SrcLoc* error_loc_out = nullptr) {
+    if (!ast_ctx || !ast_ctx->has_attrs(node_id)) {
+        return 0;
+    }
+
+    size_t best = 0;
+    for (const auto& attr : ast_ctx->get_attrs(node_id).attrs) {
+        if (attr.resolved_kind != AttributeKind::ALIGNED || attr.args.empty()) {
+            continue;
+        }
+        std::string local_error;
+        auto requested = aligned_attribute_value_after_substitution(
+            collect,
+            attr.args.front(),
+            &local_error);
+        SrcLoc attr_loc = attr.loc.isInvalid() ? loc : attr.loc;
+        if (!local_error.empty()) {
+            if (error_out && error_out->empty()) {
+                *error_out = local_error;
+            }
+            if (error_loc_out) {
+                *error_loc_out = attr_loc;
+            }
+            return 0;
+        }
+        if (!requested.has_value()) {
+            continue;
+        }
+        if (*requested > best) {
+            best = *requested;
+        }
+    }
+    return best;
+}
+
 std::string make_virtual_slot_key(
     const std::string& method_name,
     QualType method_type) {
@@ -1343,6 +1426,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     }
 
     bool instantiate_member(const Decl* member, RecordMemberAccess declared_access) {
+        if (auto* nested_record = dyn_cast<CppRecordDecl>(member)) {
+            return handle_nested_record_member(nested_record, declared_access);
+        }
         if (auto* field_decl = dyn_cast<FieldDecl>(member)) {
             return handle_field_member(field_decl, declared_access);
         }
@@ -1551,6 +1637,130 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return true;
     }
 
+    bool handle_nested_record_member(
+        const CppRecordDecl* nested_record,
+        RecordMemberAccess declared_access) {
+        if (!nested_record || nested_record->name.empty()) {
+            return fail_instantiation(
+                "anonymous nested records in class template specializations are not supported yet",
+                nested_record ? nested_record->location : loc);
+        }
+
+        std::string clone_error;
+        auto cloned_decl_base = clone_pass.clone_decl(nested_record, &clone_error);
+        auto* cloned_record = dyn_cast<CppRecordDecl>(cloned_decl_base.get());
+        if (!cloned_decl_base || !cloned_record) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to clone class template nested record"
+                    : clone_error,
+                nested_record->location);
+        }
+
+        auto resolution_pass =
+            clone_pass_builder.build_dependent_resolution_pass(
+                clone_pass,
+                [this](std::unique_ptr<Expr>& expr, std::string* error_out)
+                    -> bool {
+                    return collect.resolve_dependent_expr_after_substitution(
+                        expr,
+                        QualType(),
+                        error_out);
+                });
+        if (!resolution_pass.resolve_decl_in_place(cloned_decl_base, &clone_error)) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to resolve class template nested record after substitution"
+                    : clone_error,
+                nested_record->location);
+        }
+
+        bool is_union_record = cloned_record->record_kind == CppRecordKind::Union;
+        auto record_type = std::make_shared<ObjectType>(
+            cloned_record->name,
+            is_union_record,
+            !cloned_record->is_definition);
+        auto semantic_decl = collect.collect_record_declaration(
+            cloned_record->name,
+            record_type,
+            is_union_record,
+            cloned_record->location);
+        if (!semantic_decl) {
+            return fail_instantiation(
+                "failed to build semantic owner for class template nested record",
+                nested_record->location);
+        }
+
+        Collect::CollectRecordBuildContext ctx{
+            cloned_record,
+            cloned_record->location,
+            cloned_record->name,
+            cloned_record->name,
+            is_union_record,
+            record_type,
+            semantic_decl.get(),
+            &entry->member_decls,
+            nullptr};
+        ctx.semantic_state.is_incomplete = false;
+        ctx.semantic_state.alignment = 1;
+        ctx.semantic_state.non_virtual_alignment = 1;
+        if (const auto* definition_data = cloned_record->get_definition_data()) {
+            ctx.semantic_state.definition_data = *definition_data;
+        }
+        std::string alignment_error;
+        SrcLoc alignment_error_loc = cloned_record->location;
+        size_t requested_alignment = requested_alignment_from_decl_attrs(
+            collect,
+            ast_ctx(),
+            cloned_record->node_id,
+            cloned_record->location,
+            &alignment_error,
+            &alignment_error_loc);
+        if (!alignment_error.empty()) {
+            return fail_instantiation(alignment_error, alignment_error_loc);
+        }
+        if (requested_alignment > record_type->requested_alignment) {
+            record_type->requested_alignment = requested_alignment;
+        }
+        ctx.fields.reserve(cloned_record->members.size());
+        ctx.methods.reserve(cloned_record->members.size());
+        ctx.method_templates.reserve(cloned_record->members.size());
+        ctx.static_data_members.reserve(cloned_record->members.size());
+        ctx.nested_types.reserve(cloned_record->members.size());
+        ctx.nested_templates.reserve(cloned_record->members.size());
+        ctx.enumerator_members.reserve(cloned_record->members.size());
+        ctx.seen_static_data_member_names.reserve(cloned_record->members.size());
+        ctx.constructors.reserve(cloned_record->members.size());
+        ctx.destructors.reserve(cloned_record->members.size());
+        ctx.required_ctor_member_init_fields.reserve(cloned_record->members.size());
+
+        collect.collect_record_resolve_bases(ctx);
+        collect.collect_record_walk_virtual_bases(ctx);
+        collect.collect_record_collect_members(ctx);
+        collect.collect_record_synthesize_implicit_members(ctx);
+        collect.collect_record_resolve_virtual_dispatch(ctx);
+        collect.collect_record_compute_layout(ctx);
+        collect.collect_record_publish_semantics(ctx);
+
+        if (ast_ctx() && ast_ctx()->has_attrs(cloned_record->node_id)) {
+            std::vector<ParsedAttribute> copied_attrs(
+                ast_ctx()->get_attrs(cloned_record->node_id).attrs.begin(),
+                ast_ctx()->get_attrs(cloned_record->node_id).attrs.end());
+            ast_ctx()->append_attrs(semantic_decl->node_id, std::move(copied_attrs));
+        }
+
+        RecordSemanticState::NestedType nested_type;
+        nested_type.name = cloned_record->name;
+        nested_type.type = QualType(record_type);
+        nested_type.declared_access = declared_access;
+        nested_type.decl = semantic_decl.get();
+        nested_types.push_back(std::move(nested_type));
+        publish_provisional_nested_members();
+
+        entry->member_decls.push_back(std::move(semantic_decl));
+        return true;
+    }
+
     bool handle_field_member(
         const FieldDecl* field_decl,
         RecordMemberAccess declared_access) {
@@ -1571,6 +1781,55 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 field_decl->location);
         }
 
+        size_t forced_alignment = 0;
+        if (ast_ctx() && ast_ctx()->has_attrs(field_decl->node_id)) {
+            std::string clone_error;
+            auto cloned_field_decl_base = clone_pass.clone_decl(
+                field_decl,
+                &clone_error);
+            auto* cloned_field_decl = dyn_cast<FieldDecl>(cloned_field_decl_base.get());
+            if (!cloned_field_decl_base || !cloned_field_decl) {
+                return fail_instantiation(
+                    clone_error.empty()
+                        ? "failed to clone class template field attributes"
+                        : clone_error,
+                    field_decl->location);
+            }
+
+            auto resolution_pass =
+                clone_pass_builder.build_dependent_resolution_pass(
+                    clone_pass,
+                    [this](std::unique_ptr<Expr>& expr, std::string* error_out)
+                        -> bool {
+                        return collect.resolve_dependent_expr_after_substitution(
+                            expr,
+                            QualType(),
+                            error_out);
+                    });
+            if (!resolution_pass.resolve_decl_in_place(
+                    cloned_field_decl_base,
+                    &clone_error)) {
+                return fail_instantiation(
+                    clone_error.empty()
+                        ? "failed to resolve class template field attributes after substitution"
+                        : clone_error,
+                    field_decl->location);
+            }
+
+            std::string alignment_error;
+            SrcLoc alignment_error_loc = field_decl->location;
+            forced_alignment = requested_alignment_from_decl_attrs(
+                collect,
+                ast_ctx(),
+                cloned_field_decl->node_id,
+                cloned_field_decl->location,
+                &alignment_error,
+                &alignment_error_loc);
+            if (!alignment_error.empty()) {
+                return fail_instantiation(alignment_error, alignment_error_loc);
+            }
+        }
+
         if (field_decl->is_bitfield()) {
             user_fields.emplace_back(field_decl->name,
                                      substituted_type,
@@ -1579,12 +1838,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                                      field_decl->bitfield_width,
                                      0,
                                      declared_access);
+            user_fields.back().forced_alignment = forced_alignment;
         } else {
             user_fields.emplace_back(
                 field_decl->name,
                 substituted_type,
                 0,
                 declared_access);
+            user_fields.back().forced_alignment = forced_alignment;
         }
         return true;
     }

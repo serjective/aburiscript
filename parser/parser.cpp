@@ -532,6 +532,93 @@ void Parser::skip_to_param_sync_point() {
 
 std::vector<ParsedAttribute> Parser::try_parse_attributes() {
     std::vector<ParsedAttribute> attrs;
+    auto parse_alignas_attribute = [this]() -> ParsedAttribute {
+        Token alignas_tok = current_token();
+        ParsedAttribute aligned_attr;
+        aligned_attr.name = "aligned";
+        aligned_attr.loc = alignas_tok.loc;
+        aligned_attr.resolved_kind = AttributeKind::ALIGNED;
+
+        advance(); // consume alignas / _Alignas
+        check_and_consume(TokenType::LEFT_PAREN);
+
+        AttributeArg alignment_arg;
+        bool have_alignment_arg = false;
+        if (isTokenDeclarationSpec(current_token())) {
+            int64_t alignment = 0;
+            DeclarationParser align_dp(this);
+            auto align_type = align_dp.parse_declaration();
+            if (!align_type) {
+                error("Error parsing type in _Alignas");
+            }
+            auto align_cursor = desugar_type(align_type);
+            if (!align_cursor) {
+                align_cursor = align_type;
+            }
+            while (true) {
+                if (auto arr = dyn_cast_shared<ArrayType>(align_cursor)) {
+                    align_cursor = arr->element_type.get_shared();
+                    continue;
+                }
+                if (auto complex = dyn_cast_shared<ComplexType>(align_cursor)) {
+                    align_cursor = complex->element_type;
+                    continue;
+                }
+                if (auto en = dyn_cast_shared<EnumType>(align_cursor)) {
+                    align_cursor = en->semantic_underlying_type();
+                    continue;
+                }
+                break;
+            }
+            if (auto obj = dyn_cast_shared<ObjectType>(align_cursor)) {
+                alignment = static_cast<int64_t>(obj->getAlignment());
+            } else if (auto vec = dyn_cast_shared<VectorType>(align_cursor)) {
+                alignment = vec->getWidthBytes();
+            } else if (align_cursor) {
+                alignment = align_cursor->getWidthBytes();
+            }
+            alignment_arg = AttributeArg::make_int(alignment, alignas_tok.loc);
+            have_alignment_arg = true;
+        } else {
+            auto align_expr = parse_conditional_expression();
+            auto value = try_evaluate_with_consteval_compat(
+                align_expr.get(),
+                ConstEvalMode::c_ice());
+            if (value.has_value()) {
+                alignment_arg = AttributeArg::make_int(*value, alignas_tok.loc);
+                have_alignment_arg = true;
+            } else if (is_cxx_mode_active() &&
+                       expr_depends_on_active_template_parameter(
+                           align_expr.get())) {
+                alignment_arg = AttributeArg::make_expr(
+                    std::shared_ptr<Expr>(align_expr.release()),
+                    alignas_tok.loc);
+                have_alignment_arg = true;
+            } else {
+                error("_Alignas requires a constant expression");
+            }
+        }
+
+        check_and_consume(TokenType::RIGHT_PAREN);
+        if (!have_alignment_arg) {
+            error("_Alignas requires a constant expression");
+        }
+        if (alignment_arg.kind == AttributeArg::Kind::INTEGER) {
+            int64_t alignment = alignment_arg.int_value;
+            if (alignment < 0) {
+                error("_Alignas requires a non-negative alignment");
+            }
+            if (alignment == 0) {
+                return ParsedAttribute{};
+            }
+            if ((alignment & (alignment - 1)) != 0) {
+                error("_Alignas requires a power-of-two alignment");
+            }
+        }
+
+        aligned_attr.args.push_back(std::move(alignment_arg));
+        return aligned_attr;
+    };
 
     while (true) {
         if (is_gnu_attribute_token(current_token())) {
@@ -539,6 +626,11 @@ std::vector<ParsedAttribute> Parser::try_parse_attributes() {
             attrs.insert(attrs.end(),
                 std::make_move_iterator(gnu_attrs.begin()),
                 std::make_move_iterator(gnu_attrs.end()));
+        } else if (gentle_check(TokenType::ALIGNAS)) {
+            auto aligned_attr = parse_alignas_attribute();
+            if (!aligned_attr.name.empty()) {
+                attrs.push_back(std::move(aligned_attr));
+            }
         } else if (gentle_check(TokenType::LEFT_BRACKET) &&
                    peek_token().type == TokenType::LEFT_BRACKET) {
             auto c23_attrs = parse_c23_attribute_list();
