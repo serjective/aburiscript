@@ -2283,6 +2283,22 @@ static size_t find_best_matching_include_index(const std::vector<std::string>& p
     return best_idx;
 }
 
+static bool is_same_include_file(const std::shared_ptr<FileSrc>& lhs,
+                                 const std::shared_ptr<FileSrc>& rhs) {
+    if (!lhs || !rhs) {
+        return false;
+    }
+    if (lhs.get() == rhs.get()) {
+        return true;
+    }
+
+    const auto lhs_path =
+        normalize_dir((std::filesystem::path(lhs->directory) / lhs->file_name).string());
+    const auto rhs_path =
+        normalize_dir((std::filesystem::path(rhs->directory) / rhs->file_name).string());
+    return lhs_path == rhs_path;
+}
+
 static std::shared_ptr<FileSrc> resolve_include_file(SourceManager* sm,
                                                      const std::shared_ptr<FileSrc>& curr_file,
                                                      const std::string& file_name,
@@ -2302,8 +2318,19 @@ static std::shared_ptr<FileSrc> resolve_include_file(SourceManager* sm,
     if (!new_file && !is_system) {
         if (is_next) {
             const size_t quote_idx = find_best_matching_include_index(sm->quote_look_paths, curr_dir);
+            size_t quote_start_idx = 0;
             if (quote_idx != sm->quote_look_paths.size()) {
-                new_file = sm->lookThroughQuotePathsFrom(file_name, quote_idx + 1);
+                quote_start_idx = quote_idx + 1;
+            }
+            for (size_t i = quote_start_idx; i < sm->quote_look_paths.size(); ++i) {
+                auto candidate = sm->getFileFromLoc(file_name, sm->quote_look_paths[i]);
+                if (is_same_include_file(candidate, curr_file)) {
+                    continue;
+                }
+                if (candidate) {
+                    new_file = std::move(candidate);
+                    break;
+                }
             }
         } else {
             new_file = sm->lookThroughQuotePaths(file_name);
@@ -2320,7 +2347,16 @@ static std::shared_ptr<FileSrc> resolve_include_file(SourceManager* sm,
         if (source_idx != sm->source_look_paths.size()) {
             source_start_idx = source_idx + 1;
         }
-        return sm->lookThroughPathsFrom(file_name, source_start_idx);
+        for (size_t i = source_start_idx; i < sm->source_look_paths.size(); ++i) {
+            auto candidate = sm->getFileFromLoc(file_name, sm->source_look_paths[i]);
+            if (is_same_include_file(candidate, curr_file)) {
+                continue;
+            }
+            if (candidate) {
+                return candidate;
+            }
+        }
+        return nullptr;
     }
 
     return sm->lookThroughPaths(file_name);

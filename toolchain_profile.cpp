@@ -219,6 +219,12 @@ CxxStdlibDiscoveryResult discover_cxx_stdlib_include_paths(
             attempted_seen,
             result.include_paths,
             include_seen);
+        // Use one active libc++ root. Keeping multiple libc++ wrapper roots in the
+        // search list breaks headers like <stdint.h> that rely on include_next to
+        // drop from the C++ wrapper layer to the C header layer.
+        if (result.include_paths.size() > 1) {
+            result.include_paths.resize(1);
+        }
     }
 
     return result;
