@@ -32,8 +32,79 @@ bool symbol_is_non_type_template_parameter(const Symbol* sym) {
            isa<TemplateNonTypeParmDecl>(sym->template_parameter_decl);
 }
 
+const VariableDecl* find_template_dependent_variable_definition(
+    const Symbol* sym) {
+    if (!sym || sym->kind != SymbolKind::VARIABLE) {
+        return nullptr;
+    }
+    if (sym->variable_definition && sym->variable_definition->init) {
+        return sym->variable_definition;
+    }
+
+    QualType owner_type = get_symbol_owner_record_type(sym);
+    auto owner_record = desugar_type(owner_type).as_shared<ObjectType>();
+    auto* owner_decl =
+        owner_record ? dyn_cast<ObjectDecl>(owner_record->get_decl()) : nullptr;
+    if (!owner_decl) {
+        return nullptr;
+    }
+
+    const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
+    if (!state) {
+        return nullptr;
+    }
+
+    for (const auto& static_member : state->static_data_members) {
+        if (!static_member.decl || !static_member.decl->init) {
+            continue;
+        }
+        if ((static_member.symbol && static_member.symbol.get() == sym) ||
+            (static_member.decl->sym &&
+             static_member.decl->sym.get() == sym)) {
+            return static_member.decl;
+        }
+    }
+
+    return nullptr;
+}
+
+bool expr_depends_on_template_parameters_impl(
+    const Expr* expr,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const Symbol*>& active_variable_symbols);
+
+bool variable_definition_depends_on_template_parameters(
+    const Symbol* sym,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const Symbol*>& active_variable_symbols) {
+    if (!sym || sym->kind != SymbolKind::VARIABLE ||
+        !active_variable_symbols.insert(sym).second) {
+        return false;
+    }
+
+    const VariableDecl* definition = find_template_dependent_variable_definition(sym);
+    bool depends = false;
+    if (definition) {
+        depends =
+            type_depends_on_template_parameters(definition->type, ast_ctx) ||
+            type_depends_on_template_parameters(
+                QualType(definition->original_type),
+                ast_ctx) ||
+            (definition->init &&
+             expr_depends_on_template_parameters_impl(
+                 definition->init.get(),
+                 ast_ctx,
+                 active_variable_symbols));
+    }
+
+    active_variable_symbols.erase(sym);
+    return depends;
+}
+
 bool expr_depends_on_template_parameters_impl(const Expr* expr,
-                                              const ASTContext* ast_ctx) {
+                                              const ASTContext* ast_ctx,
+                                              std::unordered_set<const Symbol*>&
+                                                  active_variable_symbols) {
     if (!expr) {
         return false;
     }
@@ -45,6 +116,12 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
 
     if (auto* var_ref = dyn_cast<VarRef>(stripped)) {
         if (symbol_is_non_type_template_parameter(var_ref->symref.get())) {
+            return true;
+        }
+        if (variable_definition_depends_on_template_parameters(
+                var_ref->symref.get(),
+                ast_ctx,
+                active_variable_symbols)) {
             return true;
         }
     }
@@ -69,7 +146,8 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                    member->names_dependent_base ||
                    expr_depends_on_template_parameters_impl(
                        member->base.get(),
-                       ast_ctx) ||
+                       ast_ctx,
+                       active_variable_symbols) ||
                    template_arguments_contain_dependency(
                        member->explicit_template_arguments,
                        ast_ctx);
@@ -111,7 +189,8 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                         get_param_decl_default_argument(parameter.get())) {
                     if (expr_depends_on_template_parameters_impl(
                             default_arg,
-                            ast_ctx)) {
+                            ast_ctx,
+                            active_variable_symbols)) {
                         return true;
                     }
                 }
@@ -119,13 +198,15 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
             for (const auto& requirement : requires_expr->requirements) {
                 if (expr_depends_on_template_parameters_impl(
                         requirement.expr.get(),
-                        ast_ctx) ||
+                        ast_ctx,
+                        active_variable_symbols) ||
                     type_depends_on_template_parameters(
                         requirement.type_requirement,
                         ast_ctx) ||
                     expr_depends_on_template_parameters_impl(
                         requirement.return_constraint.get(),
-                        ast_ctx)) {
+                        ast_ctx,
+                        active_variable_symbols)) {
                     return true;
                 }
             }
@@ -134,59 +215,76 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
         case StmtKind::UnaryOperation:
             return expr_depends_on_template_parameters_impl(
                 static_cast<const UnaryOperation*>(stripped)->exp.get(),
-                ast_ctx);
+                ast_ctx,
+                active_variable_symbols);
         case StmtKind::BinaryOperation: {
             const auto* binary = static_cast<const BinaryOperation*>(stripped);
             return expr_depends_on_template_parameters_impl(
                        binary->left.get(),
-                       ast_ctx) ||
+                       ast_ctx,
+                       active_variable_symbols) ||
                    expr_depends_on_template_parameters_impl(
                        binary->right.get(),
-                       ast_ctx);
+                       ast_ctx,
+                       active_variable_symbols);
         }
         case StmtKind::CompoundAssignOperation: {
             const auto* binary =
                 static_cast<const CompoundAssignOperation*>(stripped);
             return expr_depends_on_template_parameters_impl(
                        binary->left.get(),
-                       ast_ctx) ||
+                       ast_ctx,
+                       active_variable_symbols) ||
                    expr_depends_on_template_parameters_impl(
                        binary->right.get(),
-                       ast_ctx);
+                       ast_ctx,
+                       active_variable_symbols);
         }
         case StmtKind::CondExpr: {
             const auto* cond = static_cast<const CondExpr*>(stripped);
             return expr_depends_on_template_parameters_impl(
                        cond->condition.get(),
-                       ast_ctx) ||
+                       ast_ctx,
+                       active_variable_symbols) ||
                    expr_depends_on_template_parameters_impl(
                        cond->true_expr.get(),
-                       ast_ctx) ||
+                       ast_ctx,
+                       active_variable_symbols) ||
                    expr_depends_on_template_parameters_impl(
                        cond->false_expr.get(),
-                       ast_ctx);
+                       ast_ctx,
+                       active_variable_symbols);
         }
         case StmtKind::ExplicitCast:
             return expr_depends_on_template_parameters_impl(
                 static_cast<const ExplicitCast*>(stripped)->expr.get(),
-                ast_ctx);
+                ast_ctx,
+                active_variable_symbols);
         case StmtKind::ArraySubscriptExpr: {
             const auto* subscript =
                 static_cast<const ArraySubscriptExpr*>(stripped);
             return expr_depends_on_template_parameters_impl(
                        subscript->array.get(),
-                       ast_ctx) ||
+                       ast_ctx,
+                       active_variable_symbols) ||
                    expr_depends_on_template_parameters_impl(
                        subscript->index.get(),
-                       ast_ctx);
+                       ast_ctx,
+                       active_variable_symbols);
         }
         case StmtKind::FuncCall: {
             const auto* call = static_cast<const FuncCall*>(stripped);
-            if (expr_depends_on_template_parameters_impl(call->func.get(), ast_ctx)) {
+            if (expr_depends_on_template_parameters_impl(
+                    call->func.get(),
+                    ast_ctx,
+                    active_variable_symbols)) {
                 return true;
             }
             for (const auto& arg : call->args) {
-                if (expr_depends_on_template_parameters_impl(arg.get(), ast_ctx)) {
+                if (expr_depends_on_template_parameters_impl(
+                        arg.get(),
+                        ast_ctx,
+                        active_variable_symbols)) {
                     return true;
                 }
             }
@@ -197,13 +295,17 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
             return call->lowered_call &&
                    expr_depends_on_template_parameters_impl(
                        call->lowered_call.get(),
-                       ast_ctx);
+                       ast_ctx,
+                       active_variable_symbols);
         }
         case StmtKind::CppConstructExpr: {
             const auto* construct =
                 static_cast<const CppConstructExpr*>(stripped);
             for (const auto& arg : construct->args) {
-                if (expr_depends_on_template_parameters_impl(arg.get(), ast_ctx)) {
+                if (expr_depends_on_template_parameters_impl(
+                        arg.get(),
+                        ast_ctx,
+                        active_variable_symbols)) {
                     return true;
                 }
             }
@@ -212,32 +314,38 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
         case StmtKind::MemberExpr:
             return expr_depends_on_template_parameters_impl(
                 static_cast<const MemberExpr*>(stripped)->base.get(),
-                ast_ctx);
+                ast_ctx,
+                active_variable_symbols);
         case StmtKind::MemberPointerAccessExpr: {
             const auto* access =
                 static_cast<const MemberPointerAccessExpr*>(stripped);
             return expr_depends_on_template_parameters_impl(
                        access->base.get(),
-                       ast_ctx) ||
+                       ast_ctx,
+                       active_variable_symbols) ||
                    expr_depends_on_template_parameters_impl(
                        access->member_pointer.get(),
-                       ast_ctx);
+                       ast_ctx,
+                       active_variable_symbols);
         }
         case StmtKind::InitListExpr: {
             const auto* init_list = static_cast<const InitListExpr*>(stripped);
             for (const auto& element : init_list->elements) {
                 if (expr_depends_on_template_parameters_impl(
                         element.value.get(),
-                        ast_ctx)) {
+                        ast_ctx,
+                        active_variable_symbols)) {
                     return true;
                 }
                 for (const auto& designator : element.designators) {
                     if (expr_depends_on_template_parameters_impl(
                             designator.index.get(),
-                            ast_ctx) ||
+                            ast_ctx,
+                            active_variable_symbols) ||
                         expr_depends_on_template_parameters_impl(
                             designator.range_end.get(),
-                            ast_ctx)) {
+                            ast_ctx,
+                            active_variable_symbols)) {
                         return true;
                     }
                 }
@@ -247,12 +355,14 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
         case StmtKind::CompoundLiteralExpr:
             return expr_depends_on_template_parameters_impl(
                 static_cast<const CompoundLiteralExpr*>(stripped)->init.get(),
-                ast_ctx);
+                ast_ctx,
+                active_variable_symbols);
         case StmtKind::SizeOfExpr: {
             const auto* sizeof_expr = static_cast<const SizeOfExpr*>(stripped);
             return expr_depends_on_template_parameters_impl(
                        sizeof_expr->expr_operand.get(),
-                       ast_ctx) ||
+                       ast_ctx,
+                       active_variable_symbols) ||
                    type_depends_on_template_parameters(
                        sizeof_expr->type_operand,
                        ast_ctx);
@@ -264,7 +374,8 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                 static_cast<const AlignOfExpr*>(stripped);
             return expr_depends_on_template_parameters_impl(
                        alignof_expr->expr_operand.get(),
-                       ast_ctx) ||
+                       ast_ctx,
+                       active_variable_symbols) ||
                    type_depends_on_template_parameters(
                        alignof_expr->type_operand,
                        ast_ctx);
@@ -273,13 +384,15 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
             const auto* generic = static_cast<const GenericExpr*>(stripped);
             if (expr_depends_on_template_parameters_impl(
                     generic->controlling_expr.get(),
-                    ast_ctx)) {
+                    ast_ctx,
+                    active_variable_symbols)) {
                 return true;
             }
             for (const auto& assoc : generic->associations) {
                 if (expr_depends_on_template_parameters_impl(
                         assoc.expr.get(),
-                        ast_ctx) ||
+                        ast_ctx,
+                        active_variable_symbols) ||
                     type_depends_on_template_parameters(assoc.type, ast_ctx)) {
                     return true;
                 }
@@ -289,7 +402,10 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
         case StmtKind::BuiltinCallExpr: {
             const auto* builtin = static_cast<const BuiltinCallExpr*>(stripped);
             for (const auto& arg : builtin->args) {
-                if (expr_depends_on_template_parameters_impl(arg.get(), ast_ctx)) {
+                if (expr_depends_on_template_parameters_impl(
+                        arg.get(),
+                        ast_ctx,
+                        active_variable_symbols)) {
                     return true;
                 }
             }
@@ -306,13 +422,15 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                        ast_ctx) ||
                    expr_depends_on_template_parameters_impl(
                        static_cast<const CppTypeIdExpr*>(stripped)->expr_operand.get(),
-                       ast_ctx);
+                       ast_ctx,
+                       active_variable_symbols);
         case StmtKind::CppDynamicCastExpr: {
             const auto* cast = static_cast<const CppDynamicCastExpr*>(stripped);
             return type_depends_on_template_parameters(cast->target_type, ast_ctx) ||
                    expr_depends_on_template_parameters_impl(
                        cast->expr.get(),
-                       ast_ctx);
+                       ast_ctx,
+                       active_variable_symbols);
         }
         default:
             return false;
@@ -480,7 +598,11 @@ bool Collect::decltype_expression_requires_deferred_resolution(
 
 bool Collect::expression_depends_on_template_parameters(
     const Expr* expr) const {
-    return expr_depends_on_template_parameters_impl(expr, ast_ctx_.get());
+    std::unordered_set<const Symbol*> active_variable_symbols;
+    return expr_depends_on_template_parameters_impl(
+        expr,
+        ast_ctx_.get(),
+        active_variable_symbols);
 }
 
 QualType Collect::resolve_deferred_decltype_expr_type(

@@ -470,8 +470,10 @@ bool Parser::expr_depends_on_active_template_parameter(const Expr* expr) const {
         return false;
     }
     if (auto* var_ref = dyn_cast<VarRef>(expr)) {
-        return find_active_non_type_template_parameter(var_ref->symref.get()) !=
-            nullptr;
+        if (find_active_non_type_template_parameter(var_ref->symref.get()) !=
+            nullptr) {
+            return true;
+        }
     }
     return collect_ &&
            collect_->expression_depends_on_template_parameters(expr);
@@ -533,6 +535,25 @@ TemplateArgument Parser::parse_cpp_template_argument() {
                           parsed_expr->location);
         }
 
+        if (expr_depends_on_active_template_parameter(parsed_expr.get())) {
+            std::string argument_spelling;
+            const TemplateParameterDecl* referenced_parameter = nullptr;
+            if (auto* var_ref = dyn_cast<VarRef>(parsed_expr.get())) {
+                argument_spelling = var_ref->get_name();
+                if (const auto* non_type_parameter =
+                        find_active_non_type_template_parameter(
+                            var_ref->symref.get())) {
+                    referenced_parameter = non_type_parameter;
+                }
+            }
+            std::shared_ptr<Expr> shared_expr(parsed_expr.release());
+            return TemplateArgument::dependent_value_argument(
+                argument_type,
+                std::move(shared_expr),
+                std::move(argument_spelling),
+                referenced_parameter);
+        }
+
         ConstEvalResult eval = evaluate_with_consteval_compat(
             parsed_expr.get(),
             ConstEvalMode::cpp_non_type_template_argument());
@@ -555,24 +576,6 @@ TemplateArgument Parser::parse_cpp_template_argument() {
                 *eval.value,
                 {},
                 std::move(concrete_expr));
-        }
-        if (expr_depends_on_active_template_parameter(parsed_expr.get())) {
-            std::string argument_spelling;
-            const TemplateParameterDecl* referenced_parameter = nullptr;
-            if (auto* var_ref = dyn_cast<VarRef>(parsed_expr.get())) {
-                argument_spelling = var_ref->get_name();
-                if (const auto* non_type_parameter =
-                        find_active_non_type_template_parameter(
-                            var_ref->symref.get())) {
-                    referenced_parameter = non_type_parameter;
-                }
-            }
-            std::shared_ptr<Expr> shared_expr(parsed_expr.release());
-            return TemplateArgument::dependent_value_argument(
-                argument_type,
-                std::move(shared_expr),
-                std::move(argument_spelling),
-                referenced_parameter);
         }
 
         error_custloc(
