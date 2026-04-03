@@ -25,6 +25,8 @@ bool is_builtin_type_trait_kind(BuiltinKind kind) {
         case BuiltinKind::HAS_VIRTUAL_DESTRUCTOR:
         case BuiltinKind::IS_ABSTRACT:
         case BuiltinKind::IS_ARRAY:
+        case BuiltinKind::IS_UNION:
+        case BuiltinKind::IS_VOLATILE:
         case BuiltinKind::IS_CONST:
         case BuiltinKind::IS_EMPTY:
         case BuiltinKind::IS_ENUM:
@@ -44,6 +46,7 @@ bool is_builtin_type_trait_kind(BuiltinKind kind) {
         case BuiltinKind::IS_POLYMORPHIC:
         case BuiltinKind::IS_STANDARD_LAYOUT:
         case BuiltinKind::IS_TRIVIAL:
+        case BuiltinKind::IS_TRIVIALLY_COPYABLE:
         case BuiltinKind::IS_POD:
         case BuiltinKind::IS_SIGNED:
         case BuiltinKind::IS_CONSTRUCTIBLE:
@@ -83,6 +86,8 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__has_virtual_destructor", BuiltinKind::HAS_VIRTUAL_DESTRUCTOR, 1, 1, true, true});
     register_builtin({"__is_abstract", BuiltinKind::IS_ABSTRACT, 1, 1, true, true});
     register_builtin({"__is_array", BuiltinKind::IS_ARRAY, 1, 1, true, true});
+    register_builtin({"__is_union", BuiltinKind::IS_UNION, 1, 1, true, true});
+    register_builtin({"__is_volatile", BuiltinKind::IS_VOLATILE, 1, 1, true, true});
     register_builtin({"__is_const", BuiltinKind::IS_CONST, 1, 1, true, true});
     register_builtin({"__is_empty", BuiltinKind::IS_EMPTY, 1, 1, true, true});
     register_builtin({"__is_enum", BuiltinKind::IS_ENUM, 1, 1, true, true});
@@ -102,6 +107,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__is_polymorphic", BuiltinKind::IS_POLYMORPHIC, 1, 1, true, true});
     register_builtin({"__is_standard_layout", BuiltinKind::IS_STANDARD_LAYOUT, 1, 1, true, true});
     register_builtin({"__is_trivial", BuiltinKind::IS_TRIVIAL, 1, 1, true, true});
+    register_builtin({"__is_trivially_copyable", BuiltinKind::IS_TRIVIALLY_COPYABLE, 1, 1, true, true});
     register_builtin({"__is_pod", BuiltinKind::IS_POD, 1, 1, true, true});
     register_builtin({"__is_signed", BuiltinKind::IS_SIGNED, 1, 1, true, true});
     register_builtin({"__is_constructible", BuiltinKind::IS_CONSTRUCTIBLE, 1, -1, true, true});

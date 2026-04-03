@@ -2745,6 +2745,7 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
 
     std::function<bool(QualType)> trait_is_standard_layout_type;
     std::function<bool(QualType)> trait_is_trivial_type;
+    std::function<bool(QualType)> trait_is_trivially_copyable_type;
     std::function<bool(QualType)> trait_is_pod_type;
 
     trait_is_standard_layout_type = [&](QualType type_arg) -> bool {
@@ -2842,6 +2843,126 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
         }
     };
 
+    trait_is_trivially_copyable_type = [&](QualType type_arg) -> bool {
+        if (!type_arg) {
+            return false;
+        }
+
+        QualType canonical = desugar_type(type_arg, ast_ctx_.get());
+        if (!canonical) {
+            return false;
+        }
+        if (canonical->isVoid()) {
+            return false;
+        }
+
+        switch (canonical->kind) {
+            case TypeKind::Reference:
+            case TypeKind::Function:
+                return false;
+            case TypeKind::Array: {
+                auto array_type = canonical.as_shared<ArrayType>();
+                if (!array_type ||
+                    array_type->size_kind != ArraySizeKind::Constant ||
+                    !array_type->size.has_value()) {
+                    return false;
+                }
+                return trait_is_trivially_copyable_type(array_type->element_type);
+            }
+            case TypeKind::Object: {
+                auto object_type = canonical.as_shared<ObjectType>();
+                if (!object_type) {
+                    return false;
+                }
+                const auto* record_decl = canonical_record_decl(
+                    dyn_cast<ObjectDecl>(object_type->get_decl()));
+                if (!record_decl) {
+                    return false;
+                }
+                const auto* state = query_lookup_record_semantics(record_decl);
+                if (!state || state->is_incomplete) {
+                    return false;
+                }
+                if (state->is_polymorphic || !state->virtual_bases.empty()) {
+                    return false;
+                }
+                if (!cpp_type_is_trivially_destructible(canonical, ast_ctx_.get())) {
+                    return false;
+                }
+
+                for (const auto& ctor : state->constructors) {
+                    if (!ctor.decl || ctor.is_implicit) {
+                        continue;
+                    }
+                    auto fn_type =
+                        desugar_type(ctor.type, ast_ctx_.get()).as_shared<FunctionType>();
+                    if (!fn_type) {
+                        continue;
+                    }
+                    CppConstructorUserParamInfo info =
+                        cpp_compute_constructor_user_param_info(ctor);
+                    if (info.max_user_param_count != 1 ||
+                        info.user_param_start >= fn_type->parameters.size()) {
+                        continue;
+                    }
+                    QualType param_type =
+                        desugar_type(fn_type->parameters[info.user_param_start], ast_ctx_.get());
+                    auto ref_type = param_type.as_shared<ReferenceType>();
+                    if (!ref_type || !ref_type->referred_type) {
+                        continue;
+                    }
+                    QualType referred =
+                        desugar_type(ref_type->referred_type, ast_ctx_.get());
+                    if (!referred || !referred.equals_unqualified(canonical)) {
+                        continue;
+                    }
+                    if (!ctor.decl->is_defaulted) {
+                        return false;
+                    }
+                }
+
+                for (const auto& method : state->methods) {
+                    if (method.is_static || !method.decl || method.name != "operator=") {
+                        continue;
+                    }
+                    auto fn_type =
+                        desugar_type(method.type, ast_ctx_.get()).as_shared<FunctionType>();
+                    if (!fn_type || fn_type->parameters.size() != 1) {
+                        continue;
+                    }
+                    QualType param_type =
+                        desugar_type(fn_type->parameters.front(), ast_ctx_.get());
+                    auto ref_type = param_type.as_shared<ReferenceType>();
+                    if (!ref_type || !ref_type->referred_type) {
+                        continue;
+                    }
+                    QualType referred =
+                        desugar_type(ref_type->referred_type, ast_ctx_.get());
+                    if (referred && referred.equals_unqualified(canonical)) {
+                        return false;
+                    }
+                }
+
+                for (const auto& base : state->bases) {
+                    if (!trait_is_trivially_copyable_type(base.type)) {
+                        return false;
+                    }
+                }
+                for (const auto& field : state->fields) {
+                    if (field.is_base_subobject || field.is_virtual_base_storage) {
+                        continue;
+                    }
+                    if (!trait_is_trivially_copyable_type(field.type)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            default:
+                return canonical->isScalar() || canonical->kind == TypeKind::Complex;
+        }
+    };
+
     trait_is_pod_type = [&](QualType type_arg) -> bool {
         return trait_is_standard_layout_type(type_arg) &&
                trait_is_trivial_type(type_arg);
@@ -2926,6 +3047,21 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                 return std::nullopt;
             }
             return canonical_type_kind(*type_arg, ast_ctx_.get()) == TypeKind::Array;
+        }
+        case BuiltinKind::IS_UNION: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto object_type = type_arg->as_shared<ObjectType>();
+            return object_type && object_type->is_union;
+        }
+        case BuiltinKind::IS_VOLATILE: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return !type_arg->as_shared<ReferenceType>() && type_arg->is_volatile();
         }
         case BuiltinKind::IS_CONST: {
             auto type_arg = get_canonical_arg(0);
@@ -3147,6 +3283,13 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                 return std::nullopt;
             }
             return trait_is_trivial_type(*type_arg);
+        }
+        case BuiltinKind::IS_TRIVIALLY_COPYABLE: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return trait_is_trivially_copyable_type(*type_arg);
         }
         case BuiltinKind::IS_POD: {
             auto type_arg = get_canonical_arg(0);
