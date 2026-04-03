@@ -22,6 +22,13 @@ bool is_builtin_type_trait_kind(BuiltinKind kind) {
         case BuiltinKind::IS_REFERENCE:
         case BuiltinKind::IS_LVALUE_REFERENCE:
         case BuiltinKind::IS_RVALUE_REFERENCE:
+        case BuiltinKind::HAS_VIRTUAL_DESTRUCTOR:
+        case BuiltinKind::IS_ABSTRACT:
+        case BuiltinKind::IS_ARRAY:
+        case BuiltinKind::IS_ASSIGNABLE:
+        case BuiltinKind::IS_BASE_OF:
+        case BuiltinKind::IS_CLASS:
+        case BuiltinKind::IS_NULL_POINTER:
         case BuiltinKind::IS_DESTRUCTIBLE:
         case BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE:
         case BuiltinKind::HAS_TRIVIAL_DESTRUCTOR:
@@ -51,6 +58,13 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__is_reference", BuiltinKind::IS_REFERENCE, 1, 1, true, true});
     register_builtin({"__is_lvalue_reference", BuiltinKind::IS_LVALUE_REFERENCE, 1, 1, true, true});
     register_builtin({"__is_rvalue_reference", BuiltinKind::IS_RVALUE_REFERENCE, 1, 1, true, true});
+    register_builtin({"__has_virtual_destructor", BuiltinKind::HAS_VIRTUAL_DESTRUCTOR, 1, 1, true, true});
+    register_builtin({"__is_abstract", BuiltinKind::IS_ABSTRACT, 1, 1, true, true});
+    register_builtin({"__is_array", BuiltinKind::IS_ARRAY, 1, 1, true, true});
+    register_builtin({"__is_assignable", BuiltinKind::IS_ASSIGNABLE, 2, 2, true, true});
+    register_builtin({"__is_base_of", BuiltinKind::IS_BASE_OF, 2, 2, true, true});
+    register_builtin({"__is_class", BuiltinKind::IS_CLASS, 1, 1, true, true});
+    register_builtin({"__is_null_pointer", BuiltinKind::IS_NULL_POINTER, 1, 1, true, true});
     register_builtin({"__is_destructible", BuiltinKind::IS_DESTRUCTIBLE, 1, 1, true, true});
     register_builtin({"__is_trivially_destructible", BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE, 1, 1, true, true});
     register_builtin({"__has_trivial_destructor", BuiltinKind::HAS_TRIVIAL_DESTRUCTOR, 1, 1, true, true});

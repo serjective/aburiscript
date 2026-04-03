@@ -2493,6 +2493,108 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             auto ref_type = type_arg->as_shared<ReferenceType>();
             return ref_type && ref_type->isRValueReference();
         }
+        case BuiltinKind::HAS_VIRTUAL_DESTRUCTOR: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto object_type = type_arg->as_shared<ObjectType>();
+            if (!object_type || object_type->is_union) {
+                return false;
+            }
+            const auto* record_decl = canonical_record_decl(
+                dyn_cast<ObjectDecl>(object_type->get_decl()));
+            if (!record_decl) {
+                return false;
+            }
+            const auto* state = query_lookup_record_semantics(record_decl);
+            return state && state->has_virtual_destructor;
+        }
+        case BuiltinKind::IS_ABSTRACT: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto object_type = type_arg->as_shared<ObjectType>();
+            if (!object_type || object_type->is_union) {
+                return false;
+            }
+            const auto* record_decl = canonical_record_decl(
+                dyn_cast<ObjectDecl>(object_type->get_decl()));
+            if (!record_decl) {
+                return false;
+            }
+            const auto* state = query_lookup_record_semantics(record_decl);
+            return state && state->is_abstract;
+        }
+        case BuiltinKind::IS_ARRAY: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return canonical_type_kind(*type_arg, ast_ctx_.get()) == TypeKind::Array;
+        }
+        case BuiltinKind::IS_ASSIGNABLE: {
+            auto lhs = get_canonical_arg(0);
+            auto rhs = get_canonical_arg(1);
+            if (!lhs || !rhs) {
+                return std::nullopt;
+            }
+            auto lhs_ref = lhs->as_shared<ReferenceType>();
+            if (!lhs_ref || !lhs_ref->isLValueReference()) {
+                return false;
+            }
+            QualType target_type = lhs_ref->referred_type;
+            if (!target_type || target_type.is_const()) {
+                return false;
+            }
+            auto target_kind = canonical_type_kind(target_type, ast_ctx_.get());
+            if (target_type->isVoid() || target_kind == TypeKind::Function ||
+                target_kind == TypeKind::Array) {
+                return false;
+            }
+            return build_implicit_conversion_sequence(
+                       *rhs,
+                       target_type,
+                       ExprUseContext::CallArgument)
+                .viable;
+        }
+        case BuiltinKind::IS_BASE_OF: {
+            auto base = get_canonical_arg(0);
+            auto derived = get_canonical_arg(1);
+            if (!base || !derived) {
+                return std::nullopt;
+            }
+            auto base_object = base->as_shared<ObjectType>();
+            auto derived_object = derived->as_shared<ObjectType>();
+            if (!base_object || !derived_object ||
+                base_object->is_union || derived_object->is_union) {
+                return false;
+            }
+            const auto* base_decl = canonical_record_decl(
+                dyn_cast<ObjectDecl>(base_object->get_decl()));
+            const auto* derived_decl = canonical_record_decl(
+                dyn_cast<ObjectDecl>(derived_object->get_decl()));
+            if (!base_decl || !derived_decl) {
+                return false;
+            }
+            return is_same_record_or_any_access_derived(derived_decl, base_decl);
+        }
+        case BuiltinKind::IS_CLASS: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto object_type = type_arg->as_shared<ObjectType>();
+            return object_type && !object_type->is_union;
+        }
+        case BuiltinKind::IS_NULL_POINTER: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return is_nullptr_type(*type_arg, ast_ctx_.get());
+        }
         case BuiltinKind::IS_DESTRUCTIBLE: {
             auto type_arg = get_canonical_arg(0);
             if (!type_arg) {
