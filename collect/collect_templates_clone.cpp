@@ -107,6 +107,15 @@ const ASTCloneContext& TemplateDependentResolutionPass::context() const {
 
 void TemplateDependentResolutionPass::sync_from_substitution_pass(
     const TemplateSubstitutionPass& substitution_pass) {
+    ctx.rewrite_type = substitution_pass.context().rewrite_type;
+    ctx.rewrite_template_arguments =
+        substitution_pass.context().rewrite_template_arguments;
+    ctx.rewrite_var_ref = substitution_pass.context().rewrite_var_ref;
+    ctx.rewrite_symbol = substitution_pass.context().rewrite_symbol;
+    ctx.register_symbol = substitution_pass.context().register_symbol;
+    ctx.rewrite_member_expr = substitution_pass.context().rewrite_member_expr;
+    ctx.expand_pack_expansion = substitution_pass.context().expand_pack_expansion;
+    ctx.lookup_pack_size = substitution_pass.context().lookup_pack_size;
     ctx.symbol_remap = substitution_pass.context().symbol_remap;
     ctx.scope_remap = substitution_pass.context().scope_remap;
 }
@@ -151,6 +160,11 @@ TemplateClonePassBuilder::build_dependent_resolution_pass(
     const std::function<bool(std::unique_ptr<Expr>&, std::string*)>& resolve_expr) const {
     TemplateDependentResolutionPass pass;
     pass.ctx.ast_ctx = ast_ctx;
+    pass.ctx.rewrite_type = rewrite_type;
+    pass.ctx.rewrite_template_arguments = rewrite_template_arguments;
+    pass.ctx.rewrite_var_ref = rewrite_var_ref;
+    pass.ctx.register_symbol = register_symbol;
+    pass.ctx.rewrite_member_expr = rewrite_member_expr;
     pass.ctx.rewrite_expr = resolve_expr;
     pass.ctx.expand_pack_expansion = expand_pack_expansion;
     pass.ctx.lookup_pack_size = lookup_pack_size;
@@ -164,6 +178,15 @@ TemplateClonePassBuilder::build_dependent_resolution_pass(
     const TemplateSubstitutionPass& substitution_pass,
     const std::function<bool(std::unique_ptr<Expr>&, std::string*)>& resolve_expr) const {
     auto pass = build_dependent_resolution_pass(resolve_expr);
+    pass.ctx.rewrite_type = substitution_pass.context().rewrite_type;
+    pass.ctx.rewrite_template_arguments =
+        substitution_pass.context().rewrite_template_arguments;
+    pass.ctx.rewrite_var_ref = substitution_pass.context().rewrite_var_ref;
+    pass.ctx.rewrite_symbol = substitution_pass.context().rewrite_symbol;
+    pass.ctx.register_symbol = substitution_pass.context().register_symbol;
+    pass.ctx.rewrite_member_expr = substitution_pass.context().rewrite_member_expr;
+    pass.ctx.expand_pack_expansion = substitution_pass.context().expand_pack_expansion;
+    pass.ctx.lookup_pack_size = substitution_pass.context().lookup_pack_size;
     pass.ctx.symbol_remap = substitution_pass.context().symbol_remap;
     pass.ctx.scope_remap = substitution_pass.context().scope_remap;
     return pass;
@@ -271,6 +294,21 @@ bool remap_template_argument_after_outer_substitution(
             argument.referenced_parameter = parameter_it->second;
         }
     }
+    if (argument.value.kind == ConstValueKind::Address &&
+        argument.value.address_value.symbol) {
+        if (auto remapped = lookup_symbol_remap_in_clone_context(
+                argument.value.address_value.symbol,
+                clone_ctx)) {
+            argument.value.address_value.symbol = remapped;
+        }
+    } else if (argument.value.kind == ConstValueKind::MemberPointer &&
+               argument.value.member_pointer_value.method_symbol) {
+        if (auto remapped = lookup_symbol_remap_in_clone_context(
+                argument.value.member_pointer_value.method_symbol,
+                clone_ctx)) {
+            argument.value.member_pointer_value.method_symbol = remapped;
+        }
+    }
     if (!argument.value_expr) {
         return true;
     }
@@ -305,7 +343,8 @@ bool remap_template_argument_after_outer_substitution(
 QualType remap_template_parameter_types_in_type(
     QualType type,
     const std::unordered_map<const TemplateParameterDecl*,
-                             const TemplateParameterDecl*>& parameter_rebinds) {
+                             const TemplateParameterDecl*>& parameter_rebinds,
+    ASTCloneContext* clone_ctx) {
     if (!type) {
         return type;
     }
@@ -334,7 +373,8 @@ QualType remap_template_parameter_types_in_type(
             case TemplateArgumentKind::Type:
                 remapped.type = remap_template_parameter_types_in_type(
                     argument.type,
-                    parameter_rebinds);
+                    parameter_rebinds,
+                    clone_ctx);
                 break;
             case TemplateArgumentKind::Template:
                 if (argument.referenced_parameter) {
@@ -347,14 +387,34 @@ QualType remap_template_parameter_types_in_type(
             case TemplateArgumentKind::Value:
                 remapped.value_type = remap_template_parameter_types_in_type(
                     argument.value_type,
-                    parameter_rebinds);
+                    parameter_rebinds,
+                    clone_ctx);
                 if (argument.referenced_parameter) {
                     auto it = parameter_rebinds.find(argument.referenced_parameter);
                     if (it != parameter_rebinds.end()) {
                         remapped.referenced_parameter = it->second;
                     }
                 }
+                if (clone_ctx) {
+                    remap_template_argument_after_outer_substitution(
+                        remapped,
+                        parameter_rebinds,
+                        *clone_ctx,
+                        nullptr);
+                }
                 break;
+        }
+        remapped.is_dependent = template_argument_depends_on_template_parameters(
+            remapped,
+            clone_ctx ? clone_ctx->ast_ctx : nullptr);
+        if (remapped.kind == TemplateArgumentKind::Value &&
+            !remapped.is_dependent &&
+            remapped.value_type) {
+            std::string ignored_error;
+            normalize_concrete_template_value_argument(
+                remapped,
+                remapped.value_type,
+                &ignored_error);
         }
         return remapped;
     };
@@ -362,7 +422,8 @@ QualType remap_template_parameter_types_in_type(
     if (auto typedef_type = dyn_cast_shared<TypedefType>(raw)) {
         auto remapped_underlying = remap_template_parameter_types_in_type(
             typedef_type->underlying_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         if (remapped_underlying.equals_qualified(typedef_type->underlying_type)) {
             return type;
         }
@@ -398,7 +459,8 @@ QualType remap_template_parameter_types_in_type(
     if (auto dependent_name = dyn_cast_shared<DependentNameType>(raw)) {
         auto remapped_qualifier = remap_template_parameter_types_in_type(
             dependent_name->qualifier_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         std::vector<TemplateArgument> remapped_arguments;
         remapped_arguments.reserve(dependent_name->template_arguments.size());
         bool changed =
@@ -425,7 +487,8 @@ QualType remap_template_parameter_types_in_type(
     if (auto ptr = dyn_cast_shared<PointerType>(raw)) {
         auto remapped_pointed = remap_template_parameter_types_in_type(
             ptr->pointed_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         if (remapped_pointed.equals_qualified(ptr->pointed_type)) {
             return type;
         }
@@ -435,7 +498,8 @@ QualType remap_template_parameter_types_in_type(
     if (auto ref = dyn_cast_shared<ReferenceType>(raw)) {
         auto remapped_referred = remap_template_parameter_types_in_type(
             ref->referred_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         if (remapped_referred.equals_qualified(ref->referred_type)) {
             return type;
         }
@@ -448,7 +512,8 @@ QualType remap_template_parameter_types_in_type(
     if (auto transform = dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
         auto remapped_operand = remap_template_parameter_types_in_type(
             transform->operand_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         if (remapped_operand.equals_qualified(transform->operand_type)) {
             return type;
         }
@@ -462,10 +527,12 @@ QualType remap_template_parameter_types_in_type(
     if (auto mem_ptr = dyn_cast_shared<MemberPointerType>(raw)) {
         auto remapped_class = remap_template_parameter_types_in_type(
             mem_ptr->class_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         auto remapped_member = remap_template_parameter_types_in_type(
             mem_ptr->member_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         if (remapped_class.equals_qualified(mem_ptr->class_type) &&
             remapped_member.equals_qualified(mem_ptr->member_type)) {
             return type;
@@ -480,7 +547,8 @@ QualType remap_template_parameter_types_in_type(
     if (auto blk = dyn_cast_shared<BlockPointerType>(raw)) {
         auto remapped_pointed = remap_template_parameter_types_in_type(
             blk->pointed_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         if (remapped_pointed.equals_qualified(blk->pointed_type)) {
             return type;
         }
@@ -492,7 +560,8 @@ QualType remap_template_parameter_types_in_type(
     if (auto arr = dyn_cast_shared<ArrayType>(raw)) {
         auto remapped_element = remap_template_parameter_types_in_type(
             arr->element_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         if (remapped_element.equals_qualified(arr->element_type)) {
             return type;
         }
@@ -513,14 +582,16 @@ QualType remap_template_parameter_types_in_type(
     if (auto func = dyn_cast_shared<FunctionType>(raw)) {
         auto remapped_ret = remap_template_parameter_types_in_type(
             func->ret_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         bool changed = !remapped_ret.equals_qualified(func->ret_type);
         std::vector<QualType> remapped_parameters;
         remapped_parameters.reserve(func->parameters.size());
         for (const auto& parameter : func->parameters) {
             auto remapped_parameter = remap_template_parameter_types_in_type(
                 parameter,
-                parameter_rebinds);
+                parameter_rebinds,
+                clone_ctx);
             changed |= !remapped_parameter.equals_qualified(parameter);
             remapped_parameters.push_back(std::move(remapped_parameter));
         }
@@ -542,7 +613,8 @@ QualType remap_template_parameter_types_in_type(
     if (auto vec = dyn_cast_shared<VectorType>(raw)) {
         auto remapped_element = remap_template_parameter_types_in_type(
             vec->element_type,
-            parameter_rebinds);
+            parameter_rebinds,
+            clone_ctx);
         if (remapped_element.equals_qualified(vec->element_type)) {
             return type;
         }
@@ -559,7 +631,8 @@ QualType remap_template_parameter_types_in_type(
 std::vector<TemplateArgument> remap_template_parameter_types_in_arguments(
     const std::vector<TemplateArgument>& arguments,
     const std::unordered_map<const TemplateParameterDecl*,
-                             const TemplateParameterDecl*>& parameter_rebinds) {
+                             const TemplateParameterDecl*>& parameter_rebinds,
+    ASTCloneContext* clone_ctx) {
     std::vector<TemplateArgument> remapped;
     remapped.reserve(arguments.size());
     for (const auto& argument : arguments) {
@@ -568,7 +641,8 @@ std::vector<TemplateArgument> remap_template_parameter_types_in_arguments(
             case TemplateArgumentKind::Type:
                 rewritten.type = remap_template_parameter_types_in_type(
                     argument.type,
-                    parameter_rebinds);
+                    parameter_rebinds,
+                    clone_ctx);
                 break;
             case TemplateArgumentKind::Template:
                 if (argument.referenced_parameter) {
@@ -581,14 +655,34 @@ std::vector<TemplateArgument> remap_template_parameter_types_in_arguments(
             case TemplateArgumentKind::Value:
                 rewritten.value_type = remap_template_parameter_types_in_type(
                     argument.value_type,
-                    parameter_rebinds);
+                    parameter_rebinds,
+                    clone_ctx);
                 if (argument.referenced_parameter) {
                     auto it = parameter_rebinds.find(argument.referenced_parameter);
                     if (it != parameter_rebinds.end()) {
                         rewritten.referenced_parameter = it->second;
                     }
                 }
+                if (clone_ctx) {
+                    remap_template_argument_after_outer_substitution(
+                        rewritten,
+                        parameter_rebinds,
+                        *clone_ctx,
+                        nullptr);
+                }
                 break;
+        }
+        rewritten.is_dependent = template_argument_depends_on_template_parameters(
+            rewritten,
+            clone_ctx ? clone_ctx->ast_ctx : nullptr);
+        if (rewritten.kind == TemplateArgumentKind::Value &&
+            !rewritten.is_dependent &&
+            rewritten.value_type) {
+            std::string ignored_error;
+            normalize_concrete_template_value_argument(
+                rewritten,
+                rewritten.value_type,
+                &ignored_error);
         }
         remapped.push_back(std::move(rewritten));
     }

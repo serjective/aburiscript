@@ -476,14 +476,92 @@ QualType Collect::substitute_template_type_with_bindings(
             argument_bindings,
             loc,
             allow_unsubstituted_parameters);
-        if (substituted_element.equals_qualified(arr->element_type)) {
+        bool needs_bound_rewrite =
+            arr->size_kind == ArraySizeKind::Variable && arr->size_expr;
+        if (substituted_element.equals_qualified(arr->element_type) &&
+            !needs_bound_rewrite) {
             return type;
         }
-        if (arr->size_kind == ArraySizeKind::Variable && arr->size_expr) {
+        if (needs_bound_rewrite) {
+            auto rewrite_bound_template_type =
+                [&](QualType type) -> QualType {
+                    auto rewritten_type =
+                        substitute_template_type_with_bindings(
+                            type,
+                            parameters,
+                            argument_bindings,
+                            loc,
+                            allow_unsubstituted_parameters);
+                    return finalize_deferred_semantic_type(
+                        rewritten_type,
+                        loc);
+                };
+            auto rewrite_bound_template_arguments =
+                [&](const std::vector<TemplateArgument>& template_arguments)
+                -> std::vector<TemplateArgument> {
+                    return substitute_template_arguments_with_bindings(
+                        template_arguments,
+                        parameters,
+                        argument_bindings,
+                        loc,
+                        allow_unsubstituted_parameters);
+                };
+            auto clone_pass_builder = make_template_binding_clone_pass_builder(
+                ast_ctx_.get(),
+                parameters,
+                argument_bindings,
+                loc,
+                "failed to substitute array bound expression",
+                rewrite_bound_template_type,
+                rewrite_bound_template_arguments,
+                {},
+                {});
+            auto clone_pass = clone_pass_builder.build_substitution_pass();
+
+            std::string clone_error;
+            auto cloned_size_expr = clone_pass.clone_expr(
+                arr->size_expr.get(),
+                &clone_error);
+            if (!cloned_size_expr) {
+                if (allow_unsubstituted_parameters) {
+                    return type;
+                }
+                report_error(
+                    clone_error.empty()
+                        ? "internal error: failed to substitute array bound expression"
+                        : clone_error,
+                    loc);
+                return type;
+            }
+
+            std::string resolve_error;
+            if (!resolve_dependent_expr_after_substitution(
+                    cloned_size_expr,
+                    QualType(),
+                    &resolve_error)) {
+                if (allow_unsubstituted_parameters) {
+                    return type;
+                }
+                report_error(
+                    resolve_error.empty()
+                        ? "internal error: failed to resolve substituted array bound expression"
+                        : resolve_error,
+                    loc);
+                return type;
+            }
+
+            auto bound = collect_array_bound_expression(std::move(cloned_size_expr));
+            if (bound.constant_size.has_value()) {
+                return QualType(
+                    std::make_shared<ArrayType>(
+                        substituted_element,
+                        *bound.constant_size),
+                    quals);
+            }
             return QualType(
                 std::make_shared<ArrayType>(
                     substituted_element,
-                    arr->size_expr),
+                    bound.variable_size_expr),
                 quals);
         }
         return QualType(

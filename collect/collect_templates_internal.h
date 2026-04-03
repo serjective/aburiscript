@@ -202,12 +202,14 @@ bool remap_template_argument_after_outer_substitution(
 QualType remap_template_parameter_types_in_type(
     QualType type,
     const std::unordered_map<const TemplateParameterDecl*,
-                             const TemplateParameterDecl*>& parameter_rebinds);
+                             const TemplateParameterDecl*>& parameter_rebinds,
+    ASTCloneContext* clone_ctx = nullptr);
 
 std::vector<TemplateArgument> remap_template_parameter_types_in_arguments(
     const std::vector<TemplateArgument>& arguments,
     const std::unordered_map<const TemplateParameterDecl*,
-                             const TemplateParameterDecl*>& parameter_rebinds);
+                             const TemplateParameterDecl*>& parameter_rebinds,
+    ASTCloneContext* clone_ctx = nullptr);
 
 TemplateClonePassBuilder make_nested_template_clone_pass_builder(
     const TemplateClonePassBuilder& outer_builder,

@@ -5612,6 +5612,12 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 dyn_cast<ClassTemplateDecl>(primary_template);
         }
     }
+    if (!semantic_owner && collect_ && !name.empty()) {
+        semantic_owner =
+            dyn_cast<ObjectDecl>(collect_->collect_lookup_tag_decl(name, false));
+    }
+    QualType semantic_owner_record_type =
+        semantic_owner ? QualType(semantic_owner->get_record_type()) : QualType();
     cxx_record_parse_stack_.push_back(
         CppRecordParseFrame{
             record_kind,
@@ -5626,8 +5632,166 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
             }
         }
     } record_stack_guard{&cxx_record_parse_stack_};
+    QualType previous_record_lookup_type =
+        collect_ ? collect_->collect_current_cpp_record_lookup_type() : QualType();
+    struct CppRecordLookupGuard {
+        Collect* collect = nullptr;
+        QualType previous_type = nullptr;
+        ~CppRecordLookupGuard() {
+            if (collect) {
+                collect->collect_set_current_cpp_record_lookup_type(previous_type);
+            }
+        }
+    } record_lookup_guard{collect_.get(), previous_record_lookup_type};
+    if (collect_ && semantic_owner_record_type) {
+        collect_->collect_set_current_cpp_record_lookup_type(
+            semantic_owner_record_type);
+    }
 
+    auto encode_member_access = [](CppAccessSpecifier access) {
+        switch (access) {
+            case CppAccessSpecifier::Public:
+                return RecordMemberAccess::Public;
+            case CppAccessSpecifier::Protected:
+                return RecordMemberAccess::Protected;
+            case CppAccessSpecifier::Private:
+                return RecordMemberAccess::Private;
+            case CppAccessSpecifier::None:
+                break;
+        }
+        return RecordMemberAccess::Public;
+    };
+    auto ensure_namespace_qualifier_prefix = [&](std::string& qualifier_prefix) {
+        if (!collect_ || !is_cxx_mode_active()) {
+            return;
+        }
+        qualified_name_utils::ensure_namespace_qualifier_prefix_for_scope(
+            collect_->collect_current_scope(),
+            qualifier_prefix);
+    };
+    auto publish_transient_record_member_semantics =
+        [&](Decl* member_decl, RecordMemberAccess member_access) {
+            if (!collect_ || !semantic_owner || !semantic_owner_record_type ||
+                !member_decl) {
+                return;
+            }
+
+            RecordSemanticState state;
+            if (const auto* cached =
+                    collect_->query_lookup_record_semantics(semantic_owner)) {
+                state = *cached;
+            }
+
+            bool changed = false;
+            if (auto* static_member_decl = dyn_cast<VariableDecl>(member_decl)) {
+                if (static_member_decl->storage_class != StorageClass::STATIC) {
+                    return;
+                }
+                for (const auto& existing_member : state.static_data_members) {
+                    if (existing_member.decl == static_member_decl) {
+                        return;
+                    }
+                }
+
+                std::shared_ptr<Symbol> static_member_sym = static_member_decl->sym;
+                if (!static_member_sym) {
+                    static_member_sym = std::make_shared<Symbol>(
+                        static_member_decl->name,
+                        SymbolKind::VARIABLE,
+                        desugar_type(static_member_decl->type),
+                        StorageClass::STATIC,
+                        VariableLinkage::EXTERNAL,
+                        static_member_decl->is_inline != 0);
+                    static_member_decl->sym = static_member_sym;
+                } else {
+                    static_member_sym->type = desugar_type(static_member_decl->type);
+                    static_member_sym->storage_class = StorageClass::STATIC;
+                    static_member_sym->linkage = VariableLinkage::EXTERNAL;
+                    if (static_member_decl->is_inline) {
+                        static_member_sym->is_inline = true;
+                    } else {
+                        static_member_sym->had_non_inline_declaration = true;
+                    }
+                }
+                static_member_sym->is_constexpr = static_member_decl->is_constexpr;
+                static_member_sym->set_language_linkage(
+                    static_member_decl->get_language_linkage());
+
+                std::string qualifier_prefix = name;
+                ensure_namespace_qualifier_prefix(qualifier_prefix);
+                if (!qualifier_prefix.empty()) {
+                    set_symbol_cxx_qualifier_prefix(
+                        static_member_sym.get(),
+                        qualifier_prefix);
+                }
+                set_symbol_owner_record_type(
+                    static_member_sym.get(),
+                    semantic_owner_record_type);
+
+                RecordSemanticState::StaticDataMember semantic_member;
+                semantic_member.name = static_member_decl->name;
+                semantic_member.type = static_member_decl->type;
+                semantic_member.declared_access = member_access;
+                semantic_member.decl = static_member_decl;
+                semantic_member.symbol = std::move(static_member_sym);
+                state.static_data_members.push_back(std::move(semantic_member));
+                changed = true;
+            } else if (auto* enum_decl = dyn_cast<EnumDecl>(member_decl)) {
+                if (enum_decl->is_scoped()) {
+                    return;
+                }
+                for (const auto& constant : enum_decl->constants) {
+                    if (!constant) {
+                        continue;
+                    }
+                    bool already_published = false;
+                    for (const auto& existing_enumerator :
+                         state.enumerator_members) {
+                        if (existing_enumerator.decl == constant.get()) {
+                            already_published = true;
+                            break;
+                        }
+                    }
+                    if (already_published) {
+                        continue;
+                    }
+                    RecordSemanticState::EnumeratorMember enumerator_member;
+                    enumerator_member.name = constant->name;
+                    enumerator_member.declared_access = member_access;
+                    enumerator_member.enum_decl = enum_decl;
+                    enumerator_member.decl = constant.get();
+                    enumerator_member.symbol = constant->sym;
+                    state.enumerator_members.push_back(
+                        std::move(enumerator_member));
+                    changed = true;
+                }
+            }
+
+            if (changed) {
+                collect_->query_publish_record_semantics(
+                    semantic_owner,
+                    std::move(state));
+            }
+        };
     std::vector<std::unique_ptr<Decl>> members;
+    RecordMemberAccess current_member_access =
+        record_kind == CppRecordKind::Class
+            ? RecordMemberAccess::Private
+            : RecordMemberAccess::Public;
+    auto append_record_member = [&](std::unique_ptr<Decl> member) {
+        if (!member) {
+            return;
+        }
+        if (auto* access_spec = dyn_cast<CppAccessSpecDecl>(member.get())) {
+            current_member_access = encode_member_access(access_spec->access);
+        } else {
+            publish_transient_record_member_semantics(
+                member.get(),
+                current_member_access);
+        }
+        members.push_back(std::move(member));
+    };
+
     size_t last_recovery_idx = std::numeric_limits<size_t>::max();
     while (!gentle_check(TokenType::RIGHT_BRACE) && !gentle_check(TokenType::Eof)) {
         try {
@@ -5647,7 +5811,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 SrcLoc access_loc = current_token().loc;
                 advance(); // public/private/protected
                 check_and_consume(TokenType::COLON);
-                members.push_back(make_ast<CppAccessSpecDecl>(*ast_ctx, access, access_loc));
+                append_record_member(
+                    make_ast<CppAccessSpecDecl>(*ast_ctx, access, access_loc));
                 diag_engine->sync_point_reached();
                 last_recovery_idx = std::numeric_limits<size_t>::max();
                 continue;
@@ -5659,10 +5824,9 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                                   current_token().loc);
                 }
                 auto templated_members = parse_cpp_template_declaration();
-                members.insert(
-                    members.end(),
-                    std::make_move_iterator(templated_members.begin()),
-                    std::make_move_iterator(templated_members.end()));
+                for (auto& member : templated_members) {
+                    append_record_member(std::move(member));
+                }
                 diag_engine->sync_point_reached();
                 last_recovery_idx = std::numeric_limits<size_t>::max();
                 continue;
@@ -5673,10 +5837,9 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                                   current_token().loc);
                 }
                 auto using_members = parse_cpp_using_alias_declaration();
-                members.insert(
-                    members.end(),
-                    std::make_move_iterator(using_members.begin()),
-                    std::make_move_iterator(using_members.end()));
+                for (auto& member : using_members) {
+                    append_record_member(std::move(member));
+                }
                 diag_engine->sync_point_reached();
                 last_recovery_idx = std::numeric_limits<size_t>::max();
                 continue;
@@ -5704,7 +5867,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                         }
                         auto ctor_member = parse_cpp_constructor_member();
                         if (ctor_member) {
-                            members.push_back(std::move(ctor_member));
+                            append_record_member(std::move(ctor_member));
                             diag_engine->sync_point_reached();
                             last_recovery_idx = std::numeric_limits<size_t>::max();
                             continue;
@@ -5722,7 +5885,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                         }
                     }
                     if (dtor_member) {
-                        members.push_back(std::move(dtor_member));
+                        append_record_member(std::move(dtor_member));
                         diag_engine->sync_point_reached();
                         last_recovery_idx = std::numeric_limits<size_t>::max();
                         continue;
@@ -5743,7 +5906,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     if (gentle_check(TokenType::SEMICOLON)) {
                         tentative.commit();
                         check_and_consume(TokenType::SEMICOLON);
-                        members.push_back(std::move(nested));
+                        append_record_member(std::move(nested));
                         diag_engine->sync_point_reached();
                         last_recovery_idx = std::numeric_limits<size_t>::max();
                         consumed_nested_record_decl = true;
@@ -5761,7 +5924,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
 
             auto parsed_members = parse_struct_declaration(member_leading_virtual);
             for (auto& member : parsed_members) {
-                members.push_back(std::move(member));
+                append_record_member(std::move(member));
             }
             diag_engine->sync_point_reached();
             last_recovery_idx = std::numeric_limits<size_t>::max();
@@ -5778,7 +5941,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
             }
             last_recovery_idx = get_token_idx();
             diag_engine->sync_point_reached();
-            members.push_back(collect_->collect_error_declaration(e.message, e.location));
+            append_record_member(
+                collect_->collect_error_declaration(e.message, e.location));
         }
     }
 

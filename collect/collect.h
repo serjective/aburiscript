@@ -227,6 +227,8 @@ public:
         DeclContext* enclosing_namespace);
 
     CppThisContext collect_current_cpp_this_context() const ;
+    QualType collect_current_cpp_record_lookup_type() const ;
+    void collect_set_current_cpp_record_lookup_type(QualType record_type) ;
 
     bool with_function_definition_state(
         const FuncDecl* function_decl,
@@ -1144,6 +1146,7 @@ private:
 
         // Function body state (bundled)
         FunctionDefinitionState func_state;
+        QualType current_cpp_record_lookup_type = nullptr;
         std::vector<FunctionDefinitionState> function_definition_stack;
 
         struct DeclContextMutationCheckpoint {
@@ -2198,6 +2201,7 @@ private:
         std::shared_ptr<DeclContext> current_decl_context_ = nullptr;
         std::shared_ptr<GlobalIdentTracker> current_global_scope_ = nullptr;
         FunctionDefinitionState func_state_;
+        QualType current_cpp_record_lookup_type_ = nullptr;
         std::vector<TentativeSnapshot> tentative_snapshots_;
         std::vector<FunctionDefinitionState> function_definition_stack_;
         std::vector<std::vector<TentativeSnapshot>>

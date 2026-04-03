@@ -677,6 +677,13 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             pattern_semantic_decl,
             QualType(entry->specialization_type),
             ast_ctx());
+        static const std::unordered_map<const TemplateParameterDecl*,
+                                        const TemplateParameterDecl*>
+            kNoParameterRebinds;
+        rewritten = remap_template_parameter_types_in_type(
+            rewritten,
+            kNoParameterRebinds,
+            &const_cast<TemplateSubstitutionPass&>(clone_pass).context());
         return collect.finalize_deferred_semantic_type(rewritten, loc);
     }
 
@@ -1275,11 +1282,43 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             provisional_state = *existing_state;
         }
         provisional_state.is_incomplete = true;
+        provisional_state.static_data_members = static_data_members;
         provisional_state.nested_types = nested_types;
         provisional_state.nested_templates = nested_templates;
         provisional_state.enumerator_members = enumerator_members;
         collect.query_publish_record_semantics(entry->specialization_decl.get(),
                                                std::move(provisional_state));
+    }
+
+    void try_finalize_static_member_for_later_members(
+        std::unique_ptr<Decl>& member_decl) {
+        auto* static_member = dyn_cast<VariableDecl>(member_decl.get());
+        if (!static_member || !static_member->init ||
+            static_member->get_cpp_construct_init()) {
+            return;
+        }
+
+        auto resolution_pass =
+            clone_pass_builder.build_dependent_resolution_pass(
+                clone_pass,
+                [this](std::unique_ptr<Expr>& expr, std::string* error_out)
+                    -> bool {
+                    return collect.resolve_dependent_expr_after_substitution(
+                        expr,
+                        QualType(),
+                        error_out);
+                });
+
+        std::string ignored_error;
+        if (!resolution_pass.resolve_decl_in_place(member_decl, &ignored_error)) {
+            return;
+        }
+        if (!template_sema_internal::finalize_specialized_decl_semantics(
+                collect,
+                member_decl,
+                &ignored_error)) {
+            return;
+        }
     }
 
     bool instantiate_members() {
@@ -1590,8 +1629,20 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         }
         if (cloned_symbol) {
             set_symbol_owner_record_type(cloned_symbol.get(), owner_type);
-            cloned_symbol->type = desugar_type(cloned_decl->type);
             cloned_symbol->storage_class = StorageClass::STATIC;
+            cloned_symbol->is_constexpr = cloned_decl->is_constexpr;
+        }
+
+        try_finalize_static_member_for_later_members(cloned_decl_base);
+        cloned_decl = dyn_cast<VariableDecl>(cloned_decl_base.get());
+        if (!cloned_decl) {
+            return fail_instantiation(
+                "internal error: class template static data member lost its declaration kind during early finalization",
+                static_member->location);
+        }
+
+        if (cloned_symbol) {
+            cloned_symbol->type = desugar_type(cloned_decl->type);
             cloned_symbol->is_constexpr = cloned_decl->is_constexpr;
             cloned_symbol->variable_definition = cloned_decl;
         }
@@ -1603,6 +1654,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         semantic_member.decl = cloned_decl;
         semantic_member.symbol = cloned_symbol;
         static_data_members.push_back(std::move(semantic_member));
+        publish_provisional_nested_members();
 
         entry->member_decls.push_back(std::move(cloned_decl_base));
         return true;

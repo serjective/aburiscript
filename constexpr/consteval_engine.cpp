@@ -1551,28 +1551,92 @@ ConstEvalResult eval_expr_as_typed_const_value(Expr* expr,
     return ConstEvalResult::constant(*casted);
 }
 
+const VariableDecl* find_constant_evaluable_variable_definition(
+    const Symbol* sym) {
+    if (!sym || sym->kind != SymbolKind::VARIABLE) {
+        return nullptr;
+    }
+    if (sym->variable_definition && sym->variable_definition->init) {
+        return sym->variable_definition;
+    }
+
+    QualType owner_type = get_symbol_owner_record_type(sym);
+    auto owner_record =
+        desugar_type(owner_type).as_shared<ObjectType>();
+    auto* owner_decl = owner_record
+        ? dyn_cast<ObjectDecl>(owner_record->get_decl())
+        : nullptr;
+    if (!owner_decl) {
+        return nullptr;
+    }
+
+    const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
+    if (!state) {
+        return nullptr;
+    }
+
+    for (const auto& static_member : state->static_data_members) {
+        if (!static_member.decl || !static_member.decl->init) {
+            continue;
+        }
+        if ((static_member.symbol && static_member.symbol.get() == sym) ||
+            (static_member.decl->sym &&
+             static_member.decl->sym.get() == sym)) {
+            return static_member.decl;
+        }
+    }
+
+    return nullptr;
+}
+
+bool is_cpp_constant_static_data_member(const Symbol* sym,
+                                        const VariableDecl* definition) {
+    if (!sym || !definition || definition->storage_class != StorageClass::STATIC ||
+        !get_symbol_owner_record_type(sym)) {
+        return false;
+    }
+
+    QualType type = definition->type ? definition->type : sym->type;
+    if (!type || !type.is_const()) {
+        return false;
+    }
+
+    QualType canonical = desugar_type(type);
+    return canonical &&
+           (canonical->isInteger() || canonical->kind == TypeKind::Enum);
+}
+
 ConstEvalResult eval_constexpr_variable_initializer(
     const Symbol* sym,
     ConstEvalMode mode,
     size_t depth,
     bool allow_static_storage_duration) {
-    if (!sym || sym->kind != SymbolKind::VARIABLE || !sym->is_constexpr ||
-        !sym->variable_definition || !sym->variable_definition->init) {
+    if (!sym || sym->kind != SymbolKind::VARIABLE) {
+        return ConstEvalResult::not_evaluated();
+    }
+    const VariableDecl* definition =
+        find_constant_evaluable_variable_definition(sym);
+    bool can_evaluate_as_cpp_constant =
+        sym->is_constexpr ||
+        ((is_cpp_core_constant_expression_mode(mode) ||
+          is_cpp_non_type_template_argument_mode(mode)) &&
+         is_cpp_constant_static_data_member(sym, definition));
+    if (!can_evaluate_as_cpp_constant || !definition || !definition->init) {
         return ConstEvalResult::not_evaluated();
     }
     if (!allow_static_storage_duration && has_static_storage_duration(sym)) {
         return ConstEvalResult::not_evaluated();
     }
 
-    QualType target_type = sym->variable_definition->type
-        ? sym->variable_definition->type
+    QualType target_type = definition->type
+        ? definition->type
         : sym->type;
     if (!target_type) {
         return ConstEvalResult::not_evaluated();
     }
 
     return eval_expr_as_typed_const_value(
-        sym->variable_definition->init.get(),
+        definition->init.get(),
         target_type,
         mode,
         depth + 1);

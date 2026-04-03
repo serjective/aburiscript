@@ -272,10 +272,68 @@ bool resolve_non_type_template_argument_target_type(TemplateArgument& argument,
 
 } // namespace
 
+const VariableDecl* find_constant_evaluable_template_argument_variable_definition(
+    const Symbol* sym) {
+    if (!sym || sym->kind != SymbolKind::VARIABLE) {
+        return nullptr;
+    }
+    if (sym->variable_definition && sym->variable_definition->init) {
+        return sym->variable_definition;
+    }
+
+    QualType owner_type = get_symbol_owner_record_type(sym);
+    auto owner_record =
+        desugar_type(owner_type).as_shared<ObjectType>();
+    auto* owner_decl = owner_record
+        ? dyn_cast<ObjectDecl>(owner_record->get_decl())
+        : nullptr;
+    if (!owner_decl) {
+        return nullptr;
+    }
+
+    const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
+    if (!state) {
+        return nullptr;
+    }
+
+    for (const auto& static_member : state->static_data_members) {
+        if (!static_member.decl || !static_member.decl->init) {
+            continue;
+        }
+        if ((static_member.symbol && static_member.symbol.get() == sym) ||
+            (static_member.decl->sym &&
+             static_member.decl->sym.get() == sym)) {
+            return static_member.decl;
+        }
+    }
+
+    return nullptr;
+}
+
+bool is_cpp_constant_static_data_member_for_template_argument(
+    const Symbol* sym,
+    const VariableDecl* definition) {
+    if (!sym || !definition || definition->storage_class != StorageClass::STATIC ||
+        !get_symbol_owner_record_type(sym)) {
+        return false;
+    }
+
+    QualType type = definition->type ? definition->type : sym->type;
+    if (!type || !type.is_const()) {
+        return false;
+    }
+
+    QualType canonical = desugar_type(type);
+    return canonical &&
+           (canonical->isInteger() || canonical->kind == TypeKind::Enum);
+}
+
 std::shared_ptr<Expr> clone_constexpr_variable_initializer_expr(
     const Symbol* sym,
     ASTContext* ast_ctx) {
-    if (!sym || !sym->variable_definition || !sym->variable_definition->init) {
+    const VariableDecl* definition =
+        find_constant_evaluable_template_argument_variable_definition(sym);
+    if (!definition || !definition->init) {
         return nullptr;
     }
     if (!ast_ctx) {
@@ -292,7 +350,7 @@ std::shared_ptr<Expr> clone_constexpr_variable_initializer_expr(
 
     std::string clone_error;
     auto cloned =
-        clone_expr_tree(sym->variable_definition->init.get(), ast_ctx, &clone_error);
+        clone_expr_tree(definition->init.get(), ast_ctx, &clone_error);
     if (!cloned) {
         return nullptr;
     }
@@ -325,18 +383,24 @@ bool try_fold_constexpr_variable_address_to_value(TemplateArgument& argument,
     }
 
     const Symbol* sym = argument.value.address_value.symbol.get();
-    if (!sym->is_constexpr || !sym->variable_definition ||
-        !sym->variable_definition->init) {
+    const VariableDecl* definition =
+        find_constant_evaluable_template_argument_variable_definition(sym);
+    bool can_fold_to_value =
+        sym->is_constexpr ||
+        is_cpp_constant_static_data_member_for_template_argument(
+            sym,
+            definition);
+    if (!can_fold_to_value || !definition || !definition->init) {
         return true;
     }
 
     ConstEvalResult eval = evaluate_with_consteval_compat(
-        sym->variable_definition->init.get(),
-        ConstEvalMode::cpp_non_type_template_argument());
+        definition->init.get(),
+        ConstEvalMode::cpp_core_constant_expression());
     if (eval.status != ConstEvalStatus::Constant || !eval.value.has_value()) {
         if (error_out) {
             *error_out =
-                "constexpr variable initializer is not a valid non-type template argument constant expression";
+                "variable initializer is not a valid non-type template argument constant expression";
         }
         return false;
     }
@@ -548,6 +612,22 @@ bool normalize_concrete_template_value_argument(TemplateArgument& argument,
             target_type,
             error_out)) {
         return false;
+    }
+    if (argument.value_expr) {
+        auto canonical_target = desugar_type(target_type);
+        bool target_prefers_value_constant =
+            canonical_target &&
+            (canonical_target->kind == TypeKind::Builtin ||
+             canonical_target->kind == TypeKind::Enum);
+        if (target_prefers_value_constant) {
+            ConstEvalResult eval = evaluate_with_consteval_compat(
+                argument.value_expr.get(),
+                ConstEvalMode::cpp_core_constant_expression());
+            if (eval.status == ConstEvalStatus::Constant &&
+                eval.value.has_value()) {
+                argument.value = *eval.value;
+            }
+        }
     }
     if (!try_fold_constexpr_variable_address_to_value(
             argument,

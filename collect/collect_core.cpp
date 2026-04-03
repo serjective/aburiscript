@@ -155,6 +155,7 @@ void Collect::materialize_tentative_snapshot(TentativeSnapshot& snapshot) {
     snapshot.current_decl_context = session_.current_decl_context_;
     snapshot.current_global_scope_ptr = session_.current_global_scope_;
     snapshot.func_state = session_.func_state_;
+    snapshot.current_cpp_record_lookup_type = session_.current_cpp_record_lookup_type_;
     snapshot.function_definition_stack = session_.function_definition_stack_;
 }
 
@@ -299,6 +300,8 @@ void Collect::collect_rollback_session_isolation() {
     session_.current_decl_context_ = std::move(snapshot.current_decl_context);
     session_.current_global_scope_ = snapshot.current_global_scope_ptr;
     session_.func_state_ = std::move(snapshot.func_state);
+    session_.current_cpp_record_lookup_type_ =
+        std::move(snapshot.current_cpp_record_lookup_type);
     session_.function_definition_stack_ = std::move(snapshot.function_definition_stack);
     sync_decl_context_from_current_scope();
 }
@@ -370,6 +373,7 @@ void Collect::collect_start_translation_unit() {
     session_.func_state_.current_function_is_cpp_member = false;
     session_.func_state_.current_function_is_static_cpp_member = false;
     session_.func_state_.current_function_cpp_this_type = nullptr;
+    session_.current_cpp_record_lookup_type_ = nullptr;
     session_.tentative_snapshots_.clear();
     session_.function_definition_stack_.clear();
     session_.function_tentative_snapshot_stack_.clear();
@@ -705,6 +709,17 @@ CppThisContext Collect::collect_current_cpp_this_context() const {
         session_.func_state_.current_function_is_static_cpp_member,
         session_.func_state_.current_function_cpp_this_type
     };
+}
+
+QualType Collect::collect_current_cpp_record_lookup_type() const {
+
+    return session_.current_cpp_record_lookup_type_;
+}
+
+void Collect::collect_set_current_cpp_record_lookup_type(QualType record_type) {
+
+    materialize_tentative_snapshot_if_needed();
+    session_.current_cpp_record_lookup_type_ = record_type;
 }
 
 bool Collect::with_function_definition_state(

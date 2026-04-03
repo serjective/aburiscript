@@ -1016,15 +1016,65 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
 
     auto sym = collect_lookup_variable_symbol(name, true);
     bool symbol_is_local = is_local_variable_or_parameter_symbol(sym);
+    bool symbol_is_template_parameter =
+        sym && sym->template_parameter_decl != nullptr;
     bool is_predefined_ident =
         (name == "__func__" || name == "__FUNCTION__" ||
          name == "__PRETTY_FUNCTION__");
+    auto resolve_static_record_member_lookup =
+        [&](const MemberNameLookupResult& member_lookup)
+            -> std::unique_ptr<Expr> {
+            size_t static_template_candidate_matches =
+                member_lookup.static_method_template_matches;
+            size_t static_candidate_matches =
+                member_lookup.static_method_matches +
+                static_template_candidate_matches +
+                member_lookup.static_data_matches +
+                member_lookup.enumerator_matches;
+            if (static_candidate_matches == 0) {
+                return nullptr;
+            }
+            if (static_candidate_matches > 1) {
+                report_error("member '" + name + "' is ambiguous", loc);
+                return collect_make<ErrorExpr>(
+                    "ambiguous member lookup", loc);
+            }
+            if (member_lookup.static_data_matches == 1 &&
+                member_lookup.single_static_data_member &&
+                member_lookup.single_static_data_member->symbol) {
+                return collect_identifier_reference(
+                    name,
+                    member_lookup.single_static_data_member->symbol,
+                    loc);
+            }
+            if (member_lookup.enumerator_matches == 1 &&
+                member_lookup.single_enumerator_member &&
+                member_lookup.single_enumerator_member->symbol) {
+                return collect_identifier_reference(
+                    name,
+                    member_lookup.single_enumerator_member->symbol,
+                    loc);
+            }
+            if (member_lookup.single_static_method &&
+                member_lookup.single_static_method->symbol) {
+                return collect_identifier_reference(
+                    name, member_lookup.single_static_method->symbol, loc);
+            }
+            report_error(
+                "internal error: unresolved member function symbol '" + name +
+                "'",
+                loc);
+            return collect_make<ErrorExpr>(
+                "unresolved member function symbol", loc);
+        };
 
     if (lang_opts_.is_cxx_mode() && session_.func_state_.current_function_is_cpp_member) {
         auto current_record =
             current_record_from_this_type(session_.func_state_.current_function_cpp_this_type, ast_ctx_.get());
         auto member_lookup = lookup_record_member_name(current_record.get(), name);
-        if (member_lookup.has_member_match() && !symbol_is_local) {
+        if (member_lookup.has_member_match() &&
+            !symbol_is_local &&
+            !symbol_is_template_parameter) {
             size_t static_template_candidate_matches =
                 member_lookup.static_method_template_matches;
             size_t nonstatic_template_candidate_matches =
@@ -1040,43 +1090,7 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
                     return collect_make<ErrorExpr>(
                         "invalid use of non-static member", loc);
                 }
-                size_t static_candidate_matches =
-                    member_lookup.static_method_matches +
-                    static_template_candidate_matches +
-                    member_lookup.static_data_matches +
-                    member_lookup.enumerator_matches;
-                if (static_candidate_matches > 1) {
-                    report_error("member '" + name + "' is ambiguous", loc);
-                    return collect_make<ErrorExpr>(
-                        "ambiguous member lookup", loc);
-                }
-                if (member_lookup.static_data_matches == 1 &&
-                    member_lookup.single_static_data_member &&
-                    member_lookup.single_static_data_member->symbol) {
-                    return collect_identifier_reference(
-                        name,
-                        member_lookup.single_static_data_member->symbol,
-                        loc);
-                }
-                if (member_lookup.enumerator_matches == 1 &&
-                    member_lookup.single_enumerator_member &&
-                    member_lookup.single_enumerator_member->symbol) {
-                    return collect_identifier_reference(
-                        name,
-                        member_lookup.single_enumerator_member->symbol,
-                        loc);
-                }
-                if (member_lookup.single_static_method &&
-                    member_lookup.single_static_method->symbol) {
-                    return collect_identifier_reference(
-                        name, member_lookup.single_static_method->symbol, loc);
-                }
-                report_error(
-                    "internal error: unresolved member function symbol '" + name +
-                    "'",
-                    loc);
-                return collect_make<ErrorExpr>(
-                    "unresolved member function symbol", loc);
+                return resolve_static_record_member_lookup(member_lookup);
             }
 
             size_t static_candidate_matches =
@@ -1128,6 +1142,28 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
                 session_.func_state_.current_function_cpp_this_type, loc);
             return collect_member_expression(
                 std::move(this_expr), name, true, loc, looks_like_call);
+        }
+    }
+
+    if (lang_opts_.is_cxx_mode() &&
+        session_.current_cpp_record_lookup_type_ &&
+        !session_.func_state_.current_function_is_cpp_member &&
+        !symbol_is_local &&
+        !symbol_is_template_parameter) {
+        auto current_record =
+            desugar_type(session_.current_cpp_record_lookup_type_, ast_ctx_.get())
+                .as_shared<ObjectType>();
+        auto member_lookup = lookup_record_member_name(current_record.get(), name);
+        size_t static_candidate_matches =
+            member_lookup.static_method_matches +
+            member_lookup.static_method_template_matches +
+            member_lookup.static_data_matches +
+            member_lookup.enumerator_matches;
+        if (member_lookup.field_matches == 0 &&
+            member_lookup.nonstatic_method_matches == 0 &&
+            member_lookup.nonstatic_method_template_matches == 0 &&
+            static_candidate_matches > 0) {
+            return resolve_static_record_member_lookup(member_lookup);
         }
     }
 
