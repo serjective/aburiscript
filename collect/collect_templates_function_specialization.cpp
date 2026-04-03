@@ -506,6 +506,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             return;
         }
         symbol->is_constexpr = source_decl->is_constexpr;
+        symbol->is_deleted = source_decl->is_deleted;
+        symbol->is_defaulted = source_decl->is_defaulted;
         symbol->set_language_linkage(source_decl->get_language_linkage());
         if (source_decl->asm_label) {
             symbol->asm_label = *source_decl->asm_label;
@@ -628,6 +630,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_method->storage_class = pattern_method->storage_class;
             specialized_method->is_inline = pattern_method->is_inline;
             specialized_method->is_constexpr = pattern_method->is_constexpr;
+            specialized_method->is_deleted = pattern_method->is_deleted;
+            specialized_method->is_defaulted = pattern_method->is_defaulted;
             specialized_method->set_language_linkage(
                 pattern_method->get_language_linkage());
             specialized_method->is_virtual = pattern_method->is_virtual;
@@ -664,6 +668,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_function->storage_class = pattern->storage_class;
             specialized_function->is_inline = pattern->is_inline;
             specialized_function->is_constexpr = pattern->is_constexpr;
+            specialized_function->is_deleted = pattern->is_deleted;
+            specialized_function->is_defaulted = pattern->is_defaulted;
             specialized_function->set_language_linkage(
                 pattern->get_language_linkage());
             if (pattern->asm_label) {
@@ -690,7 +696,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             linkage,
             pattern->is_inline != 0);
         specialization_symbol->is_defined =
-            !specialization_is_dependent && pattern->body != nullptr;
+            !specialization_is_dependent && function_decl_defines_entity(pattern);
         copy_function_symbol_metadata(pattern, specialization_symbol.get());
         set_symbol_function_template_specialization(
             specialization_symbol.get(),
@@ -757,6 +763,13 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 }
             }
         } depth_guard{ast_ctx()};
+
+        if (specialization_decl_ptr->is_deleted ||
+            specialization_decl_ptr->is_defaulted) {
+            entry->is_instantiated = true;
+            specialization_symbol_ptr->is_defined = true;
+            return specialization_decl_ptr;
+        }
 
         if (!clone_specialization_definition(
                 specialization_decl_ptr,
@@ -1231,7 +1244,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 pattern->body ? pattern->body->location : pattern->location);
         }
         specialization_symbol_ptr->is_defined =
-            specialization_decl_ptr->body != nullptr;
+            function_decl_defines_entity(specialization_decl_ptr);
         return true;
     }
 };

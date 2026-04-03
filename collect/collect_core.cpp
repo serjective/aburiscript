@@ -767,8 +767,21 @@ bool Collect::with_function_definition_state(
                 method->storage_class != StorageClass::STATIC &&
                 !function_type->parameters.empty()) {
                 new_state.current_function_is_cpp_member = true;
-                new_state.current_function_cpp_this_type =
-                    function_type->parameters.front();
+                QualType this_type = function_type->parameters.front();
+                if (QualType owner_type =
+                        get_func_decl_owner_record_type(function_decl)) {
+                    uint8_t pointee_quals = QUAL_NONE;
+                    if (auto this_ptr = this_type.as_shared<PointerType>()) {
+                        pointee_quals = this_ptr->pointed_type.get_qualifiers();
+                    }
+                    QualType qualified_owner(
+                        owner_type.get_shared(),
+                        static_cast<uint8_t>(
+                            owner_type.get_qualifiers() | pointee_quals));
+                    this_type = QualType(
+                        std::make_shared<PointerType>(qualified_owner));
+                }
+                new_state.current_function_cpp_this_type = this_type;
             }
         }
     }

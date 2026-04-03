@@ -246,6 +246,20 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     auto func_trailing_attrs = try_parse_attributes();
     ast_ctx->append_attrs(fin_funcdecl->node_id, std::move(func_trailing_attrs));
 
+    if (gentle_check(TokenType::ASSIGN)) {
+        SrcLoc suffix_loc = current_token().loc;
+        advance(); // '='
+        if (gentle_check(TokenType::DELETE)) {
+            fin_funcdecl->is_deleted = true;
+            advance(); // 'delete'
+        } else if (gentle_check(TokenType::DEFAULT)) {
+            fin_funcdecl->is_defaulted = true;
+            advance(); // 'default'
+        } else {
+            fail_cpp_unsupported("function declaration suffix", suffix_loc);
+        }
+    }
+
     // check to see if already in scope, and if so check to see if types are compatible
     std::unique_ptr<Stmt> compound_stmt = nullptr;
 

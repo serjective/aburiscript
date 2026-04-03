@@ -3663,6 +3663,12 @@ std::unique_ptr<Expr> Collect::finalize_call_expression(
     } else if (context.constructor_call && context.constructor_symbol) {
         note_specialization_use_for_symbol(context.constructor_symbol, loc);
     }
+    if (context.callee_symbol && context.callee_symbol->is_deleted) {
+        report_error(
+            "call to deleted function '" + context.callee_symbol->name + "'",
+            loc);
+        return collect_make<ErrorExpr>("deleted function call", loc);
+    }
     if (auto default_arg_error = append_missing_call_default_arguments(
             call.get(), context, loc)) {
         return default_arg_error;

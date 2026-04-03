@@ -356,6 +356,350 @@ struct VirtualSlotState {
     std::string name;
 };
 
+bool is_copy_assignment_method_type(QualType method_type,
+                                    QualType owner_type,
+                                    const ASTContext* ast_ctx,
+                                    ReferenceKind* rhs_ref_kind_out = nullptr) {
+    if (!method_type || !owner_type) {
+        return false;
+    }
+
+    auto function_type =
+        desugar_type(method_type, ast_ctx).as_shared<FunctionType>();
+    if (!function_type || function_type->parameters.size() != 2) {
+        return false;
+    }
+
+    auto rhs_ref =
+        desugar_type(function_type->parameters[1], ast_ctx).as_shared<ReferenceType>();
+    if (!rhs_ref || !rhs_ref->referred_type) {
+        return false;
+    }
+
+    QualType canonical_owner =
+        remove_reference(owner_type, ast_ctx).without_qualifiers();
+    QualType canonical_rhs =
+        remove_reference(rhs_ref->referred_type, ast_ctx).without_qualifiers();
+    if (!canonical_rhs.equals_unqualified(canonical_owner)) {
+        return false;
+    }
+
+    if (rhs_ref_kind_out) {
+        *rhs_ref_kind_out = rhs_ref->reference_kind;
+    }
+    return true;
+}
+
+const RecordSemanticState::Method* find_copy_assignment_method(
+    const RecordSemanticState* state,
+    QualType owner_type,
+    const ASTContext* ast_ctx) {
+    if (!state || !owner_type) {
+        return nullptr;
+    }
+
+    for (const auto& method : state->methods) {
+        if (method.is_static || method.name != "operator=") {
+            continue;
+        }
+        ReferenceKind rhs_ref_kind = ReferenceKind::LValue;
+        if (!is_copy_assignment_method_type(
+                method.type, owner_type, ast_ctx, &rhs_ref_kind) ||
+            rhs_ref_kind != ReferenceKind::LValue) {
+            continue;
+        }
+        return &method;
+    }
+
+    return nullptr;
+}
+
+bool type_supports_generated_copy_assignment(
+    QualType type,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const ObjectDecl*>& active_records);
+
+bool record_supports_generated_copy_assignment(
+    const ObjectDecl* record_decl,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const ObjectDecl*>& active_records) {
+    record_decl = canonical_cpp_record_decl(record_decl);
+    if (!record_decl) {
+        return false;
+    }
+    if (active_records.contains(record_decl)) {
+        return true;
+    }
+
+    const RecordSemanticState* state =
+        record_semantics_cache_lookup(record_decl, ast_ctx);
+    if (!state || state->is_incomplete) {
+        return false;
+    }
+
+    QualType owner_type(record_decl->get_record_type());
+    if (const auto* copy_assign =
+            find_copy_assignment_method(state, owner_type, ast_ctx)) {
+        return !copy_assign->is_deleted;
+    }
+
+    active_records.insert(record_decl);
+    for (const auto& base : state->bases) {
+        if (!type_supports_generated_copy_assignment(
+                base.type, ast_ctx, active_records)) {
+            active_records.erase(record_decl);
+            return false;
+        }
+    }
+    for (const auto& field : state->fields) {
+        if (field.is_base_subobject || field.is_virtual_base_storage) {
+            continue;
+        }
+        if (!type_supports_generated_copy_assignment(
+                field.type, ast_ctx, active_records)) {
+            active_records.erase(record_decl);
+            return false;
+        }
+    }
+    active_records.erase(record_decl);
+    return true;
+}
+
+bool type_supports_generated_copy_assignment(
+    QualType type,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const ObjectDecl*>& active_records) {
+    if (!type) {
+        return false;
+    }
+    if (type.is_const()) {
+        return false;
+    }
+
+    QualType canonical = desugar_type(type, ast_ctx);
+    if (!canonical) {
+        return false;
+    }
+
+    if (canonical.as_shared<ReferenceType>()) {
+        return false;
+    }
+
+    if (auto array_type = canonical.as_shared<ArrayType>()) {
+        if (array_type->size_kind != ArraySizeKind::Constant ||
+            !array_type->size.has_value()) {
+            return false;
+        }
+        return type_supports_generated_copy_assignment(
+            array_type->element_type, ast_ctx, active_records);
+    }
+
+    if (auto object_type = canonical.as_shared<ObjectType>()) {
+        return record_supports_generated_copy_assignment(
+            dyn_cast<ObjectDecl>(object_type->get_decl()),
+            ast_ctx,
+            active_records);
+    }
+
+    return true;
+}
+
+bool type_supports_generated_copy_assignment(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    std::unordered_set<const ObjectDecl*> active_records;
+    return type_supports_generated_copy_assignment(
+        type, ast_ctx, active_records);
+}
+
+std::optional<size_t> find_direct_base_assignment_offset(
+    const RecordSemanticState& owner_state,
+    const RecordSemanticState::Base& base) {
+    if (!base.record_decl) {
+        return std::nullopt;
+    }
+    if (!base.is_virtual) {
+        if (base.has_non_virtual_offset) {
+            return base.non_virtual_offset;
+        }
+        return std::nullopt;
+    }
+
+    const ObjectDecl* canonical_base = canonical_cpp_record_decl(base.record_decl);
+    for (const auto& virtual_base : owner_state.virtual_bases) {
+        if (!virtual_base.record_decl || !virtual_base.has_offset) {
+            continue;
+        }
+        if (canonical_cpp_record_decl(virtual_base.record_decl) ==
+            canonical_base) {
+            return virtual_base.offset;
+        }
+    }
+    return std::nullopt;
+}
+
+std::shared_ptr<Symbol> ensure_synthesized_param_symbol(
+    ParamDecl* param_decl,
+    const std::string& fallback_name) {
+    if (!param_decl) {
+        return nullptr;
+    }
+    if (param_decl->sym) {
+        return param_decl->sym;
+    }
+    param_decl->sym = std::make_shared<Symbol>(
+        fallback_name,
+        SymbolKind::VARIABLE,
+        param_decl->type,
+        param_decl->storage_class);
+    return param_decl->sym;
+}
+
+std::unique_ptr<Expr> make_param_reference_expr(Collect& collect,
+                                                ParamDecl* param_decl,
+                                                const std::string& fallback_name,
+                                                SrcLoc loc) {
+    if (!param_decl) {
+        return nullptr;
+    }
+    auto sym = ensure_synthesized_param_symbol(param_decl, fallback_name);
+    if (sym) {
+        return collect.collect_make<VarRef>(std::move(sym), loc);
+    }
+    if (param_decl->has_name()) {
+        return collect.collect_make<VarRef>(param_decl->get_name_ptr(), loc);
+    }
+    return nullptr;
+}
+
+std::unique_ptr<Expr> make_base_subobject_expr(
+    Collect& collect,
+    const ASTContext* ast_ctx,
+    const std::shared_ptr<CType>& char_type,
+    const std::shared_ptr<CType>& ulong_type,
+    std::unique_ptr<Expr> object_pointer_expr,
+    QualType base_type,
+    size_t byte_offset,
+    SrcLoc loc) {
+    if (!object_pointer_expr || !base_type) {
+        return nullptr;
+    }
+
+    auto object_ptr_type =
+        desugar_type(
+            object_pointer_expr->get_type(),
+            ast_ctx)
+            .as_shared<PointerType>();
+    if (!object_ptr_type || !object_ptr_type->pointed_type) {
+        return nullptr;
+    }
+
+    uint8_t pointee_quals = object_ptr_type->pointed_type.get_qualifiers();
+    QualType byte_pointee(char_type, pointee_quals);
+    QualType byte_ptr_type(std::make_shared<PointerType>(byte_pointee));
+    auto byte_ptr_expr =
+        collect.collect_explicit_cast(std::move(object_pointer_expr), byte_ptr_type, loc);
+    if (!byte_ptr_expr) {
+        return nullptr;
+    }
+
+    if (byte_offset != 0) {
+        auto offset_expr = collect.collect_integer_literal(
+            std::to_string(byte_offset),
+            ulong_type,
+            loc);
+        byte_ptr_expr = collect.collect_binary_operation(
+            std::move(byte_ptr_expr),
+            std::move(offset_expr),
+            BinOpTypes::ADD,
+            loc);
+        if (!byte_ptr_expr) {
+            return nullptr;
+        }
+    }
+
+    QualType qualified_base_type(base_type.get_shared(), static_cast<uint8_t>(
+        base_type.get_qualifiers() | pointee_quals));
+    QualType base_ptr_type(std::make_shared<PointerType>(qualified_base_type));
+    auto cast_base_ptr =
+        collect.collect_explicit_cast(std::move(byte_ptr_expr), base_ptr_type, loc);
+    if (!cast_base_ptr) {
+        return nullptr;
+    }
+    return collect.collect_unary_operation(
+        UnaryOpTypes::DEREFERENCE,
+        std::move(cast_base_ptr),
+        loc);
+}
+
+bool emit_copy_assignment_statements_for_type(
+    Collect& collect,
+    const ASTContext* ast_ctx,
+    const std::shared_ptr<CType>& ulong_type,
+    QualType type,
+    const std::function<std::unique_ptr<Expr>()>& make_lhs,
+    const std::function<std::unique_ptr<Expr>()>& make_rhs,
+    std::vector<std::unique_ptr<Stmt>>& statements_out,
+    SrcLoc loc) {
+    if (!type || !make_lhs || !make_rhs) {
+        return false;
+    }
+
+    if (auto array_type =
+            desugar_type(type, ast_ctx).as_shared<ArrayType>()) {
+        if (array_type->size_kind != ArraySizeKind::Constant ||
+            !array_type->size.has_value()) {
+            return false;
+        }
+        for (size_t idx = 0; idx < *array_type->size; ++idx) {
+            auto lhs_builder = [&collect, &make_lhs, &ulong_type, idx, loc]() {
+                auto index_expr = collect.collect_integer_literal(
+                    std::to_string(idx),
+                    ulong_type,
+                    loc);
+                return collect.collect_array_subscript(
+                    make_lhs(),
+                    std::move(index_expr),
+                    loc);
+            };
+            auto rhs_builder = [&collect, &make_rhs, &ulong_type, idx, loc]() {
+                auto index_expr = collect.collect_integer_literal(
+                    std::to_string(idx),
+                    ulong_type,
+                    loc);
+                return collect.collect_array_subscript(
+                    make_rhs(),
+                    std::move(index_expr),
+                    loc);
+            };
+            if (!emit_copy_assignment_statements_for_type(
+                    collect,
+                    ast_ctx,
+                    ulong_type,
+                    array_type->element_type,
+                    lhs_builder,
+                    rhs_builder,
+                    statements_out,
+                    loc)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    auto assignment = collect.collect_binary_operation(
+        make_lhs(),
+        make_rhs(),
+        BinOpTypes::ASSIGN,
+        loc);
+    if (!assignment || isa<ErrorExpr>(assignment.get())) {
+        return false;
+    }
+    statements_out.push_back(
+        collect.collect_expression_statement(std::move(assignment), loc));
+    return !statements_out.empty();
+}
+
 } // namespace
 
 class CollectRecordBuilder {
@@ -481,6 +825,7 @@ public:
             collect_.collect_record_synthesize_implicit_members(ctx);
             collect_.collect_record_resolve_virtual_dispatch(ctx);
             collect_.collect_record_compute_layout(ctx);
+            collect_.collect_record_materialize_defaulted_method_bodies(ctx);
             collect_.collect_record_publish_semantics(ctx);
 
             if (ctx.deferred_body_callback) {
@@ -1017,8 +1362,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             set_func_decl_cxx_qualifier_prefix(ctor_decl, ctor_prefix);
             set_func_decl_owner_record_type(ctor_decl, QualType(ctx.record_type));
 
-            bool is_definition =
-                ctor_decl->body != nullptr || ctor_decl->has_deferred_inline_body();
+            bool is_definition = function_decl_defines_entity(ctor_decl);
             bool ctor_is_delegating = false;
             for (const auto& mem_init : ctor_decl->ctor_initializers) {
                 if (mem_init.is_delegating_initializer) {
@@ -1062,7 +1406,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 is_definition,
                 ctor_decl->location,
                 ctor_decl->get_language_linkage(),
-                true);
+                true,
+                ctor_decl->is_deleted,
+                ctor_decl->is_defaulted);
             collect_record_register_function_default_arguments(
                 ctor_sym,
                 ctor_decl,
@@ -1151,8 +1497,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             set_func_decl_cxx_qualifier_prefix(dtor_decl, dtor_prefix);
             set_func_decl_owner_record_type(dtor_decl, QualType(ctx.record_type));
 
-            bool is_definition =
-                dtor_decl->body != nullptr || dtor_decl->has_deferred_inline_body();
+            bool is_definition = function_decl_defines_entity(dtor_decl);
             auto dtor_sym = collect_declare_function_symbol(
                 dtor_decl->name,
                 dtor_decl->type,
@@ -1162,7 +1507,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 is_definition,
                 dtor_decl->location,
                 dtor_decl->get_language_linkage(),
-                true);
+                true,
+                dtor_decl->is_deleted,
+                dtor_decl->is_defaulted);
             if (dtor_sym) {
                 set_symbol_cxx_qualifier_prefix(dtor_sym.get(), dtor_prefix);
                 set_symbol_owner_record_type(
@@ -1284,8 +1631,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             method_decl->name == "operatornew[]" ||
             method_decl->name == "operatordelete" ||
             method_decl->name == "operatordelete[]";
-        bool is_definition =
-            method_decl->body != nullptr || method_decl->has_deferred_inline_body();
+        bool is_definition = function_decl_defines_entity(method_decl);
         auto method_sym = collect_declare_function_symbol(
             method_decl->name,
             method_decl->type,
@@ -1295,7 +1641,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             is_definition,
             method_decl->location,
             method_decl->get_language_linkage(),
-            true);
+            true,
+            method_decl->is_deleted,
+            method_decl->is_defaulted);
         collect_record_register_function_default_arguments(
             method_sym,
             method_decl,
@@ -1334,6 +1682,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
         method.type = method_decl->type;
         method.declared_access = current_access;
         method.is_static = is_static_method || is_operator_new_delete;
+        method.is_deleted = method_decl->is_deleted;
+        method.is_defaulted = method_decl->is_defaulted;
         method.is_explicit = method_decl->is_explicit_conversion;
         method.is_virtual = method_decl->is_virtual;
         method.is_override = method_decl->is_override;
@@ -1550,6 +1900,345 @@ void Collect::collect_record_synthesize_implicit_members(
 
         ctx.semantic_state.definition_data.has_copy_constructor = true;
     }
+}
+
+void Collect::collect_record_materialize_defaulted_method_bodies(
+    CollectRecordBuildContext& ctx) {
+    if (!ctx.semantic_decl) {
+        return;
+    }
+
+    RecordSemanticState owner_state = ctx.semantic_state;
+    owner_state.bases = ctx.bases;
+    owner_state.virtual_bases = ctx.virtual_bases;
+    owner_state.fields = ctx.semantic_state.fields;
+    owner_state.methods = ctx.methods;
+    owner_state.method_templates = ctx.method_templates;
+    owner_state.static_data_members = ctx.static_data_members;
+    owner_state.nested_types = ctx.nested_types;
+    owner_state.nested_templates = ctx.nested_templates;
+    owner_state.enumerator_members = ctx.enumerator_members;
+    owner_state.constructors = ctx.constructors;
+    owner_state.destructors = ctx.destructors;
+
+    // Defaulted method synthesis uses normal Collect expression helpers like
+    // `this->field` and base-subobject access. Those helpers consult the
+    // record-semantics cache to decide whether the current record type is
+    // complete. Publish the computed in-progress state first so synthesis can
+    // see the record as complete before the final state is moved into place.
+    record_semantics_cache_set(ast_ctx_.get(), ctx.semantic_decl, owner_state);
+    if (const ObjectDecl* canonical_decl =
+            canonical_cpp_record_decl(ctx.semantic_decl);
+        canonical_decl && canonical_decl != ctx.semantic_decl) {
+        record_semantics_cache_set(ast_ctx_.get(), canonical_decl, owner_state);
+    }
+
+    for (auto& method : ctx.methods) {
+        auto* method_decl =
+            const_cast<CppMethodDecl*>(method.decl);
+        if (!method_decl || !method_decl->is_defaulted) {
+            continue;
+        }
+
+        bool materialized =
+            collect_materialize_defaulted_copy_assignment_body(
+            method_decl,
+            ctx.semantic_decl,
+            owner_state);
+        if (!materialized) {
+            continue;
+        }
+
+        method.is_deleted = method_decl->is_deleted;
+        if (method.symbol) {
+            method.symbol->is_deleted = method_decl->is_deleted;
+            method.symbol->is_defined =
+                method_decl->body != nullptr || method_decl->is_deleted;
+            method.symbol->function_definition = method_decl;
+        }
+
+        for (auto& cached_method : owner_state.methods) {
+            if (cached_method.decl != method_decl) {
+                continue;
+            }
+            cached_method.is_deleted = method_decl->is_deleted;
+            if (method.symbol) {
+                cached_method.symbol = method.symbol;
+            }
+            break;
+        }
+        record_semantics_cache_set(ast_ctx_.get(), ctx.semantic_decl, owner_state);
+        if (const ObjectDecl* canonical_decl =
+                canonical_cpp_record_decl(ctx.semantic_decl);
+            canonical_decl && canonical_decl != ctx.semantic_decl) {
+            record_semantics_cache_set(ast_ctx_.get(), canonical_decl, owner_state);
+        }
+    }
+}
+
+bool Collect::collect_materialize_defaulted_copy_assignment_body(
+    CppMethodDecl* method_decl,
+    const ObjectDecl* owner_record_decl,
+    const RecordSemanticState& owner_state) {
+    if (!method_decl || !owner_record_decl || !method_decl->is_defaulted) {
+        return false;
+    }
+    if (method_decl->body || method_decl->is_deleted) {
+        return true;
+    }
+
+    QualType owner_type(owner_record_decl->get_record_type());
+    ReferenceKind rhs_ref_kind = ReferenceKind::LValue;
+    if (!is_copy_assignment_method_type(
+            QualType(method_decl->type),
+            owner_type,
+            ast_ctx_.get(),
+            &rhs_ref_kind) ||
+        rhs_ref_kind != ReferenceKind::LValue) {
+        return false;
+    }
+
+    auto* rhs_param =
+        method_decl->parameters.size() > 1
+            ? dyn_cast<ParamDecl>(method_decl->parameters[1].get())
+            : nullptr;
+    if (!rhs_param) {
+        method_decl->is_deleted = true;
+        method_decl->body.reset();
+        return true;
+    }
+
+    if (!owner_state.is_incomplete) {
+        for (const auto& base : owner_state.bases) {
+            if (!type_supports_generated_copy_assignment(
+                    base.type, ast_ctx_.get())) {
+                method_decl->is_deleted = true;
+                method_decl->body.reset();
+                return true;
+            }
+            if (!find_direct_base_assignment_offset(owner_state, base).has_value()) {
+                method_decl->is_deleted = true;
+                method_decl->body.reset();
+                return true;
+            }
+        }
+        for (const auto& field : owner_state.fields) {
+            if (field.is_base_subobject || field.is_virtual_base_storage) {
+                continue;
+            }
+            if (!type_supports_generated_copy_assignment(
+                    field.type, ast_ctx_.get())) {
+                method_decl->is_deleted = true;
+                method_decl->body.reset();
+                return true;
+            }
+            if (field.name.empty()) {
+                method_decl->is_deleted = true;
+                method_decl->body.reset();
+                return true;
+            }
+        }
+    }
+
+    std::vector<std::unique_ptr<Stmt>> body_statements;
+    auto char_type = get_builtin_char();
+    auto ulong_type = get_builtin_ulong();
+    bool build_ok = with_function_definition_state(
+        method_decl,
+        [&]() {
+            auto make_semantic_this_expr = [&]() -> std::unique_ptr<Expr> {
+                uint8_t pointee_quals = QUAL_NONE;
+                if (auto function_type =
+                        QualType(method_decl->type).as_shared<FunctionType>();
+                    function_type && !function_type->parameters.empty()) {
+                    if (auto this_ptr =
+                            function_type->parameters.front().as_shared<PointerType>()) {
+                        pointee_quals = this_ptr->pointed_type.get_qualifiers();
+                    }
+                }
+                QualType qualified_owner(
+                    owner_type.get_shared(),
+                    static_cast<uint8_t>(
+                        owner_type.get_qualifiers() | pointee_quals));
+                QualType this_type(
+                    std::make_shared<PointerType>(qualified_owner));
+                return collect_make<CppThisExpr>(this_type, method_decl->location);
+            };
+
+            auto make_this_deref = [&]() -> std::unique_ptr<Expr> {
+                auto this_expr = make_semantic_this_expr();
+                if (!this_expr) {
+                    return nullptr;
+                }
+                return collect_unary_operation(
+                    UnaryOpTypes::DEREFERENCE,
+                    std::move(this_expr),
+                    method_decl->location);
+            };
+
+            auto make_raw_record_assignment =
+                [&]() -> std::unique_ptr<Expr> {
+                auto lhs = make_this_deref();
+                auto rhs = make_param_reference_expr(
+                    *this, rhs_param, "__rhs", method_decl->location);
+                if (!lhs || !rhs) {
+                    return nullptr;
+                }
+                auto assignment = collect_make<BinaryOperation>(
+                    std::move(lhs),
+                    std::move(rhs),
+                    BinOpTypes::ASSIGN);
+                assignment->location = method_decl->location;
+                assignment->ctype = owner_type;
+                return assignment;
+            };
+
+            if (owner_record_decl->get_record_type() &&
+                owner_record_decl->get_record_type()->is_union) {
+                auto assignment = make_raw_record_assignment();
+                if (!assignment) {
+                    return false;
+                }
+                body_statements.push_back(
+                    collect_expression_statement(
+                        std::move(assignment),
+                        method_decl->location));
+            } else {
+                for (const auto& base : owner_state.bases) {
+                    auto maybe_offset =
+                        find_direct_base_assignment_offset(owner_state, base);
+                    if (!maybe_offset.has_value()) {
+                        return false;
+                    }
+                    auto lhs_builder =
+                        [this,
+                         &make_semantic_this_expr,
+                         method_decl,
+                         char_type,
+                         ulong_type,
+                         base_type = base.type,
+                         offset = *maybe_offset]() {
+                        return make_base_subobject_expr(
+                            *this,
+                            ast_ctx_.get(),
+                            char_type,
+                            ulong_type,
+                            make_semantic_this_expr(),
+                            base_type,
+                            offset,
+                            method_decl->location);
+                    };
+                    auto rhs_builder =
+                        [this,
+                         rhs_param,
+                         method_decl,
+                         char_type,
+                         ulong_type,
+                         base_type = base.type,
+                         offset = *maybe_offset]() {
+                        auto rhs_ref = make_param_reference_expr(
+                            *this, rhs_param, "__rhs", method_decl->location);
+                        if (!rhs_ref) {
+                            return std::unique_ptr<Expr>();
+                        }
+                        auto rhs_addr = collect_unary_operation(
+                            UnaryOpTypes::ADDRESS_OF,
+                            std::move(rhs_ref),
+                            method_decl->location);
+                        return make_base_subobject_expr(
+                            *this,
+                            ast_ctx_.get(),
+                            char_type,
+                            ulong_type,
+                            std::move(rhs_addr),
+                            base_type,
+                            offset,
+                            method_decl->location);
+                    };
+                    if (!emit_copy_assignment_statements_for_type(
+                            *this,
+                            ast_ctx_.get(),
+                            ulong_type,
+                            base.type,
+                            lhs_builder,
+                            rhs_builder,
+                            body_statements,
+                            method_decl->location)) {
+                        return false;
+                    }
+                }
+
+                for (const auto& field : owner_state.fields) {
+                    if (field.is_base_subobject || field.is_virtual_base_storage) {
+                        continue;
+                    }
+                    if (field.name.empty()) {
+                        return false;
+                    }
+                    auto lhs_builder =
+                        [this,
+                         &make_semantic_this_expr,
+                         method_decl,
+                         field_name = field.name]() {
+                        return collect_member_expression(
+                            make_semantic_this_expr(),
+                            field_name,
+                            true,
+                            method_decl->location);
+                    };
+                    auto rhs_builder =
+                        [this, rhs_param, method_decl, field_name = field.name]() {
+                        auto rhs_ref = make_param_reference_expr(
+                            *this, rhs_param, "__rhs", method_decl->location);
+                        if (!rhs_ref) {
+                            return std::unique_ptr<Expr>();
+                        }
+                        return collect_member_expression(
+                            std::move(rhs_ref),
+                            field_name,
+                            false,
+                            method_decl->location);
+                    };
+                    if (!emit_copy_assignment_statements_for_type(
+                            *this,
+                            ast_ctx_.get(),
+                            ulong_type,
+                            field.type,
+                            lhs_builder,
+                            rhs_builder,
+                            body_statements,
+                            method_decl->location)) {
+                        return false;
+                    }
+                }
+            }
+
+            auto return_stmt = collect_return_statement(
+                make_this_deref(),
+                method_decl->location,
+                QualType(method_decl->type).as_shared<FunctionType>()
+                    ? QualType(method_decl->type).as_shared<FunctionType>()->ret_type
+                    : QualType());
+            if (!return_stmt) {
+                return false;
+            }
+            body_statements.push_back(std::move(return_stmt));
+            return true;
+        });
+
+    if (!build_ok) {
+        method_decl->is_deleted = true;
+        method_decl->body.reset();
+        return true;
+    }
+
+    auto body_stmt = collect_compound_statement(
+        std::move(body_statements),
+        method_decl->scope,
+        method_decl->location);
+    method_decl->body = std::unique_ptr<CompoundStmt>(
+        dyn_cast<CompoundStmt>(body_stmt.release()));
+    return method_decl->body != nullptr;
 }
 
 void Collect::collect_record_resolve_virtual_dispatch(

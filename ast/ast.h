@@ -590,6 +590,8 @@ struct FuncDecl: Decl {
     uint8_t is_inline : 1;
     uint8_t has_prior_non_inline_declaration : 1;
     uint8_t is_constexpr : 1;
+    uint8_t is_deleted : 1;
+    uint8_t is_defaulted : 1;
     uint8_t language_linkage : 2;
     mutable uint32_t external_semantic_owner_id = 0; // See ownership conventions at top of file
 
@@ -628,12 +630,15 @@ protected:
                asm_label(nullptr),
                storage_class(storage_class), is_inline(is_inline),
                has_prior_non_inline_declaration(false), is_constexpr(false),
+               is_deleted(false), is_defaulted(false),
                language_linkage(static_cast<uint8_t>(LanguageLinkage::None)) {}
     FuncDecl(DeclKind kind, SrcLoc loc = SrcLoc()): Decl(kind, loc), type(nullptr), body(nullptr), scope(nullptr),
                                                      asm_label(nullptr),
                                                      storage_class(StorageClass::NONE), is_inline(false),
                                                      has_prior_non_inline_declaration(false),
                                                      is_constexpr(false),
+                                                     is_deleted(false),
+                                                     is_defaulted(false),
                                                      language_linkage(static_cast<uint8_t>(LanguageLinkage::None)) {}
 
 private:
@@ -722,8 +727,6 @@ struct CppCtorInitializer {
 
 struct CppConstructorDecl : FuncDecl {
     uint8_t is_explicit : 1;
-    uint8_t is_deleted : 1;
-    uint8_t is_defaulted : 1;
     uint8_t has_deferred_inline_body_tokens : 1;
     size_t deferred_inline_body_begin_token_idx;
     size_t deferred_inline_body_end_token_idx;
@@ -737,8 +740,6 @@ struct CppConstructorDecl : FuncDecl {
         : FuncDecl(DeclKind::CppConstructorDecl, name, type, std::move(parameters),
                    std::move(body), std::move(stmt_labels), storage_class, is_inline, loc),
           is_explicit(is_explicit),
-          is_deleted(false),
-          is_defaulted(false),
           has_deferred_inline_body_tokens(false),
           deferred_inline_body_begin_token_idx(0),
           deferred_inline_body_end_token_idx(0) {}
@@ -746,8 +747,6 @@ struct CppConstructorDecl : FuncDecl {
     explicit CppConstructorDecl(SrcLoc loc = SrcLoc())
         : FuncDecl(DeclKind::CppConstructorDecl, loc),
           is_explicit(false),
-          is_deleted(false),
-          is_defaulted(false),
           has_deferred_inline_body_tokens(false),
           deferred_inline_body_begin_token_idx(0),
           deferred_inline_body_end_token_idx(0) {}
@@ -776,8 +775,6 @@ struct CppConstructorDecl : FuncDecl {
 };
 
 struct CppDestructorDecl : FuncDecl {
-    uint8_t is_deleted : 1;
-    uint8_t is_defaulted : 1;
     uint8_t has_deferred_inline_body_tokens : 1;
     uint8_t is_virtual : 1;
     uint8_t is_override : 1;
@@ -793,8 +790,6 @@ struct CppDestructorDecl : FuncDecl {
                       SrcLoc loc = SrcLoc())
         : FuncDecl(DeclKind::CppDestructorDecl, name, type, std::move(parameters),
                    std::move(body), std::move(stmt_labels), storage_class, is_inline, loc),
-          is_deleted(false),
-          is_defaulted(false),
           has_deferred_inline_body_tokens(false),
           is_virtual(false),
           is_override(false),
@@ -805,8 +800,6 @@ struct CppDestructorDecl : FuncDecl {
 
     explicit CppDestructorDecl(SrcLoc loc = SrcLoc())
         : FuncDecl(DeclKind::CppDestructorDecl, loc),
-          is_deleted(false),
-          is_defaulted(false),
           has_deferred_inline_body_tokens(false),
           is_virtual(false),
           is_override(false),
@@ -837,6 +830,26 @@ struct CppDestructorDecl : FuncDecl {
         return d->get_kind() == DeclKind::CppDestructorDecl;
     }
 };
+
+inline bool function_decl_defines_entity(const FuncDecl* decl) {
+    if (!decl) {
+        return false;
+    }
+    if (decl->body || decl->is_deleted || decl->is_defaulted) {
+        return true;
+    }
+    if (auto* method_decl = dyn_cast<const CppMethodDecl>(decl)) {
+        return method_decl->has_deferred_inline_body();
+    }
+    if (auto* ctor_decl = dyn_cast<const CppConstructorDecl>(decl)) {
+        return ctor_decl->has_deferred_inline_body();
+    }
+    if (auto* dtor_decl = dyn_cast<const CppDestructorDecl>(decl)) {
+        return dtor_decl->has_deferred_inline_body();
+    }
+    return false;
+}
+
 struct FunctionTemplateSpecializationInfo;
 struct VariableTemplateSpecializationInfo;
 struct TemplateDecl;
@@ -2726,19 +2739,7 @@ struct TemplateExplicitSpecializationDecl : Decl {
 
     bool is_definition() const {
         if (auto* function_decl = dyn_cast<FuncDecl>(specialized_decl.get())) {
-            if (function_decl->body) {
-                return true;
-            }
-            if (auto* method_decl = dyn_cast<CppMethodDecl>(function_decl)) {
-                return method_decl->has_deferred_inline_body();
-            }
-            if (auto* ctor_decl = dyn_cast<CppConstructorDecl>(function_decl)) {
-                return ctor_decl->has_deferred_inline_body();
-            }
-            if (auto* dtor_decl = dyn_cast<CppDestructorDecl>(function_decl)) {
-                return dtor_decl->has_deferred_inline_body();
-            }
-            return false;
+            return function_decl_defines_entity(function_decl);
         }
         if (auto* record_decl = dyn_cast<CppRecordDecl>(specialized_decl.get())) {
             return record_decl->is_definition;

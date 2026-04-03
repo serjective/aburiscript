@@ -1250,6 +1250,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
             symbol->type = QualType(decl->type);
             symbol->is_constexpr = decl->is_constexpr;
+            symbol->is_deleted = decl->is_deleted;
+            symbol->is_defaulted = decl->is_defaulted;
             symbol->is_defined = is_definition;
             symbol->set_language_linkage(decl->get_language_linkage());
             if (is_definition) {
@@ -1271,6 +1273,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             decl->is_inline != 0);
         synthesized_symbol->is_defined = is_definition;
         synthesized_symbol->is_constexpr = decl->is_constexpr;
+        synthesized_symbol->is_deleted = decl->is_deleted;
+        synthesized_symbol->is_defaulted = decl->is_defaulted;
         synthesized_symbol->set_language_linkage(
             decl->get_language_linkage());
         synthesized_symbol->function_definition =
@@ -1742,6 +1746,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         collect.collect_record_synthesize_implicit_members(ctx);
         collect.collect_record_resolve_virtual_dispatch(ctx);
         collect.collect_record_compute_layout(ctx);
+        collect.collect_record_materialize_defaulted_method_bodies(ctx);
         collect.collect_record_publish_semantics(ctx);
 
         if (ast_ctx() && ast_ctx()->has_attrs(cloned_record->node_id)) {
@@ -2177,6 +2182,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_method_decl->storage_class = function_decl->storage_class;
         cloned_method_decl->is_inline = function_decl->is_inline;
         cloned_method_decl->is_constexpr = function_decl->is_constexpr;
+        cloned_method_decl->is_deleted = function_decl->is_deleted;
+        cloned_method_decl->is_defaulted = function_decl->is_defaulted;
         cloned_method_decl->set_language_linkage(
             function_decl->get_language_linkage());
         cloned_method_decl->is_virtual =
@@ -2341,6 +2348,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             semantic_method.declared_access = declared_access;
             semantic_method.is_static =
                 specialized_decl->storage_class == StorageClass::STATIC;
+            semantic_method.is_deleted = specialized_decl->is_deleted;
+            semantic_method.is_defaulted = specialized_decl->is_defaulted;
             semantic_method.is_explicit =
                 specialized_decl->is_explicit_conversion;
             semantic_method.is_virtual = specialized_decl->is_virtual;
@@ -2378,6 +2387,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->storage_class = method_decl->storage_class;
         cloned_decl->is_inline = method_decl->is_inline;
         cloned_decl->is_constexpr = method_decl->is_constexpr;
+        cloned_decl->is_deleted = method_decl->is_deleted;
+        cloned_decl->is_defaulted = method_decl->is_defaulted;
         cloned_decl->set_language_linkage(method_decl->get_language_linkage());
         cloned_decl->is_virtual = method_decl->is_virtual;
         cloned_decl->is_override = method_decl->is_override;
@@ -2422,6 +2433,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         semantic_method.declared_access = declared_access;
         semantic_method.is_static =
             cloned_decl->storage_class == StorageClass::STATIC;
+        semantic_method.is_deleted = cloned_decl->is_deleted;
+        semantic_method.is_defaulted = cloned_decl->is_defaulted;
         semantic_method.is_explicit = cloned_decl->is_explicit_conversion;
         semantic_method.is_virtual = cloned_decl->is_virtual;
         semantic_method.is_override = cloned_decl->is_override;
@@ -3519,7 +3532,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     specialized_symbol.get(),
                     default_arguments,
                     nullptr);
-                specialized_symbol->is_defined = specialized_func->body != nullptr;
+                specialized_symbol->is_defined =
+                    function_decl_defines_entity(specialized_func);
                 specialized_symbol->function_definition = specialized_func;
             }
         }

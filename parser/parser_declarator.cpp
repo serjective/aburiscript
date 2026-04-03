@@ -959,6 +959,53 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
         std::shared_ptr<CType> old_type = base;
         std::shared_ptr<CType> new_type = nullptr;
         std::shared_ptr<CType> over_arch = nullptr;
+        auto try_parse_qualified_cpp_operator_function_name =
+            [&]() -> bool {
+                if (!pars->is_cxx_mode_active() ||
+                    !mgnt->gentle_check(TokenType::IDENTIFIER)) {
+                    return false;
+                }
+
+                auto consume_scope_resolution =
+                    [&](size_t& scope_offset) -> bool {
+                        Token sep = mgnt->peek_token(scope_offset);
+                        if (sep.type == TokenType::SCOPE_RESOLUTION) {
+                            ++scope_offset;
+                            return true;
+                        }
+                        if (sep.type == TokenType::COLON &&
+                            mgnt->peek_token(scope_offset + 1).type ==
+                                TokenType::COLON) {
+                            scope_offset += 2;
+                            return true;
+                        }
+                        return false;
+                    };
+
+                size_t offset = 1;
+                if (!consume_scope_resolution(offset)) {
+                    return false;
+                }
+
+                while (true) {
+                    Token next = mgnt->peek_token(offset);
+                    if (next.type == TokenType::OPERATOR_KW) {
+                        break;
+                    }
+                    if (next.type != TokenType::IDENTIFIER) {
+                        return false;
+                    }
+                    ++offset;
+                    if (!consume_scope_resolution(offset)) {
+                        return false;
+                    }
+                }
+
+                for (size_t consumed = 0; consumed < offset; ++consumed) {
+                    mgnt->advance();
+                }
+                return parse_cpp_operator_function_name(*this);
+            };
         if (parse_new_type_id_context &&
             pars->is_cxx_mode_active() &&
             mgnt->gentle_check(TokenType::LEFT_PAREN)) {
@@ -1129,6 +1176,8 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
             } else {
                 mgnt->check_and_consume(TokenType::RIGHT_PAREN);
             }
+        } else if (try_parse_qualified_cpp_operator_function_name()) {
+            // Parsed qualified operator-function declarator name.
         } else if (parse_cpp_operator_function_name(*this)) {
             // Parsed operator-function declarator name.
         } else if (in_function_parameter &&

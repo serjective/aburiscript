@@ -52,6 +52,32 @@ bool fixed_enum_value_fits_underlying(
     return value >= minv && value <= maxv;
 }
 
+bool is_defaultable_special_member_method(
+    const CppMethodDecl* method_decl,
+    QualType owner_type,
+    const ASTContext* ast_ctx) {
+    if (!method_decl || !owner_type || !ast_ctx) {
+        return false;
+    }
+    if (method_decl->storage_class == StorageClass::STATIC ||
+        method_decl->name != "operator=" ||
+        method_decl->parameters.size() != 1) {
+        return false;
+    }
+    QualType canonical_owner =
+        remove_reference(owner_type, ast_ctx).without_qualifiers();
+    auto* parameter_decl =
+        dyn_cast<ParamDecl>(method_decl->parameters.front().get());
+    QualType parameter_type =
+        parameter_decl ? parameter_decl->type : QualType();
+    if (!parameter_type) {
+        return false;
+    }
+    QualType canonical_parameter =
+        remove_reference(parameter_type, ast_ctx).without_qualifiers();
+    return canonical_parameter.equals_unqualified(canonical_owner);
+}
+
 std::shared_ptr<CType> choose_default_enum_underlying(
     TypeContext* type_ctx, int64_t min_value, int64_t max_value, bool prefer_smallest_width = false) {
     if (!type_ctx) {
@@ -862,16 +888,18 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 ctor_decl->storage_class,
                 ctor_decl->is_constexpr,
                 ctor_decl->is_inline,
-                ctor_decl->body != nullptr || ctor_decl->has_deferred_inline_body(),
+                function_decl_defines_entity(ctor_decl),
                 ctor_decl->location,
                 ctor_decl->get_language_linkage(),
-                true);
+                true,
+                ctor_decl->is_deleted,
+                ctor_decl->is_defaulted);
             if (ctor_sym) {
                 set_symbol_owner_record_type(ctor_sym.get(), QualType(record_type));
                 if (!ctor_prefix.empty()) {
                     set_symbol_cxx_qualifier_prefix(ctor_sym.get(), ctor_prefix);
                 }
-                if (ctor_decl->body || ctor_decl->has_deferred_inline_body()) {
+                if (function_decl_defines_entity(ctor_decl)) {
                     ctor_sym->function_definition =
                         const_cast<CppConstructorDecl*>(ctor_decl);
                 }
@@ -911,16 +939,18 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 dtor_decl->storage_class,
                 dtor_decl->is_constexpr,
                 dtor_decl->is_inline,
-                dtor_decl->body != nullptr || dtor_decl->has_deferred_inline_body(),
+                function_decl_defines_entity(dtor_decl),
                 dtor_decl->location,
                 dtor_decl->get_language_linkage(),
-                true);
+                true,
+                dtor_decl->is_deleted,
+                dtor_decl->is_defaulted);
             if (dtor_sym) {
                 set_symbol_owner_record_type(dtor_sym.get(), QualType(record_type));
                 if (!dtor_prefix.empty()) {
                     set_symbol_cxx_qualifier_prefix(dtor_sym.get(), dtor_prefix);
                 }
-                if (dtor_decl->body || dtor_decl->has_deferred_inline_body()) {
+                if (function_decl_defines_entity(dtor_decl)) {
                     dtor_sym->function_definition =
                         const_cast<CppDestructorDecl*>(dtor_decl);
                 }
@@ -998,16 +1028,18 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 method_decl->storage_class,
                 method_decl->is_constexpr,
                 method_decl->is_inline,
-                method_decl->body != nullptr || method_decl->has_deferred_inline_body(),
+                function_decl_defines_entity(method_decl),
                 method_decl->location,
                 method_decl->get_language_linkage(),
-                true);
+                true,
+                method_decl->is_deleted,
+                method_decl->is_defaulted);
             if (method_sym) {
                 set_symbol_owner_record_type(method_sym.get(), QualType(record_type));
                 if (!method_prefix.empty()) {
                     set_symbol_cxx_qualifier_prefix(method_sym.get(), method_prefix);
                 }
-                if (method_decl->body || method_decl->has_deferred_inline_body()) {
+                if (function_decl_defines_entity(method_decl)) {
                     method_sym->function_definition =
                         const_cast<CppMethodDecl*>(method_decl);
                 }
@@ -1018,6 +1050,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             method.type = method_decl->type;
             method.declared_access = current_access;
             method.is_static = method_decl->storage_class == StorageClass::STATIC;
+            method.is_deleted = method_decl->is_deleted;
+            method.is_defaulted = method_decl->is_defaulted;
             method.is_explicit = method_decl->is_explicit_conversion;
             method.is_virtual = method_decl->is_virtual;
             method.is_override = method_decl->is_override;
@@ -1808,6 +1842,45 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
             return cpp_primary_template_owner_matches(class_template, arguments);
         };
 
+    auto skip_leading_declarator_prefix_tokens =
+        [&]() {
+            auto consume_post_pointer_qualifiers = [&]() {
+                while (true) {
+                    if (gentle_check(TokenType::CONST) ||
+                        gentle_check(TokenType::VOLATILE) ||
+                        gentle_check(TokenType::RESTRICT) ||
+                        gentle_check(TokenType::ATOMIC) ||
+                        gentle_check(TokenType::NULLABILITY_QUALIFIER)) {
+                        advance();
+                        continue;
+                    }
+                    if (is_gnu_attribute_token(current_token())) {
+                        try_parse_attributes();
+                        continue;
+                    }
+                    break;
+                }
+            };
+
+            while (true) {
+                if (gentle_check(TokenType::MULTIPLY) ||
+                    gentle_check(TokenType::BITWISE_XOR)) {
+                    advance();
+                    consume_post_pointer_qualifiers();
+                    continue;
+                }
+                if (gentle_check(TokenType::LOGICAL_AND)) {
+                    advance();
+                    continue;
+                }
+                if (gentle_check(TokenType::BITWISE_AND)) {
+                    advance();
+                    continue;
+                }
+                break;
+            }
+        };
+
     if (!is_cxx_mode_active() || starts_with_member_pointer_declarator_prefix()) {
         return context;
     }
@@ -1818,6 +1891,8 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
     std::optional<size_t> terminal_token_idx;
     {
         RevertingTentativeParsingAction tentative(*this);
+        context.info.loc = current_token().loc;
+        skip_leading_declarator_prefix_tokens();
         context.info.loc = current_token().loc;
         has_global_qualifier = consume_cpp_scope_resolution();
         auto parse_qualified_component =
@@ -2813,6 +2888,8 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         out_of_line_method->scope = parsed_method_func->scope;
         out_of_line_method->type = parsed_method_func->type;
         out_of_line_method->is_constexpr = parsed_method_func->is_constexpr;
+        out_of_line_method->is_deleted = parsed_method_func->is_deleted;
+        out_of_line_method->is_defaulted = parsed_method_func->is_defaulted;
         out_of_line_method->explicit_specialization_arguments =
             parsed_method_func->explicit_specialization_arguments;
         out_of_line_method->has_explicit_specialization_argument_list =
@@ -2954,7 +3031,17 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             }
         }
 
-        bool is_definition = out_of_line_method->body != nullptr;
+        if (out_of_line_method->is_defaulted &&
+            !is_defaultable_special_member_method(
+                out_of_line_method.get(),
+                QualType(qualified_declarator.owner_record_decl->get_record_type()),
+                ast_ctx.get())) {
+            error_custloc(
+                "only copy and move assignment operators may be defaulted here",
+                qualified_declarator.loc);
+        }
+
+        bool is_definition = function_decl_defines_entity(out_of_line_method.get());
         if (preserve_explicit_specialization_member_decl) {
             const Decl* primary_member_decl = nullptr;
             const FunctionTemplateDecl* primary_member_template = nullptr;
@@ -3047,6 +3134,10 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                 std::move(out_of_line_method->stmt_labels);
             matched_method_decl->is_constexpr =
                 out_of_line_method->is_constexpr;
+            matched_method_decl->is_deleted =
+                out_of_line_method->is_deleted;
+            matched_method_decl->is_defaulted =
+                out_of_line_method->is_defaulted;
             matched_method_decl->is_conversion_function =
                 out_of_line_method->is_conversion_function;
             matched_method_decl->is_explicit_conversion =
@@ -3066,8 +3157,23 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                     matched_method_decl, *parsed_prefix);
             }
 
+            if (matched_method_decl->is_defaulted) {
+                if (const auto* owner_state =
+                        collect_->query_lookup_record_semantics(
+                            qualified_declarator.owner_record_decl)) {
+                    collect_->collect_materialize_defaulted_copy_assignment_body(
+                        matched_method_decl,
+                        qualified_declarator.owner_record_decl,
+                        *owner_state);
+                }
+            }
+
             if (method_sym) {
-                method_sym->is_defined = true;
+                method_sym->is_defined =
+                    matched_method_decl->body != nullptr ||
+                    matched_method_decl->is_deleted;
+                method_sym->is_deleted = matched_method_decl->is_deleted;
+                method_sym->is_defaulted = matched_method_decl->is_defaulted;
                 method_sym->type = QualType(matched_method_decl->type);
                 method_sym->function_definition = matched_method_decl;
             }
@@ -3083,6 +3189,8 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                         }
                         method.decl = matched_method_decl;
                         method.type = QualType(matched_method_decl->type);
+                        method.is_deleted = matched_method_decl->is_deleted;
+                        method.is_defaulted = matched_method_decl->is_defaulted;
                         method.is_explicit =
                             matched_method_decl->is_explicit_conversion;
                         method.is_conversion_function =
@@ -3147,12 +3255,21 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             decl_parser.is_inline,
             false,
             declarator_token.loc,
-            declaration_language_linkage);
+            declaration_language_linkage,
+            false,
+            false,
+            false);
         merge_function_asm_label(decl_parser, predecl_sym, declarator_token.loc);
     }
     auto funct = parse_function(&decl_parser, declarator_token.loc, predecl_sym);
     auto* func_decl_check = dyn_cast<FuncDecl>(funct.get());
-    bool is_definition = func_decl_check && func_decl_check->body != nullptr;
+    if (func_decl_check && func_decl_check->is_defaulted) {
+        error_custloc(
+            "only non-static member special member functions may be defaulted",
+            declarator_token.loc);
+    }
+    bool is_definition =
+        func_decl_check && function_decl_defines_entity(func_decl_check);
     std::shared_ptr<Symbol> final_sym = nullptr;
     if (!preserve_function_explicit_specialization_decl) {
         final_sym = collect_->collect_declare_function_symbol(
@@ -3163,7 +3280,10 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             decl_parser.is_inline,
             is_definition,
             declarator_token.loc,
-            declaration_language_linkage);
+            declaration_language_linkage,
+            false,
+            func_decl_check && func_decl_check->is_deleted,
+            func_decl_check && func_decl_check->is_defaulted);
         if (is_definition && func_decl_check) {
             if (predecl_sym) {
                 predecl_sym->function_definition = func_decl_check;
@@ -4210,7 +4330,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 error("static member function cannot have cv/ref qualifier");
             }
 
-            if (gentle_check(TokenType::ASSIGN)) {
+            if (gentle_check(TokenType::ASSIGN) &&
+                peek_token().type == TokenType::INTEGER_CONST &&
+                peek_token().value == "0") {
                 SrcLoc pure_loc = current_token().loc;
                 advance(); // '='
                 if (!gentle_check(TokenType::INTEGER_CONST) ||
@@ -4251,6 +4373,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     t.loc);
                 cpp_method->type = field_type;
                 cpp_method->is_constexpr = decl_parser.is_constexpr;
+                cpp_method->is_deleted = false;
+                cpp_method->is_defaulted = false;
                 cpp_method->is_conversion_function =
                     decl_parser.is_conversion_function;
                 cpp_method->is_explicit_conversion = member_explicit;
@@ -4292,6 +4416,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->scope = parsed_method->scope;
                 cpp_method->type = parsed_method->type;
                 cpp_method->is_constexpr = parsed_method->is_constexpr;
+                cpp_method->is_deleted = parsed_method->is_deleted;
+                cpp_method->is_defaulted = parsed_method->is_defaulted;
                 cpp_method->is_conversion_function =
                     decl_parser.is_conversion_function;
                 cpp_method->is_explicit_conversion = member_explicit;
@@ -4311,6 +4437,34 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     method_qualifier_prefix = *existing_prefix;
                 }
                 set_func_decl_cxx_qualifier_prefix(parsed_method.get(), std::nullopt);
+            }
+
+            QualType defaulted_method_owner_type;
+            if (!cxx_record_parse_stack_.empty()) {
+                const auto& record_frame = cxx_record_parse_stack_.back();
+                defaulted_method_owner_type =
+                    record_frame.semantic_owner
+                        ? QualType(record_frame.semantic_owner->get_record_type())
+                        : QualType();
+                if (!defaulted_method_owner_type && !record_frame.name.empty()) {
+                    auto owner_type_raw = collect_->collect_lookup_tag_type(
+                        record_frame.name,
+                        true);
+                    auto owner_object_type =
+                        dyn_cast_shared<ObjectType>(owner_type_raw);
+                    if (owner_object_type) {
+                        defaulted_method_owner_type = QualType(owner_object_type);
+                    }
+                }
+            }
+            if (cpp_method->is_defaulted &&
+                !is_defaultable_special_member_method(
+                    cpp_method.get(),
+                    defaulted_method_owner_type,
+                    ast_ctx.get())) {
+                error_custloc(
+                    "only copy and move assignment operators may be defaulted here",
+                    cpp_method->location);
             }
 
             std::string record_qualifier_prefix = current_cpp_record_qualifier_prefix();

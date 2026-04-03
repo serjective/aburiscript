@@ -841,7 +841,9 @@ public:
                                                             bool is_definition,
                                                             SrcLoc loc,
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
-                                                            bool is_cpp_member_function = false) ;
+                                                            bool is_cpp_member_function = false,
+                                                            bool is_deleted = false,
+                                                            bool is_defaulted = false) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(std::shared_ptr<Scope> scope,
                                                             std::shared_ptr<GlobalIdentTracker> global_scope,
@@ -852,7 +854,9 @@ public:
                                                             bool is_definition,
                                                             SrcLoc loc,
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
-                                                            bool is_cpp_member_function = false) ;
+                                                            bool is_cpp_member_function = false,
+                                                            bool is_deleted = false,
+                                                            bool is_defaulted = false) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(const std::string& name,
                                                             QualType type,
@@ -862,7 +866,9 @@ public:
                                                             bool is_definition,
                                                             SrcLoc loc,
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
-                                                            bool is_cpp_member_function = false) ;
+                                                            bool is_cpp_member_function = false,
+                                                            bool is_deleted = false,
+                                                            bool is_defaulted = false) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(const std::string& name,
                                                             QualType type,
@@ -871,7 +877,9 @@ public:
                                                             bool is_definition,
                                                             SrcLoc loc,
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
-                                                            bool is_cpp_member_function = false) ;
+                                                            bool is_cpp_member_function = false,
+                                                            bool is_deleted = false,
+                                                            bool is_defaulted = false) ;
 
     std::shared_ptr<Symbol> collect_declare_typedef_symbol(std::shared_ptr<Scope> scope,
                                                            std::shared_ptr<GlobalIdentTracker> global_scope,
@@ -1091,6 +1099,12 @@ public:
     void collect_record_collect_members(CollectRecordBuildContext& ctx);
     void collect_record_synthesize_implicit_members(
         CollectRecordBuildContext& ctx) const;
+    void collect_record_materialize_defaulted_method_bodies(
+        CollectRecordBuildContext& ctx);
+    bool collect_materialize_defaulted_copy_assignment_body(
+        CppMethodDecl* method_decl,
+        const ObjectDecl* owner_record_decl,
+        const RecordSemanticState& owner_state);
     void collect_record_resolve_virtual_dispatch(
         CollectRecordBuildContext& ctx) const;
     void collect_record_compute_layout(CollectRecordBuildContext& ctx) const;
@@ -1266,6 +1280,7 @@ private:
         std::shared_ptr<FunctionType> function_type = nullptr;
         std::vector<ImplicitConversionSequence> conversions;
         bool viable = false;
+        bool is_deleted = false;
         OverloadImplicitObjectArgKind implicit_object_arg_kind =
             OverloadImplicitObjectArgKind::None;
         OverloadFailure failure;

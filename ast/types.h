@@ -1464,6 +1464,8 @@ struct RecordSemanticState {
         QualType type;
         RecordMemberAccess declared_access = RecordMemberAccess::Public;
         bool is_static = false;
+        bool is_deleted = false;
+        bool is_defaulted = false;
         bool is_explicit = false;
         bool is_virtual = false;
         bool is_override = false;

@@ -243,6 +243,8 @@ std::shared_ptr<Symbol> clone_symbol_shallow_for_specialization(
         sym->is_inline != 0);
     cloned->is_defined = sym->is_defined;
     cloned->is_constexpr = sym->is_constexpr;
+    cloned->is_deleted = sym->is_deleted;
+    cloned->is_defaulted = sym->is_defaulted;
     cloned->had_non_inline_declaration = sym->had_non_inline_declaration;
     cloned->is_block_byref = sym->is_block_byref;
     cloned->is_deprecated = sym->is_deprecated;

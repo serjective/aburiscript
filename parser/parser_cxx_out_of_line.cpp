@@ -79,6 +79,8 @@ void merge_out_of_line_constructor_definition(
 
     if (matched_symbol) {
         matched_symbol->is_defined = true;
+        matched_symbol->is_deleted = matched_ctor_decl->is_deleted;
+        matched_symbol->is_defaulted = matched_ctor_decl->is_defaulted;
         matched_symbol->type = QualType(matched_ctor_decl->type);
         matched_symbol->function_definition = matched_ctor_decl;
     }
@@ -1375,6 +1377,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
     auto matched_symbol = matched_dtor_state->symbol;
     if (matched_symbol) {
         matched_symbol->is_defined = true;
+        matched_symbol->is_deleted = matched_dtor_decl->is_deleted;
+        matched_symbol->is_defaulted = matched_dtor_decl->is_defaulted;
         matched_symbol->type = QualType(matched_dtor_decl->type);
         matched_symbol->function_definition = matched_dtor_decl;
     }

@@ -1813,6 +1813,7 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
 
     eval.function_type = candidate_fn;
     eval.viable = true;
+    eval.is_deleted = candidate_info.symbol->is_deleted != 0;
 
     bool has_implicit_object_arg =
         eval.implicit_object_arg_kind != OverloadImplicitObjectArgKind::None;
@@ -2153,6 +2154,13 @@ void Collect::emit_overload_candidate_notes(
         const auto& candidate = candidate_set.evaluated[idx];
         std::string type_name = overload_candidate_type_name(candidate);
         if (candidate.viable) {
+            if (candidate.is_deleted) {
+                diag_engine_->report_note(
+                    "candidate function '" + callee_name_str + "' has type '" +
+                        type_name + "' (deleted)",
+                    loc);
+                continue;
+            }
             diag_engine_->report_note(
                 "candidate function '" + callee_name_str + "' has type '" +
                     type_name + "'",
@@ -2320,8 +2328,17 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
         return collect_make<ErrorExpr>("ambiguous overload", loc);
     }
 
-    selected_symbol_out = candidate_set.evaluated[*best_index].symbol;
+    const auto& chosen = candidate_set.evaluated[*best_index];
+    if (chosen.is_deleted) {
+        report_error(
+            "call to deleted function '" + std::string(callee_name) + "'",
+            loc);
+        emit_overload_candidate_notes(callee_name, candidate_set, false, loc);
+        return collect_make<ErrorExpr>("deleted overload", loc);
+    }
+
+    selected_symbol_out = chosen.symbol;
     selected_implicit_object_arg_kind_out =
-        candidate_set.evaluated[*best_index].implicit_object_arg_kind;
+        chosen.implicit_object_arg_kind;
     return nullptr;
 }
