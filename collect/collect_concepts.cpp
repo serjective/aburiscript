@@ -1,5 +1,6 @@
 #include "collect.h"
 #include "collect_templates_internal.h"
+#include "../ast/special_members.h"
 
 using template_sema_internal::lookup_symbol_remap_in_clone_context;
 using template_sema_internal::make_template_binding_clone_pass_builder;
@@ -87,39 +88,6 @@ bool requires_expr_depends_on_template_parameters(
                 requirement.return_constraint.get())) {
             return true;
         }
-    }
-    return false;
-}
-
-bool expression_is_known_noexcept(const Expr* expr, const ASTContext* ast_ctx) {
-    if (!expr) {
-        return false;
-    }
-    auto* stripped = Collect::strip_implicit_casts(const_cast<Expr*>(expr));
-    if (!stripped) {
-        return false;
-    }
-
-    auto is_nothrow_function_type = [&](QualType function_like_type) -> bool {
-        auto function_type =
-            desugar_type(function_like_type, ast_ctx).as_shared<FunctionType>();
-        return function_type &&
-               function_type->exception_spec ==
-                   FunctionExceptionSpecKind::NonThrowing;
-    };
-
-    if (auto* call = dyn_cast<FuncCall>(stripped)) {
-        return call->func && is_nothrow_function_type(call->func->get_type());
-    }
-    if (auto* member_call = dyn_cast<CppMemberCallExpr>(stripped)) {
-        if (member_call->lowered_call && member_call->lowered_call->func) {
-            return is_nothrow_function_type(
-                member_call->lowered_call->func->get_type());
-        }
-    }
-    if (auto* construct = dyn_cast<CppConstructExpr>(stripped)) {
-        return construct->ctor_sym &&
-               is_nothrow_function_type(construct->ctor_sym->type);
     }
     return false;
 }
@@ -708,7 +676,7 @@ std::optional<bool> Collect::evaluate_requires_expression(
                     return false;
                 }
                 if (requirement.is_noexcept &&
-                    !expression_is_known_noexcept(
+                    !cpp_expression_is_known_noexcept(
                         requirement.expr.get(),
                         ast_ctx_.get())) {
                     return false;

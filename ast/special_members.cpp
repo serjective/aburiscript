@@ -22,6 +22,53 @@ const RecordSemanticState* lookup_record_state_for_type(
 bool cpp_record_is_trivially_destructible(
     const RecordSemanticState* state,
     const ASTContext* ast_ctx);
+
+Expr* strip_implicit_casts_for_noexcept(Expr* expr) {
+    auto* current = expr;
+    while (auto* cast = dyn_cast<ImplicitCast>(current)) {
+        if (!cast->expr) {
+            break;
+        }
+        current = cast->expr.get();
+    }
+    return current;
+}
+
+bool function_type_is_non_throwing(QualType function_like_type,
+                                   const ASTContext* ast_ctx) {
+    auto function_type =
+        desugar_type(function_like_type, ast_ctx).as_shared<FunctionType>();
+    return function_type &&
+           function_type->exception_spec ==
+               FunctionExceptionSpecKind::NonThrowing;
+}
+
+bool cpp_record_subobjects_are_nothrow_destructible(
+    const RecordSemanticState* state,
+    const ASTContext* ast_ctx) {
+    if (!state || state->is_incomplete) {
+        return false;
+    }
+    for (const auto& base : state->bases) {
+        if (!cpp_type_is_nothrow_destructible(base.type, ast_ctx)) {
+            return false;
+        }
+    }
+    for (const auto& virtual_base : state->virtual_bases) {
+        if (!cpp_type_is_nothrow_destructible(virtual_base.type, ast_ctx)) {
+            return false;
+        }
+    }
+    for (const auto& field : state->fields) {
+        if (field.is_base_subobject || field.is_virtual_base_storage) {
+            continue;
+        }
+        if (!cpp_type_is_nothrow_destructible(field.type, ast_ctx)) {
+            return false;
+        }
+    }
+    return true;
+}
 } // namespace
 
 bool cpp_access_allows_member(RecordMemberAccess access,
@@ -240,6 +287,121 @@ bool cpp_type_is_trivially_destructible(
         default:
             return canonical->isScalar();
     }
+}
+
+bool cpp_type_is_nothrow_destructible(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    if (!cpp_type_is_destructible(type, false, ast_ctx)) {
+        return false;
+    }
+
+    QualType canonical = desugar_type(type, ast_ctx);
+    if (!canonical) {
+        return false;
+    }
+
+    if (canonical.as_shared<ReferenceType>()) {
+        return true;
+    }
+
+    switch (canonical->kind) {
+        case TypeKind::Array: {
+            auto array_type = canonical.as_shared<ArrayType>();
+            if (!array_type ||
+                array_type->size_kind != ArraySizeKind::Constant ||
+                !array_type->size.has_value()) {
+                return false;
+            }
+            return cpp_type_is_nothrow_destructible(
+                array_type->element_type,
+                ast_ctx);
+        }
+        case TypeKind::Object: {
+            const RecordSemanticState* state =
+                lookup_record_state_for_type(canonical, ast_ctx);
+            if (!state || state->is_incomplete) {
+                return false;
+            }
+            if (state->destructors.empty()) {
+                return cpp_record_subobjects_are_nothrow_destructible(
+                    state,
+                    ast_ctx);
+            }
+            for (const auto& dtor : state->destructors) {
+                if (!cpp_destructor_is_viable_candidate(dtor, false)) {
+                    continue;
+                }
+                if (dtor.is_implicit || dtor.is_defaulted) {
+                    return cpp_record_subobjects_are_nothrow_destructible(
+                        state,
+                        ast_ctx);
+                }
+                if (function_type_is_non_throwing(dtor.type, ast_ctx) ||
+                    function_type_is_non_throwing(
+                        dtor.symbol ? dtor.symbol->type : QualType(nullptr),
+                        ast_ctx)) {
+                    return true;
+                }
+                return false;
+            }
+            return false;
+        }
+        case TypeKind::Builtin:
+        case TypeKind::Pointer:
+        case TypeKind::MemberPointer:
+        case TypeKind::Enum:
+        case TypeKind::BlockPointer:
+        case TypeKind::Vector:
+        case TypeKind::Complex:
+            return true;
+        default:
+            return canonical->isScalar();
+    }
+}
+
+bool cpp_expression_is_known_noexcept(
+    const Expr* expr,
+    const ASTContext* ast_ctx) {
+    if (!expr) {
+        return false;
+    }
+    auto* stripped =
+        strip_implicit_casts_for_noexcept(const_cast<Expr*>(expr));
+    if (!stripped) {
+        return false;
+    }
+
+    if (auto* call = dyn_cast<FuncCall>(stripped)) {
+        return call->func &&
+               function_type_is_non_throwing(call->func->get_type(), ast_ctx);
+    }
+    if (auto* member_call = dyn_cast<CppMemberCallExpr>(stripped)) {
+        return member_call->lowered_call &&
+               member_call->lowered_call->func &&
+               function_type_is_non_throwing(
+                   member_call->lowered_call->func->get_type(),
+                   ast_ctx);
+    }
+    if (auto* construct = dyn_cast<CppConstructExpr>(stripped)) {
+        if (construct->ctor_sym &&
+            function_type_is_non_throwing(construct->ctor_sym->type, ast_ctx)) {
+            return true;
+        }
+        return cpp_type_is_nothrow_destructible(construct->ctype, ast_ctx);
+    }
+    if (auto* pseudo_dtor = dyn_cast<CppPseudoDestructorExpr>(stripped)) {
+        if (pseudo_dtor->destructor_sym &&
+            function_type_is_non_throwing(
+                pseudo_dtor->destructor_sym->type,
+                ast_ctx)) {
+            return true;
+        }
+        return cpp_type_is_nothrow_destructible(
+            pseudo_dtor->destroyed_type,
+            ast_ctx);
+    }
+    return false;
 }
 
 void cpp_recompute_default_constructor_traits(

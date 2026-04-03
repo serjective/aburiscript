@@ -2230,6 +2230,56 @@ bool Collect::resolve_dependent_expr_after_substitution(
             alignof_expr->location);
         return true;
     }
+    if (auto* noexcept_expr = dyn_cast<CppNoexceptExpr>(expr.get())) {
+        if (!noexcept_expr->operand ||
+            expression_depends_on_template_parameters(
+                noexcept_expr->operand.get()) ||
+            type_depends_on_template_parameters(
+                noexcept_expr->operand->get_type(),
+                ast_ctx_.get())) {
+            return true;
+        }
+        auto owned_noexcept = std::unique_ptr<CppNoexceptExpr>(
+            static_cast<CppNoexceptExpr*>(expr.release()));
+        auto rewritten = collect_cpp_noexcept_expression(
+            std::move(owned_noexcept->operand),
+            owned_noexcept->location);
+        if (!rewritten) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to resolve dependent noexcept expression after substitution";
+            }
+            return false;
+        }
+        expr = std::move(rewritten);
+        return true;
+    }
+    if (auto* pseudo_dtor = dyn_cast<CppPseudoDestructorExpr>(expr.get())) {
+        if (!pseudo_dtor->base ||
+            expression_depends_on_template_parameters(
+                pseudo_dtor->base.get()) ||
+            type_depends_on_template_parameters(
+                pseudo_dtor->destroyed_type,
+                ast_ctx_.get())) {
+            return true;
+        }
+        auto owned_pseudo_dtor = std::unique_ptr<CppPseudoDestructorExpr>(
+            static_cast<CppPseudoDestructorExpr*>(expr.release()));
+        auto rewritten = collect_cpp_pseudo_destructor_expression(
+            std::move(owned_pseudo_dtor->base),
+            owned_pseudo_dtor->destroyed_type,
+            owned_pseudo_dtor->is_arrow != 0,
+            owned_pseudo_dtor->location);
+        if (!rewritten) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to resolve dependent pseudo-destructor expression after substitution";
+            }
+            return false;
+        }
+        expr = std::move(rewritten);
+        return true;
+    }
 
     auto strip_stale_dependent_implicit_casts =
         [&](std::unique_ptr<Expr>& candidate) {

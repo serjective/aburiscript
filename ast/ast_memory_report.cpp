@@ -77,6 +77,7 @@ constexpr auto kAllStmtKinds = std::to_array<StmtKind>({
     StmtKind::SizeOfExpr,
     StmtKind::SizeOfPackExpr,
     StmtKind::AlignOfExpr,
+    StmtKind::CppNoexceptExpr,
     StmtKind::OffsetOfExpr,
     StmtKind::GenericExpr,
     StmtKind::StmtExpr,
@@ -90,6 +91,7 @@ constexpr auto kAllStmtKinds = std::to_array<StmtKind>({
     StmtKind::CppThrowExpr,
     StmtKind::CppNewExpr,
     StmtKind::CppDeleteExpr,
+    StmtKind::CppPseudoDestructorExpr,
     StmtKind::BlockByrefAccessExpr,
     StmtKind::BlockExpr,
     StmtKind::CppLambdaExpr,
@@ -188,6 +190,7 @@ const char* stmt_kind_name(StmtKind kind) {
         case StmtKind::SizeOfExpr: return "SizeOfExpr";
         case StmtKind::SizeOfPackExpr: return "SizeOfPackExpr";
         case StmtKind::AlignOfExpr: return "AlignOfExpr";
+        case StmtKind::CppNoexceptExpr: return "CppNoexceptExpr";
         case StmtKind::OffsetOfExpr: return "OffsetOfExpr";
         case StmtKind::GenericExpr: return "GenericExpr";
         case StmtKind::StmtExpr: return "StmtExpr";
@@ -201,6 +204,7 @@ const char* stmt_kind_name(StmtKind kind) {
         case StmtKind::CppThrowExpr: return "CppThrowExpr";
         case StmtKind::CppNewExpr: return "CppNewExpr";
         case StmtKind::CppDeleteExpr: return "CppDeleteExpr";
+        case StmtKind::CppPseudoDestructorExpr: return "CppPseudoDestructorExpr";
         case StmtKind::BlockByrefAccessExpr: return "BlockByrefAccessExpr";
         case StmtKind::BlockExpr: return "BlockExpr";
         case StmtKind::CppLambdaExpr: return "CppLambdaExpr";
@@ -1196,6 +1200,12 @@ private:
                 visit_stmt(node->expr_operand.get());
                 return;
             }
+            case StmtKind::CppNoexceptExpr: {
+                auto* node = static_cast<const CppNoexceptExpr*>(stmt);
+                record_stmt<CppNoexceptExpr>(StmtKind::CppNoexceptExpr);
+                visit_stmt(node->operand.get());
+                return;
+            }
             case StmtKind::OffsetOfExpr: {
                 auto* node = static_cast<const OffsetOfExpr*>(stmt);
                 record_stmt<OffsetOfExpr>(StmtKind::OffsetOfExpr);
@@ -1318,6 +1328,14 @@ private:
                 auto* node = static_cast<const CppDeleteExpr*>(stmt);
                 record_stmt<CppDeleteExpr>(StmtKind::CppDeleteExpr);
                 visit_stmt(node->operand.get());
+                return;
+            }
+            case StmtKind::CppPseudoDestructorExpr: {
+                auto* node = static_cast<const CppPseudoDestructorExpr*>(stmt);
+                record_stmt<CppPseudoDestructorExpr>(
+                    StmtKind::CppPseudoDestructorExpr);
+                visit_symbol(node->destructor_sym);
+                visit_stmt(node->base.get());
                 return;
             }
             case StmtKind::BlockExpr: {

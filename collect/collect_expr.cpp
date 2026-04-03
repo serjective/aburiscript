@@ -4464,6 +4464,120 @@ std::unique_ptr<Expr> Collect::collect_cpp_delete_expression(
         loc);
 }
 
+std::unique_ptr<Expr> Collect::collect_cpp_pseudo_destructor_expression(
+    std::unique_ptr<Expr> base,
+    QualType destroyed_type,
+    bool is_arrow,
+    SrcLoc loc) {
+    if (!base) {
+        report_error(
+            "pseudo-destructor expression requires an object operand",
+            loc);
+        return collect_error_expression(
+            "pseudo-destructor expression requires an object operand",
+            loc);
+    }
+    if (destroyed_type &&
+        contains_deferred_semantic_type(destroyed_type.get_shared())) {
+        destroyed_type = resolve_typeof_types(destroyed_type, loc);
+    }
+    if (!destroyed_type) {
+        report_error(
+            "pseudo-destructor expression requires a valid destroyed type",
+            loc);
+        return collect_error_expression("invalid pseudo-destructor type", loc);
+    }
+
+    if (is_arrow) {
+        base = collect_apply_standard_conversions(
+            std::move(base),
+            ExprUseContext::RValue);
+    }
+
+    auto build_expr =
+        [&](std::unique_ptr<Expr> object_base,
+            QualType object_destroyed_type,
+            std::shared_ptr<Symbol> destructor_sym)
+            -> std::unique_ptr<Expr> {
+            return collect_make<CppPseudoDestructorExpr>(
+                std::move(object_base),
+                object_destroyed_type,
+                QualType(get_builtin_void()),
+                std::move(destructor_sym),
+                is_arrow,
+                loc);
+        };
+
+    QualType base_type = base->get_type();
+    if (!base_type) {
+        report_error("pseudo-destructor operand has unknown type", loc);
+        return collect_error_expression("pseudo-destructor operand has unknown type", loc);
+    }
+
+    QualType object_type = remove_reference(base_type, ast_ctx_.get());
+    if (is_arrow) {
+        auto pointer_type =
+            remove_reference_and_desugar(base_type, ast_ctx_.get())
+                .as_shared<PointerType>();
+        if (!pointer_type) {
+            report_error("pseudo-destructor '->' requires pointer operand", loc);
+            return collect_error_expression("invalid pseudo-destructor operand", loc);
+        }
+        object_type = pointer_type->pointed_type;
+    }
+
+    if (type_depends_on_template_parameters(object_type, ast_ctx_.get()) ||
+        type_depends_on_template_parameters(destroyed_type, ast_ctx_.get()) ||
+        expression_depends_on_template_parameters(base.get())) {
+        return build_expr(std::move(base), destroyed_type, nullptr);
+    }
+
+    QualType canonical_object_type =
+        remove_reference_and_desugar(object_type, ast_ctx_.get());
+    QualType canonical_destroyed_type =
+        remove_reference_and_desugar(destroyed_type, ast_ctx_.get());
+    if (!canonical_object_type || !canonical_destroyed_type ||
+        !same_type_ignoring_all_qualifiers(
+            canonical_object_type,
+            canonical_destroyed_type,
+            ast_ctx_.get())) {
+        report_error(
+            "pseudo-destructor type '" + destroyed_type.to_string() +
+                "' does not match object type '" + object_type.to_string() +
+                "'",
+            loc);
+        return collect_error_expression(
+            "pseudo-destructor type does not match object type",
+            loc);
+    }
+
+    if (!cpp_type_is_destructible(destroyed_type, false, ast_ctx_.get())) {
+        report_error(
+            "type '" + destroyed_type.to_string() +
+                "' is not destructible in pseudo-destructor expression",
+            loc);
+        return collect_error_expression("type is not destructible", loc);
+    }
+
+    std::shared_ptr<Symbol> destructor_sym = nullptr;
+    auto record_type = canonical_destroyed_type.as_shared<ObjectType>();
+    auto* record_decl =
+        record_type ? dyn_cast<ObjectDecl>(record_type->get_decl()) : nullptr;
+    const RecordSemanticState* record_state =
+        record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
+    if (record_state) {
+        for (const auto& dtor : record_state->destructors) {
+            if (!cpp_destructor_is_viable_candidate(dtor, false)) {
+                continue;
+            }
+            destructor_sym = dtor.symbol;
+            break;
+        }
+    }
+
+    return build_expr(std::move(base), destroyed_type, std::move(destructor_sym));
+}
+
 std::unique_ptr<Expr> Collect::collect_cpp_typeid_type(QualType type_operand,
                                                        SrcLoc loc) {
     if (!type_operand) {
@@ -4581,6 +4695,36 @@ std::unique_ptr<Expr> Collect::collect_alignof_expression(std::unique_ptr<Expr> 
     node->type_operand = QualType(target_type);
     finalize_alignof_node(node.get(), target_type, loc);
     return node;
+}
+
+std::unique_ptr<Expr> Collect::collect_cpp_noexcept_expression(
+    std::unique_ptr<Expr> expr,
+    SrcLoc loc) {
+    if (!expr) {
+        report_error("noexcept requires a valid expression operand", loc);
+        return collect_error_expression("invalid noexcept operand", loc);
+    }
+
+    expr = prepare_unevaluated_operand(std::move(expr), "noexcept");
+    if (!expr) {
+        report_error("noexcept requires a valid expression operand", loc);
+        return collect_error_expression("invalid noexcept operand", loc);
+    }
+
+    auto bool_type = QualType(get_builtin_bool());
+    if (expression_depends_on_template_parameters(expr.get()) ||
+        type_depends_on_template_parameters(expr->get_type(), ast_ctx_.get())) {
+        return collect_make<CppNoexceptExpr>(
+            std::move(expr),
+            bool_type,
+            loc);
+    }
+
+    bool is_noexcept = cpp_expression_is_known_noexcept(expr.get(), ast_ctx_.get());
+    return collect_integer_literal(
+        is_noexcept ? "1" : "0",
+        get_builtin_bool(),
+        loc);
 }
 
 

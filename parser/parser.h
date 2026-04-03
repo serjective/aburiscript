@@ -580,6 +580,10 @@ private:
     std::unique_ptr<Expr> parse_cpp_throw_expression();
     std::unique_ptr<Expr> parse_cpp_new_expression(bool is_global_allocation);
     std::unique_ptr<Expr> parse_cpp_delete_expression(bool is_global_delete);
+    std::unique_ptr<Expr> parse_cpp_postfix_pseudo_destructor_expression(
+        std::unique_ptr<Expr> base,
+        bool is_arrow,
+        SrcLoc operator_loc);
     CppCatchClause parse_cpp_catch_clause();
     std::unique_ptr<Stmt> parse_cpp_try_statement(
         std::shared_ptr<Scope> try_scope = nullptr,

@@ -125,6 +125,7 @@ enum class StmtKind : uint8_t {
     SizeOfExpr,
     SizeOfPackExpr,
     AlignOfExpr,
+    CppNoexceptExpr,
     OffsetOfExpr,
     GenericExpr,
     StmtExpr,
@@ -138,6 +139,7 @@ enum class StmtKind : uint8_t {
     CppThrowExpr,
     CppNewExpr,
     CppDeleteExpr,
+    CppPseudoDestructorExpr,
     BlockByrefAccessExpr,
     BlockExpr,
     CppLambdaExpr,
@@ -1448,6 +1450,34 @@ struct CppDeleteExpr: Expr {
 
     static bool classof(const Stmt *s) {
         return s->get_kind() == StmtKind::CppDeleteExpr;
+    }
+};
+struct CppPseudoDestructorExpr : Expr {
+    std::unique_ptr<Expr> base;
+    QualType destroyed_type;
+    QualType ctype;
+    std::shared_ptr<Symbol> destructor_sym;
+    uint8_t is_arrow : 1;
+
+    CppPseudoDestructorExpr(std::unique_ptr<Expr> base,
+                            QualType destroyed_type,
+                            QualType ctype,
+                            std::shared_ptr<Symbol> destructor_sym,
+                            bool is_arrow,
+                            SrcLoc loc = SrcLoc())
+        : Expr(StmtKind::CppPseudoDestructorExpr, loc),
+          base(std::move(base)),
+          destroyed_type(std::move(destroyed_type)),
+          ctype(std::move(ctype)),
+          destructor_sym(std::move(destructor_sym)),
+          is_arrow(is_arrow) {}
+
+    QualType get_type() override {
+        return ctype;
+    }
+
+    static bool classof(const Stmt* s) {
+        return s->get_kind() == StmtKind::CppPseudoDestructorExpr;
     }
 };
 struct BlockByrefAccessExpr : Expr {
@@ -3708,6 +3738,24 @@ struct AlignOfExpr : Expr {
     bool isLValue() override { return false; }
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::AlignOfExpr; }
+};
+struct CppNoexceptExpr : Expr {
+    std::unique_ptr<Expr> operand;
+    QualType ctype;
+
+    CppNoexceptExpr(std::unique_ptr<Expr> operand,
+                    QualType ctype,
+                    SrcLoc loc = SrcLoc())
+        : Expr(StmtKind::CppNoexceptExpr, loc),
+          operand(std::move(operand)),
+          ctype(std::move(ctype)) {}
+
+    QualType get_type() override { return ctype; }
+    bool isLValue() override { return false; }
+
+    static bool classof(const Stmt* s) {
+        return s->get_kind() == StmtKind::CppNoexceptExpr;
+    }
 };
 
 // GenericAssociation for _Generic expression

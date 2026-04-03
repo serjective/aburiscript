@@ -797,6 +797,24 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
             assign_node_id(result.get(), ast_ctx);
             return result;
         }
+        case StmtKind::CppPseudoDestructorExpr: {
+            const auto* pseudo_dtor =
+                static_cast<const CppPseudoDestructorExpr*>(expr);
+            auto cloned_base =
+                clone_expr_impl(pseudo_dtor->base.get(), ast_ctx, error_out);
+            if (pseudo_dtor->base && !cloned_base) {
+                return {};
+            }
+            auto result = std::make_unique<CppPseudoDestructorExpr>(
+                std::move(cloned_base),
+                pseudo_dtor->destroyed_type,
+                pseudo_dtor->ctype,
+                pseudo_dtor->destructor_sym,
+                pseudo_dtor->is_arrow != 0,
+                pseudo_dtor->location);
+            assign_node_id(result.get(), ast_ctx);
+            return result;
+        }
         case StmtKind::BlockByrefAccessExpr: {
             const auto* byref_expr = static_cast<const BlockByrefAccessExpr*>(expr);
             auto cloned_cell_expr =
@@ -1455,6 +1473,21 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
             assign_node_id(result.get(), ast_ctx);
             auto* cloned_alignof = static_cast<AlignOfExpr*>(result.get());
             cloned_alignof->result_type = alignof_expr->result_type;
+            return result;
+        }
+        case StmtKind::CppNoexceptExpr: {
+            const auto* noexcept_expr =
+                static_cast<const CppNoexceptExpr*>(expr);
+            auto cloned_operand =
+                clone_expr_impl(noexcept_expr->operand.get(), ast_ctx, error_out);
+            if (noexcept_expr->operand && !cloned_operand) {
+                return {};
+            }
+            auto result = std::make_unique<CppNoexceptExpr>(
+                std::move(cloned_operand),
+                noexcept_expr->ctype,
+                noexcept_expr->location);
+            assign_node_id(result.get(), ast_ctx);
             return result;
         }
         case StmtKind::GenericExpr: {

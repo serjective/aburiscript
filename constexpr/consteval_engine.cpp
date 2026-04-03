@@ -2,6 +2,7 @@
 
 #include "../ast/ast.h"
 #include "../ast/ast_context.h"
+#include "../ast/special_members.h"
 #include "../numeric_utils.h"
 #include "eval_state.h"
 
@@ -183,39 +184,6 @@ bool const_value_to_constraint_bool(const ConstValue& value, bool& out) {
         default:
             return false;
     }
-}
-
-bool expression_is_known_noexcept_for_requires(const Expr* expr) {
-    if (!expr) {
-        return false;
-    }
-    auto* stripped = strip_noop_implicit_casts(const_cast<Expr*>(expr));
-    if (!stripped) {
-        return false;
-    }
-
-    auto is_nothrow_function_type = [](QualType function_like_type) -> bool {
-        auto function_type =
-            desugar_type(function_like_type).as_shared<FunctionType>();
-        return function_type &&
-               function_type->exception_spec ==
-                   FunctionExceptionSpecKind::NonThrowing;
-    };
-
-    if (auto* call = dyn_cast<FuncCall>(stripped)) {
-        return call->func && is_nothrow_function_type(call->func->get_type());
-    }
-    if (auto* member_call = dyn_cast<CppMemberCallExpr>(stripped)) {
-        return member_call->lowered_call &&
-               member_call->lowered_call->func &&
-               is_nothrow_function_type(
-                   member_call->lowered_call->func->get_type());
-    }
-    if (auto* construct = dyn_cast<CppConstructExpr>(stripped)) {
-        return construct->ctor_sym &&
-               is_nothrow_function_type(construct->ctor_sym->type);
-    }
-    return false;
 }
 
 struct InterpScopeBindings {
@@ -1165,7 +1133,7 @@ ConstEvalResult eval_requires_expr(RequiresExpr* requires_expr,
                     return ConstEvalResult::constant(ConstValue::boolean(false));
                 }
                 if (requirement.is_noexcept &&
-                    !expression_is_known_noexcept_for_requires(
+                    !cpp_expression_is_known_noexcept(
                         requirement.expr.get())) {
                     return ConstEvalResult::constant(ConstValue::boolean(false));
                 }
@@ -3850,6 +3818,13 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
                 "alignof expression is not a compile-time constant", expr->location);
         }
         return make_constant_int(ConstIntValue::from_signed(*val, 64));
+    }
+
+    if (auto* noexcept_expr = dyn_cast<CppNoexceptExpr>(expr)) {
+        bool is_noexcept =
+            cpp_expression_is_known_noexcept(noexcept_expr->operand.get());
+        return make_constant_int(
+            ConstIntValue::from_signed(is_noexcept ? 1 : 0, 64));
     }
 
     if (auto* offsetof_expr = dyn_cast<OffsetOfExpr>(expr)) {

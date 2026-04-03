@@ -2046,6 +2046,14 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             check_and_consume(TokenType::RIGHT_BRACKET);
             expr = collect_->collect_array_subscript(std::move(expr), std::move(index), loc);
         } else if (gentle_check_and_consume(TokenType::DOT)) {
+            if (is_cxx_mode_active() &&
+                gentle_check(TokenType::BITWISE_NOT)) {
+                expr = parse_cpp_postfix_pseudo_destructor_expression(
+                    std::move(expr),
+                    false,
+                    loc);
+                continue;
+            }
             // Member access: expr.member
             QualType base_type = expr ? expr->get_type() : QualType();
             bool saw_template_keyword = gentle_check_and_consume(TokenType::TEMPLATE);
@@ -2077,6 +2085,14 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                 loc,
                 allow_overloaded_method_set);
         } else if (gentle_check_and_consume(TokenType::ARROW)) {
+            if (is_cxx_mode_active() &&
+                gentle_check(TokenType::BITWISE_NOT)) {
+                expr = parse_cpp_postfix_pseudo_destructor_expression(
+                    std::move(expr),
+                    true,
+                    loc);
+                continue;
+            }
             // Pointer member access: ptr->member
             QualType base_type = expr ? expr->get_type() : QualType();
             bool saw_template_keyword = gentle_check_and_consume(TokenType::TEMPLATE);
@@ -2121,6 +2137,34 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
     return expr;
 
 }
+
+std::unique_ptr<Expr> Parser::parse_cpp_postfix_pseudo_destructor_expression(
+    std::unique_ptr<Expr> base,
+    bool is_arrow,
+    SrcLoc operator_loc) {
+    check_and_consume(TokenType::BITWISE_NOT);
+
+    DeclarationParser parse_decl(this);
+    auto destroyed_base_type = parse_decl.parse_declaration(false);
+    if (!destroyed_base_type || !parse_decl.name.empty()) {
+        error_custloc(
+            "expected type-name after '~' in pseudo-destructor expression",
+            current_token().loc);
+    }
+    QualType destroyed_type(
+        destroyed_base_type,
+        parse_decl.qualifiers);
+    retain_type_specifier_decl_if_needed(parse_decl);
+
+    check_and_consume(TokenType::LEFT_PAREN);
+    check_and_consume(TokenType::RIGHT_PAREN);
+    return collect_->collect_cpp_pseudo_destructor_expression(
+        std::move(base),
+        destroyed_type,
+        is_arrow,
+        operator_loc);
+}
+
 std::unique_ptr<Expr> Parser::parse_unary_expression() {
     Token tok = current_token();
     if (tok.type == TokenType::BITWISE_XOR) {
@@ -2189,6 +2233,16 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
         auto expr = parse_assignment_expression();
         check_and_consume(TokenType::RIGHT_PAREN);
         return collect_->collect_alignof_expression(std::move(expr), tok.loc);
+    }
+
+    if (is_cxx_mode_active() && tok.type == TokenType::NOEXCEPT_KW) {
+        advance(); // consume 'noexcept'
+        check_and_consume(TokenType::LEFT_PAREN);
+        auto expr = parse_expression();
+        check_and_consume(TokenType::RIGHT_PAREN);
+        return collect_->collect_cpp_noexcept_expression(
+            std::move(expr),
+            tok.loc);
     }
 
     // Handle sizeof operator

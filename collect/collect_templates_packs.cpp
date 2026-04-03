@@ -587,6 +587,18 @@ bool collect_pack_expansion_shape_in_expr(
                        parameters,
                        shape_out);
         }
+        case StmtKind::CppPseudoDestructorExpr: {
+            const auto* pseudo_dtor =
+                static_cast<const CppPseudoDestructorExpr*>(expr);
+            return collect_pack_expansion_shape_in_expr(
+                       pseudo_dtor->base.get(),
+                       parameters,
+                       shape_out) &&
+                   collect_pack_expansion_shape_in_type(
+                       pseudo_dtor->destroyed_type,
+                       parameters,
+                       shape_out);
+        }
         case StmtKind::BlockExpr: {
             const auto* block = static_cast<const BlockExpr*>(expr);
             if (!collect_pack_expansion_shape_in_type(
@@ -861,6 +873,14 @@ bool collect_pack_expansion_shape_in_expr(
                 }
             }
             return true;
+        }
+        case StmtKind::CppNoexceptExpr: {
+            const auto* noexcept_expr =
+                static_cast<const CppNoexceptExpr*>(expr);
+            return collect_pack_expansion_shape_in_expr(
+                noexcept_expr->operand.get(),
+                parameters,
+                shape_out);
         }
         case StmtKind::StmtExpr: {
             const auto* stmt_expr = static_cast<const StmtExpr*>(expr);

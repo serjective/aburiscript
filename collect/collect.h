@@ -590,6 +590,10 @@ public:
     std::unique_ptr<Expr> collect_alignof_expression(std::unique_ptr<Expr> expr,
                                                      SrcLoc loc) ;
 
+    std::unique_ptr<Expr> collect_cpp_noexcept_expression(
+        std::unique_ptr<Expr> expr,
+        SrcLoc loc) ;
+
     std::unique_ptr<Expr> collect_unary_operation(UnaryOpTypes uop,
                                                   std::unique_ptr<Expr> expr,
                                                   SrcLoc loc) ;
@@ -641,6 +645,12 @@ public:
                                                     SrcLoc loc,
                                                     bool allow_overloaded_method_set = false,
                                                     bool suppress_virtual_dispatch = false) ;
+
+    std::unique_ptr<Expr> collect_cpp_pseudo_destructor_expression(
+        std::unique_ptr<Expr> base,
+        QualType destroyed_type,
+        bool is_arrow,
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_member_pointer_literal_expression(
         const std::string& owner_name,

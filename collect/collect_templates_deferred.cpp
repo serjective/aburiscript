@@ -406,6 +406,22 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                        alignof_expr->type_operand,
                        ast_ctx);
         }
+        case StmtKind::CppNoexceptExpr:
+            return expr_depends_on_template_parameters_impl(
+                static_cast<const CppNoexceptExpr*>(stripped)->operand.get(),
+                ast_ctx,
+                active_variable_symbols);
+        case StmtKind::CppPseudoDestructorExpr: {
+            const auto* pseudo_dtor =
+                static_cast<const CppPseudoDestructorExpr*>(stripped);
+            return expr_depends_on_template_parameters_impl(
+                       pseudo_dtor->base.get(),
+                       ast_ctx,
+                       active_variable_symbols) ||
+                   type_depends_on_template_parameters(
+                       pseudo_dtor->destroyed_type,
+                       ast_ctx);
+        }
         case StmtKind::GenericExpr: {
             const auto* generic = static_cast<const GenericExpr*>(stripped);
             if (expr_depends_on_template_parameters_impl(
@@ -595,6 +611,16 @@ bool Collect::decltype_expression_requires_deferred_resolution(
         }
         case StmtKind::RequiresExpr:
             return expression_depends_on_template_parameters(stripped);
+        case StmtKind::CppPseudoDestructorExpr: {
+            const auto* pseudo_dtor =
+                static_cast<const CppPseudoDestructorExpr*>(stripped);
+            return (pseudo_dtor->base &&
+                    expression_depends_on_template_parameters(
+                        pseudo_dtor->base.get())) ||
+                   type_depends_on_template_parameters(
+                       pseudo_dtor->destroyed_type,
+                       ast_ctx_.get());
+        }
         case StmtKind::UnresolvedMemberExpr: {
             const auto* member =
                 static_cast<const UnresolvedMemberExpr*>(stripped);

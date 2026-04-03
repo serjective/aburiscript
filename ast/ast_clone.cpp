@@ -741,6 +741,20 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
                 remap_symbol(delete_expr->destructor_sym, ctx);
             return true;
         }
+        case StmtKind::CppPseudoDestructorExpr: {
+            auto* pseudo_dtor =
+                static_cast<CppPseudoDestructorExpr*>(expr.get());
+            if (pseudo_dtor->base &&
+                !rewrite_expr_tree(pseudo_dtor->base, ctx, error_out)) {
+                return false;
+            }
+            pseudo_dtor->destroyed_type =
+                rewrite_type(pseudo_dtor->destroyed_type, ctx);
+            pseudo_dtor->ctype = rewrite_type(pseudo_dtor->ctype, ctx);
+            pseudo_dtor->destructor_sym =
+                remap_symbol(pseudo_dtor->destructor_sym, ctx);
+            return true;
+        }
         case StmtKind::BlockByrefAccessExpr: {
             auto* byref_expr = static_cast<BlockByrefAccessExpr*>(expr.get());
             if (byref_expr->cell_expr &&
@@ -1088,6 +1102,15 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
                 rewrite_type(alignof_expr->type_operand, ctx);
             alignof_expr->result_type =
                 rewrite_type(alignof_expr->result_type, ctx);
+            return true;
+        }
+        case StmtKind::CppNoexceptExpr: {
+            auto* noexcept_expr = static_cast<CppNoexceptExpr*>(expr.get());
+            if (noexcept_expr->operand &&
+                !rewrite_expr_tree(noexcept_expr->operand, ctx, error_out)) {
+                return false;
+            }
+            noexcept_expr->ctype = rewrite_type(noexcept_expr->ctype, ctx);
             return true;
         }
         case StmtKind::GenericExpr: {

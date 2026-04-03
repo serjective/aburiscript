@@ -5,6 +5,9 @@
 #include <cstddef>
 #include <vector>
 
+class ASTContext;
+struct Expr;
+
 struct CppConstructorUserParamInfo {
     size_t user_param_start = 0;
     size_t max_user_param_count = 0;
@@ -40,6 +43,14 @@ bool cpp_type_is_destructible(
 
 bool cpp_type_is_trivially_destructible(
     QualType type,
+    const ASTContext* ast_ctx = nullptr);
+
+bool cpp_type_is_nothrow_destructible(
+    QualType type,
+    const ASTContext* ast_ctx = nullptr);
+
+bool cpp_expression_is_known_noexcept(
+    const Expr* expr,
     const ASTContext* ast_ctx = nullptr);
 
 void cpp_recompute_default_constructor_traits(

@@ -1,6 +1,7 @@
 #include "ast2llvm.h"
 #include "const_lowering.h"
 #include "../abi/darwin_blocks.h"
+#include "../ast/special_members.h"
 #include "../helpers/casting.h"
 #include "../constexpr/consteval_compat.h"
 #include "../numeric_utils.h"
@@ -1657,6 +1658,16 @@ llvm::Value * ASTToLLVM::convert_expression(Expr *expr) {
             return convert_sizeof_expr(static_cast<SizeOfExpr*>(expr));
         case StmtKind::AlignOfExpr:
             return convert_alignof_expr(static_cast<AlignOfExpr*>(expr));
+        case StmtKind::CppNoexceptExpr: {
+            auto* noexcept_expr = static_cast<CppNoexceptExpr*>(expr);
+            bool is_noexcept =
+                cpp_expression_is_known_noexcept(
+                    noexcept_expr->operand.get(),
+                    ast_ctx.get());
+            return llvm::ConstantInt::get(
+                llvm::Type::getInt1Ty(*context),
+                is_noexcept ? 1 : 0);
+        }
         case StmtKind::OffsetOfExpr:
             return convert_offsetof_expr(static_cast<OffsetOfExpr*>(expr));
         case StmtKind::StmtExpr:
@@ -1685,6 +1696,11 @@ llvm::Value * ASTToLLVM::convert_expression(Expr *expr) {
             return convert_cpp_new_expression(static_cast<CppNewExpr*>(expr));
         case StmtKind::CppDeleteExpr:
             return convert_cpp_delete_expression(static_cast<CppDeleteExpr*>(expr));
+        case StmtKind::CppPseudoDestructorExpr:
+            error(
+                "convert_expression(): pseudo-destructor expressions are only supported in unevaluated contexts",
+                expr->location);
+            return nullptr;
         case StmtKind::BlockExpr:
             return convert_block_expression(static_cast<BlockExpr*>(expr));
         case StmtKind::CppLambdaExpr: {
