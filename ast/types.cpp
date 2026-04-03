@@ -2854,6 +2854,8 @@ const char* builtin_type_transform_name(BuiltinTypeTransformKind kind) {
             return "__remove_cvref";
         case BuiltinTypeTransformKind::RemoveReference:
             return "__remove_reference";
+        case BuiltinTypeTransformKind::UnderlyingType:
+            return "__underlying_type";
         case BuiltinTypeTransformKind::RemoveExtent:
             return "__remove_extent";
         case BuiltinTypeTransformKind::RemoveAllExtents:
@@ -2892,6 +2894,10 @@ bool lookup_builtin_type_transform_kind(
     }
     if (name == "__remove_reference" || name == "__remove_reference_t") {
         out = BuiltinTypeTransformKind::RemoveReference;
+        return true;
+    }
+    if (name == "__underlying_type") {
+        out = BuiltinTypeTransformKind::UnderlyingType;
         return true;
     }
     if (name == "__remove_extent") {
@@ -2961,6 +2967,23 @@ QualType apply_builtin_type_transform(
                 static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
         case BuiltinTypeTransformKind::RemoveReference:
             return remove_reference(operand_type, ast_ctx);
+        case BuiltinTypeTransformKind::UnderlyingType: {
+            auto enum_type =
+                desugar_type(
+                    remove_top_level_qualifiers(
+                        remove_reference(operand_type, ast_ctx),
+                        static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE)),
+                    ast_ctx)
+                    .as_shared<EnumType>();
+            if (!enum_type) {
+                return QualType();
+            }
+            auto underlying_type = enum_type->semantic_underlying_type();
+            if (!underlying_type) {
+                return QualType();
+            }
+            return QualType(underlying_type);
+        }
         case BuiltinTypeTransformKind::RemoveExtent:
             return strip_one_array_extent(operand_type);
         case BuiltinTypeTransformKind::RemoveAllExtents: {

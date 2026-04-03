@@ -80,6 +80,7 @@ enum class BuiltinTypeTransformKind : uint8_t {
     RemoveCV,
     RemoveCVRef,
     RemoveReference,
+    UnderlyingType,
     RemoveExtent,
     RemoveAllExtents,
     Decay,
