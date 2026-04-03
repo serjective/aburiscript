@@ -926,6 +926,72 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                         }
                     }
                 }
+                if (!argument.dependent_template_member_name.empty()) {
+                    new_argument.dependent_template_qualifier_type =
+                        substitute_template_type_with_bindings(
+                            argument.dependent_template_qualifier_type,
+                            parameters,
+                            active_bindings,
+                            loc,
+                            allow_unsubstituted_parameters);
+                    new_argument.is_dependent =
+                        type_depends_on_template_parameters(
+                            new_argument.dependent_template_qualifier_type,
+                            ast_ctx_.get());
+
+                    if (!new_argument.is_dependent) {
+                        QualType concrete_owner =
+                            collect_try_realize_deferred_semantic_type(
+                                new_argument.dependent_template_qualifier_type);
+                        if (concrete_owner &&
+                            !type_depends_on_template_parameters(
+                                concrete_owner,
+                                ast_ctx_.get())) {
+                            new_argument.dependent_template_qualifier_type =
+                                concrete_owner;
+                        }
+
+                        const auto* nested_template =
+                            collect_lookup_record_nested_template(
+                                new_argument.dependent_template_qualifier_type,
+                                argument.dependent_template_member_name);
+                        auto* resolved_template =
+                            nested_template
+                                ? nested_template->decl
+                                : nullptr;
+                        if (!resolved_template) {
+                            if (allow_unsubstituted_parameters) {
+                                break;
+                            }
+                            report_error(
+                                "'" +
+                                    new_argument
+                                        .dependent_template_qualifier_type
+                                        .to_string() +
+                                    "::" +
+                                    argument.dependent_template_member_name +
+                                    "' does not name a template",
+                                loc);
+                            return false;
+                        }
+
+                        std::string resolved_name =
+                            new_argument.dependent_template_qualifier_type
+                                .to_string();
+                        resolved_name += "::";
+                        resolved_name += argument.dependent_template_member_name;
+                        new_argument = TemplateArgument::template_argument(
+                            resolved_template,
+                            std::move(resolved_name));
+                    } else {
+                        new_argument.template_name =
+                            new_argument.dependent_template_qualifier_type
+                                .to_string();
+                        new_argument.template_name += "::template ";
+                        new_argument.template_name +=
+                            argument.dependent_template_member_name;
+                    }
+                }
                 break;
             case TemplateArgumentKind::Value:
                 if (argument.referenced_parameter) {

@@ -208,6 +208,14 @@ bool template_argument_structurally_matches(const TemplateArgument& lhs,
                         lhs.referenced_parameter,
                         rhs.referenced_parameter);
                 }
+                if (!lhs.dependent_template_member_name.empty() ||
+                    !rhs.dependent_template_member_name.empty()) {
+                    return lhs.dependent_template_member_name ==
+                               rhs.dependent_template_member_name &&
+                           lhs.dependent_template_qualifier_type
+                               .equals_qualified(
+                                   rhs.dependent_template_qualifier_type);
+                }
                 return lhs.template_name == rhs.template_name;
             }
             return lhs.equals(rhs);
@@ -765,6 +773,14 @@ std::string template_argument_pattern_display_string(
                 return template_parameter_display_name_for_pack(
                     argument.referenced_parameter);
             }
+            if (!argument.dependent_template_member_name.empty()) {
+                if (argument.dependent_template_qualifier_type) {
+                    return argument.dependent_template_qualifier_type.to_string() +
+                           "::template " +
+                           argument.dependent_template_member_name;
+                }
+                return argument.dependent_template_member_name;
+            }
             if (auto display_name = template_decl_display_name(argument.template_decl);
                 !display_name.empty()) {
                 return display_name;
@@ -823,6 +839,15 @@ bool template_template_arguments_match(const TemplateArgument& formal_argument,
                                actual_argument.referenced_parameter->index &&
                            formal_argument.referenced_parameter->is_parameter_pack ==
                                actual_argument.referenced_parameter->is_parameter_pack;
+                }
+                if (!formal_argument.dependent_template_member_name.empty() ||
+                    !actual_argument.dependent_template_member_name.empty()) {
+                    return formal_argument.dependent_template_member_name ==
+                               actual_argument.dependent_template_member_name &&
+                           formal_argument.dependent_template_qualifier_type
+                               .equals_qualified(
+                                   actual_argument
+                                       .dependent_template_qualifier_type);
                 }
                 return formal_argument.template_name ==
                     actual_argument.template_name;
@@ -974,6 +999,10 @@ const TemplateParameterList* template_template_argument_parameter_list(
         return nullptr;
     }
 
+    if (!argument.dependent_template_member_name.empty()) {
+        return nullptr;
+    }
+
     if (auto* template_parameter = dyn_cast<TemplateTemplateParmDecl>(
             const_cast<TemplateParameterDecl*>(argument.referenced_parameter))) {
         return &template_parameter->parameters;
@@ -1105,6 +1134,9 @@ bool template_parameter_accepts_argument(const TemplateParameterDecl* parameter,
         }
         const auto* actual_parameters =
             template_template_argument_parameter_list(argument);
+        if (argument.is_dependent && actual_parameters == nullptr) {
+            return true;
+        }
         if (actual_parameters &&
             template_template_parameter_lists_are_compatible(
                 template_parameter->parameters,
@@ -1471,6 +1503,13 @@ bool TemplateArgument::equals(const TemplateArgument& other) const {
             if (is_dependent) {
                 if (referenced_parameter && other.referenced_parameter) {
                     return referenced_parameter == other.referenced_parameter;
+                }
+                if (!dependent_template_member_name.empty() ||
+                    !other.dependent_template_member_name.empty()) {
+                    return dependent_template_member_name ==
+                               other.dependent_template_member_name &&
+                           dependent_template_qualifier_type.equals_qualified(
+                               other.dependent_template_qualifier_type);
                 }
                 return template_name == other.template_name;
             }

@@ -273,26 +273,71 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
         return std::nullopt;
     }
 
-    std::vector<std::string> qualifiers;
-    std::string terminal_name = current_token().value;
-    advance();
+    auto parse_component = [&](bool preceded_by_template_keyword)
+        -> CppQualifiedNameComponent {
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            return {};
+        }
+        CppQualifiedNameComponent component;
+        component.name = current_token().value;
+        component.loc = current_token().loc;
+        component.preceded_by_template_keyword = preceded_by_template_keyword;
+        advance();
+        if (gentle_check(TokenType::LESS_THAN)) {
+            RevertingTentativeParsingAction template_args(*this);
+            auto parsed_arguments = parse_cpp_template_argument_list();
+            if (is_cpp_scope_resolution_here()) {
+                template_args.commit();
+                component.has_template_argument_list = true;
+                component.template_arguments = std::move(parsed_arguments);
+            }
+        }
+        return component;
+    };
+
+    std::vector<CppQualifiedNameComponent> components;
+    components.push_back(parse_component(false));
     while (is_cpp_scope_resolution_here()) {
         consume_cpp_scope_resolution();
-        qualifiers.push_back(terminal_name);
-        if (gentle_check(TokenType::TEMPLATE)) {
-            return std::nullopt;
-        }
+        bool preceded_by_template_keyword =
+            gentle_check_and_consume(TokenType::TEMPLATE);
         if (!gentle_check(TokenType::IDENTIFIER)) {
             return std::nullopt;
         }
-        terminal_name = current_token().value;
-        advance();
+        components.push_back(parse_component(preceded_by_template_keyword));
+    }
+
+    if (components.empty()) {
+        return std::nullopt;
     }
 
     if (!is_cpp_template_argument_boundary_here() &&
         !gentle_check(TokenType::ELLIPSIS)) {
         return std::nullopt;
     }
+
+    const auto& terminal_component = components.back();
+    if (terminal_component.has_template_argument_list) {
+        return std::nullopt;
+    }
+
+    auto format_template_name_argument =
+        [&](const std::vector<CppQualifiedNameComponent>& parts) {
+            std::string spelled;
+            if (has_global_qualifier) {
+                spelled += "::";
+            }
+            for (size_t idx = 0; idx < parts.size(); ++idx) {
+                if (idx > 0) {
+                    spelled += "::";
+                }
+                if (parts[idx].preceded_by_template_keyword) {
+                    spelled += "template ";
+                }
+                spelled += parts[idx].spelling();
+            }
+            return spelled;
+        };
 
     auto resolve_single_template = [](const DeclBinding* binding) -> const Decl* {
         if (!binding) {
@@ -307,27 +352,42 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
         return nullptr;
     };
 
+    std::vector<std::string> plain_qualifiers;
+    plain_qualifiers.reserve(components.size() > 0 ? components.size() - 1 : 0);
+    bool qualifiers_need_owner_chain = false;
+    for (size_t idx = 0; idx + 1 < components.size(); ++idx) {
+        const auto& component = components[idx];
+        if (component.preceded_by_template_keyword ||
+            component.has_template_argument_list) {
+            qualifiers_need_owner_chain = true;
+            break;
+        }
+        plain_qualifiers.push_back(component.name);
+    }
+
     const Decl* resolved_template = nullptr;
-    if (!has_global_qualifier && qualifiers.empty()) {
+    if (!has_global_qualifier && components.size() == 1 &&
+        !terminal_component.preceded_by_template_keyword) {
         resolved_template = resolve_single_template(
             LookupEngine::lookup_unqualified_template_binding(
-                terminal_name,
+                terminal_component.name,
                 current_scope,
                 true,
                 LookupNamespace::Ordinary));
         if (!resolved_template) {
             resolved_template = resolve_single_template(
                 LookupEngine::lookup_unqualified_template_binding(
-                    terminal_name,
+                    terminal_component.name,
                     current_scope,
                     true,
                     LookupNamespace::Tag));
         }
-    } else {
+    } else if (!qualifiers_need_owner_chain &&
+               !terminal_component.preceded_by_template_keyword) {
         LookupEngine::QualifiedNameSpec name_spec;
         name_spec.has_global_qualifier = has_global_qualifier;
-        name_spec.qualifiers = qualifiers;
-        name_spec.terminal_name = terminal_name;
+        name_spec.qualifiers = plain_qualifiers;
+        name_spec.terminal_name = terminal_component.name;
 
         auto ordinary_lookup = LookupEngine::lookup_qualified_name(
             name_spec,
@@ -341,16 +401,64 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
                 LookupNamespace::Tag);
             resolved_template = resolve_single_template(tag_lookup.binding);
         }
+    } else {
+        if (components.size() < 2) {
+            return std::nullopt;
+        }
+
+        std::vector<CppQualifiedNameComponent> qualifiers(
+            components.begin(),
+            components.end() - 1);
+        auto owner_chain = resolve_cpp_qualified_owner_chain(
+            qualifiers,
+            has_global_qualifier,
+            terminal_component.loc,
+            /*diagnose_dependent_names=*/false);
+        if (owner_chain.lookup_failed || !owner_chain.owner_type) {
+            return std::nullopt;
+        }
+        if (owner_chain.requires_template_keyword() &&
+            !terminal_component.preceded_by_template_keyword) {
+            return std::nullopt;
+        }
+
+        std::string template_name =
+            format_template_name_argument(components);
+        tentative.commit();
+
+        if (owner_chain.is_dependent_context()) {
+            TemplateArgument argument =
+                TemplateArgument::dependent_template_argument(
+                    template_name);
+            argument.dependent_template_qualifier_type =
+                owner_chain.owner_type;
+            argument.dependent_template_member_name =
+                terminal_component.name;
+            return argument;
+        }
+
+        const auto* nested_template =
+            collect_->collect_lookup_record_nested_template(
+                owner_chain.owner_type,
+                terminal_component.name);
+        auto* template_decl =
+            nested_template
+                ? nested_template->decl
+                : nullptr;
+        if (!template_decl) {
+            return std::nullopt;
+        }
+        return TemplateArgument::template_argument(
+            template_decl,
+            template_name);
     }
 
     if (!resolved_template) {
         return std::nullopt;
     }
 
-    std::string template_name = qualified_name_utils::format_cpp_qualified_name(
-        has_global_qualifier,
-        qualifiers,
-        terminal_name);
+    std::string template_name =
+        format_template_name_argument(components);
     tentative.commit();
 
     if (auto* template_parameter = dyn_cast<TemplateTemplateParmDecl>(

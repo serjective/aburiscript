@@ -329,6 +329,8 @@ struct TemplateArgument {
     std::shared_ptr<Expr> value_expr = nullptr;
     const TemplateDecl* template_decl = nullptr;
     const TemplateParameterDecl* referenced_parameter = nullptr;
+    QualType dependent_template_qualifier_type = nullptr;
+    std::string dependent_template_member_name;
     bool is_dependent = false;
     bool expands_parameter_pack = false;
     std::string template_name;
