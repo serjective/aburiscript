@@ -53,6 +53,7 @@ bool is_builtin_type_trait_kind(BuiltinKind kind) {
         case BuiltinKind::IS_TRIVIALLY_CONSTRUCTIBLE:
         case BuiltinKind::IS_NOTHROW_CONSTRUCTIBLE:
         case BuiltinKind::IS_CONVERTIBLE:
+        case BuiltinKind::IS_CORE_CONVERTIBLE:
         case BuiltinKind::IS_NOTHROW_CONVERTIBLE:
         case BuiltinKind::IS_DESTRUCTIBLE:
         case BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE:
@@ -114,6 +115,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__is_trivially_constructible", BuiltinKind::IS_TRIVIALLY_CONSTRUCTIBLE, 1, -1, true, true});
     register_builtin({"__is_nothrow_constructible", BuiltinKind::IS_NOTHROW_CONSTRUCTIBLE, 1, -1, true, true});
     register_builtin({"__is_convertible", BuiltinKind::IS_CONVERTIBLE, 2, 2, true, true});
+    register_builtin({"__is_core_convertible", BuiltinKind::IS_CORE_CONVERTIBLE, 2, 2, true, true});
     register_builtin({"__is_nothrow_convertible", BuiltinKind::IS_NOTHROW_CONVERTIBLE, 2, 2, true, true});
     register_builtin({"__is_destructible", BuiltinKind::IS_DESTRUCTIBLE, 1, 1, true, true});
     register_builtin({"__is_trivially_destructible", BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE, 1, 1, true, true});

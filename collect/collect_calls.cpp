@@ -740,6 +740,32 @@ std::unique_ptr<Expr> Collect::collect_function_call(
             std::move(args),
             loc);
     }
+    if (lang_opts_.is_cxx_mode()) {
+        bool callee_is_dependent =
+            expression_depends_on_template_parameters(callee.get()) ||
+            type_depends_on_template_parameters(
+                callee->get_type(),
+                ast_ctx_.get());
+        bool any_arg_is_dependent = false;
+        for (const auto& arg : args) {
+            if (!arg) {
+                continue;
+            }
+            if (expression_depends_on_template_parameters(arg.get()) ||
+                type_depends_on_template_parameters(
+                    arg->get_type(),
+                    ast_ctx_.get())) {
+                any_arg_is_dependent = true;
+                break;
+            }
+        }
+        if (callee_is_dependent || any_arg_is_dependent) {
+            return collect_dependent_call_expression(
+                std::move(callee),
+                std::move(args),
+                loc);
+        }
+    }
     auto call = collect_make<FuncCall>(std::move(callee), std::move(args), loc);
     if (!call->func) {
         return call;

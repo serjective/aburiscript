@@ -2470,6 +2470,7 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
     };
 
     std::function<bool(QualType, QualType)> trait_is_convertible_to_target;
+    std::function<bool(QualType, QualType)> trait_is_core_convertible_to_target;
 
     auto trait_reference_binding_viable = [&](QualType from_type,
                                              QualType to_type) -> bool {
@@ -2741,6 +2742,51 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                        canonical_target,
                        ExprUseContext::CallArgument)
                 .viable;
+        };
+
+    trait_is_core_convertible_to_target =
+        [&](QualType from_type, QualType to_type) -> bool {
+            if (!from_type || !to_type) {
+                return false;
+            }
+
+            QualType source_type = materialize_trait_source_type(from_type);
+            QualType canonical_source = desugar_type(source_type, ast_ctx_.get());
+            QualType canonical_target = desugar_type(to_type, ast_ctx_.get());
+            if (!canonical_source || !canonical_target) {
+                return false;
+            }
+
+            if (canonical_target->kind == TypeKind::Reference) {
+                return trait_reference_binding_viable(from_type, to_type);
+            }
+
+            // libc++ uses this builtin to model the "pass the result to a
+            // function parameter" form, where any void involvement is
+            // immediately ill-formed.
+            if (canonical_source->isVoid() || canonical_target->isVoid()) {
+                return false;
+            }
+
+            if (canonical_target->kind == TypeKind::Object) {
+                bool same_unqualified_type =
+                    source_type.equals_unqualified(to_type) ||
+                    canonical_source.equals_unqualified(canonical_target);
+                if (same_unqualified_type) {
+                    return true;
+                }
+                if (can_convert_derived_to_base_object(source_type, to_type)) {
+                    return true;
+                }
+                return trait_record_constructible_from(
+                    canonical_target,
+                    {from_type},
+                    /*allow_explicit_constructors=*/false,
+                    /*require_nothrow=*/false,
+                    /*require_trivial=*/false);
+            }
+
+            return trait_is_convertible_to_target(from_type, to_type);
         };
 
     std::function<bool(QualType)> trait_is_standard_layout_type;
@@ -3369,6 +3415,14 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                     /*require_trivial=*/false);
             }
             return true;
+        }
+        case BuiltinKind::IS_CORE_CONVERTIBLE: {
+            auto from_type = get_canonical_arg(0);
+            auto to_type = get_canonical_arg(1);
+            if (!from_type || !to_type) {
+                return std::nullopt;
+            }
+            return trait_is_core_convertible_to_target(*from_type, *to_type);
         }
         case BuiltinKind::IS_DESTRUCTIBLE: {
             auto type_arg = get_canonical_arg(0);

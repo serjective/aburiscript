@@ -609,7 +609,9 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                             typedef_resolved_type =
                                 std::make_shared<BuiltinTypeTransformType>(
                                     builtin_transform_kind,
-                                    operand_type);
+                                    QualType(
+                                        operand_type,
+                                        transform_dp.qualifiers));
                             mgnt->check_and_consume(TokenType::RIGHT_PAREN);
                             continue;
                         }

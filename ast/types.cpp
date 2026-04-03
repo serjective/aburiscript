@@ -2854,6 +2854,8 @@ const char* builtin_type_transform_name(BuiltinTypeTransformKind kind) {
             return "__remove_cvref";
         case BuiltinTypeTransformKind::RemoveReference:
             return "__remove_reference";
+        case BuiltinTypeTransformKind::RemoveExtent:
+            return "__remove_extent";
         case BuiltinTypeTransformKind::RemoveAllExtents:
             return "__remove_all_extents";
         case BuiltinTypeTransformKind::Decay:
@@ -2892,6 +2894,10 @@ bool lookup_builtin_type_transform_kind(
         out = BuiltinTypeTransformKind::RemoveReference;
         return true;
     }
+    if (name == "__remove_extent") {
+        out = BuiltinTypeTransformKind::RemoveExtent;
+        return true;
+    }
     if (name == "__remove_all_extents") {
         out = BuiltinTypeTransformKind::RemoveAllExtents;
         return true;
@@ -2928,6 +2934,18 @@ QualType apply_builtin_type_transform(
     BuiltinTypeTransformKind kind,
     QualType operand_type,
     const ASTContext* ast_ctx) {
+    auto strip_one_array_extent = [&](QualType type) -> QualType {
+        auto array_type = desugar_type(type, ast_ctx).as_shared<ArrayType>();
+        if (!array_type) {
+            return type;
+        }
+        auto element_type = array_type->element_type;
+        uint8_t merged_quals = static_cast<uint8_t>(
+            element_type.get_qualifiers() |
+            desugar_type(type, ast_ctx).get_qualifiers());
+        return QualType(element_type.get_shared(), merged_quals);
+    };
+
     switch (kind) {
         case BuiltinTypeTransformKind::RemoveConst:
             return remove_top_level_qualifiers(operand_type, QUAL_CONST);
@@ -2943,14 +2961,17 @@ QualType apply_builtin_type_transform(
                 static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
         case BuiltinTypeTransformKind::RemoveReference:
             return remove_reference(operand_type, ast_ctx);
+        case BuiltinTypeTransformKind::RemoveExtent:
+            return strip_one_array_extent(operand_type);
         case BuiltinTypeTransformKind::RemoveAllExtents: {
             QualType current = operand_type;
             while (current) {
-                auto current_array = desugar_type(current, ast_ctx).as_shared<ArrayType>();
+                auto current_array =
+                    desugar_type(current, ast_ctx).as_shared<ArrayType>();
                 if (!current_array) {
                     break;
                 }
-                current = current_array->element_type;
+                current = strip_one_array_extent(current);
             }
             return current;
         }
