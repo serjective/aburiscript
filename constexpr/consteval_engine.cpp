@@ -3862,6 +3862,9 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
     }
 
     if (auto* builtin_call = dyn_cast<BuiltinCallExpr>(expr)) {
+        if (builtin_call->kind == BuiltinKind::IS_CONSTANT_EVALUATED) {
+            return make_constant_int(ConstIntValue::from_signed(1, 64));
+        }
         if (!builtin_call->const_value.has_value()) {
             return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
                 "builtin call is not a compile-time constant", expr->location);

@@ -79,6 +79,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__builtin_object_size", BuiltinKind::OBJECT_SIZE, 2, 2, false, false});
     register_builtin({"__builtin_dynamic_object_size", BuiltinKind::DYNAMIC_OBJECT_SIZE, 2, 2, false, false});
     register_builtin({"__builtin_available", BuiltinKind::AVAILABLE, 1, -1, false, false});
+    register_builtin({"__builtin_is_constant_evaluated", BuiltinKind::IS_CONSTANT_EVALUATED, 0, 0, false, false});
     register_builtin({"__is_same", BuiltinKind::IS_SAME, 2, 2, true, true});
     register_builtin({"__is_function", BuiltinKind::IS_FUNCTION, 1, 1, true, true});
     register_builtin({"__is_reference", BuiltinKind::IS_REFERENCE, 1, 1, true, true});

@@ -1702,6 +1702,9 @@ llvm::Value* ASTToLLVM::convert_builtin_call_expr(BuiltinCallExpr *expr) {
         return lower_builtin_const_integer(
             *this, expr, expr->const_value.value_or(0));
     }
+    case BuiltinKind::IS_CONSTANT_EVALUATED: {
+        return llvm::ConstantInt::getFalse(llvm::Type::getInt1Ty(ctx));
+    }
     case BuiltinKind::AVAILABLE: {
         // Compatibility behavior: treat __builtin_available(...) as always true.
         return llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 1);

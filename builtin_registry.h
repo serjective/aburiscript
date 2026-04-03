@@ -16,6 +16,7 @@ enum class BuiltinKind {
     OBJECT_SIZE,
     DYNAMIC_OBJECT_SIZE,
     AVAILABLE,
+    IS_CONSTANT_EVALUATED,
     IS_SAME,
     IS_FUNCTION,
     IS_REFERENCE,

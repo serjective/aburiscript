@@ -6197,6 +6197,13 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_special_cases(
             node->const_value = is_const ? 1 : 0;
             return node;
         }
+        case BuiltinKind::IS_CONSTANT_EVALUATED: {
+            auto bool_type = QualType(get_builtin_bool());
+            auto node =
+                collect_make<BuiltinCallExpr>(kind, std::move(args), bool_type, loc);
+            node->const_value = 0;
+            return node;
+        }
         case BuiltinKind::SHUFFLEVECTOR: {
             QualType ret = int_type;
             if (!args.empty() && args[0] && args[0]->get_type() &&
