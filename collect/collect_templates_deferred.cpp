@@ -586,6 +586,10 @@ bool Collect::decltype_expression_requires_deferred_resolution(
         return true;
     }
 
+    if (expression_depends_on_template_parameters(stripped)) {
+        return true;
+    }
+
     switch (stripped->get_kind()) {
         case StmtKind::UnresolvedLookupExpr:
             return static_cast<const UnresolvedLookupExpr*>(stripped)

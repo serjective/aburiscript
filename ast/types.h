@@ -187,13 +187,7 @@ struct DecltypeExprType : CType {
           use_declared_type_rule(use_declared_type_rule) {}
     bool isIncomplete() const override { return true; }
     std::string to_string() const override { return "decltype(<expr>)"; }
-    bool equals(const CType& other) override {
-        if (other.kind != TypeKind::DecltypeExpr) {
-            return false;
-        }
-        const auto& rhs = static_cast<const DecltypeExprType&>(other);
-        return rhs.use_declared_type_rule == use_declared_type_rule;
-    }
+    bool equals(const CType& other) override;
     static bool classof(const CType *t) {
         return t->kind == TypeKind::DecltypeExpr;
     }

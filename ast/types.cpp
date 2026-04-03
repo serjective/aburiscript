@@ -127,6 +127,582 @@ std::string template_decl_display_name(const TemplateDecl* decl) {
     return {};
 }
 
+const Expr* strip_structural_implicit_casts(const Expr* expr) {
+    auto* current = const_cast<Expr*>(expr);
+    while (auto* cast = dyn_cast<ImplicitCast>(current)) {
+        if (!cast->expr) {
+            break;
+        }
+        current = cast->expr.get();
+    }
+    return current;
+}
+
+bool template_parameter_structurally_matches(
+    const TemplateParameterDecl* lhs,
+    const TemplateParameterDecl* rhs) {
+    if (!lhs || !rhs) {
+        return lhs == rhs;
+    }
+    return lhs->get_kind() == rhs->get_kind() &&
+           lhs->depth == rhs->depth &&
+           lhs->index == rhs->index &&
+           lhs->is_parameter_pack == rhs->is_parameter_pack;
+}
+
+bool expr_structurally_matches(const Expr* lhs, const Expr* rhs);
+
+bool template_argument_pack_parameters_structurally_match(
+    const TemplateArgument& lhs,
+    const TemplateArgument& rhs) {
+    if (lhs.expands_parameter_pack != rhs.expands_parameter_pack ||
+        lhs.pack_expansion_parameters.size() != rhs.pack_expansion_parameters.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < lhs.pack_expansion_parameters.size(); ++idx) {
+        if (!template_parameter_structurally_matches(
+                lhs.pack_expansion_parameters[idx],
+                rhs.pack_expansion_parameters[idx])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool template_argument_structurally_matches(const TemplateArgument& lhs,
+                                            const TemplateArgument& rhs) {
+    if (lhs.kind != rhs.kind ||
+        !template_argument_pack_parameters_structurally_match(lhs, rhs)) {
+        return false;
+    }
+
+    switch (lhs.kind) {
+        case TemplateArgumentKind::Type:
+            return lhs.type.equals_qualified(rhs.type);
+        case TemplateArgumentKind::Value:
+            if (!lhs.value_type.equals_qualified(rhs.value_type) ||
+                lhs.is_dependent != rhs.is_dependent) {
+                return false;
+            }
+            if (lhs.is_dependent) {
+                if (lhs.referenced_parameter || rhs.referenced_parameter) {
+                    return template_parameter_structurally_matches(
+                        lhs.referenced_parameter,
+                        rhs.referenced_parameter);
+                }
+                if (lhs.value_expr && rhs.value_expr) {
+                    return expr_structurally_matches(
+                        lhs.value_expr.get(),
+                        rhs.value_expr.get());
+                }
+                return lhs.value_spelling == rhs.value_spelling;
+            }
+            return lhs.equals(rhs);
+        case TemplateArgumentKind::Template:
+            if (lhs.is_dependent != rhs.is_dependent) {
+                return false;
+            }
+            if (lhs.is_dependent) {
+                if (lhs.referenced_parameter || rhs.referenced_parameter) {
+                    return template_parameter_structurally_matches(
+                        lhs.referenced_parameter,
+                        rhs.referenced_parameter);
+                }
+                return lhs.template_name == rhs.template_name;
+            }
+            return lhs.equals(rhs);
+    }
+    return false;
+}
+
+bool template_argument_list_structurally_matches(
+    const std::optional<std::vector<TemplateArgument>>& lhs,
+    const std::optional<std::vector<TemplateArgument>>& rhs) {
+    if (lhs.has_value() != rhs.has_value()) {
+        return false;
+    }
+    if (!lhs.has_value()) {
+        return true;
+    }
+    if (lhs->size() != rhs->size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < lhs->size(); ++idx) {
+        if (!template_argument_structurally_matches((*lhs)[idx], (*rhs)[idx])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool dependent_lookup_qualifier_structurally_matches(
+    const DependentLookupQualifier& lhs,
+    const DependentLookupQualifier& rhs) {
+    return lhs.has_global_qualifier == rhs.has_global_qualifier &&
+           lhs.is_type_qualified == rhs.is_type_qualified &&
+           lhs.is_current_instantiation == rhs.is_current_instantiation &&
+           lhs.names_dependent_base == rhs.names_dependent_base &&
+           lhs.qualifiers == rhs.qualifiers &&
+           lhs.qualifier_type.equals_qualified(rhs.qualifier_type);
+}
+
+bool expr_vector_structurally_matches(
+    const std::vector<std::unique_ptr<Expr>>& lhs,
+    const std::vector<std::unique_ptr<Expr>>& rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < lhs.size(); ++idx) {
+        if (!expr_structurally_matches(lhs[idx].get(), rhs[idx].get())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool expr_structurally_matches(const Expr* lhs, const Expr* rhs) {
+    lhs = strip_structural_implicit_casts(lhs);
+    rhs = strip_structural_implicit_casts(rhs);
+    if (!lhs || !rhs) {
+        return lhs == rhs;
+    }
+    if (lhs->get_kind() != rhs->get_kind()) {
+        return false;
+    }
+
+    switch (lhs->get_kind()) {
+        case StmtKind::IntegerLiteral: {
+            const auto* lhs_int = static_cast<const IntegerLiteral*>(lhs);
+            const auto* rhs_int = static_cast<const IntegerLiteral*>(rhs);
+            return lhs_int->get_value() == rhs_int->get_value();
+        }
+        case StmtKind::FloatingLiteral: {
+            const auto* lhs_float = static_cast<const FloatingLiteral*>(lhs);
+            const auto* rhs_float = static_cast<const FloatingLiteral*>(rhs);
+            return lhs_float->value == rhs_float->value &&
+                   lhs_float->is_imaginary == rhs_float->is_imaginary;
+        }
+        case StmtKind::CharacterLiteral: {
+            const auto* lhs_char = static_cast<const CharacterLiteral*>(lhs);
+            const auto* rhs_char = static_cast<const CharacterLiteral*>(rhs);
+            return lhs_char->value == rhs_char->value &&
+                   lhs_char->int_value == rhs_char->int_value;
+        }
+        case StmtKind::StringLiteral: {
+            const auto* lhs_string = static_cast<const StringLiteral*>(lhs);
+            const auto* rhs_string = static_cast<const StringLiteral*>(rhs);
+            return lhs_string->value == rhs_string->value;
+        }
+        case StmtKind::VarRef: {
+            const auto* lhs_ref = static_cast<const VarRef*>(lhs);
+            const auto* rhs_ref = static_cast<const VarRef*>(rhs);
+            if (lhs_ref->get_name() != rhs_ref->get_name()) {
+                return false;
+            }
+            const auto* lhs_parameter =
+                lhs_ref->symref ? lhs_ref->symref->template_parameter_decl : nullptr;
+            const auto* rhs_parameter =
+                rhs_ref->symref ? rhs_ref->symref->template_parameter_decl : nullptr;
+            if (lhs_parameter || rhs_parameter) {
+                return template_parameter_structurally_matches(
+                    lhs_parameter,
+                    rhs_parameter);
+            }
+            return lhs_ref->symref == rhs_ref->symref;
+        }
+        case StmtKind::UnresolvedLookupExpr: {
+            const auto* lhs_lookup =
+                static_cast<const UnresolvedLookupExpr*>(lhs);
+            const auto* rhs_lookup =
+                static_cast<const UnresolvedLookupExpr*>(rhs);
+            return lhs_lookup->name == rhs_lookup->name &&
+                   lhs_lookup->requires_template_keyword ==
+                       rhs_lookup->requires_template_keyword &&
+                   lhs_lookup->is_dependent == rhs_lookup->is_dependent &&
+                   dependent_lookup_qualifier_structurally_matches(
+                       lhs_lookup->qualifier,
+                       rhs_lookup->qualifier) &&
+                   template_argument_list_structurally_matches(
+                       lhs_lookup->explicit_template_arguments,
+                       rhs_lookup->explicit_template_arguments);
+        }
+        case StmtKind::FuncCall: {
+            const auto* lhs_call = static_cast<const FuncCall*>(lhs);
+            const auto* rhs_call = static_cast<const FuncCall*>(rhs);
+            return expr_structurally_matches(
+                       lhs_call->func.get(),
+                       rhs_call->func.get()) &&
+                   expr_vector_structurally_matches(
+                       lhs_call->args,
+                       rhs_call->args);
+        }
+        case StmtKind::DependentCallExpr: {
+            const auto* lhs_call = static_cast<const DependentCallExpr*>(lhs);
+            const auto* rhs_call = static_cast<const DependentCallExpr*>(rhs);
+            return lhs_call->known_function_type.equals_qualified(
+                       rhs_call->known_function_type) &&
+                   expr_structurally_matches(
+                       lhs_call->callee.get(),
+                       rhs_call->callee.get()) &&
+                   expr_vector_structurally_matches(
+                       lhs_call->args,
+                       rhs_call->args);
+        }
+        case StmtKind::CppMemberCallExpr: {
+            const auto* lhs_call = static_cast<const CppMemberCallExpr*>(lhs);
+            const auto* rhs_call = static_cast<const CppMemberCallExpr*>(rhs);
+            return lhs_call->member_name == rhs_call->member_name &&
+                   lhs_call->isArrow == rhs_call->isArrow &&
+                   lhs_call->suppress_virtual_dispatch ==
+                       rhs_call->suppress_virtual_dispatch &&
+                   lhs_call->has_implicit_object_argument ==
+                       rhs_call->has_implicit_object_argument &&
+                   expr_structurally_matches(
+                       lhs_call->lowered_call.get(),
+                       rhs_call->lowered_call.get());
+        }
+        case StmtKind::MemberExpr: {
+            const auto* lhs_member = static_cast<const MemberExpr*>(lhs);
+            const auto* rhs_member = static_cast<const MemberExpr*>(rhs);
+            return lhs_member->isArrow == rhs_member->isArrow &&
+                   lhs_member->get_member_name() == rhs_member->get_member_name() &&
+                   expr_structurally_matches(
+                       lhs_member->base.get(),
+                       rhs_member->base.get());
+        }
+        case StmtKind::UnresolvedMemberExpr: {
+            const auto* lhs_member =
+                static_cast<const UnresolvedMemberExpr*>(lhs);
+            const auto* rhs_member =
+                static_cast<const UnresolvedMemberExpr*>(rhs);
+            return lhs_member->isArrow == rhs_member->isArrow &&
+                   lhs_member->is_current_instantiation ==
+                       rhs_member->is_current_instantiation &&
+                   lhs_member->names_dependent_base ==
+                       rhs_member->names_dependent_base &&
+                   lhs_member->requires_template_keyword ==
+                       rhs_member->requires_template_keyword &&
+                   lhs_member->suppress_virtual_dispatch ==
+                       rhs_member->suppress_virtual_dispatch &&
+                   lhs_member->member_name == rhs_member->member_name &&
+                   expr_structurally_matches(
+                       lhs_member->base.get(),
+                       rhs_member->base.get()) &&
+                   template_argument_list_structurally_matches(
+                       lhs_member->explicit_template_arguments,
+                       rhs_member->explicit_template_arguments);
+        }
+        case StmtKind::UnaryOperation: {
+            const auto* lhs_unary = static_cast<const UnaryOperation*>(lhs);
+            const auto* rhs_unary = static_cast<const UnaryOperation*>(rhs);
+            return lhs_unary->uop == rhs_unary->uop &&
+                   expr_structurally_matches(
+                       lhs_unary->exp.get(),
+                       rhs_unary->exp.get());
+        }
+        case StmtKind::DependentUnaryExpr: {
+            const auto* lhs_unary =
+                static_cast<const DependentUnaryExpr*>(lhs);
+            const auto* rhs_unary =
+                static_cast<const DependentUnaryExpr*>(rhs);
+            return lhs_unary->uop == rhs_unary->uop &&
+                   expr_structurally_matches(
+                       lhs_unary->operand.get(),
+                       rhs_unary->operand.get());
+        }
+        case StmtKind::BinaryOperation: {
+            const auto* lhs_binary = static_cast<const BinaryOperation*>(lhs);
+            const auto* rhs_binary = static_cast<const BinaryOperation*>(rhs);
+            return lhs_binary->bop == rhs_binary->bop &&
+                   expr_structurally_matches(
+                       lhs_binary->left.get(),
+                       rhs_binary->left.get()) &&
+                   expr_structurally_matches(
+                       lhs_binary->right.get(),
+                       rhs_binary->right.get());
+        }
+        case StmtKind::CompoundAssignOperation: {
+            const auto* lhs_binary =
+                static_cast<const CompoundAssignOperation*>(lhs);
+            const auto* rhs_binary =
+                static_cast<const CompoundAssignOperation*>(rhs);
+            return lhs_binary->bop == rhs_binary->bop &&
+                   expr_structurally_matches(
+                       lhs_binary->left.get(),
+                       rhs_binary->left.get()) &&
+                   expr_structurally_matches(
+                       lhs_binary->right.get(),
+                       rhs_binary->right.get());
+        }
+        case StmtKind::DependentBinaryExpr: {
+            const auto* lhs_binary =
+                static_cast<const DependentBinaryExpr*>(lhs);
+            const auto* rhs_binary =
+                static_cast<const DependentBinaryExpr*>(rhs);
+            return lhs_binary->bop == rhs_binary->bop &&
+                   expr_structurally_matches(
+                       lhs_binary->left.get(),
+                       rhs_binary->left.get()) &&
+                   expr_structurally_matches(
+                       lhs_binary->right.get(),
+                       rhs_binary->right.get());
+        }
+        case StmtKind::ExplicitCast: {
+            const auto* lhs_cast = static_cast<const ExplicitCast*>(lhs);
+            const auto* rhs_cast = static_cast<const ExplicitCast*>(rhs);
+            return lhs_cast->ctype.equals_qualified(rhs_cast->ctype) &&
+                   expr_structurally_matches(
+                       lhs_cast->expr.get(),
+                       rhs_cast->expr.get());
+        }
+        case StmtKind::ArraySubscriptExpr: {
+            const auto* lhs_subscript =
+                static_cast<const ArraySubscriptExpr*>(lhs);
+            const auto* rhs_subscript =
+                static_cast<const ArraySubscriptExpr*>(rhs);
+            return expr_structurally_matches(
+                       lhs_subscript->array.get(),
+                       rhs_subscript->array.get()) &&
+                   expr_structurally_matches(
+                       lhs_subscript->index.get(),
+                       rhs_subscript->index.get());
+        }
+        case StmtKind::DependentArraySubscriptExpr: {
+            const auto* lhs_subscript =
+                static_cast<const DependentArraySubscriptExpr*>(lhs);
+            const auto* rhs_subscript =
+                static_cast<const DependentArraySubscriptExpr*>(rhs);
+            return expr_structurally_matches(
+                       lhs_subscript->array.get(),
+                       rhs_subscript->array.get()) &&
+                   expr_structurally_matches(
+                       lhs_subscript->index.get(),
+                       rhs_subscript->index.get());
+        }
+        case StmtKind::MemberPointerAccessExpr: {
+            const auto* lhs_access =
+                static_cast<const MemberPointerAccessExpr*>(lhs);
+            const auto* rhs_access =
+                static_cast<const MemberPointerAccessExpr*>(rhs);
+            return lhs_access->is_arrow == rhs_access->is_arrow &&
+                   lhs_access->is_function_member ==
+                       rhs_access->is_function_member &&
+                   expr_structurally_matches(
+                       lhs_access->base.get(),
+                       rhs_access->base.get()) &&
+                   expr_structurally_matches(
+                       lhs_access->member_pointer.get(),
+                       rhs_access->member_pointer.get());
+        }
+        case StmtKind::DependentMemberPointerAccessExpr: {
+            const auto* lhs_access =
+                static_cast<const DependentMemberPointerAccessExpr*>(lhs);
+            const auto* rhs_access =
+                static_cast<const DependentMemberPointerAccessExpr*>(rhs);
+            return lhs_access->is_arrow == rhs_access->is_arrow &&
+                   expr_structurally_matches(
+                       lhs_access->base.get(),
+                       rhs_access->base.get()) &&
+                   expr_structurally_matches(
+                       lhs_access->member_pointer.get(),
+                       rhs_access->member_pointer.get());
+        }
+        case StmtKind::CppNoexceptExpr: {
+            const auto* lhs_noexcept = static_cast<const CppNoexceptExpr*>(lhs);
+            const auto* rhs_noexcept = static_cast<const CppNoexceptExpr*>(rhs);
+            return expr_structurally_matches(
+                lhs_noexcept->operand.get(),
+                rhs_noexcept->operand.get());
+        }
+        case StmtKind::CppPseudoDestructorExpr: {
+            const auto* lhs_dtor =
+                static_cast<const CppPseudoDestructorExpr*>(lhs);
+            const auto* rhs_dtor =
+                static_cast<const CppPseudoDestructorExpr*>(rhs);
+            return lhs_dtor->is_arrow == rhs_dtor->is_arrow &&
+                   lhs_dtor->destroyed_type.equals_qualified(
+                       rhs_dtor->destroyed_type) &&
+                   expr_structurally_matches(
+                       lhs_dtor->base.get(),
+                       rhs_dtor->base.get());
+        }
+        default:
+            return false;
+    }
+}
+
+bool expr_depends_on_template_parameters_for_type(const Expr* expr,
+                                                  const ASTContext* ast_ctx) {
+    expr = strip_structural_implicit_casts(expr);
+    if (!expr) {
+        return true;
+    }
+
+    switch (expr->get_kind()) {
+        case StmtKind::UnresolvedLookupExpr: {
+            const auto* lookup = static_cast<const UnresolvedLookupExpr*>(expr);
+            if (lookup->is_dependent ||
+                type_depends_on_template_parameters(
+                    lookup->qualifier.qualifier_type,
+                    ast_ctx)) {
+                return true;
+            }
+            if (lookup->explicit_template_arguments.has_value()) {
+                for (const auto& argument : *lookup->explicit_template_arguments) {
+                    if (template_argument_depends_on_template_parameters(
+                            argument,
+                            ast_ctx)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        case StmtKind::DependentCallExpr:
+        case StmtKind::DependentArraySubscriptExpr:
+        case StmtKind::DependentUnaryExpr:
+        case StmtKind::DependentBinaryExpr:
+        case StmtKind::DependentMemberPointerAccessExpr:
+        case StmtKind::FoldExpr:
+            return true;
+        case StmtKind::FuncCall: {
+            const auto* call = static_cast<const FuncCall*>(expr);
+            if (expr_depends_on_template_parameters_for_type(
+                    call->func.get(),
+                    ast_ctx)) {
+                return true;
+            }
+            for (const auto& arg : call->args) {
+                if (expr_depends_on_template_parameters_for_type(
+                        arg.get(),
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case StmtKind::CppMemberCallExpr: {
+            const auto* call = static_cast<const CppMemberCallExpr*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                call->lowered_call.get(),
+                ast_ctx);
+        }
+        case StmtKind::MemberExpr:
+            return expr_depends_on_template_parameters_for_type(
+                static_cast<const MemberExpr*>(expr)->base.get(),
+                ast_ctx);
+        case StmtKind::UnresolvedMemberExpr: {
+            const auto* member =
+                static_cast<const UnresolvedMemberExpr*>(expr);
+            if (member->is_current_instantiation ||
+                member->names_dependent_base ||
+                expr_depends_on_template_parameters_for_type(
+                    member->base.get(),
+                    ast_ctx)) {
+                return true;
+            }
+            if (member->explicit_template_arguments.has_value()) {
+                for (const auto& argument : *member->explicit_template_arguments) {
+                    if (template_argument_depends_on_template_parameters(
+                            argument,
+                            ast_ctx)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        case StmtKind::UnaryOperation:
+            return expr_depends_on_template_parameters_for_type(
+                static_cast<const UnaryOperation*>(expr)->exp.get(),
+                ast_ctx);
+        case StmtKind::BinaryOperation: {
+            const auto* binary = static_cast<const BinaryOperation*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                       binary->left.get(),
+                       ast_ctx) ||
+                   expr_depends_on_template_parameters_for_type(
+                       binary->right.get(),
+                       ast_ctx);
+        }
+        case StmtKind::CompoundAssignOperation: {
+            const auto* binary =
+                static_cast<const CompoundAssignOperation*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                       binary->left.get(),
+                       ast_ctx) ||
+                   expr_depends_on_template_parameters_for_type(
+                       binary->right.get(),
+                       ast_ctx);
+        }
+        case StmtKind::ExplicitCast:
+            return expr_depends_on_template_parameters_for_type(
+                static_cast<const ExplicitCast*>(expr)->expr.get(),
+                ast_ctx);
+        case StmtKind::ArraySubscriptExpr: {
+            const auto* subscript =
+                static_cast<const ArraySubscriptExpr*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                       subscript->array.get(),
+                       ast_ctx) ||
+                   expr_depends_on_template_parameters_for_type(
+                       subscript->index.get(),
+                       ast_ctx);
+        }
+        case StmtKind::MemberPointerAccessExpr: {
+            const auto* access =
+                static_cast<const MemberPointerAccessExpr*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                       access->base.get(),
+                       ast_ctx) ||
+                   expr_depends_on_template_parameters_for_type(
+                       access->member_pointer.get(),
+                       ast_ctx);
+        }
+        case StmtKind::SizeOfExpr: {
+            const auto* sizeof_expr = static_cast<const SizeOfExpr*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                       sizeof_expr->expr_operand.get(),
+                       ast_ctx) ||
+                   type_depends_on_template_parameters(
+                       sizeof_expr->type_operand,
+                       ast_ctx);
+        }
+        case StmtKind::AlignOfExpr: {
+            const auto* alignof_expr =
+                static_cast<const AlignOfExpr*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                       alignof_expr->expr_operand.get(),
+                       ast_ctx) ||
+                   type_depends_on_template_parameters(
+                       alignof_expr->type_operand,
+                       ast_ctx);
+        }
+        case StmtKind::CppNoexceptExpr:
+            return expr_depends_on_template_parameters_for_type(
+                static_cast<const CppNoexceptExpr*>(expr)->operand.get(),
+                ast_ctx);
+        case StmtKind::CppPseudoDestructorExpr: {
+            const auto* pseudo_dtor =
+                static_cast<const CppPseudoDestructorExpr*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                       pseudo_dtor->base.get(),
+                       ast_ctx) ||
+                   type_depends_on_template_parameters(
+                       pseudo_dtor->destroyed_type,
+                       ast_ctx);
+        }
+        default:
+            break;
+    }
+
+    auto expr_type = const_cast<Expr*>(expr)->get_type();
+    if (!expr_type) {
+        return true;
+    }
+    return type_depends_on_template_parameters(expr_type, ast_ctx);
+}
+
 bool template_argument_pack_expansion_parameters_match(
     const TemplateArgument& lhs,
     const TemplateArgument& rhs) {
@@ -564,17 +1140,10 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
             if (!typeof_type->expr) {
                 return true;
             }
-            switch (typeof_type->expr->get_kind()) {
-                case StmtKind::UnresolvedLookupExpr:
-                case StmtKind::DependentCallExpr:
-                case StmtKind::DependentArraySubscriptExpr:
-                case StmtKind::DependentUnaryExpr:
-                case StmtKind::DependentBinaryExpr:
-                case StmtKind::UnresolvedMemberExpr:
-                case StmtKind::DependentMemberPointerAccessExpr:
-                    return true;
-                default:
-                    break;
+            if (expr_depends_on_template_parameters_for_type(
+                    typeof_type->expr.get(),
+                    ast_ctx)) {
+                return true;
             }
             auto expr_type = typeof_type->expr->get_type();
             if (!expr_type) {
@@ -587,17 +1156,10 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
             if (!decltype_type->expr) {
                 return true;
             }
-            switch (decltype_type->expr->get_kind()) {
-                case StmtKind::UnresolvedLookupExpr:
-                case StmtKind::DependentCallExpr:
-                case StmtKind::DependentArraySubscriptExpr:
-                case StmtKind::DependentUnaryExpr:
-                case StmtKind::DependentBinaryExpr:
-                case StmtKind::UnresolvedMemberExpr:
-                case StmtKind::DependentMemberPointerAccessExpr:
-                    return true;
-                default:
-                    break;
+            if (expr_depends_on_template_parameters_for_type(
+                    decltype_type->expr.get(),
+                    ast_ctx)) {
+                return true;
             }
             auto expr_type = decltype_type->expr->get_type();
             if (!expr_type) {
@@ -682,6 +1244,15 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
     return false;
 }
 } // namespace
+
+bool DecltypeExprType::equals(const CType& other) {
+    if (other.kind != TypeKind::DecltypeExpr) {
+        return false;
+    }
+    const auto& rhs = static_cast<const DecltypeExprType&>(other);
+    return rhs.use_declared_type_rule == use_declared_type_rule &&
+           expr_structurally_matches(expr.get(), rhs.expr.get());
+}
 
 bool is_nullptr_type(QualType type, const ASTContext* ast_ctx) {
     return is_builtin_nullptr_type_impl(type, effective_ast_context(ast_ctx));
