@@ -194,6 +194,7 @@ TemplateClonePassBuilder::build_dependent_resolution_pass(
 
 TemplateClonePassBuilder make_template_binding_clone_pass_builder(
     ASTContext* ast_ctx,
+    Collect* collect,
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& argument_bindings,
     SrcLoc loc,
@@ -221,9 +222,11 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
     SrcLoc fallback_loc = loc;
     builder.rewrite_var_ref =
         [parameters_ptr,
+         collect,
          argument_bindings_ptr,
          clone_ast_ctx,
          fallback_loc,
+         rewrite_template_arguments_fn = rewrite_template_arguments,
          rewrite_type_fn = rewrite_type,
          value_error_message = std::move(value_error_message)](
             const VarRef* var_ref,
@@ -261,7 +264,88 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
         if (!literal && error_out && error_out->empty()) {
             *error_out = value_error_message;
         }
-        return literal;
+        if (literal) {
+            return literal;
+        }
+        if (collect && var_ref && var_ref->symref) {
+            if (const auto* specialization_info =
+                    get_symbol_variable_template_specialization(
+                        var_ref->symref.get())) {
+                std::vector<TemplateArgument> rewritten_arguments =
+                    rewrite_template_arguments_fn
+                        ? rewrite_template_arguments_fn(
+                              specialization_info->arguments)
+                        : specialization_info->arguments;
+                std::shared_ptr<Symbol> specialization_symbol = nullptr;
+                auto* specialization_decl =
+                    collect->instantiate_variable_template_specialization_for_clone(
+                        specialization_info->primary_template,
+                        rewritten_arguments,
+                        var_ref->location,
+                        &specialization_symbol);
+                if (!specialization_decl || !specialization_symbol) {
+                    if (error_out && error_out->empty()) {
+                        *error_out =
+                            "failed to rewrite variable template specialization reference";
+                    }
+                    return nullptr;
+                }
+                auto rewritten_ref = collect->collect_identifier_reference(
+                    var_ref->get_name(),
+                    std::move(specialization_symbol),
+                    var_ref->location);
+                if (const auto* qualified_info =
+                        var_ref->get_cpp_qualified_info()) {
+                    rewritten_ref = attach_cpp_qualified_info_to_expr(
+                        std::move(rewritten_ref),
+                        *qualified_info);
+                }
+                return rewritten_ref;
+            }
+        }
+        return nullptr;
+    };
+    builder.rewrite_symbol =
+        [collect,
+         fallback_loc,
+         rewrite_template_arguments_fn = rewrite_template_arguments,
+         register_symbol_fn = register_symbol](
+            const std::shared_ptr<Symbol>& sym,
+            ASTCloneContext& clone_ctx) -> std::shared_ptr<Symbol> {
+        if (!sym) {
+            return nullptr;
+        }
+        if (auto remapped = lookup_symbol_remap_in_clone_context(sym, clone_ctx)) {
+            return remapped;
+        }
+        if (!collect) {
+            return sym;
+        }
+        const auto* specialization_info =
+            get_symbol_variable_template_specialization(sym.get());
+        if (!specialization_info || !specialization_info->primary_template) {
+            return sym;
+        }
+
+        std::vector<TemplateArgument> rewritten_arguments =
+            rewrite_template_arguments_fn
+                ? rewrite_template_arguments_fn(specialization_info->arguments)
+                : specialization_info->arguments;
+        std::shared_ptr<Symbol> specialization_symbol = nullptr;
+        auto* specialization_decl =
+            collect->instantiate_variable_template_specialization_for_clone(
+                specialization_info->primary_template,
+                rewritten_arguments,
+                fallback_loc,
+                &specialization_symbol);
+        if (!specialization_decl || !specialization_symbol) {
+            return sym;
+        }
+        clone_ctx.symbol_remap[sym.get()] = specialization_symbol;
+        if (register_symbol_fn) {
+            register_symbol_fn(specialization_symbol);
+        }
+        return specialization_symbol;
     };
     builder.register_symbol = register_symbol;
     builder.rewrite_member_expr = rewrite_member_expr;

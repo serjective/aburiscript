@@ -1059,6 +1059,18 @@ public:
     bool finalize_cpp_lambda_semantics(CppLambdaExpr& lambda,
                                        std::string* error_out = nullptr);
 
+    VariableDecl* instantiate_variable_template_specialization_for_clone(
+        const VariableTemplateDecl* variable_template,
+        const std::vector<TemplateArgument>& arguments,
+        SrcLoc loc,
+        std::shared_ptr<Symbol>* specialization_symbol_out = nullptr) {
+        return instantiate_variable_template_specialization(
+            variable_template,
+            arguments,
+            loc,
+            specialization_symbol_out);
+    }
+
     void collect_record_register_function_default_arguments(
         const std::shared_ptr<Symbol>& sym,
         const FuncDecl* decl,

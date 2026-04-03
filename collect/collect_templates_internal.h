@@ -182,6 +182,7 @@ std::shared_ptr<Symbol> lookup_symbol_remap_in_clone_context(
 
 TemplateClonePassBuilder make_template_binding_clone_pass_builder(
     ASTContext* ast_ctx,
+    Collect* collect,
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& argument_bindings,
     SrcLoc loc,

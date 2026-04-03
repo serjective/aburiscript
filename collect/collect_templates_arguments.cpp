@@ -281,6 +281,25 @@ const VariableDecl* find_constant_evaluable_template_argument_variable_definitio
         return sym->variable_definition;
     }
 
+    if (const auto* specialization_info =
+            get_symbol_variable_template_specialization(sym)) {
+        ASTContext* ast_ctx = get_side_table_ast_context_for(sym);
+        if (!ast_ctx) {
+            ast_ctx = get_active_side_table_ast_context();
+        }
+        if (ast_ctx) {
+            const auto* specialization_entry =
+                ast_ctx->lookup_variable_template_specialization(
+                    specialization_info->primary_template,
+                    specialization_info->arguments);
+            if (specialization_entry &&
+                specialization_entry->specialization_decl &&
+                specialization_entry->specialization_decl->init) {
+                return specialization_entry->specialization_decl.get();
+            }
+        }
+    }
+
     QualType owner_type = get_symbol_owner_record_type(sym);
     auto owner_record =
         desugar_type(owner_type).as_shared<ObjectType>();
@@ -326,6 +345,31 @@ bool is_cpp_constant_static_data_member_for_template_argument(
     QualType canonical = desugar_type(type);
     return canonical &&
            (canonical->isInteger() || canonical->kind == TypeKind::Enum);
+}
+
+bool is_cpp_constant_initialized_integral_or_enum_variable_for_template_argument(
+    const Symbol* sym,
+    const VariableDecl* definition) {
+    if (!sym || !definition || !definition->init) {
+        return false;
+    }
+
+    QualType type = definition->type ? definition->type : sym->type;
+    if (!type || !type.is_const() || type.is_volatile()) {
+        return false;
+    }
+
+    QualType canonical = desugar_type(remove_reference(type));
+    if (!canonical ||
+        !(canonical->isInteger() || canonical->kind == TypeKind::Enum)) {
+        return false;
+    }
+
+    ConstEvalResult eval = evaluate_with_consteval_compat(
+        definition->init.get(),
+        ConstEvalMode::cpp_core_constant_expression());
+    return eval.status == ConstEvalStatus::Constant &&
+           eval.value.has_value();
 }
 
 std::shared_ptr<Expr> clone_constexpr_variable_initializer_expr(
@@ -388,6 +432,9 @@ bool try_fold_constexpr_variable_address_to_value(TemplateArgument& argument,
     bool can_fold_to_value =
         sym->is_constexpr ||
         is_cpp_constant_static_data_member_for_template_argument(
+            sym,
+            definition) ||
+        is_cpp_constant_initialized_integral_or_enum_variable_for_template_argument(
             sym,
             definition);
     if (!can_fold_to_value || !definition || !definition->init) {

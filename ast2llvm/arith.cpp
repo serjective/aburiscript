@@ -998,6 +998,15 @@ llvm::Constant* ASTToLLVM::emit_constant_initializer(Expr* expr) {
             llvm::Type* ty = convert_type(varRef->get_type());
             return llvm::ConstantInt::getSigned(ty, varRef->symref->enum_val);
         }
+        if (lang_opts.is_cxx_mode() && expr_ty) {
+            if (auto* lowered = lower_consteval_to_llvm_constant(
+                    expr,
+                    expr_ty,
+                    expr_is_unsigned,
+                    ConstEvalMode::cpp_core_constant_expression())) {
+                return lowered;
+            }
+        }
         if (!varRef->symref) return nullptr;
         std::string mangled = mangleCIdentifier(varRef->symref->uid);
         auto it = named_values.find(mangled);

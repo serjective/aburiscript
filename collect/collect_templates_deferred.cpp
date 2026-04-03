@@ -32,6 +32,27 @@ bool symbol_is_non_type_template_parameter(const Symbol* sym) {
            isa<TemplateNonTypeParmDecl>(sym->template_parameter_decl);
 }
 
+bool variable_template_specialization_depends_on_template_parameters(
+    const Symbol* sym,
+    const ASTContext* ast_ctx) {
+    if (!sym) {
+        return false;
+    }
+    const auto* specialization_info =
+        get_symbol_variable_template_specialization(sym);
+    if (!specialization_info) {
+        return false;
+    }
+    for (const auto& argument : specialization_info->arguments) {
+        if (template_argument_depends_on_template_parameters(
+                argument,
+                ast_ctx)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 const VariableDecl* find_template_dependent_variable_definition(
     const Symbol* sym) {
     if (!sym || sym->kind != SymbolKind::VARIABLE) {
@@ -116,6 +137,11 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
 
     if (auto* var_ref = dyn_cast<VarRef>(stripped)) {
         if (symbol_is_non_type_template_parameter(var_ref->symref.get())) {
+            return true;
+        }
+        if (variable_template_specialization_depends_on_template_parameters(
+                var_ref->symref.get(),
+                ast_ctx)) {
             return true;
         }
         if (variable_definition_depends_on_template_parameters(

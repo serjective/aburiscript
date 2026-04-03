@@ -1,6 +1,7 @@
 #include "consteval_engine.h"
 
 #include "../ast/ast.h"
+#include "../ast/ast_context.h"
 #include "../numeric_utils.h"
 #include "eval_state.h"
 
@@ -1560,6 +1561,25 @@ const VariableDecl* find_constant_evaluable_variable_definition(
         return sym->variable_definition;
     }
 
+    if (const auto* specialization_info =
+            get_symbol_variable_template_specialization(sym)) {
+        ASTContext* ast_ctx = get_side_table_ast_context_for(sym);
+        if (!ast_ctx) {
+            ast_ctx = get_active_side_table_ast_context();
+        }
+        if (ast_ctx) {
+            const auto* specialization_entry =
+                ast_ctx->lookup_variable_template_specialization(
+                    specialization_info->primary_template,
+                    specialization_info->arguments);
+            if (specialization_entry &&
+                specialization_entry->specialization_decl &&
+                specialization_entry->specialization_decl->init) {
+                return specialization_entry->specialization_decl.get();
+            }
+        }
+    }
+
     QualType owner_type = get_symbol_owner_record_type(sym);
     auto owner_record =
         desugar_type(owner_type).as_shared<ObjectType>();
@@ -1606,6 +1626,33 @@ bool is_cpp_constant_static_data_member(const Symbol* sym,
            (canonical->isInteger() || canonical->kind == TypeKind::Enum);
 }
 
+bool is_cpp_constant_initialized_integral_or_enum_variable(
+    const Symbol* sym,
+    const VariableDecl* definition) {
+    if (!sym || !definition || !definition->init) {
+        return false;
+    }
+
+    QualType type = definition->type ? definition->type : sym->type;
+    if (!type || !type.is_const() || type.is_volatile()) {
+        return false;
+    }
+
+    QualType canonical = desugar_type(remove_reference(type));
+    if (!canonical ||
+        !(canonical->isInteger() || canonical->kind == TypeKind::Enum)) {
+        return false;
+    }
+
+    ConstEvalResult init_eval = eval_expr_as_typed_const_value(
+        definition->init.get(),
+        type,
+        ConstEvalMode::cpp_core_constant_expression(),
+        /*depth=*/0);
+    return init_eval.status == ConstEvalStatus::Constant &&
+           init_eval.value.has_value();
+}
+
 ConstEvalResult eval_constexpr_variable_initializer(
     const Symbol* sym,
     ConstEvalMode mode,
@@ -1620,7 +1667,10 @@ ConstEvalResult eval_constexpr_variable_initializer(
         sym->is_constexpr ||
         ((is_cpp_core_constant_expression_mode(mode) ||
           is_cpp_non_type_template_argument_mode(mode)) &&
-         is_cpp_constant_static_data_member(sym, definition));
+         (is_cpp_constant_static_data_member(sym, definition) ||
+          is_cpp_constant_initialized_integral_or_enum_variable(
+              sym,
+              definition)));
     if (!can_evaluate_as_cpp_constant || !definition || !definition->init) {
         return ConstEvalResult::not_evaluated();
     }
@@ -3526,20 +3576,20 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
             }
         }
         if (is_cpp_non_type_template_argument_mode(mode) && var_ref->symref) {
-            if (var_ref->symref->kind == SymbolKind::FUNCTION ||
-                has_static_storage_duration(var_ref->symref.get())) {
-                return ConstEvalResult::constant(
-                    ConstValue::address(var_ref->symref));
-            }
             ConstEvalResult constexpr_value =
                 eval_constexpr_variable_initializer(
                     var_ref->symref.get(),
                     mode,
                     depth + 1,
-                    false);
+                    true);
             if (constexpr_value.status == ConstEvalStatus::Constant &&
                 constexpr_value.value.has_value()) {
                 return constexpr_value;
+            }
+            if (var_ref->symref->kind == SymbolKind::FUNCTION ||
+                has_static_storage_duration(var_ref->symref.get())) {
+                return ConstEvalResult::constant(
+                    ConstValue::address(var_ref->symref));
             }
         }
         return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,

@@ -838,6 +838,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
 
         auto clone_pass_builder = make_template_binding_clone_pass_builder(
             ast_ctx(),
+            &collect,
             function_template->parameters,
             specialization_bindings,
             loc,
@@ -936,6 +937,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                     auto element_builder =
                         make_template_binding_clone_pass_builder(
                             ast_ctx(),
+                            &collect,
                             function_template->parameters,
                             element_bindings,
                             loc,
@@ -1045,6 +1047,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
 
                 auto element_builder = make_template_binding_clone_pass_builder(
                     ast_ctx(),
+                    &collect,
                     function_template->parameters,
                     element_bindings,
                     loc,

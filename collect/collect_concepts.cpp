@@ -502,6 +502,7 @@ std::optional<bool> Collect::evaluate_concept_specialization(
 
     auto clone_pass_builder = make_template_binding_clone_pass_builder(
         ast_ctx_.get(),
+        this,
         canonical_concept->parameters,
         bindings,
         loc,
@@ -796,6 +797,7 @@ bool Collect::are_template_constraints_satisfied_with_bindings(
 
             auto clone_pass_builder = make_template_binding_clone_pass_builder(
                 ast_ctx_.get(),
+                this,
                 template_decl->parameters,
                 bindings,
                 loc,

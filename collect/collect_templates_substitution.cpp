@@ -182,6 +182,7 @@ QualType Collect::substitute_template_type_with_bindings(
 
             auto clone_pass_builder = make_template_binding_clone_pass_builder(
                 ast_ctx_.get(),
+                this,
                 parameters,
                 argument_bindings,
                 loc,
@@ -508,6 +509,7 @@ QualType Collect::substitute_template_type_with_bindings(
                 };
             auto clone_pass_builder = make_template_binding_clone_pass_builder(
                 ast_ctx_.get(),
+                this,
                 parameters,
                 argument_bindings,
                 loc,
@@ -884,6 +886,7 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                     auto clone_pass_builder =
                         make_template_binding_clone_pass_builder(
                             ast_ctx_.get(),
+                            this,
                             parameters,
                             active_bindings,
                             loc,
