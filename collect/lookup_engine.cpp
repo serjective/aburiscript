@@ -386,6 +386,7 @@ std::string scope_flags_to_string(ScopeFlags flags) {
     if (scope_flags_contains(flags, ScopeFlags::FileScope)) out += "File|";
     if (scope_flags_contains(flags, ScopeFlags::FunctionScope)) out += "Function|";
     if (scope_flags_contains(flags, ScopeFlags::BlockScope)) out += "Block|";
+    if (scope_flags_contains(flags, ScopeFlags::RecordScope)) out += "Record|";
     if (scope_flags_contains(flags, ScopeFlags::PrototypeScope)) out += "Proto|";
     if (scope_flags_contains(flags, ScopeFlags::LoopScope)) out += "Loop|";
     if (scope_flags_contains(flags, ScopeFlags::SwitchScope)) out += "Switch|";

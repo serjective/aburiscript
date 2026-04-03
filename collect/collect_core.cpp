@@ -103,6 +103,9 @@ DeclContextKind context_kind_for_scope_flags(ScopeFlags flags) {
     if (scope_flags_contains(flags, ScopeFlags::NamespaceScope)) {
         return DeclContextKind::Namespace;
     }
+    if (scope_flags_contains(flags, ScopeFlags::RecordScope)) {
+        return DeclContextKind::Record;
+    }
     if (scope_flags_contains(flags, ScopeFlags::TemplateParameterScope)) {
         return DeclContextKind::TemplateParameter;
     }

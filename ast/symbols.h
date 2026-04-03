@@ -42,7 +42,8 @@ enum class ScopeFlags : uint32_t {
     LoopScope = 1u << 4,
     SwitchScope = 1u << 5,
     NamespaceScope = 1u << 6,
-    TemplateParameterScope = 1u << 7
+    TemplateParameterScope = 1u << 7,
+    RecordScope = 1u << 8
 };
 
 inline ScopeFlags operator|(ScopeFlags lhs, ScopeFlags rhs) {

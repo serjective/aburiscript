@@ -5668,6 +5668,20 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         collect_->collect_set_current_cpp_record_lookup_type(
             semantic_owner_record_type);
     }
+    struct CppRecordScopeGuard {
+        Collect* collect = nullptr;
+        bool active = false;
+        ~CppRecordScopeGuard() {
+            if (collect && active) {
+                collect->collect_leave_scope();
+            }
+        }
+    } record_scope_guard{};
+    if (collect_) {
+        collect_->collect_enter_scope(ScopeFlags::RecordScope);
+        record_scope_guard.collect = collect_.get();
+        record_scope_guard.active = true;
+    }
 
     auto encode_member_access = [](CppAccessSpecifier access) {
         switch (access) {
