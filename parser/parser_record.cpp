@@ -60,14 +60,24 @@ bool is_defaultable_special_member_method(
         return false;
     }
     if (method_decl->storage_class == StorageClass::STATIC ||
-        method_decl->name != "operator=" ||
-        method_decl->parameters.size() != 1) {
+        method_decl->name != "operator=") {
+        return false;
+    }
+    size_t user_param_start = 0;
+    if (!method_decl->parameters.empty()) {
+        auto* first_param =
+            dyn_cast<ParamDecl>(method_decl->parameters.front().get());
+        if (first_param && first_param->get_name() == "this") {
+            user_param_start = 1;
+        }
+    }
+    if (method_decl->parameters.size() != user_param_start + 1) {
         return false;
     }
     QualType canonical_owner =
         remove_reference(owner_type, ast_ctx).without_qualifiers();
     auto* parameter_decl =
-        dyn_cast<ParamDecl>(method_decl->parameters.front().get());
+        dyn_cast<ParamDecl>(method_decl->parameters[user_param_start].get());
     QualType parameter_type =
         parameter_decl ? parameter_decl->type : QualType();
     if (!parameter_type) {
@@ -2072,7 +2082,6 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
         break;
     }
 
-    set_token_idx(*terminal_token_idx);
     if (context.info.owner_record_decl &&
         context.scope_snapshot.scope &&
         scope_flags_contains(

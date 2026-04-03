@@ -959,52 +959,84 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
         std::shared_ptr<CType> old_type = base;
         std::shared_ptr<CType> new_type = nullptr;
         std::shared_ptr<CType> over_arch = nullptr;
-        auto try_parse_qualified_cpp_operator_function_name =
+        auto try_parse_qualified_cpp_declarator_name =
             [&]() -> bool {
-                if (!pars->is_cxx_mode_active() ||
-                    !mgnt->gentle_check(TokenType::IDENTIFIER)) {
+                if (!pars->is_cxx_mode_active()) {
                     return false;
                 }
 
-                auto consume_scope_resolution =
-                    [&](size_t& scope_offset) -> bool {
-                        Token sep = mgnt->peek_token(scope_offset);
-                        if (sep.type == TokenType::SCOPE_RESOLUTION) {
-                            ++scope_offset;
-                            return true;
-                        }
-                        if (sep.type == TokenType::COLON &&
-                            mgnt->peek_token(scope_offset + 1).type ==
-                                TokenType::COLON) {
-                            scope_offset += 2;
-                            return true;
-                        }
-                        return false;
-                    };
+                size_t saved_idx = mgnt->get_token_idx();
+                auto saved_split_state = mgnt->get_split_token_state();
+                auto restore = [&]() {
+                    mgnt->set_token_idx(saved_idx);
+                    mgnt->set_split_token_state(saved_split_state);
+                };
 
-                size_t offset = 1;
-                if (!consume_scope_resolution(offset)) {
-                    return false;
+                bool has_global_qualifier = false;
+                if (mgnt->gentle_check(TokenType::SCOPE_RESOLUTION) ||
+                    (mgnt->gentle_check(TokenType::COLON) &&
+                     mgnt->peek_token().type == TokenType::COLON)) {
+                    has_global_qualifier = true;
+                    pars->consume_cpp_scope_resolution();
+                }
+
+                bool saw_scope_resolution = false;
+                if ((has_global_qualifier || mgnt->gentle_check(TokenType::IDENTIFIER)) &&
+                    mgnt->gentle_check(TokenType::OPERATOR_KW)) {
+                    return parse_cpp_operator_function_name(*this);
                 }
 
                 while (true) {
-                    Token next = mgnt->peek_token(offset);
-                    if (next.type == TokenType::OPERATOR_KW) {
-                        break;
-                    }
-                    if (next.type != TokenType::IDENTIFIER) {
+                    if (!mgnt->gentle_check(TokenType::IDENTIFIER)) {
+                        restore();
                         return false;
                     }
-                    ++offset;
-                    if (!consume_scope_resolution(offset)) {
-                        return false;
-                    }
-                }
 
-                for (size_t consumed = 0; consumed < offset; ++consumed) {
+                    Token ident_tok = mgnt->current_token();
+                    std::string component_name = ident_tok.value;
+                    std::vector<TemplateArgument> component_template_arguments;
+                    bool component_has_template_argument_list = false;
+
                     mgnt->advance();
+                    if (mgnt->gentle_check(TokenType::LESS_THAN)) {
+                        component_has_template_argument_list = true;
+                        component_template_arguments =
+                            pars->parse_cpp_template_argument_list();
+                    }
+
+                    if (!(mgnt->gentle_check(TokenType::SCOPE_RESOLUTION) ||
+                          (mgnt->gentle_check(TokenType::COLON) &&
+                           mgnt->peek_token().type == TokenType::COLON))) {
+                        if (!has_global_qualifier && !saw_scope_resolution) {
+                            restore();
+                            return false;
+                        }
+
+                        if (name.empty()) {
+                            name = component_name;
+                            loc = ident_tok.loc;
+                        } else {
+                            error_custloc(
+                                "Potentially two names in a declarator",
+                                this->begin_loc);
+                        }
+                        if ((pars->is_parsing_cpp_explicit_specialization() ||
+                             pars->is_in_template_pattern_context()) &&
+                            component_has_template_argument_list &&
+                            !has_explicit_specialization_argument_list) {
+                            explicit_specialization_arguments =
+                                std::move(component_template_arguments);
+                            has_explicit_specialization_argument_list = true;
+                        }
+                        return true;
+                    }
+
+                    saw_scope_resolution = true;
+                    pars->consume_cpp_scope_resolution();
+                    if (mgnt->gentle_check(TokenType::OPERATOR_KW)) {
+                        return parse_cpp_operator_function_name(*this);
+                    }
                 }
-                return parse_cpp_operator_function_name(*this);
             };
         if (parse_new_type_id_context &&
             pars->is_cxx_mode_active() &&
@@ -1176,8 +1208,8 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
             } else {
                 mgnt->check_and_consume(TokenType::RIGHT_PAREN);
             }
-        } else if (try_parse_qualified_cpp_operator_function_name()) {
-            // Parsed qualified operator-function declarator name.
+        } else if (try_parse_qualified_cpp_declarator_name()) {
+            // Parsed qualified declarator name.
         } else if (parse_cpp_operator_function_name(*this)) {
             // Parsed operator-function declarator name.
         } else if (in_function_parameter &&
