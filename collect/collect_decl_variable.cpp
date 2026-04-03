@@ -100,11 +100,20 @@ std::unique_ptr<Decl> Collect::collect_static_assert_declaration(std::unique_ptr
         report_error("static assertion requires a constant expression", loc);
         return collect_make<NopDecl>(loc);
     }
+    if (expression_depends_on_template_parameters(condition.get())) {
+        return collect_make<StaticAssertDecl>(
+            std::move(condition), std::move(message), has_message, loc);
+    }
     condition = collect_apply_standard_conversions(std::move(condition), ExprUseContext::RValue);
-    auto val = try_evaluate_with_consteval_compat(
-        condition.get(), ConstEvalMode::c_ice());
+    auto mode = lang_opts_.is_cxx_mode()
+        ? ConstEvalMode::cpp_core_constant_expression()
+        : ConstEvalMode::c_ice();
+    auto val = try_evaluate_with_consteval_compat(condition.get(), mode);
     if (!val.has_value()) {
-        report_error("static assertion expression is not an integer constant expression", loc);
+        report_error(lang_opts_.is_cxx_mode()
+                         ? "static assertion expression is not a constant expression"
+                         : "static assertion expression is not an integer constant expression",
+                     loc);
     } else if (*val == 0) {
         std::string text = "static assertion failed";
         if (has_message && !message.empty()) {
