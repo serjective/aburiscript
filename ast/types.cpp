@@ -2850,8 +2850,12 @@ const char* builtin_type_transform_name(BuiltinTypeTransformKind kind) {
             return "__remove_volatile";
         case BuiltinTypeTransformKind::RemoveCV:
             return "__remove_cv";
+        case BuiltinTypeTransformKind::RemoveCVRef:
+            return "__remove_cvref";
         case BuiltinTypeTransformKind::RemoveReference:
             return "__remove_reference";
+        case BuiltinTypeTransformKind::Decay:
+            return "__decay";
         case BuiltinTypeTransformKind::AddPointer:
             return "__add_pointer";
         case BuiltinTypeTransformKind::AddLValueReference:
@@ -2878,8 +2882,16 @@ bool lookup_builtin_type_transform_kind(
         out = BuiltinTypeTransformKind::RemoveCV;
         return true;
     }
+    if (name == "__remove_cvref") {
+        out = BuiltinTypeTransformKind::RemoveCVRef;
+        return true;
+    }
     if (name == "__remove_reference" || name == "__remove_reference_t") {
         out = BuiltinTypeTransformKind::RemoveReference;
+        return true;
+    }
+    if (name == "__decay") {
+        out = BuiltinTypeTransformKind::Decay;
         return true;
     }
     if (name == "__add_pointer") {
@@ -2919,8 +2931,30 @@ QualType apply_builtin_type_transform(
             return remove_top_level_qualifiers(
                 operand_type,
                 static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
+        case BuiltinTypeTransformKind::RemoveCVRef:
+            return remove_top_level_qualifiers(
+                remove_reference(operand_type, ast_ctx),
+                static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
         case BuiltinTypeTransformKind::RemoveReference:
             return remove_reference(operand_type, ast_ctx);
+        case BuiltinTypeTransformKind::Decay: {
+            auto decayed = remove_reference(operand_type, ast_ctx);
+            auto canonical_decayed = desugar_type(decayed, ast_ctx);
+            if (!canonical_decayed) {
+                return QualType();
+            }
+            if (auto array_type = canonical_decayed.as_shared<ArrayType>()) {
+                return QualType(
+                    std::make_shared<PointerType>(array_type->element_type));
+            }
+            if (canonical_decayed->kind == TypeKind::Function) {
+                return QualType(
+                    std::make_shared<PointerType>(canonical_decayed));
+            }
+            return remove_top_level_qualifiers(
+                decayed,
+                static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
+        }
         case BuiltinTypeTransformKind::AddPointer: {
             auto pointee_type = remove_reference(operand_type, ast_ctx);
             if (!pointee_type) {
