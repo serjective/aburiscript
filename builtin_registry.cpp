@@ -48,6 +48,7 @@ bool is_builtin_type_trait_kind(BuiltinKind kind) {
         case BuiltinKind::IS_STANDARD_LAYOUT:
         case BuiltinKind::IS_TRIVIAL:
         case BuiltinKind::IS_TRIVIALLY_COPYABLE:
+        case BuiltinKind::HAS_UNIQUE_OBJECT_REPRESENTATIONS:
         case BuiltinKind::IS_POD:
         case BuiltinKind::IS_SIGNED:
         case BuiltinKind::IS_CONSTRUCTIBLE:
@@ -112,6 +113,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__is_standard_layout", BuiltinKind::IS_STANDARD_LAYOUT, 1, 1, true, true});
     register_builtin({"__is_trivial", BuiltinKind::IS_TRIVIAL, 1, 1, true, true});
     register_builtin({"__is_trivially_copyable", BuiltinKind::IS_TRIVIALLY_COPYABLE, 1, 1, true, true});
+    register_builtin({"__has_unique_object_representations", BuiltinKind::HAS_UNIQUE_OBJECT_REPRESENTATIONS, 1, 1, true, true});
     register_builtin({"__is_pod", BuiltinKind::IS_POD, 1, 1, true, true});
     register_builtin({"__is_signed", BuiltinKind::IS_SIGNED, 1, 1, true, true});
     register_builtin({"__is_constructible", BuiltinKind::IS_CONSTRUCTIBLE, 1, -1, true, true});

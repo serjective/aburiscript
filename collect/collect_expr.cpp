@@ -2915,6 +2915,7 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
     std::function<bool(QualType)> trait_is_standard_layout_type;
     std::function<bool(QualType)> trait_is_trivial_type;
     std::function<bool(QualType)> trait_is_trivially_copyable_type;
+    std::function<bool(QualType)> trait_has_unique_object_representations_type;
     std::function<bool(QualType)> trait_is_pod_type;
 
     trait_is_standard_layout_type = [&](QualType type_arg) -> bool {
@@ -3131,6 +3132,40 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                 return canonical->isScalar() || canonical->kind == TypeKind::Complex;
         }
     };
+
+    trait_has_unique_object_representations_type =
+        [&](QualType type_arg) -> bool {
+            if (!type_arg) {
+                return false;
+            }
+            QualType canonical = desugar_type(type_arg, ast_ctx_.get());
+            if (!canonical) {
+                return false;
+            }
+
+            switch (canonical->kind) {
+                case TypeKind::Array: {
+                    auto array_type = canonical.as_shared<ArrayType>();
+                    return array_type &&
+                           trait_has_unique_object_representations_type(
+                               array_type->element_type);
+                }
+                case TypeKind::Enum: {
+                    auto enum_type = canonical.as_shared<EnumType>();
+                    return enum_type &&
+                           trait_has_unique_object_representations_type(
+                               QualType(enum_type->semantic_underlying_type()));
+                }
+                case TypeKind::Builtin: {
+                    auto builtin = canonical.as_shared<BuiltinType>();
+                    return builtin &&
+                           builtin->builtin_kind != BuiltinTypes::Bool &&
+                           builtin->isInteger();
+                }
+                default:
+                    return false;
+            }
+        };
 
     trait_is_pod_type = [&](QualType type_arg) -> bool {
         return trait_is_standard_layout_type(type_arg) &&
@@ -3473,6 +3508,13 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                 return std::nullopt;
             }
             return trait_is_trivially_copyable_type(*type_arg);
+        }
+        case BuiltinKind::HAS_UNIQUE_OBJECT_REPRESENTATIONS: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            return trait_has_unique_object_representations_type(*type_arg);
         }
         case BuiltinKind::IS_POD: {
             auto type_arg = get_canonical_arg(0);
