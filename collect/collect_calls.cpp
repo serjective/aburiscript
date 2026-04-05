@@ -2657,6 +2657,10 @@ bool Collect::resolve_dependent_expr_after_substitution(
             dependent_member_access->member_pointer);
         if (!dependent_member_access->base ||
             !dependent_member_access->member_pointer ||
+            expression_depends_on_template_parameters(
+                dependent_member_access->base.get()) ||
+            expression_depends_on_template_parameters(
+                dependent_member_access->member_pointer.get()) ||
             type_depends_on_template_parameters(
                 dependent_member_access->base->get_type(),
                 ast_ctx_.get()) ||

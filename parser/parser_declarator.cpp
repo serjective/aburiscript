@@ -904,8 +904,12 @@ std::shared_ptr<CType> DeclarationParser::parse_declarator(std::shared_ptr<CType
                         owner_name,
                         true,
                         true);
+                    bool owner_is_dependent =
+                        owner_type &&
+                        type_depends_on_template_parameters(owner_type);
                     if (!owner_type ||
-                        canonical_type_kind(owner_type) != TypeKind::Object) {
+                        (!owner_is_dependent &&
+                         canonical_type_kind(owner_type) != TypeKind::Object)) {
                         error("pointer-to-member declarator requires class/struct/union type");
                     }
 

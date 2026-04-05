@@ -36,11 +36,46 @@ Expr* strip_implicit_casts_for_noexcept(Expr* expr) {
 
 bool function_type_is_non_throwing(QualType function_like_type,
                                    const ASTContext* ast_ctx) {
-    auto function_type =
-        desugar_type(function_like_type, ast_ctx).as_shared<FunctionType>();
+    QualType canonical = desugar_type(function_like_type, ast_ctx);
+    if (auto ref_type = canonical.as_shared<ReferenceType>()) {
+        return function_type_is_non_throwing(ref_type->referred_type, ast_ctx);
+    }
+    if (auto ptr_type = canonical.as_shared<PointerType>()) {
+        return function_type_is_non_throwing(ptr_type->pointed_type, ast_ctx);
+    } else if (auto block_ptr_type = canonical.as_shared<BlockPointerType>()) {
+        return function_type_is_non_throwing(block_ptr_type->pointed_type, ast_ctx);
+    }
+    auto function_type = canonical.as_shared<FunctionType>();
     return function_type &&
            function_type->exception_spec ==
                FunctionExceptionSpecKind::NonThrowing;
+}
+
+bool cpp_subexpression_is_known_noexcept(const Expr* expr,
+                                         const ASTContext* ast_ctx) {
+    if (!expr) {
+        return false;
+    }
+
+    auto* stripped =
+        strip_implicit_casts_for_noexcept(const_cast<Expr*>(expr));
+    if (!stripped) {
+        return false;
+    }
+
+    if (isa<VarRef>(stripped) ||
+        isa<MemberPointerLiteralExpr>(stripped) ||
+        isa<CppThisExpr>(stripped)) {
+        return true;
+    }
+
+    if (auto* member = dyn_cast<MemberExpr>(stripped)) {
+        return cpp_subexpression_is_known_noexcept(
+            member->base.get(),
+            ast_ctx);
+    }
+
+    return cpp_expression_is_known_noexcept(stripped, ast_ctx);
 }
 
 bool cpp_record_subobjects_are_nothrow_destructible(
@@ -381,6 +416,20 @@ bool cpp_expression_is_known_noexcept(
                member_call->lowered_call->func &&
                function_type_is_non_throwing(
                    member_call->lowered_call->func->get_type(),
+                   ast_ctx);
+    }
+    if (auto* member = dyn_cast<MemberExpr>(stripped)) {
+        return cpp_subexpression_is_known_noexcept(
+            member->base.get(),
+            ast_ctx);
+    }
+    if (auto* member_pointer_access =
+            dyn_cast<MemberPointerAccessExpr>(stripped)) {
+        return cpp_subexpression_is_known_noexcept(
+                   member_pointer_access->base.get(),
+                   ast_ctx) &&
+               cpp_subexpression_is_known_noexcept(
+                   member_pointer_access->member_pointer.get(),
                    ast_ctx);
     }
     if (auto* construct = dyn_cast<CppConstructExpr>(stripped)) {

@@ -292,7 +292,11 @@ std::unique_ptr<Expr> Collect::collect_member_pointer_access_expression(
 
     QualType base_type = base ? base->get_type() : QualType();
     QualType member_ptr_type = member_pointer ? member_pointer->get_type() : QualType();
-    if (type_depends_on_template_parameters(member_ptr_type, ast_ctx_.get()) ||
+    if ((base &&
+         expression_depends_on_template_parameters(base.get())) ||
+        (member_pointer &&
+         expression_depends_on_template_parameters(member_pointer.get())) ||
+        type_depends_on_template_parameters(member_ptr_type, ast_ctx_.get()) ||
         type_depends_on_template_parameters(base_type, ast_ctx_.get())) {
         return collect_make<DependentMemberPointerAccessExpr>(
             std::move(base),
@@ -572,6 +576,9 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
                       : QualType(nullptr),
                   ast_ctx_.get())
             : CppMemberLookupBaseAnalysis{};
+    bool dependent_base_expr =
+        lang_opts_.is_cxx_mode() &&
+        expression_depends_on_template_parameters(member->base.get());
     bool dependent_base_type = dependent_base_analysis.is_dependent;
     auto dependent_record_type = dependent_base_analysis.object_record_type;
     const ObjectDecl* current_record_decl =
@@ -591,7 +598,7 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
     }
 
     if (lang_opts_.is_cxx_mode() &&
-        (dependent_base_type || names_dependent_base)) {
+        (dependent_base_expr || dependent_base_type || names_dependent_base)) {
         auto unresolved_member = collect_make<UnresolvedMemberExpr>(
             std::move(member->base),
             member_name,
