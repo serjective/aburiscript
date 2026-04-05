@@ -469,7 +469,7 @@ public:
     std::optional<bool> evaluate_builtin_type_trait(
         BuiltinKind kind,
         const std::vector<QualType>& type_args,
-        SrcLoc loc) const ;
+        SrcLoc loc)  ;
     std::unique_ptr<Expr> collect_concept_specialization_expression(
         const ConceptDecl* concept_decl,
         std::string concept_name,
