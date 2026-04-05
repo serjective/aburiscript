@@ -1452,9 +1452,9 @@ bool Collect::deduce_function_template_specialization_arguments_from_pattern(
             specialized_function->member_ref_qualifier ||
         pattern_function->has_prototype != specialized_function->has_prototype ||
         pattern_function->is_variadic != specialized_function->is_variadic ||
-        pattern_function->has_explicit_exception_spec !=
-            specialized_function->has_explicit_exception_spec ||
-        pattern_function->exception_spec != specialized_function->exception_spec ||
+        !function_exception_specs_equal(
+            *pattern_function,
+            *specialized_function) ||
         pattern_function->parameters.size() !=
             specialized_function->parameters.size() +
                 implicit_object_parameter_count) {

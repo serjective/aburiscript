@@ -1,4 +1,5 @@
 #include "special_members.h"
+#include "../constexpr/consteval_compat.h"
 
 #include "ast.h"
 #include "symbols.h"
@@ -46,9 +47,30 @@ bool function_type_is_non_throwing(QualType function_like_type,
         return function_type_is_non_throwing(block_ptr_type->pointed_type, ast_ctx);
     }
     auto function_type = canonical.as_shared<FunctionType>();
-    return function_type &&
-           function_type->exception_spec ==
-               FunctionExceptionSpecKind::NonThrowing;
+    if (!function_type) {
+        return false;
+    }
+    if (function_type->exception_spec == FunctionExceptionSpecKind::NonThrowing) {
+        return true;
+    }
+    if (function_type->exception_spec != FunctionExceptionSpecKind::Dependent ||
+        !function_type->exception_spec_expr) {
+        return false;
+    }
+    ConstEvalResult eval = evaluate_with_consteval_compat(
+        function_type->exception_spec_expr.get(),
+        ConstEvalMode::cpp_core_constant_expression());
+    if (eval.status != ConstEvalStatus::Constant || !eval.value.has_value()) {
+        return false;
+    }
+    switch (eval.value->kind) {
+        case ConstValueKind::Boolean:
+            return eval.value->bool_value;
+        case ConstValueKind::Integer:
+            return eval.value->int_value.to_unsigned_u64() != 0;
+        default:
+            return false;
+    }
 }
 
 bool cpp_subexpression_is_known_noexcept(const Expr* expr,

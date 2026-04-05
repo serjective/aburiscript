@@ -406,9 +406,7 @@ inline bool cpp_out_of_line_type_matches(QualType lhs,
             lhs_func->member_ref_qualifier != rhs_func->member_ref_qualifier ||
             lhs_func->has_prototype != rhs_func->has_prototype ||
             lhs_func->is_variadic != rhs_func->is_variadic ||
-            lhs_func->has_explicit_exception_spec !=
-                rhs_func->has_explicit_exception_spec ||
-            lhs_func->exception_spec != rhs_func->exception_spec ||
+            !function_exception_specs_equal(*lhs_func, *rhs_func) ||
             lhs_func->parameters.size() != rhs_func->parameters.size()) {
             return false;
         }

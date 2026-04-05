@@ -691,6 +691,7 @@ QualType remap_template_parameter_types_in_type(
         rewritten->has_explicit_exception_spec =
             func->has_explicit_exception_spec;
         rewritten->exception_spec = func->exception_spec;
+        rewritten->exception_spec_expr = func->exception_spec_expr;
         return QualType(rewritten, quals);
     }
 

@@ -2164,7 +2164,7 @@ bool Parser::record_method_signature_matches(
         method_fn_type->has_explicit_exception_spec) {
         return false;
     }
-    if (parsed_fn_type->exception_spec != method_fn_type->exception_spec) {
+    if (!function_exception_specs_equal(*parsed_fn_type, *method_fn_type)) {
         return false;
     }
     if (!cpp_out_of_line_type_matches(

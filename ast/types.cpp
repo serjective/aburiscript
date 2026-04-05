@@ -1233,6 +1233,13 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
                     return true;
                 }
             }
+            if (fn->exception_spec == FunctionExceptionSpecKind::Dependent ||
+                (fn->exception_spec_expr &&
+                 expr_depends_on_template_parameters_for_type(
+                     fn->exception_spec_expr.get(),
+                     ast_ctx))) {
+                return true;
+            }
             return false;
         }
         if (auto vec = dyn_cast_shared<VectorType>(raw)) {
@@ -1608,6 +1615,11 @@ bool template_argument_depends_on_template_parameters(
                 ast_ctx);
         case TemplateArgumentKind::Value:
             return argument.is_dependent ||
+                   argument.referenced_parameter != nullptr ||
+                   (argument.value_expr &&
+                    expr_depends_on_template_parameters_for_type(
+                        argument.value_expr.get(),
+                        ast_ctx)) ||
                    type_depends_on_template_parameter_for_argument(
                        argument.value_type,
                        ast_ctx);
@@ -1615,6 +1627,23 @@ bool template_argument_depends_on_template_parameters(
             return argument.is_dependent;
     }
     return false;
+}
+
+bool function_exception_specs_equal(const FunctionType& lhs,
+                                    const FunctionType& rhs) {
+    if (lhs.has_explicit_exception_spec != rhs.has_explicit_exception_spec ||
+        lhs.exception_spec != rhs.exception_spec) {
+        return false;
+    }
+    if (!lhs.has_explicit_exception_spec) {
+        return true;
+    }
+    if (lhs.exception_spec != FunctionExceptionSpecKind::Dependent) {
+        return true;
+    }
+    return expr_structurally_matches(
+        lhs.exception_spec_expr.get(),
+        rhs.exception_spec_expr.get());
 }
 
 TemplateEnvironmentFrame::TemplateEnvironmentFrame(
@@ -2184,6 +2213,7 @@ QualType cpp_written_method_type(QualType method_type,
     rebuilt->has_explicit_exception_spec =
         fn_type->has_explicit_exception_spec;
     rebuilt->exception_spec = fn_type->exception_spec;
+    rebuilt->exception_spec_expr = fn_type->exception_spec_expr;
     return QualType(rebuilt, method_type.get_qualifiers());
 }
 
@@ -2945,6 +2975,7 @@ bool FunctionType::equals(const CType &other) {
     auto rhs_ret = desugar_type(other1.ret_type);
     if (!lhs_ret.equals_unqualified(rhs_ret)) return false;
     if (member_ref_qualifier != other1.member_ref_qualifier) return false;
+    if (!function_exception_specs_equal(*this, other1)) return false;
     // K&R style () is compatible with any parameter list (C11 6.7.6.3p15)
     if (!has_prototype || !other1.has_prototype) return true;
     if (parameters.size() != other1.parameters.size()) return false;
@@ -3237,6 +3268,7 @@ QualType desugar_type(QualType type, const ASTContext* ast_ctx) {
             rebuilt_func->has_explicit_exception_spec =
                 func->has_explicit_exception_spec;
             rebuilt_func->exception_spec = func->exception_spec;
+            rebuilt_func->exception_spec_expr = func->exception_spec_expr;
             rebuilt = QualType(rebuilt_func, quals);
         }
     } else if (auto vec = dyn_cast_shared<VectorType>(current)) {
@@ -3659,6 +3691,8 @@ std::string FunctionType::to_string() const {
     if (has_explicit_exception_spec) {
         if (exception_spec == FunctionExceptionSpecKind::NonThrowing) {
             result += " noexcept";
+        } else if (exception_spec == FunctionExceptionSpecKind::Dependent) {
+            result += " noexcept(<dependent>)";
         } else {
             result += " noexcept(false)";
         }

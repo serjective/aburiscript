@@ -1939,6 +1939,7 @@ bool Collect::finalize_cpp_lambda_semantics(
         invoker_type->has_explicit_exception_spec =
             function_type->has_explicit_exception_spec;
         invoker_type->exception_spec = function_type->exception_spec;
+        invoker_type->exception_spec_expr = function_type->exception_spec_expr;
 
         std::vector<std::unique_ptr<Decl>> invoker_parameters;
         invoker_parameters.reserve(lambda.parameters.size());

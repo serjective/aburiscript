@@ -2289,6 +2289,48 @@ bool Collect::resolve_dependent_expr_after_substitution(
         return true;
     }
     if (auto* noexcept_expr = dyn_cast<CppNoexceptExpr>(expr.get())) {
+        while (auto* cast =
+                   dyn_cast<ImplicitCast>(noexcept_expr->operand.get())) {
+            if (!cast->expr) {
+                break;
+            }
+            bool cast_type_still_dependent =
+                type_depends_on_template_parameters(
+                    cast->ctype,
+                    ast_ctx_.get());
+            bool source_type_still_dependent =
+                type_depends_on_template_parameters(
+                    cast->expr->get_type(),
+                    ast_ctx_.get());
+            if (!cast_type_still_dependent || source_type_still_dependent) {
+                break;
+            }
+            switch (cast->kind) {
+                case ImplicitCastTypes::LVALUE_TO_RVALUE:
+                case ImplicitCastTypes::FUNCTION_TO_POINTER:
+                case ImplicitCastTypes::ARRAY_TO_POINTER:
+                case ImplicitCastTypes::LAMBDA_TO_FUNCTION_POINTER:
+                case ImplicitCastTypes::ARITH_CAST:
+                case ImplicitCastTypes::RAW_CAST:
+                    break;
+                default:
+                    cast = nullptr;
+                    break;
+            }
+            if (!cast) {
+                break;
+            }
+            auto owned_cast = std::unique_ptr<ImplicitCast>(
+                static_cast<ImplicitCast*>(noexcept_expr->operand.release()));
+            noexcept_expr->operand = std::move(owned_cast->expr);
+        }
+        if (noexcept_expr->operand &&
+            !resolve_dependent_expr_after_substitution(
+                noexcept_expr->operand,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
         if (!noexcept_expr->operand ||
             expression_depends_on_template_parameters(
                 noexcept_expr->operand.get()) ||
@@ -2313,6 +2355,47 @@ bool Collect::resolve_dependent_expr_after_substitution(
         return true;
     }
     if (auto* pseudo_dtor = dyn_cast<CppPseudoDestructorExpr>(expr.get())) {
+        while (auto* cast = dyn_cast<ImplicitCast>(pseudo_dtor->base.get())) {
+            if (!cast->expr) {
+                break;
+            }
+            bool cast_type_still_dependent =
+                type_depends_on_template_parameters(
+                    cast->ctype,
+                    ast_ctx_.get());
+            bool source_type_still_dependent =
+                type_depends_on_template_parameters(
+                    cast->expr->get_type(),
+                    ast_ctx_.get());
+            if (!cast_type_still_dependent || source_type_still_dependent) {
+                break;
+            }
+            switch (cast->kind) {
+                case ImplicitCastTypes::LVALUE_TO_RVALUE:
+                case ImplicitCastTypes::FUNCTION_TO_POINTER:
+                case ImplicitCastTypes::ARRAY_TO_POINTER:
+                case ImplicitCastTypes::LAMBDA_TO_FUNCTION_POINTER:
+                case ImplicitCastTypes::ARITH_CAST:
+                case ImplicitCastTypes::RAW_CAST:
+                    break;
+                default:
+                    cast = nullptr;
+                    break;
+            }
+            if (!cast) {
+                break;
+            }
+            auto owned_cast = std::unique_ptr<ImplicitCast>(
+                static_cast<ImplicitCast*>(pseudo_dtor->base.release()));
+            pseudo_dtor->base = std::move(owned_cast->expr);
+        }
+        if (pseudo_dtor->base &&
+            !resolve_dependent_expr_after_substitution(
+                pseudo_dtor->base,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
         if (!pseudo_dtor->base ||
             expression_depends_on_template_parameters(
                 pseudo_dtor->base.get()) ||
@@ -2378,6 +2461,16 @@ bool Collect::resolve_dependent_expr_after_substitution(
             if (!unresolved_member) {
                 return false;
             }
+            if (unresolved_member->explicit_template_arguments.has_value()) {
+                for (const auto& argument :
+                     *unresolved_member->explicit_template_arguments) {
+                    if (template_argument_depends_on_template_parameters(
+                            argument,
+                            ast_ctx_.get())) {
+                        return true;
+                    }
+                }
+            }
             return analyze_cpp_member_lookup_base(
                        unresolved_member->base
                            ? unresolved_member->base->get_type()
@@ -2392,6 +2485,16 @@ bool Collect::resolve_dependent_expr_after_substitution(
         [&](const UnresolvedLookupExpr* unresolved_lookup) -> bool {
             if (!unresolved_lookup) {
                 return false;
+            }
+            if (unresolved_lookup->explicit_template_arguments.has_value()) {
+                for (const auto& argument :
+                     *unresolved_lookup->explicit_template_arguments) {
+                    if (template_argument_depends_on_template_parameters(
+                            argument,
+                            ast_ctx_.get())) {
+                        return true;
+                    }
+                }
             }
             return dependent_lookup_qualifier_is_dependent(
                 unresolved_lookup->qualifier,
@@ -2802,13 +2905,15 @@ bool Collect::resolve_dependent_expr_after_substitution(
             std::move(*owned_lookup->explicit_template_arguments);
     }
     std::unique_ptr<Expr> concrete_callee;
-    if (has_explicit_template_args &&
-        owned_lookup->qualifier.is_type_qualified) {
+    if (has_explicit_template_args) {
         concrete_callee = collect_identifier_reference(
             owned_lookup->name,
             nullptr,
             owned_lookup->location);
-        if (isa<VarRef>(concrete_callee.get())) {
+        if (isa<VarRef>(concrete_callee.get()) &&
+            (owned_lookup->qualifier.is_type_qualified ||
+             owned_lookup->qualifier.has_global_qualifier ||
+             !owned_lookup->qualifier.qualifiers.empty())) {
             concrete_callee = attach_cpp_qualified_info_to_expr(
                 std::move(concrete_callee),
                 build_cpp_qualified_expr_info(owned_lookup->qualifier));

@@ -4240,6 +4240,7 @@ void Parser::parse_cpp_optional_noexcept_spec(FunctionType& function_type) {
 
     function_type.has_explicit_exception_spec = true;
     function_type.exception_spec = FunctionExceptionSpecKind::PotentiallyThrowing;
+    function_type.exception_spec_expr = nullptr;
 
     advance(); // 'noexcept'
     bool is_non_throwing = true;
@@ -4252,23 +4253,51 @@ void Parser::parse_cpp_optional_noexcept_spec(FunctionType& function_type) {
                           lparen_loc);
         } else {
             auto noexcept_expr = parse_conditional_expression();
-            auto eval = try_evaluate_with_consteval_compat(
-                noexcept_expr.get(), ConstEvalMode::c_ice());
-            if (!eval.has_value()) {
-                SrcLoc diag_loc =
-                    noexcept_expr ? noexcept_expr->location : current_token().loc;
-                error_custloc("noexcept expression must be an integer constant expression",
-                              diag_loc);
+            bool is_dependent =
+                (collect_ &&
+                 collect_->expression_depends_on_template_parameters(
+                     noexcept_expr.get())) ||
+                type_depends_on_template_parameters(
+                    noexcept_expr ? noexcept_expr->get_type() : QualType(),
+                    ast_ctx.get());
+            if (is_dependent) {
+                function_type.exception_spec =
+                    FunctionExceptionSpecKind::Dependent;
+                function_type.exception_spec_expr =
+                    std::shared_ptr<Expr>(noexcept_expr.release());
+                is_non_throwing = false;
             } else {
-                is_non_throwing = *eval != 0;
+                auto eval = try_evaluate_with_consteval_compat(
+                    noexcept_expr.get(),
+                    ConstEvalMode::cpp_core_constant_expression());
+                if (!eval.has_value()) {
+                    SrcLoc diag_loc =
+                        noexcept_expr ? noexcept_expr->location : current_token().loc;
+                    error_custloc(
+                        "noexcept expression must be an integer constant expression",
+                        diag_loc);
+                } else {
+                    is_non_throwing = *eval != 0;
+                }
+            }
+            if (!is_dependent && !noexcept_expr) {
+                SrcLoc diag_loc =
+                    current_token().loc;
+                error_custloc(
+                    "noexcept expression must be an integer constant expression",
+                    diag_loc);
             }
         }
         check_and_consume(TokenType::RIGHT_PAREN);
+    } else {
+        function_type.exception_spec = FunctionExceptionSpecKind::NonThrowing;
     }
 
-    function_type.exception_spec = is_non_throwing
-        ? FunctionExceptionSpecKind::NonThrowing
-        : FunctionExceptionSpecKind::PotentiallyThrowing;
+    if (function_type.exception_spec != FunctionExceptionSpecKind::Dependent) {
+        function_type.exception_spec = is_non_throwing
+            ? FunctionExceptionSpecKind::NonThrowing
+            : FunctionExceptionSpecKind::PotentiallyThrowing;
+    }
 }
 
 std::unique_ptr<Expr> Parser::parse_cpp_throw_expression() {
@@ -4962,11 +4991,13 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     bool ctor_has_exception_spec = false;
     FunctionExceptionSpecKind ctor_exception_spec =
         FunctionExceptionSpecKind::PotentiallyThrowing;
+    std::shared_ptr<Expr> ctor_exception_spec_expr = nullptr;
     if (gentle_check(TokenType::NOEXCEPT_KW)) {
         FunctionType spec_probe;
         parse_cpp_optional_noexcept_spec(spec_probe);
         ctor_has_exception_spec = spec_probe.has_explicit_exception_spec;
         ctor_exception_spec = spec_probe.exception_spec;
+        ctor_exception_spec_expr = spec_probe.exception_spec_expr;
     }
 
     auto trailing_attrs = try_parse_attributes();
@@ -5073,6 +5104,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     ctor_fn_type->has_prototype = has_prototype;
     ctor_fn_type->has_explicit_exception_spec = ctor_has_exception_spec;
     ctor_fn_type->exception_spec = ctor_exception_spec;
+    ctor_fn_type->exception_spec_expr = ctor_exception_spec_expr;
 
     auto ctor_decl = make_ast<CppConstructorDecl>(
         *ast_ctx,
@@ -5247,11 +5279,13 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
     bool dtor_has_exception_spec = false;
     FunctionExceptionSpecKind dtor_exception_spec =
         FunctionExceptionSpecKind::PotentiallyThrowing;
+    std::shared_ptr<Expr> dtor_exception_spec_expr = nullptr;
     if (gentle_check(TokenType::NOEXCEPT_KW)) {
         FunctionType spec_probe;
         parse_cpp_optional_noexcept_spec(spec_probe);
         dtor_has_exception_spec = spec_probe.has_explicit_exception_spec;
         dtor_exception_spec = spec_probe.exception_spec;
+        dtor_exception_spec_expr = spec_probe.exception_spec_expr;
     }
 
     bool is_override = false;
@@ -5306,6 +5340,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
     dtor_fn_type->has_prototype = true;
     dtor_fn_type->has_explicit_exception_spec = dtor_has_exception_spec;
     dtor_fn_type->exception_spec = dtor_exception_spec;
+    dtor_fn_type->exception_spec_expr = dtor_exception_spec_expr;
 
     std::vector<std::unique_ptr<Decl>> params;
     auto dtor_decl = make_ast<CppDestructorDecl>(

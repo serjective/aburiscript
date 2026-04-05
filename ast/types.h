@@ -30,6 +30,7 @@ struct CppMethodDecl;
 struct CppConstructorDecl;
 struct CppDestructorDecl;
 struct VariableDecl;
+struct FunctionType;
 struct CppBaseSpecifier;
 struct Symbol;
 struct AbiPolicy;
@@ -623,6 +624,8 @@ bool template_argument_depends_on_template_parameters(
 bool template_argument_depends_on_template_parameters(
     const TemplateArgument& argument,
     const ASTContext* ast_ctx);
+bool function_exception_specs_equal(const FunctionType& lhs,
+                                    const FunctionType& rhs);
 
 enum class BuiltinTypes {
     Void,
@@ -729,6 +732,7 @@ struct BuiltinType : CType {
 enum class FunctionExceptionSpecKind : uint8_t {
     PotentiallyThrowing,
     NonThrowing,
+    Dependent,
 };
 
 enum class FunctionRefQualifierKind : uint8_t {
@@ -750,6 +754,9 @@ struct FunctionType: CType {
     bool has_explicit_exception_spec = false;
     // C++ noexcept model: currently tracks potentially-throwing vs non-throwing.
     FunctionExceptionSpecKind exception_spec = FunctionExceptionSpecKind::PotentiallyThrowing;
+    // in a function like void process() noexcept(sizeof(void*) == 8)
+    // , exception_spec_expr is the expression in the noexcept
+    std::shared_ptr<Expr> exception_spec_expr = nullptr;
     bool equals(const CType &other) override;
     int64_t getWidth() override {
         return 8; // for sizeof gcc extension

@@ -660,6 +660,98 @@ QualType Collect::substitute_template_type_with_bindings(
                 substituted_parameters.push_back(std::move(substituted_parameter));
             }
         }
+        FunctionExceptionSpecKind substituted_exception_spec =
+            func->exception_spec;
+        std::shared_ptr<Expr> substituted_exception_spec_expr =
+            func->exception_spec_expr;
+        if (func->exception_spec_expr) {
+            auto rewrite_bound_template_type =
+                [&](QualType bound_type) -> QualType {
+                    return substitute_template_type_with_bindings(
+                        bound_type,
+                        parameters,
+                        argument_bindings,
+                        loc,
+                        allow_unsubstituted_parameters);
+                };
+            auto rewrite_bound_template_arguments =
+                [&](const std::vector<TemplateArgument>& template_arguments)
+                -> std::vector<TemplateArgument> {
+                    return substitute_template_arguments_with_bindings(
+                        template_arguments,
+                        parameters,
+                        argument_bindings,
+                        loc,
+                        allow_unsubstituted_parameters);
+                };
+            auto clone_pass_builder = make_template_binding_clone_pass_builder(
+                ast_ctx_.get(),
+                this,
+                parameters,
+                argument_bindings,
+                loc,
+                "failed to substitute function noexcept expression",
+                rewrite_bound_template_type,
+                rewrite_bound_template_arguments,
+                {},
+                {});
+            auto clone_pass = clone_pass_builder.build_substitution_pass();
+            std::string clone_error;
+            auto cloned_exception_expr =
+                clone_pass.clone_expr(func->exception_spec_expr.get(), &clone_error);
+            if (!cloned_exception_expr) {
+                report_error(
+                    clone_error.empty()
+                        ? "failed to substitute function noexcept expression"
+                        : clone_error,
+                    loc);
+                return type;
+            }
+            std::string resolve_error;
+            if (!resolve_dependent_expr_after_substitution(
+                    cloned_exception_expr,
+                    QualType(),
+                    &resolve_error)) {
+                report_error(
+                    resolve_error.empty()
+                        ? "failed to resolve function noexcept expression after substitution"
+                        : resolve_error,
+                    loc);
+                return type;
+            }
+            changed = true;
+            substituted_exception_spec_expr =
+                std::shared_ptr<Expr>(cloned_exception_expr.release());
+            ConstEvalResult eval = evaluate_with_consteval_compat(
+                substituted_exception_spec_expr.get(),
+                ConstEvalMode::cpp_core_constant_expression());
+            bool known_exception_spec = false;
+            bool is_non_throwing = false;
+            if (eval.status == ConstEvalStatus::Constant && eval.value.has_value()) {
+                switch (eval.value->kind) {
+                    case ConstValueKind::Boolean:
+                        is_non_throwing = eval.value->bool_value;
+                        known_exception_spec = true;
+                        break;
+                    case ConstValueKind::Integer:
+                        is_non_throwing =
+                            eval.value->int_value.to_unsigned_u64() != 0;
+                        known_exception_spec = true;
+                        break;
+                    default:
+                        break;
+                }
+            }
+            if (known_exception_spec) {
+                substituted_exception_spec = is_non_throwing
+                    ? FunctionExceptionSpecKind::NonThrowing
+                    : FunctionExceptionSpecKind::PotentiallyThrowing;
+                substituted_exception_spec_expr = nullptr;
+            } else {
+                substituted_exception_spec =
+                    FunctionExceptionSpecKind::Dependent;
+            }
+        }
         if (!changed) {
             return type;
         }
@@ -671,7 +763,8 @@ QualType Collect::substitute_template_type_with_bindings(
         rewritten->member_ref_qualifier = func->member_ref_qualifier;
         rewritten->has_explicit_exception_spec =
             func->has_explicit_exception_spec;
-        rewritten->exception_spec = func->exception_spec;
+        rewritten->exception_spec = substituted_exception_spec;
+        rewritten->exception_spec_expr = substituted_exception_spec_expr;
         return QualType(rewritten, quals);
     }
 

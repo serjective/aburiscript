@@ -105,6 +105,7 @@ std::shared_ptr<FunctionType> strip_implicit_object_parameter_from_method_type(
     rebuilt->member_ref_qualifier = fn_type->member_ref_qualifier;
     rebuilt->has_explicit_exception_spec = fn_type->has_explicit_exception_spec;
     rebuilt->exception_spec = fn_type->exception_spec;
+    rebuilt->exception_spec_expr = fn_type->exception_spec_expr;
     return rebuilt;
 }
 

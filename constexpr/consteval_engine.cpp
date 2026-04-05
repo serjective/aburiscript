@@ -14,6 +14,24 @@
 namespace {
 constexpr size_t kMaxConstEvalDepth = 512;
 
+bool variable_template_specialization_still_depends_on_template_parameters(
+    const Symbol* sym) {
+    if (!sym) {
+        return false;
+    }
+    const auto* specialization_info =
+        get_symbol_variable_template_specialization(sym);
+    if (!specialization_info) {
+        return false;
+    }
+    for (const auto& argument : specialization_info->arguments) {
+        if (template_argument_depends_on_template_parameters(argument)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // ====== Type infrastructure & alignment calculations ======
 
 struct IntShape {
@@ -3553,6 +3571,13 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
             if (constexpr_value.status == ConstEvalStatus::Constant &&
                 constexpr_value.value.has_value()) {
                 return constexpr_value;
+            }
+            if (variable_template_specialization_still_depends_on_template_parameters(
+                    var_ref->symref.get())) {
+                return make_not_evaluated(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "dependent variable template reference is not a concrete non-type template argument",
+                    expr->location);
             }
             if (var_ref->symref->kind == SymbolKind::FUNCTION ||
                 has_static_storage_duration(var_ref->symref.get())) {

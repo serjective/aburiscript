@@ -87,6 +87,7 @@ QualType replace_auto_placeholder_qualtype(QualType pattern, QualType deduced) {
         rebuilt->has_explicit_exception_spec =
             func->has_explicit_exception_spec;
         rebuilt->exception_spec = func->exception_spec;
+        rebuilt->exception_spec_expr = func->exception_spec_expr;
         return QualType(rebuilt, pattern.get_qualifiers());
     }
 

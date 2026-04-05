@@ -409,6 +409,10 @@ void append_type_semantic_fingerprint(std::string& out, QualType type) {
             out += ":ES";
             out += std::to_string(static_cast<int>(func->exception_spec));
             out += func->has_explicit_exception_spec ? ":X" : ":I";
+            if (func->exception_spec_expr) {
+                out += ":EXPR";
+                out += pointer_identity_string(func->exception_spec_expr.get());
+            }
             return;
         }
         case TypeKind::Object: {
