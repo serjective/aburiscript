@@ -3419,7 +3419,8 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
     }
 
     if (auto* init_list = dyn_cast<InitListExpr>(expr)) {
-        if (is_cpp_non_type_template_argument_mode(mode) &&
+        if ((is_cpp_core_constant_expression_mode(mode) ||
+             is_cpp_non_type_template_argument_mode(mode)) &&
             init_list->type &&
             (init_list->type->kind == TypeKind::Object ||
              init_list->type->kind == TypeKind::Array)) {
