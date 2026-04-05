@@ -940,6 +940,38 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
             loc);
     }
 
+    bool explicit_args_are_dependent = false;
+    bool any_arg_is_dependent = false;
+    bool callee_is_dependent = false;
+    for (const auto& explicit_arg : explicit_template_args) {
+        if (template_argument_depends_on_template_parameters(
+                explicit_arg,
+                ast_ctx_.get())) {
+            explicit_args_are_dependent = true;
+            break;
+                }
+    }
+    callee_is_dependent =
+        expression_depends_on_template_parameters(callee.get());
+    for (const auto& arg : args) {
+        if (!arg) {
+            continue;
+        }
+        if (expression_depends_on_template_parameters(arg.get())) {
+            any_arg_is_dependent = true;
+            break;
+                }
+    }
+    if (explicit_args_are_dependent ||
+        callee_is_dependent ||
+        any_arg_is_dependent) {
+        return build_dependent_explicit_template_call(
+            std::move(callee),
+            std::move(explicit_template_args),
+            std::move(args),
+            loc);
+        }
+
     if (auto* unresolved_member = dyn_cast<UnresolvedMemberExpr>(callee.get())) {
         auto owned_member = std::unique_ptr<UnresolvedMemberExpr>(
             static_cast<UnresolvedMemberExpr*>(callee.release()));

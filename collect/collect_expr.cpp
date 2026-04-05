@@ -1021,9 +1021,41 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
     bool is_predefined_ident =
         (name == "__func__" || name == "__FUNCTION__" ||
          name == "__PRETTY_FUNCTION__");
-    auto resolve_static_record_member_lookup =
-        [&](const MemberNameLookupResult& member_lookup)
+    auto build_current_record_qualified_reference =
+        [&](QualType current_record_type,
+            std::shared_ptr<Symbol> selected_symbol = nullptr)
             -> std::unique_ptr<Expr> {
+            if (!current_record_type) {
+                return selected_symbol
+                    ? collect_identifier_reference(
+                          name,
+                          std::move(selected_symbol),
+                          loc)
+                    : collect_identifier_reference(name, nullptr, loc);
+            }
+            auto qualified_ref = collect_identifier_reference(
+                name,
+                std::move(selected_symbol),
+                loc);
+            if (isa<VarRef>(qualified_ref.get())) {
+                qualified_ref = attach_cpp_qualified_info_to_expr(
+                    std::move(qualified_ref),
+                    build_cpp_qualified_expr_info(
+                        /*has_global_qualifier=*/false,
+                        {},
+                        current_record_type,
+                        /*is_type_qualified=*/true,
+                        /*is_current_instantiation=*/false));
+            }
+            return qualified_ref;
+        };
+    auto resolve_static_record_member_lookup =
+        [&](const MemberNameLookupResult& member_lookup,
+            QualType current_record_type)
+            -> std::unique_ptr<Expr> {
+            size_t static_callable_matches =
+                member_lookup.static_method_matches +
+                member_lookup.static_method_template_matches;
             size_t static_template_candidate_matches =
                 member_lookup.static_method_template_matches;
             size_t static_candidate_matches =
@@ -1033,6 +1065,22 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
                 member_lookup.enumerator_matches;
             if (static_candidate_matches == 0) {
                 return nullptr;
+            }
+            if (looks_like_call &&
+                static_callable_matches > 0 &&
+                member_lookup.static_data_matches == 0 &&
+                member_lookup.enumerator_matches == 0) {
+                std::shared_ptr<Symbol> selected_symbol = nullptr;
+                if (member_lookup.static_method_matches == 1 &&
+                    static_template_candidate_matches == 0 &&
+                    member_lookup.single_static_method &&
+                    member_lookup.single_static_method->symbol) {
+                    selected_symbol =
+                        member_lookup.single_static_method->symbol;
+                }
+                return build_current_record_qualified_reference(
+                    current_record_type,
+                    std::move(selected_symbol));
             }
             if (static_candidate_matches > 1) {
                 report_error("member '" + name + "' is ambiguous", loc);
@@ -1090,7 +1138,9 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
                     return collect_make<ErrorExpr>(
                         "invalid use of non-static member", loc);
                 }
-                return resolve_static_record_member_lookup(member_lookup);
+                return resolve_static_record_member_lookup(
+                    member_lookup,
+                    current_record ? QualType(current_record) : QualType());
             }
 
             size_t static_candidate_matches =
@@ -1163,7 +1213,9 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
             member_lookup.nonstatic_method_matches == 0 &&
             member_lookup.nonstatic_method_template_matches == 0 &&
             static_candidate_matches > 0) {
-            return resolve_static_record_member_lookup(member_lookup);
+            return resolve_static_record_member_lookup(
+                member_lookup,
+                session_.current_cpp_record_lookup_type_);
         }
     }
 

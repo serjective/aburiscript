@@ -5704,6 +5704,14 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
             collect_->collect_current_scope(),
             qualifier_prefix);
     };
+    /*
+     * This is needed because:
+     * class Ghana {
+     *   static const int nkrumah = 1957;
+     *   int accra[nkrumah];
+     *   }
+     *  is valid and we need to see
+     */
     auto publish_transient_record_member_semantics =
         [&](Decl* member_decl, RecordMemberAccess member_access) {
             if (!collect_ || !semantic_owner || !semantic_owner_record_type ||
@@ -5717,8 +5725,14 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 state = *cached;
             }
 
+            auto build_member_qualifier_prefix = [&]() {
+                std::string qualifier_prefix = name;
+                ensure_namespace_qualifier_prefix(qualifier_prefix);
+                return qualifier_prefix;
+            };
             bool changed = false;
             if (auto* static_member_decl = dyn_cast<VariableDecl>(member_decl)) {
+                // todo: we can't have non-const static variable in class decl
                 if (static_member_decl->storage_class != StorageClass::STATIC) {
                     return;
                 }
@@ -5770,6 +5784,109 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 semantic_member.decl = static_member_decl;
                 semantic_member.symbol = std::move(static_member_sym);
                 state.static_data_members.push_back(std::move(semantic_member));
+                changed = true;
+            } else if (auto* method_template_decl =
+                           dyn_cast<FunctionTemplateDecl>(member_decl)) {
+                auto* templated_method =
+                    dyn_cast<CppMethodDecl>(method_template_decl->function_decl());
+                if (!templated_method) {
+                    return;
+                }
+                for (const auto& existing_method_template :
+                     state.method_templates) {
+                    if (existing_method_template.decl == method_template_decl) {
+                        return;
+                    }
+                }
+
+                std::string qualifier_prefix = build_member_qualifier_prefix();
+                if (!qualifier_prefix.empty()) {
+                    set_func_decl_cxx_qualifier_prefix(
+                        templated_method,
+                        qualifier_prefix);
+                }
+                set_func_decl_owner_record_type(
+                    templated_method,
+                    semantic_owner_record_type);
+
+                RecordSemanticState::MethodTemplate semantic_method_template;
+                semantic_method_template.name = templated_method->name;
+                semantic_method_template.declared_access = member_access;
+                semantic_method_template.is_static =
+                    templated_method->storage_class == StorageClass::STATIC;
+                semantic_method_template.decl = method_template_decl;
+                state.method_templates.push_back(
+                    std::move(semantic_method_template));
+                changed = true;
+            } else if (auto* method_decl = dyn_cast<CppMethodDecl>(member_decl)) {
+                for (const auto& existing_method : state.methods) {
+                    if (existing_method.decl == method_decl) {
+                        return;
+                    }
+                }
+
+                std::string qualifier_prefix = build_member_qualifier_prefix();
+                if (!qualifier_prefix.empty()) {
+                    set_func_decl_cxx_qualifier_prefix(
+                        method_decl,
+                        qualifier_prefix);
+                }
+                set_func_decl_owner_record_type(
+                    method_decl,
+                    semantic_owner_record_type);
+
+                bool is_definition = function_decl_defines_entity(method_decl);
+                auto method_sym = collect_->collect_declare_function_symbol(
+                    method_decl->name,
+                    method_decl->type,
+                    method_decl->storage_class,
+                    method_decl->is_constexpr,
+                    method_decl->is_inline,
+                    is_definition,
+                    method_decl->location,
+                    method_decl->get_language_linkage(),
+                    true,
+                    method_decl->is_deleted,
+                    method_decl->is_defaulted);
+                collect_->collect_record_register_function_default_arguments(
+                    method_sym,
+                    method_decl,
+                    method_decl->location);
+                if (method_sym) {
+                    if (!qualifier_prefix.empty()) {
+                        set_symbol_cxx_qualifier_prefix(
+                            method_sym.get(),
+                            qualifier_prefix);
+                    }
+                    set_symbol_owner_record_type(
+                        method_sym.get(),
+                        semantic_owner_record_type);
+                    if (is_definition) {
+                        method_sym->function_definition = method_decl;
+                    }
+                }
+
+                RecordSemanticState::Method semantic_method;
+                semantic_method.name = method_decl->name;
+                semantic_method.type = method_decl->type;
+                semantic_method.declared_access = member_access;
+                semantic_method.is_static =
+                    method_decl->storage_class == StorageClass::STATIC;
+                semantic_method.is_deleted = method_decl->is_deleted;
+                semantic_method.is_defaulted = method_decl->is_defaulted;
+                semantic_method.is_explicit =
+                    method_decl->is_explicit_conversion;
+                semantic_method.is_virtual = method_decl->is_virtual;
+                semantic_method.is_override = method_decl->is_override;
+                semantic_method.is_final = method_decl->is_final;
+                semantic_method.is_pure = method_decl->is_pure;
+                semantic_method.is_conversion_function =
+                    method_decl->is_conversion_function;
+                semantic_method.conversion_target_type =
+                    method_decl->conversion_target_type;
+                semantic_method.decl = method_decl;
+                semantic_method.symbol = std::move(method_sym);
+                state.methods.push_back(std::move(semantic_method));
                 changed = true;
             } else if (auto* enum_decl = dyn_cast<EnumDecl>(member_decl)) {
                 if (enum_decl->is_scoped()) {
