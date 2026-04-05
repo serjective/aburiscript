@@ -34,6 +34,7 @@ struct ASTCloneContext {
         lookup_pack_size;
     std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_remap;
     std::unordered_map<const Scope*, std::shared_ptr<Scope>> scope_remap;
+    std::unordered_map<const ObjectDecl*, QualType> record_type_remap;
 };
 
 std::unique_ptr<Expr> clone_expr_with_substitution(

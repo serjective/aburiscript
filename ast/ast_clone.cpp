@@ -71,10 +71,116 @@ std::unique_ptr<Expr> make_pack_size_integer_literal(size_t pack_size,
 }
 
 QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
-    if (!ctx.rewrite_type) {
-        return type;
+    // Cloned lambdas synthesize fresh closure record types. If surrounding
+    // rewritten types still mention the pattern lambda's closure owner, walk
+    // through pointer/reference/function/array wrappers and swap those record
+    // references over to the cloned closure type so the closure object and its
+    // synthesized operator() stay type-consistent.
+    auto apply_record_type_remap =
+        [&](auto&& self, QualType current_type) -> QualType {
+            if (!current_type || ctx.record_type_remap.empty()) {
+                return current_type;
+            }
+
+            auto raw = current_type.get_shared();
+            uint8_t quals = current_type.get_qualifiers();
+            if (!raw) {
+                return current_type;
+            }
+
+            if (auto object = dyn_cast_shared<ObjectType>(raw)) {
+                auto remap_it = ctx.record_type_remap.find(
+                    dyn_cast<ObjectDecl>(object->get_decl()));
+                if (remap_it == ctx.record_type_remap.end() || !remap_it->second) {
+                    return current_type;
+                }
+                return QualType(
+                    remap_it->second.get_shared(),
+                    static_cast<uint8_t>(
+                        remap_it->second.get_qualifiers() | quals));
+            }
+            if (auto ptr = dyn_cast_shared<PointerType>(raw)) {
+                auto rewritten = self(self, ptr->pointed_type);
+                if (rewritten.equals_qualified(ptr->pointed_type)) {
+                    return current_type;
+                }
+                return QualType(std::make_shared<PointerType>(rewritten), quals);
+            }
+            if (auto ref = dyn_cast_shared<ReferenceType>(raw)) {
+                auto rewritten = self(self, ref->referred_type);
+                if (rewritten.equals_qualified(ref->referred_type)) {
+                    return current_type;
+                }
+                return QualType(
+                    std::make_shared<ReferenceType>(
+                        rewritten,
+                        ref->reference_kind),
+                    quals);
+            }
+            if (auto mem_ptr = dyn_cast_shared<MemberPointerType>(raw)) {
+                auto rewritten_class = self(self, mem_ptr->class_type);
+                auto rewritten_member = self(self, mem_ptr->member_type);
+                if (rewritten_class.equals_qualified(mem_ptr->class_type) &&
+                    rewritten_member.equals_qualified(mem_ptr->member_type)) {
+                    return current_type;
+                }
+                return QualType(
+                    std::make_shared<MemberPointerType>(
+                        rewritten_class,
+                        rewritten_member),
+                    quals);
+            }
+            if (auto block_ptr = dyn_cast_shared<BlockPointerType>(raw)) {
+                auto rewritten = self(self, block_ptr->pointed_type);
+                if (rewritten.equals_qualified(block_ptr->pointed_type)) {
+                    return current_type;
+                }
+                return QualType(
+                    std::make_shared<BlockPointerType>(rewritten),
+                    quals);
+            }
+            if (auto array = dyn_cast_shared<ArrayType>(raw)) {
+                auto rewritten = self(self, array->element_type);
+                if (rewritten.equals_qualified(array->element_type)) {
+                    return current_type;
+                }
+                if (array->size.has_value()) {
+                    return QualType(
+                        std::make_shared<ArrayType>(rewritten, array->size),
+                        quals);
+                }
+                auto rebuilt =
+                    std::make_shared<ArrayType>(rewritten, array->size_expr);
+                rebuilt->size_kind = array->size_kind;
+                rebuilt->size = array->size;
+                return QualType(rebuilt, quals);
+            }
+            if (auto function = dyn_cast_shared<FunctionType>(raw)) {
+                auto rewritten_ret = self(self, function->ret_type);
+                bool changed =
+                    !rewritten_ret.equals_qualified(function->ret_type);
+                auto rebuilt = std::make_shared<FunctionType>(*function);
+                rebuilt->ret_type = rewritten_ret;
+                for (size_t index = 0; index < rebuilt->parameters.size(); ++index) {
+                    auto rewritten_param = self(self, rebuilt->parameters[index]);
+                    changed = changed ||
+                        !rewritten_param.equals_qualified(
+                            rebuilt->parameters[index]);
+                    rebuilt->parameters[index] = rewritten_param;
+                }
+                if (!changed) {
+                    return current_type;
+                }
+                return QualType(rebuilt, quals);
+            }
+            return current_type;
+        };
+
+    QualType rewritten = ctx.rewrite_type ? ctx.rewrite_type(type) : type;
+    if (!ctx.record_type_remap.empty()) {
+        rewritten = apply_record_type_remap(apply_record_type_remap, rewritten);
     }
-    return ctx.rewrite_type(type);
+    return rewritten;
 }
 
 bool clone_attribute_list(const AttributeList& source,
@@ -2079,6 +2185,15 @@ std::unique_ptr<Expr> clone_expr_with_substitution(
     auto cloned = clone_expr_tree(expr, ctx.ast_ctx, error_out);
     if (!cloned) {
         return nullptr;
+    }
+    if (const auto* original_lambda = dyn_cast<const CppLambdaExpr>(expr)) {
+        auto* cloned_lambda = dyn_cast<CppLambdaExpr>(cloned.get());
+        const auto* original_owner = original_lambda->semantic_info.semantic_owner();
+        QualType cloned_closure_type =
+            cloned_lambda ? cloned_lambda->semantic_info.closure_type() : QualType();
+        if (original_owner && cloned_closure_type) {
+            ctx.record_type_remap[original_owner] = cloned_closure_type;
+        }
     }
     auto saved_rewrite_expr = std::move(ctx.rewrite_expr);
     ctx.rewrite_expr = nullptr;
