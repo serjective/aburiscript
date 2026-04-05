@@ -1304,6 +1304,13 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             auto entered_scope = collect_->collect_enter_scope(ScopeFlags::FunctionScope);
             auto function_scope = entered_scope.scope;
 
+            QualType previous_record_lookup_type =
+                collect_->collect_current_cpp_record_lookup_type();
+            if (record_type) {
+                collect_->collect_set_current_cpp_record_lookup_type(
+                    QualType(record_type));
+            }
+
             Collect::CppThisContext cpp_this_context;
             cpp_this_context.is_member_function = true;
             cpp_this_context.is_static_member_function = is_static_member_function;
@@ -1365,6 +1372,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 member_decl->clear_deferred_inline_body_token_range();
                 collect_->collect_leave_scope();
                 collect_->collect_finish_function_definition(function_scope);
+                collect_->collect_set_current_cpp_record_lookup_type(
+                    previous_record_lookup_type);
                 if (pop_record_parse_frame && !cxx_record_parse_stack_.empty()) {
                     cxx_record_parse_stack_.pop_back();
                     pop_record_parse_frame = false;
@@ -1376,6 +1385,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 }
                 collect_->collect_abort_function_definition();
                 collect_->collect_leave_scope();
+                collect_->collect_set_current_cpp_record_lookup_type(
+                    previous_record_lookup_type);
                 restore_deferred_inline_parser_state(std::move(saved_state));
                 throw;
             }
@@ -2035,6 +2046,8 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
             }
             context.info.owner_class_template = class_template;
             context.info.owner_template_arguments = component.template_arguments;
+            context.info.owner_has_specialization_argument_list =
+                component.has_template_argument_list;
             if (!qualified_declarator_matches_primary_class_template_owner(
                     class_template,
                     component.template_arguments)) {
@@ -2077,6 +2090,7 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
                 }
             }
             context.info.owner_record_decl = owner_record_decl;
+            context.info.owner_has_specialization_argument_list = false;
             context.info.targets_template_pattern = false;
         }
         break;
@@ -2272,6 +2286,7 @@ bool Parser::record_method_template_explicit_specialization_matches(
     uint8_t parsed_trailing_cv_qualifiers,
     const ClassTemplateDecl* owner_class_template,
     const std::vector<TemplateArgument>& owner_template_arguments,
+    bool owner_has_specialization_argument_list,
     bool targets_template_pattern,
     SrcLoc declarator_loc,
     std::vector<TemplateArgument>& deduced_arguments_out) {
@@ -2285,7 +2300,7 @@ bool Parser::record_method_template_explicit_specialization_matches(
 
     QualType pattern_type(method_template.decl->function_decl()->type);
     if (owner_class_template &&
-        !owner_template_arguments.empty() &&
+        owner_has_specialization_argument_list &&
         !targets_template_pattern) {
         pattern_type = collect_->collect_partially_substitute_template_type(
             pattern_type,
@@ -2434,6 +2449,8 @@ void Parser::resolve_qualified_declarator_match(
                         decl_parser.trailing_function_cv_qualifiers,
                         qualified_declarator.owner_class_template,
                         qualified_declarator.owner_template_arguments,
+                        qualified_declarator
+                            .owner_has_specialization_argument_list,
                         qualified_declarator.targets_template_pattern,
                         qualified_declarator.loc,
                         qualified_declarator
@@ -2818,7 +2835,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         bool preserve_ordinary_member_explicit_specialization =
             is_parsing_cpp_explicit_specialization() &&
             qualified_declarator.owner_class_template != nullptr &&
-            !qualified_declarator.owner_template_arguments.empty() &&
+            qualified_declarator.owner_has_specialization_argument_list &&
             !matched_member_template &&
             !qualified_declarator.targets_template_pattern;
         bool preserve_explicit_specialization_member_decl =
@@ -2955,7 +2972,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         QualType explicit_specialized_owner_type;
         if (preserve_explicit_specialization_member_decl &&
             qualified_declarator.owner_class_template &&
-            !qualified_declarator.owner_template_arguments.empty() &&
+            qualified_declarator.owner_has_specialization_argument_list &&
             !qualified_declarator.targets_template_pattern) {
             auto owner_record_kind =
                 qualified_declarator.owner_record_decl->is_union
@@ -2969,7 +2986,8 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                         ->name,
                     qualified_declarator.owner_template_arguments,
                     qualified_declarator.loc,
-                    qualified_declarator.owner_class_template);
+                    qualified_declarator.owner_class_template,
+                    qualified_declarator.owner_has_specialization_argument_list);
             if (!specialized_owner_decl ||
                 !specialized_owner_decl->get_record_type()) {
                 error_custloc(
@@ -3254,8 +3272,13 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         declarator_token.loc);
     bool preserve_function_explicit_specialization_decl =
         is_parsing_cpp_explicit_specialization();
+    bool suppress_primary_function_template_symbol_binding =
+        is_cxx_mode_active() &&
+        template_pattern_depth_ > 0 &&
+        !preserve_function_explicit_specialization_decl;
     std::shared_ptr<Symbol> predecl_sym = nullptr;
-    if (!preserve_function_explicit_specialization_decl) {
+    if (!preserve_function_explicit_specialization_decl &&
+        !suppress_primary_function_template_symbol_binding) {
         predecl_sym = collect_->collect_declare_function_symbol(
             decl_parser.name,
             QualType(parsed_decl_type),
@@ -3280,7 +3303,8 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
     bool is_definition =
         func_decl_check && function_decl_defines_entity(func_decl_check);
     std::shared_ptr<Symbol> final_sym = nullptr;
-    if (!preserve_function_explicit_specialization_decl) {
+    if (!preserve_function_explicit_specialization_decl &&
+        !suppress_primary_function_template_symbol_binding) {
         final_sym = collect_->collect_declare_function_symbol(
             decl_parser.name,
             QualType(parsed_decl_type),
@@ -3306,6 +3330,21 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                 final_sym, func_decl_check, declarator_token.loc);
         }
         merge_function_asm_label(decl_parser, final_sym, declarator_token.loc);
+    }
+    auto append_function_attrs_to_symbol = [&](const std::shared_ptr<Symbol>& sym) {
+        if (!sym) {
+            return;
+        }
+        for (const auto& attr : decl_parser.leading_attrs) {
+            sym->sym_attrs.attrs.push_back(attr);
+        }
+        for (const auto& attr : trailing_attrs) {
+            sym->sym_attrs.attrs.push_back(attr);
+        }
+    };
+    append_function_attrs_to_symbol(predecl_sym);
+    if (final_sym != predecl_sym) {
+        append_function_attrs_to_symbol(final_sym);
     }
     ast_ctx->append_attrs(funct->node_id, std::move(decl_parser.leading_attrs));
     ast_ctx->append_attrs(funct->node_id, std::move(trailing_attrs));
@@ -3356,7 +3395,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
     bool preserve_explicit_specialization_static_decl =
         is_parsing_cpp_explicit_specialization() &&
         qualified_declarator.owner_class_template != nullptr &&
-        !qualified_declarator.owner_template_arguments.empty() &&
+        qualified_declarator.owner_has_specialization_argument_list &&
         !qualified_declarator.targets_template_pattern;
     if (qualified_declarator.owner_record_decl) {
         if (storage_class == StorageClass::STATIC) {
@@ -3783,6 +3822,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
             }
         }
         if (decl_parser.name.empty()) {
+            if (is_in_tentative_context()) {
+                throw ParseError("tentative declarator parse failed");
+            }
             if (storage_class == StorageClass::TYPEDEF) {
                 error("typedef requires a name for the type alias");
             }
@@ -5531,6 +5573,16 @@ bool Parser::isTokenDeclarationSpec(Token s) {
                         true,
                         is_cxx_mode_active())) {
                     return true;
+                }
+                if (is_cxx_mode_active()) {
+                    QualType current_record_lookup_type =
+                        collect_->collect_current_cpp_record_lookup_type();
+                    if (current_record_lookup_type &&
+                        collect_->collect_lookup_record_nested_type(
+                            current_record_lookup_type,
+                            s.value)) {
+                        return true;
+                    }
                 }
                 if (is_cxx_mode_active() &&
                     (is_cpp_qualified_id_start() ||

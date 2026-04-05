@@ -192,11 +192,189 @@ QualType Collect::substitute_template_type_with_bindings(
                 {},
                 {});
             auto clone_pass = clone_pass_builder.build_substitution_pass();
+            auto resolution_pass =
+                clone_pass_builder.build_dependent_resolution_pass(
+                    clone_pass,
+                    [&](std::unique_ptr<Expr>& rewritten_expr,
+                        std::string* error_out) -> bool {
+                        return resolve_dependent_expr_after_substitution(
+                            rewritten_expr,
+                            QualType(nullptr),
+                            error_out);
+                    });
 
             std::string clone_error;
             auto cloned_expr = clone_pass.clone_expr(expr.get(), &clone_error);
             if (!cloned_expr) {
                 return nullptr;
+            }
+            auto rewrite_lingering_template_ids =
+                [&](auto&& self, Expr* candidate) -> void {
+                    if (!candidate) {
+                        return;
+                    }
+
+                    switch (candidate->get_kind()) {
+                        case StmtKind::UnresolvedLookupExpr: {
+                            auto* lookup =
+                                static_cast<UnresolvedLookupExpr*>(candidate);
+                            if (lookup->explicit_template_arguments) {
+                                lookup->explicit_template_arguments =
+                                    rewrite_bound_template_arguments(
+                                        *lookup->explicit_template_arguments);
+                            }
+                            return;
+                        }
+                        case StmtKind::UnresolvedMemberExpr: {
+                            auto* member =
+                                static_cast<UnresolvedMemberExpr*>(candidate);
+                            if (member->explicit_template_arguments) {
+                                member->explicit_template_arguments =
+                                    rewrite_bound_template_arguments(
+                                        *member->explicit_template_arguments);
+                            }
+                            self(self, member->base.get());
+                            return;
+                        }
+                        case StmtKind::FuncCall: {
+                            auto* call = static_cast<FuncCall*>(candidate);
+                            self(self, call->func.get());
+                            for (const auto& arg : call->args) {
+                                self(self, arg.get());
+                            }
+                            return;
+                        }
+                        case StmtKind::DependentCallExpr: {
+                            auto* call =
+                                static_cast<DependentCallExpr*>(candidate);
+                            self(self, call->callee.get());
+                            for (const auto& arg : call->args) {
+                                self(self, arg.get());
+                            }
+                            return;
+                        }
+                        case StmtKind::ImplicitCast: {
+                            auto* cast = static_cast<ImplicitCast*>(candidate);
+                            self(self, cast->expr.get());
+                            return;
+                        }
+                        case StmtKind::ExplicitCast: {
+                            auto* cast = static_cast<ExplicitCast*>(candidate);
+                            self(self, cast->expr.get());
+                            return;
+                        }
+                        case StmtKind::CondExpr: {
+                            auto* cond = static_cast<CondExpr*>(candidate);
+                            self(self, cond->condition.get());
+                            self(self, cond->true_expr.get());
+                            self(self, cond->false_expr.get());
+                            return;
+                        }
+                        case StmtKind::UnaryOperation: {
+                            auto* unary =
+                                static_cast<UnaryOperation*>(candidate);
+                            self(self, unary->exp.get());
+                            return;
+                        }
+                        case StmtKind::DependentUnaryExpr: {
+                            auto* unary =
+                                static_cast<DependentUnaryExpr*>(candidate);
+                            self(self, unary->operand.get());
+                            return;
+                        }
+                        case StmtKind::BinaryOperation: {
+                            auto* binary =
+                                static_cast<BinaryOperation*>(candidate);
+                            self(self, binary->left.get());
+                            self(self, binary->right.get());
+                            return;
+                        }
+                        case StmtKind::CompoundAssignOperation: {
+                            auto* binary =
+                                static_cast<CompoundAssignOperation*>(candidate);
+                            self(self, binary->left.get());
+                            self(self, binary->right.get());
+                            return;
+                        }
+                        case StmtKind::DependentBinaryExpr: {
+                            auto* binary =
+                                static_cast<DependentBinaryExpr*>(candidate);
+                            self(self, binary->left.get());
+                            self(self, binary->right.get());
+                            return;
+                        }
+                        case StmtKind::ArraySubscriptExpr: {
+                            auto* subscript =
+                                static_cast<ArraySubscriptExpr*>(candidate);
+                            self(self, subscript->array.get());
+                            self(self, subscript->index.get());
+                            return;
+                        }
+                        case StmtKind::DependentArraySubscriptExpr: {
+                            auto* subscript =
+                                static_cast<DependentArraySubscriptExpr*>(
+                                    candidate);
+                            self(self, subscript->array.get());
+                            self(self, subscript->index.get());
+                            return;
+                        }
+                        case StmtKind::MemberExpr: {
+                            auto* member =
+                                static_cast<MemberExpr*>(candidate);
+                            self(self, member->base.get());
+                            return;
+                        }
+                        case StmtKind::MemberPointerAccessExpr: {
+                            auto* access =
+                                static_cast<MemberPointerAccessExpr*>(candidate);
+                            self(self, access->base.get());
+                            self(self, access->member_pointer.get());
+                            return;
+                        }
+                        case StmtKind::DependentMemberPointerAccessExpr: {
+                            auto* access =
+                                static_cast<DependentMemberPointerAccessExpr*>(
+                                    candidate);
+                            self(self, access->base.get());
+                            self(self, access->member_pointer.get());
+                            return;
+                        }
+                        case StmtKind::CppNoexceptExpr: {
+                            auto* noexcept_expr =
+                                static_cast<CppNoexceptExpr*>(candidate);
+                            self(self, noexcept_expr->operand.get());
+                            return;
+                        }
+                        case StmtKind::CppPseudoDestructorExpr: {
+                            auto* pseudo_dtor =
+                                static_cast<CppPseudoDestructorExpr*>(candidate);
+                            self(self, pseudo_dtor->base.get());
+                            return;
+                        }
+                        default:
+                            return;
+                    }
+                };
+            rewrite_lingering_template_ids(
+                rewrite_lingering_template_ids,
+                cloned_expr.get());
+            {
+                Collect::UnevaluatedContextScope unevaluated_scope(
+                    this,
+                    "template expression-bearing type substitution");
+                constexpr unsigned kMaxExprResolutionPasses = 8;
+                // resolution can happen in stages, 8 is just an arbitary number to detect infinite loops/something gone wrong
+                for (unsigned pass = 0; pass < kMaxExprResolutionPasses; ++pass) {
+                    if (!decltype_expression_requires_deferred_resolution(
+                            cloned_expr.get())) {
+                        break;
+                    }
+                    if (!resolution_pass.resolve_expr_in_place(
+                            cloned_expr,
+                            &clone_error)) {
+                        return nullptr;
+                    }
+                }
             }
             return std::shared_ptr<Expr>(cloned_expr.release());
         };

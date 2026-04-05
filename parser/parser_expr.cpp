@@ -873,7 +873,8 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             true,
             qualified_loc,
             looks_like_call,
-            true);
+            true,
+            owner_chain.requires_template_keyword());
     }
 
     if (qualified_owner_enum_type && qualified_owner_enum_decl) {
@@ -2115,7 +2116,9 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                 member_name,
                 false,
                 loc,
-                allow_overloaded_method_set);
+                allow_overloaded_method_set,
+                /*suppress_virtual_dispatch=*/false,
+                saw_template_keyword);
         } else if (gentle_check_and_consume(TokenType::ARROW)) {
             if (is_cxx_mode_active() &&
                 gentle_check(TokenType::BITWISE_NOT)) {
@@ -2154,7 +2157,9 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                 member_name,
                 true,
                 loc,
-                allow_overloaded_method_set);
+                allow_overloaded_method_set,
+                /*suppress_virtual_dispatch=*/false,
+                saw_template_keyword);
         } else if (gentle_check(TokenType::INCREMENT)) {
             expr = collect_->collect_unary_operation(UnaryOpTypes::INCREMENT_POSTFIX, std::move(expr), loc);
             advance();

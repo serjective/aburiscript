@@ -268,6 +268,13 @@ void Parser::build_cpp_record_parse_deferred_bodies(
         auto entered_scope = collect_->collect_enter_scope(ScopeFlags::FunctionScope);
         auto function_scope = entered_scope.scope;
 
+        QualType previous_record_lookup_type =
+            collect_->collect_current_cpp_record_lookup_type();
+        if (ctx.record_type) {
+            collect_->collect_set_current_cpp_record_lookup_type(
+                QualType(ctx.record_type));
+        }
+
         Collect::CppThisContext cpp_this_context;
         cpp_this_context.is_member_function = true;
         cpp_this_context.is_static_member_function = is_static_member_function;
@@ -337,9 +344,13 @@ void Parser::build_cpp_record_parse_deferred_bodies(
             member_decl->clear_deferred_inline_body_token_range();
             collect_->collect_leave_scope();
             collect_->collect_finish_function_definition(function_scope);
+            collect_->collect_set_current_cpp_record_lookup_type(
+                previous_record_lookup_type);
         } catch (...) {
             collect_->collect_abort_function_definition();
             collect_->collect_leave_scope();
+            collect_->collect_set_current_cpp_record_lookup_type(
+                previous_record_lookup_type);
             restore_deferred_inline_parser_state(std::move(saved_state));
             throw;
         }

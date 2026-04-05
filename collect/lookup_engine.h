@@ -83,6 +83,12 @@ public:
         bool look_parents,
         LookupNamespace lookup_namespace,
         LookupTrace* trace = nullptr);
+    static const DeclBinding* lookup_unqualified_template_binding_from_context(
+        const std::string& name,
+        const DeclContext* start_decl_context,
+        bool look_parents,
+        LookupNamespace lookup_namespace,
+        LookupTrace* trace = nullptr);
 
     static std::vector<QualifiedOrdinaryBindingMatch>
     lookup_qualified_ordinary_bindings(

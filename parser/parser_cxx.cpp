@@ -797,6 +797,8 @@ Parser::try_parse_cpp_named_type_specifier() {
 
     auto current_scope = collect_->collect_current_scope();
     auto current_context = collect_->get_current_decl_context();
+    QualType current_record_lookup_type =
+        collect_->collect_current_cpp_record_lookup_type();
     if (!current_scope || !current_context) {
         error_custloc("internal error: missing C++ type-name lookup context",
                       start_tok.loc);
@@ -931,6 +933,12 @@ Parser::try_parse_cpp_named_type_specifier() {
                         allow_enclosing_lookup,
                         component.name,
                         &typedef_symbol);
+                    if (!resolved_type && current_record_lookup_type) {
+                        resolved_type =
+                            collect_->collect_lookup_record_nested_type(
+                                current_record_lookup_type,
+                                component.name);
+                    }
                     if (!resolved_type) {
                         restore();
                         return std::nullopt;
@@ -5869,12 +5877,52 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
             }
 
             auto build_member_qualifier_prefix = [&]() {
-                std::string qualifier_prefix = name;
+                std::string qualifier_prefix =
+                    semantic_owner ? semantic_owner->tag : name;
                 ensure_namespace_qualifier_prefix(qualifier_prefix);
                 return qualifier_prefix;
             };
             bool changed = false;
-            if (auto* static_member_decl = dyn_cast<VariableDecl>(member_decl)) {
+            if (auto* nested_record = dyn_cast<CppRecordDecl>(member_decl)) {
+                if (nested_record->name.empty()) {
+                    return;
+                }
+                auto* nested_owner = dyn_cast<ObjectDecl>(
+                    collect_->collect_lookup_tag_decl(
+                        nested_record->name,
+                        false));
+                if (!nested_owner || !nested_owner->get_record_type()) {
+                    return;
+                }
+                for (const auto& existing_type : state.nested_types) {
+                    if (existing_type.decl == nested_owner) {
+                        return;
+                    }
+                }
+
+                RecordSemanticState::NestedType nested_type;
+                nested_type.name = nested_record->name;
+                nested_type.type = QualType(nested_owner->get_record_type());
+                nested_type.declared_access = member_access;
+                nested_type.decl = nested_owner;
+                state.nested_types.push_back(std::move(nested_type));
+                changed = true;
+            } else if (auto* typedef_decl = dyn_cast<TypedefDecl>(member_decl)) {
+                for (const auto& existing_type : state.nested_types) {
+                    if (existing_type.decl == typedef_decl) {
+                        return;
+                    }
+                }
+
+                RecordSemanticState::NestedType nested_type;
+                nested_type.name = typedef_decl->name;
+                nested_type.type = typedef_decl->type;
+                nested_type.declared_access = member_access;
+                nested_type.decl = typedef_decl;
+                nested_type.symbol = typedef_decl->sym;
+                state.nested_types.push_back(std::move(nested_type));
+                changed = true;
+            } else if (auto* static_member_decl = dyn_cast<VariableDecl>(member_decl)) {
                 // todo: we can't have non-const static variable in class decl
                 if (static_member_decl->storage_class != StorageClass::STATIC) {
                     return;
@@ -5909,7 +5957,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 static_member_sym->set_language_linkage(
                     static_member_decl->get_language_linkage());
 
-                std::string qualifier_prefix = name;
+                std::string qualifier_prefix =
+                    semantic_owner ? semantic_owner->tag : name;
                 ensure_namespace_qualifier_prefix(qualifier_prefix);
                 if (!qualifier_prefix.empty()) {
                     set_symbol_cxx_qualifier_prefix(

@@ -1347,7 +1347,9 @@ std::unique_ptr<Expr> Collect::collect_unresolved_lookup_expression(
         requires_template_keyword,
         /*is_dependent=*/true,
         unresolved_type,
-        loc);
+        loc,
+        session_.current_scope_,
+        session_.current_decl_context_);
 }
 
 

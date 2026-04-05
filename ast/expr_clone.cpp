@@ -525,7 +525,9 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
                 lookup->requires_template_keyword,
                 lookup->is_dependent,
                 lookup->ctype,
-                lookup->location);
+                lookup->location,
+                lookup->lexical_lookup_scope,
+                lookup->lexical_lookup_context);
             assign_node_id(result.get(), ast_ctx);
             return result;
         }

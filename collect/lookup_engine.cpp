@@ -1010,6 +1010,72 @@ const DeclBinding* LookupEngine::lookup_unqualified_template_binding(
     return nullptr;
 }
 
+const DeclBinding* LookupEngine::lookup_unqualified_template_binding_from_context(
+    const std::string& name,
+    const DeclContext* start_decl_context,
+    bool look_parents,
+    LookupNamespace lookup_namespace,
+    LookupTrace* trace) {
+    std::unordered_set<const DeclContext*> visited_contexts;
+    size_t depth = 0;
+    for (const DeclContext* context = start_decl_context;
+         context;
+         context = look_parents ? context->lexical_parent() : nullptr, ++depth) {
+        context = canonical_decl_context(context);
+        if (!context || !visited_contexts.insert(context).second) {
+            if (!look_parents) {
+                break;
+            }
+            continue;
+        }
+        trace_named_step(
+            trace,
+            "template lookup context: ",
+            name + " kind=" + std::to_string(static_cast<unsigned>(context->kind())));
+        InternedName interned_name = intern_lookup_name(context, name);
+        if (!interned_name) {
+            if (!look_parents) {
+                break;
+            }
+            continue;
+        }
+        const DeclBinding* binding = nullptr;
+        if (context->kind() == DeclContextKind::Namespace ||
+            context->kind() == DeclContextKind::TranslationUnit) {
+            std::unordered_set<const DeclContext*> visited_context_graph;
+            binding = lookup_template_binding_in_context_graph(
+                interned_name,
+                context,
+                context->next_lookup_event_index(),
+                lookup_namespace,
+                visited_context_graph,
+                trace);
+        } else {
+            binding = lookup_context_local(
+                context,
+                interned_name,
+                lookup_namespace);
+            if (binding) {
+                if (binding_has_template_entity(binding)) {
+                    trace_named_step(trace, "hit template binding: ", name);
+                    return binding;
+                }
+                trace_named_step(trace, "blocked by non-template binding: ", name);
+                return nullptr;
+            }
+            trace_named_step(trace, "miss template binding: ", name);
+        }
+        if (binding) {
+            return binding;
+        }
+        if (!look_parents) {
+            break;
+        }
+    }
+    trace_named_step(trace, "template lookup miss: ", name);
+    return nullptr;
+}
+
 std::vector<LookupEngine::QualifiedOrdinaryBindingMatch>
 LookupEngine::lookup_qualified_ordinary_bindings(
     const std::string& name,

@@ -55,6 +55,8 @@
 #include "helpers/casting.h"
 
 class ASTContext;
+class Scope;
+class DeclContext;
 ASTContext* get_side_table_ast_context_for(const ObjectDecl* decl);
 ASTContext* get_side_table_ast_context_for(const EnumDecl* decl);
 struct FuncDecl;
@@ -1158,6 +1160,8 @@ struct UnresolvedLookupExpr : Expr {
     std::string name;
     DependentLookupQualifier qualifier;
     std::optional<std::vector<TemplateArgument>> explicit_template_arguments;
+    std::shared_ptr<Scope> lexical_lookup_scope;
+    std::shared_ptr<DeclContext> lexical_lookup_context;
     bool requires_template_keyword = false;
     bool is_dependent = true;
     QualType ctype;
@@ -1173,11 +1177,15 @@ struct UnresolvedLookupExpr : Expr {
         bool requires_template_keyword = false,
         bool is_dependent = true,
         QualType ctype = nullptr,
-        SrcLoc loc = SrcLoc())
+        SrcLoc loc = SrcLoc(),
+        std::shared_ptr<Scope> lexical_lookup_scope = nullptr,
+        std::shared_ptr<DeclContext> lexical_lookup_context = nullptr)
         : Expr(StmtKind::UnresolvedLookupExpr, loc),
           name(std::move(name)),
           qualifier(std::move(qualifier)),
           explicit_template_arguments(std::move(explicit_template_arguments)),
+          lexical_lookup_scope(std::move(lexical_lookup_scope)),
+          lexical_lookup_context(std::move(lexical_lookup_context)),
           requires_template_keyword(requires_template_keyword),
           is_dependent(is_dependent),
           ctype(std::move(ctype)) {}

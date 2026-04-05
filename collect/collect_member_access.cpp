@@ -421,7 +421,8 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
     bool is_arrow,
     SrcLoc loc,
     bool allow_overloaded_method_set,
-    bool suppress_virtual_dispatch) {
+    bool suppress_virtual_dispatch,
+    bool requires_template_keyword) {
 
     const std::string* interned_member_name =
         ast_ctx_ ? ast_ctx_->intern_identifier(member_name) : nullptr;
@@ -607,7 +608,7 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
             is_arrow,
             is_current_instantiation,
             names_dependent_base,
-            /*requires_template_keyword=*/false,
+            requires_template_keyword,
             suppress_virtual_dispatch,
             loc);
         return unresolved_member;

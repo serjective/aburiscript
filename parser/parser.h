@@ -177,6 +177,7 @@ private:
         const ObjectDecl* owner_record_decl = nullptr;
         const ClassTemplateDecl* owner_class_template = nullptr;
         std::vector<TemplateArgument> owner_template_arguments;
+        bool owner_has_specialization_argument_list = false;
         bool targets_template_pattern = false;
         const RecordSemanticState::Method* method_match = nullptr;
         const RecordSemanticState::MethodTemplate* method_template_match = nullptr;
@@ -385,6 +386,7 @@ private:
         uint8_t parsed_trailing_cv_qualifiers,
         const ClassTemplateDecl* owner_class_template,
         const std::vector<TemplateArgument>& owner_template_arguments,
+        bool owner_has_specialization_argument_list,
         bool targets_template_pattern,
         SrcLoc declarator_loc,
         std::vector<TemplateArgument>& deduced_arguments_out);

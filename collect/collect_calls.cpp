@@ -8,6 +8,76 @@
 using namespace collect_internal;
 
 namespace {
+std::shared_ptr<Scope> skip_leading_template_parameter_scopes(
+    std::shared_ptr<Scope> scope) {
+    while (scope &&
+           scope_flags_contains(
+               scope->flags,
+               ScopeFlags::TemplateParameterScope)) {
+        scope = scope->parent;
+    }
+    return scope;
+}
+
+class ScopedLexicalLookupContext {
+public:
+    ScopedLexicalLookupContext(
+        Collect& collect,
+        std::shared_ptr<Scope> lookup_scope,
+        std::shared_ptr<DeclContext> lookup_context)
+        : collect_(collect),
+          saved_scope_(collect.collect_current_scope()),
+          saved_context_(collect.get_current_decl_context()) {
+        if (!lookup_scope && !lookup_context) {
+            return;
+        }
+        active_ = true;
+        if (lookup_scope) {
+            if (lookup_context) {
+                active_scope_ =
+                    clone_scope_chain_with_live_decl_contexts(
+                        lookup_scope,
+                        lookup_context.get());
+                collect_.collect_set_current_scope(active_scope_);
+            } else {
+                collect_.collect_set_current_scope(std::move(lookup_scope));
+            }
+        }
+        if (lookup_context) {
+            collect_.set_current_decl_context(std::move(lookup_context));
+        }
+    }
+
+    ~ScopedLexicalLookupContext() {
+        if (!active_) {
+            return;
+        }
+        collect_.collect_set_current_scope(std::move(saved_scope_));
+        collect_.set_current_decl_context(std::move(saved_context_));
+    }
+
+private:
+    Collect& collect_;
+    std::shared_ptr<Scope> saved_scope_;
+    std::shared_ptr<DeclContext> saved_context_;
+    std::shared_ptr<Scope> active_scope_;
+    bool active_ = false;
+
+    static std::shared_ptr<Scope> clone_scope_chain_with_live_decl_contexts(
+        const std::shared_ptr<Scope>& scope,
+        DeclContext* current_context) {
+        if (!scope) {
+            return nullptr;
+        }
+        auto cloned = std::make_shared<Scope>(*scope);
+        cloned->associated_decl_context = current_context;
+        cloned->parent = clone_scope_chain_with_live_decl_contexts(
+            scope->parent,
+            current_context ? current_context->lexical_parent() : nullptr);
+        return cloned;
+    }
+};
+
 void append_unique_function_candidate(
     std::vector<std::shared_ptr<Symbol>>& candidates,
     const std::shared_ptr<Symbol>& candidate) {
@@ -66,21 +136,138 @@ void append_unique_concept_candidate(
     }
     candidates.push_back(concept_decl);
 }
+// TODO: we need to do the type on the root of expr node soon, because every expr has an assc type
+void store_explicit_expr_type(Expr* candidate, QualType realized_type) {
+    if (!candidate || !realized_type) {
+        return;
+    }
+    switch (candidate->get_kind()) {
+        case StmtKind::UnresolvedLookupExpr:
+            static_cast<UnresolvedLookupExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::LabelAddressExpr:
+            static_cast<LabelAddressExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::FuncCall:
+            static_cast<FuncCall*>(candidate)->ctype = realized_type;
+            return;
+        case StmtKind::DependentCallExpr:
+            static_cast<DependentCallExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::DependentArraySubscriptExpr:
+            static_cast<DependentArraySubscriptExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::CppMemberCallExpr:
+            static_cast<CppMemberCallExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::CppConstructExpr:
+            static_cast<CppConstructExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::CondExpr:
+            static_cast<CondExpr*>(candidate)->type = realized_type;
+            return;
+        case StmtKind::UnaryOperation:
+            static_cast<UnaryOperation*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::DependentUnaryExpr:
+            static_cast<DependentUnaryExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::BinaryOperation:
+            static_cast<BinaryOperation*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::CompoundAssignOperation:
+            static_cast<CompoundAssignOperation*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::DependentBinaryExpr:
+            static_cast<DependentBinaryExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::ImplicitCast:
+            static_cast<ImplicitCast*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::ExplicitCast:
+            static_cast<ExplicitCast*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::ArraySubscriptExpr:
+            static_cast<ArraySubscriptExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::MemberExpr:
+            static_cast<MemberExpr*>(candidate)->member_type =
+                realized_type;
+            return;
+        case StmtKind::DependentMemberPointerAccessExpr:
+            static_cast<DependentMemberPointerAccessExpr*>(candidate)
+                ->ctype = realized_type;
+            return;
+        case StmtKind::CppTypeIdExpr:
+            static_cast<CppTypeIdExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::CppDynamicCastExpr:
+            static_cast<CppDynamicCastExpr*>(candidate)->target_type =
+                realized_type;
+            return;
+        case StmtKind::CppNoexceptExpr:
+            static_cast<CppNoexceptExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::CppPseudoDestructorExpr:
+            static_cast<CppPseudoDestructorExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::BuiltinCallExpr:
+            static_cast<BuiltinCallExpr*>(candidate)->result_type =
+                realized_type;
+            return;
+        case StmtKind::ConceptSpecializationExpr:
+            static_cast<ConceptSpecializationExpr*>(candidate)->result_type =
+                realized_type;
+            return;
+        default:
+            return;
+    }
+}
 
 std::vector<const FunctionTemplateDecl*> lookup_unqualified_function_templates(
     std::string_view callee_name,
-    const std::shared_ptr<Scope>& current_scope) {
+    const std::shared_ptr<Scope>& current_scope,
+    const std::shared_ptr<DeclContext>& current_context) {
     std::vector<const FunctionTemplateDecl*> template_candidates;
-    if (!current_scope) {
-        return template_candidates;
+    const DeclBinding* template_binding = nullptr;
+    if (current_context) {
+        template_binding =
+            LookupEngine::lookup_unqualified_template_binding_from_context(
+                std::string(callee_name),
+                current_context.get(),
+                true,
+                LookupNamespace::Ordinary);
     }
-
-    const DeclBinding* template_binding =
-        LookupEngine::lookup_unqualified_template_binding(
-            std::string(callee_name),
-            current_scope,
-            true,
-            LookupNamespace::Ordinary);
+    if (!template_binding) {
+        auto lookup_scope =
+            skip_leading_template_parameter_scopes(current_scope);
+        if (!lookup_scope) {
+            return template_candidates;
+        }
+        template_binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                std::string(callee_name),
+                lookup_scope,
+                true,
+                LookupNamespace::Ordinary);
+    }
     if (!template_binding) {
         return template_candidates;
     }
@@ -96,18 +283,31 @@ std::vector<const FunctionTemplateDecl*> lookup_unqualified_function_templates(
 
 std::vector<const VariableTemplateDecl*> lookup_unqualified_variable_templates(
     std::string_view name,
-    const std::shared_ptr<Scope>& current_scope) {
+    const std::shared_ptr<Scope>& current_scope,
+    const std::shared_ptr<DeclContext>& current_context) {
     std::vector<const VariableTemplateDecl*> template_candidates;
-    if (!current_scope) {
-        return template_candidates;
+    const DeclBinding* template_binding = nullptr;
+    if (current_context) {
+        template_binding =
+            LookupEngine::lookup_unqualified_template_binding_from_context(
+                std::string(name),
+                current_context.get(),
+                true,
+                LookupNamespace::Ordinary);
     }
-
-    const DeclBinding* template_binding =
-        LookupEngine::lookup_unqualified_template_binding(
-            std::string(name),
-            current_scope,
-            true,
-            LookupNamespace::Ordinary);
+    if (!template_binding) {
+        auto lookup_scope =
+            skip_leading_template_parameter_scopes(current_scope);
+        if (!lookup_scope) {
+            return template_candidates;
+        }
+        template_binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                std::string(name),
+                lookup_scope,
+                true,
+                LookupNamespace::Ordinary);
+    }
     if (!template_binding) {
         return template_candidates;
     }
@@ -123,18 +323,31 @@ std::vector<const VariableTemplateDecl*> lookup_unqualified_variable_templates(
 
 std::vector<const ConceptDecl*> lookup_unqualified_concepts(
     std::string_view name,
-    const std::shared_ptr<Scope>& current_scope) {
+    const std::shared_ptr<Scope>& current_scope,
+    const std::shared_ptr<DeclContext>& current_context) {
     std::vector<const ConceptDecl*> concept_candidates;
-    if (!current_scope) {
-        return concept_candidates;
+    const DeclBinding* template_binding = nullptr;
+    if (current_context) {
+        template_binding =
+            LookupEngine::lookup_unqualified_template_binding_from_context(
+                std::string(name),
+                current_context.get(),
+                true,
+                LookupNamespace::Ordinary);
     }
-
-    const DeclBinding* template_binding =
-        LookupEngine::lookup_unqualified_template_binding(
-            std::string(name),
-            current_scope,
-            true,
-            LookupNamespace::Ordinary);
+    if (!template_binding) {
+        auto lookup_scope =
+            skip_leading_template_parameter_scopes(current_scope);
+        if (!lookup_scope) {
+            return concept_candidates;
+        }
+        template_binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                std::string(name),
+                lookup_scope,
+                true,
+                LookupNamespace::Ordinary);
+    }
     if (!template_binding) {
         return concept_candidates;
     }
@@ -527,7 +740,10 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
                   callee_name,
                   *qualified_info,
                   current_decl_context.get())
-            : lookup_unqualified_function_templates(callee_name, session_.current_scope_);
+            : lookup_unqualified_function_templates(
+                  callee_name,
+                  session_.current_scope_,
+                  current_decl_context);
 
     QualType named_type = nullptr;
     if (!qualified_info) {
@@ -708,12 +924,61 @@ std::unique_ptr<Expr> Collect::collect_function_call(
     std::vector<TemplateArgument> explicit_template_args,
     bool has_explicit_template_args,
     SrcLoc loc) {
+    auto realize_expr_type_if_possible = [&](Expr* expr) {
+        if (!expr) {
+            return;
+        }
+        QualType expr_type = expr->get_type();
+        if (!expr_type ||
+            !contains_deferred_semantic_type(expr_type.get_shared())) {
+            return;
+        }
+        QualType realized_type =
+            try_realize_deferred_semantic_type(expr_type);
+        if (!realized_type ||
+            contains_deferred_semantic_type(realized_type.get_shared()) ||
+            type_depends_on_template_parameters(realized_type, ast_ctx_.get())) {
+            return;
+        }
+        store_explicit_expr_type(expr, realized_type);
+    };
+
+    realize_expr_type_if_possible(callee.get());
+    for (auto& arg : args) {
+        realize_expr_type_if_possible(arg.get());
+    }
+
     if (has_explicit_template_args) {
         return collect_explicit_template_call_impl(
             std::move(callee),
             std::move(explicit_template_args),
             std::move(args),
             loc);
+    }
+    if (auto* unresolved_lookup = dyn_cast<UnresolvedLookupExpr>(callee.get())) {
+        if (!unresolved_lookup->is_dependent &&
+            unresolved_lookup->explicit_template_arguments.has_value()) {
+            auto owned_lookup = std::unique_ptr<UnresolvedLookupExpr>(
+                static_cast<UnresolvedLookupExpr*>(callee.release()));
+            auto concrete_callee = collect_identifier_reference(
+                owned_lookup->name,
+                nullptr,
+                owned_lookup->location);
+            if ((owned_lookup->qualifier.has_global_qualifier ||
+                 !owned_lookup->qualifier.qualifiers.empty() ||
+                 owned_lookup->qualifier.qualifier_type ||
+                 owned_lookup->qualifier.is_type_qualified) &&
+                isa<VarRef>(concrete_callee.get())) {
+                concrete_callee = attach_cpp_qualified_info_to_expr(
+                    std::move(concrete_callee),
+                    build_cpp_qualified_expr_info(owned_lookup->qualifier));
+            }
+            return collect_explicit_template_call_impl(
+                std::move(concrete_callee),
+                std::move(*owned_lookup->explicit_template_arguments),
+                std::move(args),
+                loc);
+        }
     }
     if (isa<DependentMemberPointerAccessExpr>(callee.get())) {
         return collect_dependent_call_expression(
@@ -864,6 +1129,32 @@ std::unique_ptr<Expr> Collect::build_dependent_explicit_template_call(
     QualType dependent_call_type(
         std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
 
+    if (auto* unresolved_member = dyn_cast<UnresolvedMemberExpr>(callee.get())) {
+        auto owned_member = std::unique_ptr<UnresolvedMemberExpr>(
+            static_cast<UnresolvedMemberExpr*>(callee.release()));
+        owned_member->explicit_template_arguments =
+            std::move(explicit_template_args);
+        return collect_make<DependentCallExpr>(
+            std::move(owned_member),
+            std::move(args),
+            dependent_call_type,
+            nullptr,
+            loc);
+    }
+
+    if (auto* unresolved_lookup = dyn_cast<UnresolvedLookupExpr>(callee.get())) {
+        auto owned_lookup = std::unique_ptr<UnresolvedLookupExpr>(
+            static_cast<UnresolvedLookupExpr*>(callee.release()));
+        owned_lookup->explicit_template_arguments =
+            std::move(explicit_template_args);
+        return collect_make<DependentCallExpr>(
+            std::move(owned_lookup),
+            std::move(args),
+            dependent_call_type,
+            nullptr,
+            loc);
+    }
+
     if (auto* member_callee = dyn_cast<MemberExpr>(callee.get())) {
         auto member_base_analysis = analyze_cpp_member_lookup_base(
             member_callee->base ? member_callee->base->get_type() : QualType(nullptr),
@@ -913,7 +1204,9 @@ std::unique_ptr<Expr> Collect::build_dependent_explicit_template_call(
         /*requires_template_keyword=*/true,
         /*is_dependent=*/true,
         dependent_call_type,
-        callee_ref->location);
+        callee_ref->location,
+        session_.current_scope_,
+        session_.current_decl_context_);
     return collect_make<DependentCallExpr>(
         std::move(unresolved_lookup),
         std::move(args),
@@ -1563,7 +1856,10 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                   callee_name,
                   *qualified_info,
                   get_current_decl_context().get())
-            : lookup_unqualified_function_templates(callee_name, session_.current_scope_);
+            : lookup_unqualified_function_templates(
+                  callee_name,
+                  session_.current_scope_,
+                  session_.current_decl_context_);
     if (template_candidates.empty()) {
         report_error(
             "no function template named '" + display_name + "'",
@@ -1770,7 +2066,9 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
                 /*requires_template_keyword=*/true,
                 /*is_dependent=*/true,
                 QualType(std::make_shared<AutoType>(AutoTypeFlavor::Cxx)),
-                callee_ref->location);
+                callee_ref->location,
+                session_.current_scope_,
+                session_.current_decl_context_);
         }
 
         report_error(
@@ -1801,7 +2099,8 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
                   get_current_decl_context().get())
             : lookup_unqualified_function_templates(
                   callee_name,
-                  session_.current_scope_);
+                  session_.current_scope_,
+                  session_.current_decl_context_);
     auto variable_templates =
         qualified_info
             ? lookup_qualified_variable_templates(
@@ -1810,7 +2109,8 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
                   get_current_decl_context().get())
             : lookup_unqualified_variable_templates(
                   callee_name,
-                  session_.current_scope_);
+                  session_.current_scope_,
+                  session_.current_decl_context_);
     auto concept_templates =
         qualified_info
             ? lookup_qualified_concepts(
@@ -1819,7 +2119,8 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
                   get_current_decl_context().get())
             : lookup_unqualified_concepts(
                   callee_name,
-                  session_.current_scope_);
+                  session_.current_scope_,
+                  session_.current_decl_context_);
 
     if (function_templates.empty() &&
         variable_templates.empty() &&
@@ -2012,13 +2313,19 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
         }
 
         if (selected_function_symbol) {
-            report_error(
-                "explicit function template-id '" + display_name +
-                    "' resolves to an overload set, which is not supported yet",
-                loc);
-            return collect_make<ErrorExpr>(
-                "unsupported function template overload-set expression",
-                loc);
+            QualType unresolved_type(
+                std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
+            return collect_make<UnresolvedLookupExpr>(
+                callee_name,
+                build_dependent_lookup_qualifier(qualified_info),
+                std::optional<std::vector<TemplateArgument>>(
+                    std::move(explicit_template_args)),
+                /*requires_template_keyword=*/true,
+                /*is_dependent=*/false,
+                unresolved_type,
+                loc,
+                session_.current_scope_,
+                session_.current_decl_context_);
         }
         selected_function_symbol = std::move(specialization_symbol);
     }
@@ -2056,7 +2363,8 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
         [&](std::shared_ptr<Symbol> symbol) -> std::unique_ptr<Expr> {
             auto qualified_ref =
                 collect_identifier_reference(name, std::move(symbol), loc);
-            if (isa<VarRef>(qualified_ref.get())) {
+            if (isa<VarRef>(qualified_ref.get()) &&
+                qualifier.has_qualifier()) {
                 qualified_ref = attach_cpp_qualified_info_to_expr(
                     std::move(qualified_ref),
                     build_cpp_qualified_expr_info(qualifier));
@@ -2207,6 +2515,76 @@ bool Collect::resolve_dependent_expr_after_substitution(
     std::unique_ptr<Expr>& expr,
     QualType implicit_this_type,
     std::string* error_out) {
+    if (auto* implicit_cast = dyn_cast<ImplicitCast>(expr.get())) {
+        if (implicit_cast->expr &&
+            !resolve_dependent_expr_after_substitution(
+                implicit_cast->expr,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        return true;
+    }
+    if (auto* explicit_cast = dyn_cast<ExplicitCast>(expr.get())) {
+        if (explicit_cast->expr &&
+            !resolve_dependent_expr_after_substitution(
+                explicit_cast->expr,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        return true;
+    }
+    if (auto* cond = dyn_cast<CondExpr>(expr.get())) {
+        if (cond->condition &&
+            !resolve_dependent_expr_after_substitution(
+                cond->condition,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        if (cond->true_expr &&
+            !resolve_dependent_expr_after_substitution(
+                cond->true_expr,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        if (cond->false_expr &&
+            !resolve_dependent_expr_after_substitution(
+                cond->false_expr,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        if (!cond->condition || !cond->false_expr) {
+            return true;
+        }
+        if (expression_depends_on_template_parameters(cond->condition.get()) ||
+            (cond->true_expr &&
+             expression_depends_on_template_parameters(cond->true_expr.get())) ||
+            expression_depends_on_template_parameters(cond->false_expr.get())) {
+            return true;
+        }
+
+        auto owned_cond = std::unique_ptr<CondExpr>(
+            static_cast<CondExpr*>(expr.release()));
+        auto rewritten = collect_conditional_expression(
+            std::move(owned_cond->condition),
+            std::move(owned_cond->true_expr),
+            std::move(owned_cond->false_expr),
+            QualType(),
+            owned_cond->location);
+        if (!rewritten) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to resolve dependent conditional expression after substitution";
+            }
+            return false;
+        }
+        expr = std::move(rewritten);
+        return true;
+    }
     if (auto* block = dyn_cast<BlockExpr>(expr.get())) {
         if (block->semantic_info.invoke_decl) {
             return true;
@@ -2626,6 +3004,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
         }
         auto owned_lookup = std::unique_ptr<UnresolvedLookupExpr>(
             static_cast<UnresolvedLookupExpr*>(expr.release()));
+        auto lexical_lookup_scope = owned_lookup->lexical_lookup_scope;
+        auto lexical_lookup_context = owned_lookup->lexical_lookup_context;
         bool has_explicit_template_args =
             owned_lookup->explicit_template_arguments.has_value();
         if (has_explicit_template_args &&
@@ -2638,6 +3018,10 @@ bool Collect::resolve_dependent_expr_after_substitution(
             explicit_template_args =
                 std::move(*owned_lookup->explicit_template_arguments);
         }
+        ScopedLexicalLookupContext lexical_lookup(
+            *this,
+            lexical_lookup_scope,
+            lexical_lookup_context);
         auto rewritten = materialize_unresolved_lookup(
             std::move(owned_lookup),
             /*looks_like_call=*/false);
@@ -2793,6 +3177,94 @@ bool Collect::resolve_dependent_expr_after_substitution(
     if (auto* func_call = dyn_cast<FuncCall>(expr.get())) {
         auto owned_call = std::unique_ptr<FuncCall>(
             static_cast<FuncCall*>(expr.release()));
+        auto realize_call_result_type =
+            [&](FuncCall* call) -> bool {
+                if (!call) {
+                    return true;
+                }
+                QualType call_type = call->get_type();
+                if (!call_type ||
+                    !contains_deferred_semantic_type(call_type.get_shared())) {
+                    return !call_type ||
+                           !type_depends_on_template_parameters(
+                               call_type,
+                               ast_ctx_.get());
+                }
+                QualType realized_type =
+                    try_realize_deferred_semantic_type(call_type);
+                if (!realized_type) {
+                    return false;
+                }
+                store_explicit_expr_type(call, realized_type);
+                return !type_depends_on_template_parameters(
+                    realized_type,
+                    ast_ctx_.get());
+            };
+        if (owned_call->func &&
+            !resolve_dependent_expr_after_substitution(
+                owned_call->func,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        for (auto& arg : owned_call->args) {
+            if (arg &&
+                !resolve_dependent_expr_after_substitution(
+                    arg,
+                    implicit_this_type,
+                    error_out)) {
+                return false;
+            }
+        }
+        strip_stale_dependent_implicit_casts(owned_call->func);
+        for (auto& arg : owned_call->args) {
+            strip_stale_dependent_implicit_casts(arg);
+        }
+
+        auto expr_or_type_still_dependent =
+            [&](const std::unique_ptr<Expr>& candidate) -> bool {
+                if (!candidate) {
+                    return false;
+                }
+                QualType candidate_type = candidate->get_type();
+                if (candidate_type &&
+                    contains_deferred_semantic_type(
+                        candidate_type.get_shared())) {
+                    QualType realized_type =
+                        try_realize_deferred_semantic_type(candidate_type);
+                    if (!realized_type) {
+                        return true;
+                    }
+                    if (!type_depends_on_template_parameters(
+                            realized_type,
+                            ast_ctx_.get())) {
+                        store_explicit_expr_type(candidate.get(), realized_type);
+                    }
+                    candidate_type = realized_type;
+                }
+                if (expression_depends_on_template_parameters(candidate.get())) {
+                    return true;
+                }
+                if (!candidate_type) {
+                    return true;
+                }
+                if (!type_depends_on_template_parameters(
+                        candidate_type,
+                        ast_ctx_.get())) {
+                    return false;
+                }
+                if (!contains_deferred_semantic_type(
+                        candidate_type.get_shared())) {
+                    return true;
+                }
+                QualType realized_type =
+                    try_realize_deferred_semantic_type(candidate_type);
+                return !realized_type ||
+                       type_depends_on_template_parameters(
+                           realized_type,
+                           ast_ctx_.get());
+            };
+
         if (auto specialized_symbol =
                 find_stale_lambda_object_call_symbol(owned_call.get())) {
             auto specialized_function_type =
@@ -2811,7 +3283,37 @@ bool Collect::resolve_dependent_expr_after_substitution(
             expr = std::move(owned_call);
             return true;
         }
-        expr = std::move(owned_call);
+
+        realize_call_result_type(owned_call.get());
+
+        if (expr_or_type_still_dependent(owned_call->func)) {
+            expr = std::move(owned_call);
+            return true;
+        }
+        for (const auto& arg : owned_call->args) {
+            if (expr_or_type_still_dependent(arg)) {
+                expr = std::move(owned_call);
+                return true;
+            }
+        }
+        if (!realize_call_result_type(owned_call.get())) {
+            expr = std::move(owned_call);
+            return true;
+        }
+
+        auto rewritten = collect_function_call(
+            std::move(owned_call->func),
+            std::move(owned_call->args),
+            owned_call->location);
+        if (!rewritten) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to resolve function call after substitution";
+            }
+            return false;
+        }
+        expr = std::move(rewritten);
+        return true;
     }
 
     auto* dependent_call = dyn_cast<DependentCallExpr>(expr.get());
@@ -2826,7 +3328,26 @@ bool Collect::resolve_dependent_expr_after_substitution(
     if (!unresolved_member && !unresolved_lookup) {
         auto owned_call = std::unique_ptr<DependentCallExpr>(
             static_cast<DependentCallExpr*>(expr.release()));
+        if (owned_call->callee &&
+            !resolve_dependent_expr_after_substitution(
+                owned_call->callee,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        for (auto& arg : owned_call->args) {
+            if (arg &&
+                !resolve_dependent_expr_after_substitution(
+                    arg,
+                    implicit_this_type,
+                    error_out)) {
+                return false;
+            }
+        }
         strip_stale_dependent_implicit_casts(owned_call->callee);
+        for (auto& arg : owned_call->args) {
+            strip_stale_dependent_implicit_casts(arg);
+        }
         auto rewritten = collect_function_call(
             std::move(owned_call->callee),
             std::move(owned_call->args),
@@ -2898,12 +3419,18 @@ bool Collect::resolve_dependent_expr_after_substitution(
 
     auto owned_lookup = std::unique_ptr<UnresolvedLookupExpr>(
         static_cast<UnresolvedLookupExpr*>(owned_call->callee.release()));
+    auto lexical_lookup_scope = owned_lookup->lexical_lookup_scope;
+    auto lexical_lookup_context = owned_lookup->lexical_lookup_context;
     bool has_explicit_template_args =
         owned_lookup->explicit_template_arguments.has_value();
     if (has_explicit_template_args) {
         explicit_template_args =
             std::move(*owned_lookup->explicit_template_arguments);
     }
+    ScopedLexicalLookupContext lexical_lookup(
+        *this,
+        lexical_lookup_scope,
+        lexical_lookup_context);
     std::unique_ptr<Expr> concrete_callee;
     if (has_explicit_template_args) {
         concrete_callee = collect_identifier_reference(
@@ -3285,6 +3812,13 @@ std::unique_ptr<Expr> Collect::resolve_call_function_type(
     CallFinalizationContext& context_out) {
     auto callee_type = desugar_type(call->func->get_type());
     context_out.function_type = callee_type.as_shared<FunctionType>();
+    if (!context_out.function_type) {
+        auto ref = callee_type.as_shared<ReferenceType>();
+        if (ref) {
+            context_out.function_type =
+                desugar_type(ref->referred_type).as_shared<FunctionType>();
+        }
+    }
     if (!context_out.function_type) {
         auto ptr = callee_type.as_shared<PointerType>();
         if (ptr) {

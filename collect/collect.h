@@ -644,7 +644,8 @@ public:
                                                     bool is_arrow,
                                                     SrcLoc loc,
                                                     bool allow_overloaded_method_set = false,
-                                                    bool suppress_virtual_dispatch = false) ;
+                                                    bool suppress_virtual_dispatch = false,
+                                                    bool requires_template_keyword = false) ;
 
     std::unique_ptr<Expr> collect_cpp_pseudo_destructor_expression(
         std::unique_ptr<Expr> base,

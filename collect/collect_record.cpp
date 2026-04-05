@@ -827,6 +827,9 @@ public:
             collect_.collect_record_compute_layout(ctx);
             collect_.collect_record_materialize_defaulted_method_bodies(ctx);
             collect_.collect_record_publish_semantics(ctx);
+            if (ctx.record_type) {
+                ctx.record_type->set_decl(ctx.semantic_decl);
+            }
 
             if (ctx.deferred_body_callback) {
                 ctx.deferred_body_callback(
@@ -1087,6 +1090,136 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             collect_current_scope(),
             qualifier_prefix);
     };
+    std::function<QualType(QualType)> realize_nested_record_member_type =
+        [&](QualType type) -> QualType {
+        if (!type) {
+            return type;
+        }
+
+        auto raw = type.get_shared();
+        if (!raw) {
+            return type;
+        }
+        auto quals = type.get_qualifiers();
+
+        if (auto object_type = dyn_cast_shared<ObjectType>(raw)) {
+            auto* object_decl = dyn_cast<ObjectDecl>(object_type->get_decl());
+            const RecordSemanticState* object_state =
+                object_decl ? record_semantics_cache_lookup(object_decl) : nullptr;
+            if (object_decl && (!object_state || object_state->is_incomplete)) {
+                for (const auto& nested_type : ctx.nested_types) {
+                    auto nested_object =
+                        desugar_type(nested_type.type).as_shared<ObjectType>();
+                    auto* nested_decl = nested_object
+                        ? dyn_cast<ObjectDecl>(nested_object->get_decl())
+                        : nullptr;
+                    if (!nested_decl || nested_decl == object_decl) {
+                        continue;
+                    }
+                    if (nested_decl->tag == object_decl->tag) {
+                        return QualType(nested_object, quals);
+                    }
+                }
+            }
+            return type;
+        }
+
+        if (auto pointer_type = dyn_cast_shared<PointerType>(raw)) {
+            auto rewritten_pointee =
+                realize_nested_record_member_type(pointer_type->pointed_type);
+            if (rewritten_pointee.equals_qualified(pointer_type->pointed_type)) {
+                return type;
+            }
+            return QualType(
+                std::make_shared<PointerType>(rewritten_pointee),
+                quals);
+        }
+
+        if (auto reference_type = dyn_cast_shared<ReferenceType>(raw)) {
+            auto rewritten_referred =
+                realize_nested_record_member_type(reference_type->referred_type);
+            if (rewritten_referred.equals_qualified(reference_type->referred_type)) {
+                return type;
+            }
+            return QualType(
+                std::make_shared<ReferenceType>(
+                    rewritten_referred,
+                    reference_type->reference_kind),
+                quals);
+        }
+
+        if (auto array_type = dyn_cast_shared<ArrayType>(raw)) {
+            auto rewritten_element =
+                realize_nested_record_member_type(array_type->element_type);
+            if (rewritten_element.equals_qualified(array_type->element_type)) {
+                return type;
+            }
+            if (array_type->size.has_value()) {
+                return QualType(
+                    std::make_shared<ArrayType>(
+                        rewritten_element,
+                        array_type->size),
+                    quals);
+            }
+            auto rebuilt =
+                std::make_shared<ArrayType>(rewritten_element, array_type->size_expr);
+            rebuilt->size_kind = array_type->size_kind;
+            rebuilt->size = array_type->size;
+            return QualType(rebuilt, quals);
+        }
+
+        if (auto function_type = dyn_cast_shared<FunctionType>(raw)) {
+            auto rewritten_ret =
+                realize_nested_record_member_type(function_type->ret_type);
+            bool changed = !rewritten_ret.equals_qualified(function_type->ret_type);
+            std::vector<QualType> rewritten_params;
+            rewritten_params.reserve(function_type->parameters.size());
+            for (const auto& param_type : function_type->parameters) {
+                auto rewritten_param =
+                    realize_nested_record_member_type(param_type);
+                changed |= !rewritten_param.equals_qualified(param_type);
+                rewritten_params.push_back(rewritten_param);
+            }
+            if (!changed) {
+                return type;
+            }
+            auto rebuilt = std::make_shared<FunctionType>(*function_type);
+            rebuilt->ret_type = rewritten_ret;
+            rebuilt->parameters = std::move(rewritten_params);
+            return QualType(rebuilt, quals);
+        }
+
+        if (auto member_pointer_type = dyn_cast_shared<MemberPointerType>(raw)) {
+            auto rewritten_class =
+                realize_nested_record_member_type(member_pointer_type->class_type);
+            auto rewritten_member =
+                realize_nested_record_member_type(member_pointer_type->member_type);
+            if (rewritten_class.equals_qualified(member_pointer_type->class_type) &&
+                rewritten_member.equals_qualified(member_pointer_type->member_type)) {
+                return type;
+            }
+            return QualType(
+                std::make_shared<MemberPointerType>(
+                    rewritten_class,
+                    rewritten_member),
+                quals);
+        }
+
+        if (auto transform_type = dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
+            auto rewritten_operand =
+                realize_nested_record_member_type(transform_type->operand_type);
+            if (rewritten_operand.equals_qualified(transform_type->operand_type)) {
+                return type;
+            }
+            return QualType(
+                std::make_shared<BuiltinTypeTransformType>(
+                    transform_type->transform_kind,
+                    rewritten_operand),
+                quals);
+        }
+
+        return type;
+    };
     RecordMemberAccess current_access = encode_cpp_access(ctx.record->default_access);
     for (const auto& member : ctx.record->members) {
         if (const auto* access_spec = dyn_cast<CppAccessSpecDecl>(member.get())) {
@@ -1301,6 +1434,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
 
         auto* field_decl = dyn_cast<FieldDecl>(member.get());
         if (field_decl) {
+            QualType realized_field_type =
+                realize_nested_record_member_type(field_decl->type);
+            field_decl->type = realized_field_type;
             if (ast_ctx_) {
                 CppMemberDeclInfo member_info;
                 member_info.declared_access = static_cast<uint8_t>(current_access);
@@ -1753,7 +1889,8 @@ void Collect::collect_record_synthesize_implicit_members(
                     continue;
                 }
                 const ObjectDecl* field_decl =
-                    dyn_cast<ObjectDecl>(field_record->get_decl());
+                    canonical_cpp_record_decl(
+                        dyn_cast<ObjectDecl>(field_record->get_decl()));
                 const RecordSemanticState* field_state =
                     field_decl ? record_semantics_cache_lookup(field_decl) : nullptr;
                 if (!cpp_record_has_viable_default_constructor(
@@ -1829,7 +1966,8 @@ void Collect::collect_record_synthesize_implicit_members(
                     continue;
                 }
                 const ObjectDecl* field_decl =
-                    dyn_cast<ObjectDecl>(field_record->get_decl());
+                    canonical_cpp_record_decl(
+                        dyn_cast<ObjectDecl>(field_record->get_decl()));
                 const RecordSemanticState* field_state =
                     field_decl ? record_semantics_cache_lookup(field_decl) : nullptr;
                 if (!cpp_record_has_viable_destructor(field_state, false)) {
