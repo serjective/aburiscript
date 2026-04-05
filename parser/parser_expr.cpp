@@ -1723,6 +1723,38 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
         check_and_consume(TokenType::RIGHT_PAREN);
         return collect_->collect_generic_expression(std::move(controlling), std::move(associations), tok.loc);
     }
+    // C++ style functional casts: int(67), std::string("Accra and Belgrade")
+    if (is_cxx_mode_active() && isTokenDeclarationSpec(tok)) {
+        TentativeParsingAction tentative(*this);
+        try {
+            DeclarationParser parse_decl(this);
+            auto parsed_type = parse_decl.parse_declaration(false);
+            if (parsed_type &&
+                parse_decl.name.empty() &&
+                parse_decl.str_class == StorageClass::NONE &&
+                gentle_check(TokenType::LEFT_PAREN)) {
+                QualType target_type(parsed_type, parse_decl.qualifiers);
+                if (canonical_type_kind(target_type, ast_ctx.get()) !=
+                    TypeKind::Object) {
+                    retain_type_specifier_decl_if_needed(parse_decl);
+                    advance(); // consume '('
+                    if (!gentle_check(TokenType::RIGHT_PAREN)) {
+                        TemplateArgumentGroupGuard group_guard(*this);
+                        auto expr = parse_expression();
+                        check_and_consume(TokenType::RIGHT_PAREN);
+                        tentative.commit();
+                        return collect_->collect_explicit_cast(
+                            std::move(expr),
+                            target_type,
+                            tok.loc);
+                    }
+                }
+            }
+        } catch (const ParseError&) {
+        } catch (const FatalErrorLimitReached&) {
+            throw;
+        }
+    }
 
     if (tok.type == TokenType::IDENTIFIER) {
         if (const auto* builtin_info =
