@@ -43,8 +43,17 @@ AttributeRegistry::AttributeRegistry() {
         AttributeTarget::FUNC_OR_VAR, 0, 0, false, false});
     register_attribute({AttributeKind::VISIBILITY, "visibility",
         AttributeTarget::FUNC_OR_VAR | AttributeTarget::TYPE, 1, 1, false, false});
+    register_attribute({AttributeKind::TYPE_VISIBILITY, "type_visibility",
+        AttributeTarget::ALL, 1, 1, false, false});
     register_attribute({AttributeKind::SECTION, "section",
         AttributeTarget::FUNC_OR_VAR, 1, 1, false, false});
+    register_attribute({AttributeKind::ABI_TAG, "abi_tag",
+        AttributeTarget::ALL, 1, -1, false, false});
+    register_attribute({AttributeKind::NODEBUG, "nodebug",
+        AttributeTarget::ALL, 0, 0, false, false});
+    register_attribute({AttributeKind::EXCLUDE_FROM_EXPLICIT_INSTANTIATION,
+        "exclude_from_explicit_instantiation",
+        AttributeTarget::ALL, 0, 0, false, false});
 
     // Extended attributes
     register_attribute({AttributeKind::WARN_UNUSED_RESULT, "warn_unused_result",

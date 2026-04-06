@@ -2064,12 +2064,15 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
     // record-semantics cache to decide whether the current record type is
     // complete. Publish the computed in-progress state first so synthesis can
     // see the record as complete before the final state is moved into place.
-    record_semantics_cache_set(ast_ctx_.get(), ctx.semantic_decl, owner_state);
-    if (const ObjectDecl* canonical_decl =
-            canonical_cpp_record_decl(ctx.semantic_decl);
-        canonical_decl && canonical_decl != ctx.semantic_decl) {
-        record_semantics_cache_set(ast_ctx_.get(), canonical_decl, owner_state);
-    }
+    auto publish_owner_state = [&]() {
+        query_publish_record_semantics(ctx.semantic_decl, owner_state);
+        if (const ObjectDecl* canonical_decl =
+                canonical_cpp_record_decl(ctx.semantic_decl);
+            canonical_decl && canonical_decl != ctx.semantic_decl) {
+            query_publish_record_semantics(canonical_decl, owner_state);
+        }
+    };
+    publish_owner_state();
 
     for (auto& method : ctx.methods) {
         auto* method_decl =
@@ -2105,12 +2108,7 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
             }
             break;
         }
-        record_semantics_cache_set(ast_ctx_.get(), ctx.semantic_decl, owner_state);
-        if (const ObjectDecl* canonical_decl =
-                canonical_cpp_record_decl(ctx.semantic_decl);
-            canonical_decl && canonical_decl != ctx.semantic_decl) {
-            record_semantics_cache_set(ast_ctx_.get(), canonical_decl, owner_state);
-        }
+        publish_owner_state();
     }
 }
 

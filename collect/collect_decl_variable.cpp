@@ -28,12 +28,20 @@ bool any_initializer_argument_depends_on_template_parameters(
 }
 
 } // namespace
-
+/*
+ * Does this variable have "bearing" or is it a simple visibility statment (like for extern)
+ */
 bool Collect::is_definition_bearing_variable_declaration(
     StorageClass storage_class,
     const VariableDeclFlags& flags,
     const Expr* init) const {
     if (flags.is_cpp_static_data_member) {
+        if (flags.is_file_scope) {
+            if (init) {
+                return true;
+            }
+            return storage_class != StorageClass::EXTERN;
+        }
         return flags.is_inline || init != nullptr;
     }
 
