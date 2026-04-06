@@ -134,7 +134,9 @@ std::unique_ptr<Decl> Collect::collect_static_assert_declaration(std::unique_ptr
 }
 
 
-std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_type, const std::string& name, std::unique_ptr<Expr> init, std::shared_ptr<Symbol> sym, StorageClass storage_class, const VariableDeclFlags& flags, SrcLoc loc, LanguageLinkage language_linkage) {
+std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_type, const std::string& name,
+    std::unique_ptr<Expr> init, std::shared_ptr<Symbol> sym, StorageClass storage_class,
+    const VariableDeclFlags& flags, SrcLoc loc, LanguageLinkage language_linkage) {
 
     bool is_constexpr = flags.is_constexpr;
     bool is_inline = flags.is_inline;
@@ -533,15 +535,16 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
         has_dependent_argument) {
         return init_list;
     }
-
+    VariableDeclFlags ctor_flags = {
+        .allow_abstract_object_type_instantiation = allow_abstract_object_type_instantiation,
+    };
     auto temp_decl = collect_variable_declaration(
         member_type,
         "__member_ctor_init_tmp",
         std::move(init_list),
         nullptr,
         StorageClass::NONE,
-        {false, false, false, false, false, false, false,
-         allow_abstract_object_type_instantiation, false},
+        ctor_flags,
         loc);
     auto* temp_var = dyn_cast<VariableDecl>(temp_decl.get());
     if (!temp_var) {
