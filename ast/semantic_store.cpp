@@ -14,6 +14,9 @@ typename Map::mapped_type* find_external_semantic_info(Map& map, const Key* key)
     if (!key) {
         return nullptr;
     }
+    if (key->external_semantic_owner_id == 0) {
+        return nullptr;
+    }
     auto it = map.find(key);
     if (it == map.end()) {
         return nullptr;
@@ -25,6 +28,9 @@ template<typename Map, typename Key>
 const typename Map::mapped_type* find_external_semantic_info(const Map& map,
                                                              const Key* key) {
     if (!key) {
+        return nullptr;
+    }
+    if (key->external_semantic_owner_id == 0) {
         return nullptr;
     }
     auto it = map.find(key);
