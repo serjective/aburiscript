@@ -893,7 +893,7 @@ static void discover_aburi_builtin_includes(const char* argv0,
     }
 }
 
-static std::vector<std::string> discover_sdk_include_paths(const char* argv0) {
+static std::vector<std::string> discover_macos_sdk_include_paths(const char* argv0) {
     std::vector<std::string> paths;
     std::unordered_set<std::string> seen;
 
@@ -1584,9 +1584,11 @@ int main(int argc, char** argv) {
             for (const auto& path : QuoteIncludePaths) {
                 try_add_include_path(path, quote_include_paths, seen_quote_paths);
             }
-            auto sdk_paths = discover_sdk_include_paths(argc > 0 ? argv[0] : nullptr);
-            for (const auto& path : sdk_paths) {
-                try_add_include_path(path, include_paths, seen_paths);
+            if (target_info->os == TargetOS::MACOS) {
+                auto sdk_paths = discover_macos_sdk_include_paths(argc > 0 ? argv[0] : nullptr);
+                for (const auto& path : sdk_paths) {
+                    try_add_include_path(path, include_paths, seen_paths);
+                }
             }
             for (const auto& path : quote_include_paths) {
                 pp.sm->quote_look_paths.push_back(path);

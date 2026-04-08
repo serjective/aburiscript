@@ -28,4 +28,6 @@ CxxStdlibDiscoveryResult discover_cxx_stdlib_include_paths(
     bool cxx_mode,
     StdLibKind requested_kind);
 
+std::vector<std::string> discover_macos_sdk_include_paths(const char* argv0);
+
 #endif // ABURI_TOOLCHAIN_PROFILE_H
