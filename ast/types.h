@@ -597,20 +597,20 @@ bool complete_template_argument_bindings_with_defaults(
 std::vector<TemplateArgument> flatten_template_argument_bindings(
     const TemplateArgumentBindings& bindings);
 
-std::shared_ptr<CType> lookup_template_specialization_resolved_type(
+QualType lookup_template_specialization_resolved_type(
     const TemplateSpecializationType* type,
     const ASTContext* ast_ctx);
 void cache_template_specialization_resolved_type(
     ASTContext* ast_ctx,
     TemplateSpecializationType* type,
-    std::shared_ptr<CType> resolved_type);
-std::shared_ptr<CType> lookup_dependent_name_resolved_type(
+    QualType resolved_type);
+QualType lookup_dependent_name_resolved_type(
     const DependentNameType* type,
     const ASTContext* ast_ctx);
 void cache_dependent_name_resolved_type(
     ASTContext* ast_ctx,
     DependentNameType* type,
-    std::shared_ptr<CType> resolved_type);
+    QualType resolved_type);
 
 bool is_nullptr_type(QualType type, const ASTContext* ast_ctx = nullptr);
 bool is_null_pointer_like_type(QualType type, const ASTContext* ast_ctx = nullptr);

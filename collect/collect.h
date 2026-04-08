@@ -1121,16 +1121,16 @@ public:
     void query_publish_enum_semantics(
         const EnumDecl* enum_decl,
         EnumSemanticState state);
-    std::shared_ptr<CType> query_lookup_template_specialization_resolved_type(
+    QualType query_lookup_template_specialization_resolved_type(
         const TemplateSpecializationType* type) const;
     void query_publish_template_specialization_resolved_type(
         const TemplateSpecializationType* type,
-        std::shared_ptr<CType> resolved_type);
-    std::shared_ptr<CType> query_lookup_dependent_name_resolved_type(
+        QualType resolved_type);
+    QualType query_lookup_dependent_name_resolved_type(
         const DependentNameType* type) const;
     void query_publish_dependent_name_resolved_type(
         const DependentNameType* type,
-        std::shared_ptr<CType> resolved_type);
+        QualType resolved_type);
 
 private:
     void collect_record_publish_state(ObjectDecl* semantic_decl,

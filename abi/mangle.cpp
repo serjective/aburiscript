@@ -764,7 +764,7 @@ void append_type_substitution_key(std::string& out, QualType qt) {
                     nullptr)) {
                 append_type_substitution_key(
                     out,
-                    QualType(resolved_type, canonical.get_qualifiers()));
+                    resolved_type.with_qualifiers(canonical.get_qualifiers()));
                 return;
             }
             out += "dependent-name:";
@@ -1087,7 +1087,7 @@ void append_type_encoding(std::string& out, const QualType& qt, ItaniumMangleCon
                     : nullptr) {
                 append_type_encoding(
                     out,
-                    QualType(resolved_type),
+                    resolved_type,
                     ctx);
                 break;
             }

@@ -1023,13 +1023,13 @@ void ASTContext::clear_symbol_cpp_default_arguments() {
 
 void ASTContext::set_template_specialization_resolved_type(
     const TemplateSpecializationType* type,
-    std::shared_ptr<CType> resolved_type) {
+    QualType resolved_type) {
     semantic_store_->set_template_specialization_resolved_type(
         type,
         std::move(resolved_type));
 }
 
-std::shared_ptr<CType> ASTContext::get_template_specialization_resolved_type(
+QualType ASTContext::get_template_specialization_resolved_type(
     const TemplateSpecializationType* type) const {
     return semantic_store_->get_template_specialization_resolved_type(type);
 }
@@ -1040,13 +1040,13 @@ void ASTContext::clear_template_specialization_resolved_types() {
 
 void ASTContext::set_dependent_name_resolved_type(
     const DependentNameType* type,
-    std::shared_ptr<CType> resolved_type) {
+    QualType resolved_type) {
     semantic_store_->set_dependent_name_resolved_type(
         type,
         std::move(resolved_type));
 }
 
-std::shared_ptr<CType> ASTContext::get_dependent_name_resolved_type(
+QualType ASTContext::get_dependent_name_resolved_type(
     const DependentNameType* type) const {
     return semantic_store_->get_dependent_name_resolved_type(type);
 }

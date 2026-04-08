@@ -1225,7 +1225,7 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
             if (!resolved_type) {
                 return true;
             }
-            type = QualType(resolved_type);
+            type = resolved_type;
             continue;
         }
         if (auto ptr = dyn_cast_shared<PointerType>(raw)) {
@@ -1533,11 +1533,11 @@ std::string TemplateArgument::to_string() const {
     return text;
 }
 
-std::shared_ptr<CType> lookup_template_specialization_resolved_type(
+QualType lookup_template_specialization_resolved_type(
     const TemplateSpecializationType* type,
     const ASTContext* ast_ctx) {
     if (!type) {
-        return nullptr;
+        return QualType();
     }
     auto effective_ast_ctx = effective_ast_context(ast_ctx);
     if (effective_ast_ctx) {
@@ -1554,13 +1554,13 @@ std::shared_ptr<CType> lookup_template_specialization_resolved_type(
             return resolved_type;
         }
     }
-    return nullptr;
+    return QualType();
 }
 
 void cache_template_specialization_resolved_type(
     ASTContext* ast_ctx,
     TemplateSpecializationType* type,
-    std::shared_ptr<CType> resolved_type) {
+    QualType resolved_type) {
     if (!type) {
         return;
     }
@@ -1579,11 +1579,11 @@ void cache_template_specialization_resolved_type(
     }
 }
 
-std::shared_ptr<CType> lookup_dependent_name_resolved_type(
+QualType lookup_dependent_name_resolved_type(
     const DependentNameType* type,
     const ASTContext* ast_ctx) {
     if (!type) {
-        return nullptr;
+        return QualType();
     }
     auto effective_ast_ctx = effective_ast_context(ast_ctx);
     if (effective_ast_ctx) {
@@ -1599,12 +1599,12 @@ std::shared_ptr<CType> lookup_dependent_name_resolved_type(
             return resolved_type;
         }
     }
-    return nullptr;
+    return QualType();
 }
 
 void cache_dependent_name_resolved_type(ASTContext* ast_ctx,
                                         DependentNameType* type,
-                                        std::shared_ptr<CType> resolved_type) {
+                                        QualType resolved_type) {
     if (!type) {
         return;
     }
@@ -3183,7 +3183,7 @@ QualType desugar_type(QualType type, const ASTContext* ast_ctx) {
                 if (auto resolved_type = lookup_template_specialization_resolved_type(
                         specialization.get(),
                         ast_ctx)) {
-                    peeled = desugar_typedefs(QualType(resolved_type, quals));
+                    peeled = desugar_typedefs(resolved_type.with_qualifiers(quals));
                     continue;
                 }
             } else if (auto dependent_name =
@@ -3191,7 +3191,7 @@ QualType desugar_type(QualType type, const ASTContext* ast_ctx) {
                 if (auto resolved_type = lookup_dependent_name_resolved_type(
                         dependent_name.get(),
                         ast_ctx)) {
-                    peeled = desugar_typedefs(QualType(resolved_type, quals));
+                    peeled = desugar_typedefs(resolved_type.with_qualifiers(quals));
                     continue;
                 }
             }
@@ -3373,14 +3373,14 @@ TypeKind canonical_type_kind(QualType type, const ASTContext* ast_ctx) {
             if (auto resolved_type = lookup_template_specialization_resolved_type(
                     specialization.get(),
                     ast_ctx)) {
-                current = desugar_typedefs(QualType(resolved_type, quals));
+                current = desugar_typedefs(resolved_type.with_qualifiers(quals));
                 continue;
             }
         } else if (auto dependent_name = dyn_cast_shared<DependentNameType>(raw)) {
             if (auto resolved_type = lookup_dependent_name_resolved_type(
                     dependent_name.get(),
                     ast_ctx)) {
-                current = desugar_typedefs(QualType(resolved_type, quals));
+                current = desugar_typedefs(resolved_type.with_qualifiers(quals));
                 continue;
             }
         }

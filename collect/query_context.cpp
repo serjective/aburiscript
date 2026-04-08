@@ -247,12 +247,12 @@ void CollectQueryContext::erase_enum_semantics(const EnumDecl* enum_decl,
     overlay.erased_enum_semantics.insert(enum_decl);
 }
 
-std::shared_ptr<CType>
+QualType
 CollectQueryContext::lookup_template_specialization_resolved_type(
     const TemplateSpecializationType* type,
     const CollectSemanticStore& store) const {
     if (!type) {
-        return nullptr;
+        return QualType();
     }
     for (auto it = tentative_overlays_.rbegin();
          it != tentative_overlays_.rend();
@@ -268,12 +268,12 @@ CollectQueryContext::lookup_template_specialization_resolved_type(
         return resolved_type;
     }
     ++metrics_.template_specialization_type_misses;
-    return nullptr;
+    return QualType();
 }
 
 void CollectQueryContext::publish_template_specialization_resolved_type(
     const TemplateSpecializationType* type,
-    std::shared_ptr<CType> resolved_type,
+    QualType resolved_type,
     CollectSemanticStore& store) {
     if (!type) {
         return;
@@ -288,11 +288,11 @@ void CollectQueryContext::publish_template_specialization_resolved_type(
         std::move(resolved_type);
 }
 
-std::shared_ptr<CType> CollectQueryContext::lookup_dependent_name_resolved_type(
+QualType CollectQueryContext::lookup_dependent_name_resolved_type(
     const DependentNameType* type,
     const CollectSemanticStore& store) const {
     if (!type) {
-        return nullptr;
+        return QualType();
     }
     for (auto it = tentative_overlays_.rbegin();
          it != tentative_overlays_.rend();
@@ -308,12 +308,12 @@ std::shared_ptr<CType> CollectQueryContext::lookup_dependent_name_resolved_type(
         return resolved_type;
     }
     ++metrics_.dependent_name_type_misses;
-    return nullptr;
+    return QualType();
 }
 
 void CollectQueryContext::publish_dependent_name_resolved_type(
     const DependentNameType* type,
-    std::shared_ptr<CType> resolved_type,
+    QualType resolved_type,
     CollectSemanticStore& store) {
     if (!type) {
         return;
@@ -420,11 +420,11 @@ void Collect::query_publish_enum_semantics(const EnumDecl* enum_decl,
                                           ast_ctx_->semantic_store());
 }
 
-std::shared_ptr<CType>
+QualType
 Collect::query_lookup_template_specialization_resolved_type(
     const TemplateSpecializationType* type) const {
     if (!ast_ctx_ || !type) {
-        return nullptr;
+        return QualType();
     }
     return query_context_.lookup_template_specialization_resolved_type(
         type,
@@ -433,7 +433,7 @@ Collect::query_lookup_template_specialization_resolved_type(
 
 void Collect::query_publish_template_specialization_resolved_type(
     const TemplateSpecializationType* type,
-    std::shared_ptr<CType> resolved_type) {
+    QualType resolved_type) {
     if (!ast_ctx_ || !type) {
         return;
     }
@@ -443,10 +443,10 @@ void Collect::query_publish_template_specialization_resolved_type(
         ast_ctx_->semantic_store());
 }
 
-std::shared_ptr<CType> Collect::query_lookup_dependent_name_resolved_type(
+QualType Collect::query_lookup_dependent_name_resolved_type(
     const DependentNameType* type) const {
     if (!ast_ctx_ || !type) {
-        return nullptr;
+        return QualType();
     }
     return query_context_.lookup_dependent_name_resolved_type(
         type,
@@ -455,7 +455,7 @@ std::shared_ptr<CType> Collect::query_lookup_dependent_name_resolved_type(
 
 void Collect::query_publish_dependent_name_resolved_type(
     const DependentNameType* type,
-    std::shared_ptr<CType> resolved_type) {
+    QualType resolved_type) {
     if (!ast_ctx_ || !type) {
         return;
     }

@@ -53,18 +53,6 @@ bool variable_template_specialization_depends_on_template_parameters(
     return false;
 }
 
-std::shared_ptr<CType> encode_resolved_type_for_cache(QualType type) {
-    if (!type) {
-        return nullptr;
-    }
-    if (type.get_qualifiers() == QUAL_NONE) {
-        return type.get_shared();
-    }
-    // we do this because we need a CType for the cache whilst not destroying the qualifiers.
-    // todo: refactor
-    return std::make_shared<TypedefType>("", type);
-}
-
 const VariableDecl* find_template_dependent_variable_definition(
     const Symbol* sym) {
     if (!sym || sym->kind != SymbolKind::VARIABLE) {
@@ -514,7 +502,7 @@ bool Collect::contains_deferred_semantic_type(
             return true;
         }
         if (resolved_type &&
-            contains_deferred_semantic_type(resolved_type)) {
+            contains_deferred_semantic_type(resolved_type.get_shared())) {
             return true;
         }
         for (const auto& argument : specialization->arguments) {
@@ -535,7 +523,7 @@ bool Collect::contains_deferred_semantic_type(
         if (!resolved_type) {
             return true;
         }
-        if (contains_deferred_semantic_type(resolved_type)) {
+        if (contains_deferred_semantic_type(resolved_type.get_shared())) {
             return true;
         }
         if (contains_deferred_semantic_type(
@@ -822,7 +810,7 @@ QualType Collect::resolve_deferred_template_specialization_type(
         if (specialization_decl && specialization_decl->get_record_type()) {
             query_publish_template_specialization_resolved_type(
                 &specialization,
-                specialization_decl->get_record_type());
+                QualType(specialization_decl->get_record_type()));
         }
         return original_type;
     }
@@ -848,7 +836,7 @@ QualType Collect::resolve_deferred_template_specialization_type(
     if (resolved_alias_type) {
         query_publish_template_specialization_resolved_type(
             &specialization,
-            encode_resolved_type_for_cache(resolved_alias_type));
+            resolved_alias_type);
     }
     return original_type;
 }
@@ -920,10 +908,9 @@ QualType Collect::resolve_deferred_dependent_name_type(
     if (resolved_type) {
         auto rewritten_resolved_type =
             resolve_deferred_semantic_type_impl(
-                QualType(resolved_type),
+                resolved_type,
                 loc,
-                mode)
-                .get_shared();
+                mode);
         query_publish_dependent_name_resolved_type(
             &dependent_name,
             rewritten_resolved_type);
@@ -950,7 +937,7 @@ QualType Collect::resolve_deferred_dependent_name_type(
         mode);
     query_publish_dependent_name_resolved_type(
         &dependent_name,
-        encode_resolved_type_for_cache(resolved_nested_type));
+        resolved_nested_type);
     return original_type;
 }
 

@@ -1435,7 +1435,7 @@ void CollectSemanticStore::clear_symbol_cpp_default_arguments() {
 
 void CollectSemanticStore::set_template_specialization_resolved_type(
     const TemplateSpecializationType* type,
-    std::shared_ptr<CType> resolved_type) {
+    QualType resolved_type) {
     if (!type) {
         return;
     }
@@ -1446,14 +1446,14 @@ void CollectSemanticStore::set_template_specialization_resolved_type(
     template_specialization_resolved_type_map_[type] = std::move(resolved_type);
 }
 
-std::shared_ptr<CType> CollectSemanticStore::get_template_specialization_resolved_type(
+QualType CollectSemanticStore::get_template_specialization_resolved_type(
     const TemplateSpecializationType* type) const {
     if (!type) {
-        return nullptr;
+        return QualType();
     }
     auto it = template_specialization_resolved_type_map_.find(type);
     if (it == template_specialization_resolved_type_map_.end()) {
-        return nullptr;
+        return QualType();
     }
     return it->second;
 }
@@ -1464,7 +1464,7 @@ void CollectSemanticStore::clear_template_specialization_resolved_types() {
 
 void CollectSemanticStore::set_dependent_name_resolved_type(
     const DependentNameType* type,
-    std::shared_ptr<CType> resolved_type) {
+    QualType resolved_type) {
     if (!type) {
         return;
     }
@@ -1475,14 +1475,14 @@ void CollectSemanticStore::set_dependent_name_resolved_type(
     dependent_name_resolved_type_map_[type] = std::move(resolved_type);
 }
 
-std::shared_ptr<CType> CollectSemanticStore::get_dependent_name_resolved_type(
+QualType CollectSemanticStore::get_dependent_name_resolved_type(
     const DependentNameType* type) const {
     if (!type) {
-        return nullptr;
+        return QualType();
     }
     auto it = dependent_name_resolved_type_map_.find(type);
     if (it == dependent_name_resolved_type_map_.end()) {
-        return nullptr;
+        return QualType();
     }
     return it->second;
 }

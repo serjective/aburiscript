@@ -786,7 +786,7 @@ bool deduce_template_argument_types_impl(
                 pattern_dependent_name.get(),
                 nullptr)) {
             return deduce_template_argument_types_impl(
-                QualType(resolved_type),
+                resolved_type,
                 argument_type,
                 parameters,
                 deduced_arguments,

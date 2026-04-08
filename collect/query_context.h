@@ -57,20 +57,20 @@ public:
     void erase_enum_semantics(const EnumDecl* enum_decl,
                               CollectSemanticStore& store);
 
-    std::shared_ptr<CType> lookup_template_specialization_resolved_type(
+    QualType lookup_template_specialization_resolved_type(
         const TemplateSpecializationType* type,
         const CollectSemanticStore& store) const;
     void publish_template_specialization_resolved_type(
         const TemplateSpecializationType* type,
-        std::shared_ptr<CType> resolved_type,
+        QualType resolved_type,
         CollectSemanticStore& store);
 
-    std::shared_ptr<CType> lookup_dependent_name_resolved_type(
+    QualType lookup_dependent_name_resolved_type(
         const DependentNameType* type,
         const CollectSemanticStore& store) const;
     void publish_dependent_name_resolved_type(
         const DependentNameType* type,
-        std::shared_ptr<CType> resolved_type,
+        QualType resolved_type,
         CollectSemanticStore& store);
 
     const Metrics& metrics() const { return metrics_; }
@@ -86,9 +86,9 @@ private:
             enum_semantics;
         std::unordered_set<const EnumDecl*> erased_enum_semantics;
 
-        std::unordered_map<const TemplateSpecializationType*, std::shared_ptr<CType>>
+        std::unordered_map<const TemplateSpecializationType*, QualType>
             template_specialization_resolved_types;
-        std::unordered_map<const DependentNameType*, std::shared_ptr<CType>>
+        std::unordered_map<const DependentNameType*, QualType>
             dependent_name_resolved_types;
     };
 

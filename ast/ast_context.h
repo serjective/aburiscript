@@ -524,14 +524,14 @@ public:
 
     void set_template_specialization_resolved_type(
         const TemplateSpecializationType* type,
-        std::shared_ptr<CType> resolved_type);
-    std::shared_ptr<CType> get_template_specialization_resolved_type(
+        QualType resolved_type);
+    QualType get_template_specialization_resolved_type(
         const TemplateSpecializationType* type) const;
     void clear_template_specialization_resolved_types();
 
     void set_dependent_name_resolved_type(const DependentNameType* type,
-                                          std::shared_ptr<CType> resolved_type);
-    std::shared_ptr<CType> get_dependent_name_resolved_type(
+                                          QualType resolved_type);
+    QualType get_dependent_name_resolved_type(
         const DependentNameType* type) const;
     void clear_dependent_name_resolved_types();
 
@@ -631,9 +631,9 @@ private:
     using SymbolExternalSemanticInfoMap =
         std::unordered_map<const Symbol*, SymbolExternalSemanticInfo>;
     using TemplateSpecializationResolvedTypeMap =
-        std::unordered_map<const TemplateSpecializationType*, std::shared_ptr<CType>>;
+        std::unordered_map<const TemplateSpecializationType*, QualType>;
     using DependentNameResolvedTypeMap =
-        std::unordered_map<const DependentNameType*, std::shared_ptr<CType>>;
+        std::unordered_map<const DependentNameType*, QualType>;
     using RecordSemanticsCacheMap =
         std::unordered_map<const ObjectDecl*, RecordSemanticState>;
     using EnumSemanticsCacheMap =
