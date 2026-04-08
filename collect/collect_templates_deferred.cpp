@@ -811,8 +811,9 @@ QualType Collect::resolve_deferred_template_specialization_type(
             query_publish_template_specialization_resolved_type(
                 &specialization,
                 QualType(specialization_decl->get_record_type()));
+            return original_type;
         }
-        return original_type;
+        return QualType();
     }
 
     auto* alias_template =
@@ -837,8 +838,9 @@ QualType Collect::resolve_deferred_template_specialization_type(
         query_publish_template_specialization_resolved_type(
             &specialization,
             resolved_alias_type);
+        return original_type;
     }
-    return original_type;
+    return QualType();
 }
 
 QualType Collect::lookup_deferred_dependent_name_type(
@@ -973,6 +975,9 @@ QualType Collect::resolve_deferred_semantic_type_impl(
             typedef_type->underlying_type,
             loc,
             mode);
+        if (!typedef_type->underlying_type) {
+            return QualType();
+        }
         return type;
     }
 

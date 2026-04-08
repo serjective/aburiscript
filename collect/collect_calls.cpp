@@ -528,13 +528,14 @@ Collect::complete_selected_function_template_specialization_symbol(
         return nullptr;
     }
 
+    bool instantiate_definition = !in_unevaluated_context();
     std::shared_ptr<Symbol> completed_symbol = nullptr;
     auto* completed_decl = instantiate_function_template_specialization(
         specialization_info->primary_template,
         specialization_info->arguments,
         loc,
         &completed_symbol,
-        /*instantiate_definition=*/true);
+        instantiate_definition);
     if (!completed_decl || !completed_symbol) {
         return collect_make<ErrorExpr>(std::string(failure_message), loc);
     }
@@ -2301,13 +2302,14 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
             continue;
         }
         std::shared_ptr<Symbol> specialization_symbol = nullptr;
+        bool instantiate_definition = !in_unevaluated_context();
         auto* specialization_decl =
             instantiate_function_template_specialization(
                 function_template,
                 specialization_arguments,
                 loc,
                 &specialization_symbol,
-                /*instantiate_definition=*/true);
+                instantiate_definition);
         if (!specialization_decl || !specialization_symbol) {
             continue;
         }

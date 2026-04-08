@@ -793,26 +793,50 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 if (!sym) {
                     return nullptr;
                 }
-                const auto* specialization_info =
+                const auto* function_specialization_info =
                     get_symbol_function_template_specialization(sym.get());
-                if (!specialization_info ||
-                    !specialization_info->primary_template) {
+                if (function_specialization_info &&
+                    function_specialization_info->primary_template) {
+                    auto rewritten_arguments =
+                        collect.substitute_template_arguments_with_bindings(
+                            function_specialization_info->arguments,
+                            function_template->parameters,
+                            active_bindings,
+                            loc);
+                    std::shared_ptr<Symbol> rewritten_symbol = nullptr;
+                    auto* rewritten_decl =
+                        collect.instantiate_function_template_specialization(
+                            function_specialization_info->primary_template,
+                            rewritten_arguments,
+                            loc,
+                            &rewritten_symbol,
+                            /*instantiate_definition=*/true);
+                    if (!rewritten_decl || !rewritten_symbol) {
+                        return nullptr;
+                    }
+                    return rewritten_symbol;
+                }
+
+                const auto* variable_specialization_info =
+                    get_symbol_variable_template_specialization(sym.get());
+                if (!variable_specialization_info ||
+                    !variable_specialization_info->primary_template) {
                     return nullptr;
                 }
+
                 auto rewritten_arguments =
                     collect.substitute_template_arguments_with_bindings(
-                        specialization_info->arguments,
+                        variable_specialization_info->arguments,
                         function_template->parameters,
                         active_bindings,
                         loc);
                 std::shared_ptr<Symbol> rewritten_symbol = nullptr;
                 auto* rewritten_decl =
-                    collect.instantiate_function_template_specialization(
-                        specialization_info->primary_template,
+                    collect.instantiate_variable_template_specialization(
+                        variable_specialization_info->primary_template,
                         rewritten_arguments,
                         loc,
-                        &rewritten_symbol,
-                        /*instantiate_definition=*/true);
+                        &rewritten_symbol);
                 if (!rewritten_decl || !rewritten_symbol) {
                     return nullptr;
                 }
