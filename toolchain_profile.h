@@ -14,6 +14,7 @@ enum class StdLibKind {
 
 std::optional<StdLibKind> parse_stdlib_kind(std::string_view value);
 std::string stdlib_kind_name(StdLibKind kind);
+std::string default_target_triple();
 
 struct CxxStdlibDiscoveryResult {
     StdLibKind requested = StdLibKind::Auto;

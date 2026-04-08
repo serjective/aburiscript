@@ -408,7 +408,10 @@ QualType Collect::substitute_template_type_with_bindings(
                 argument_bindings,
                 !allow_unsubstituted_parameters)) {
             if (replacement->kind == TemplateArgumentKind::Type) {
-                return QualType(replacement->type.get_shared(), quals);
+                return QualType(
+                    replacement->type.get_shared(),
+                    static_cast<uint8_t>(
+                        replacement->type.get_qualifiers() | quals));
             }
         }
         if (allow_unsubstituted_parameters) {

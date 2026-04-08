@@ -9,6 +9,9 @@
 
 int compile_run_program(std::string prg, LangOptions lang_opts) {
     auto target = TargetInfo::create_host();
+    if (target->triple.empty()) {
+        target->triple = default_target_triple();
+    }
 
     const std::string input_name = lang_opts.is_cxx_mode() ? "main.cpp" : "main.c";
     PreProcess pp = PreProcess(input_name, prg, target, lang_opts);

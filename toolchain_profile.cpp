@@ -298,6 +298,22 @@ std::string stdlib_kind_name(StdLibKind kind) {
     return "auto";
 }
 
+std::string default_target_triple() {
+#if defined(__APPLE__) && defined(__aarch64__)
+    return "aarch64-apple-darwin";
+#elif defined(__APPLE__) && defined(__arm64__)
+    return "arm64-apple-darwin";
+#elif defined(__APPLE__) && defined(__x86_64__)
+    return "x86_64-apple-darwin";
+#elif defined(__linux__) && defined(__aarch64__)
+    return "aarch64-unknown-linux-gnu";
+#elif defined(__linux__) && defined(__x86_64__)
+    return "x86_64-unknown-linux-gnu";
+#else
+    return "unknown-unknown-unknown";
+#endif
+}
+
 CxxStdlibDiscoveryResult discover_cxx_stdlib_include_paths(
     const char* argv0,
     std::string_view target_triple,

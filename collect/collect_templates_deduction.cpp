@@ -605,6 +605,10 @@ bool bind_deduced_template_argument(
 
     auto deduced_type = desugar_typedefs(argument_type);
     if (pattern_type.get_qualifiers() != QUAL_NONE) {
+        if ((deduced_type.get_qualifiers() & pattern_type.get_qualifiers()) !=
+            pattern_type.get_qualifiers()) {
+            return false;
+        }
         deduced_type = QualType(
             deduced_type.get_shared(),
             static_cast<uint8_t>(

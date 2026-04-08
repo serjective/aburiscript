@@ -749,22 +749,6 @@ static std::vector<std::string> collect_passthrough_compile_flags(int argc, char
     return result;
 }
 
-static std::string default_target_triple() {
-#if defined(__APPLE__) && defined(__aarch64__)
-    return "aarch64-apple-darwin";
-#elif defined(__APPLE__) && defined(__arm64__)
-    return "arm64-apple-darwin";
-#elif defined(__APPLE__) && defined(__x86_64__)
-    return "x86_64-apple-darwin";
-#elif defined(__linux__) && defined(__aarch64__)
-    return "aarch64-unknown-linux-gnu";
-#elif defined(__linux__) && defined(__x86_64__)
-    return "x86_64-unknown-linux-gnu";
-#else
-    return "unknown-unknown-unknown";
-#endif
-}
-
 static bool try_add_include_path(const std::filesystem::path& path,
     std::vector<std::string>& paths,
     std::unordered_set<std::string>& seen) {
@@ -893,7 +877,7 @@ static void discover_aburi_builtin_includes(const char* argv0,
     }
 }
 
-static std::vector<std::string> discover_macos_sdk_include_paths(const char* argv0) {
+static std::vector<std::string> discover_driver_macos_sdk_include_paths(const char* argv0) {
     std::vector<std::string> paths;
     std::unordered_set<std::string> seen;
 
@@ -1585,7 +1569,8 @@ int main(int argc, char** argv) {
                 try_add_include_path(path, quote_include_paths, seen_quote_paths);
             }
             if (target_info->os == TargetOS::MACOS) {
-                auto sdk_paths = discover_macos_sdk_include_paths(argc > 0 ? argv[0] : nullptr);
+                auto sdk_paths =
+                    discover_driver_macos_sdk_include_paths(argc > 0 ? argv[0] : nullptr);
                 for (const auto& path : sdk_paths) {
                     try_add_include_path(path, include_paths, seen_paths);
                 }

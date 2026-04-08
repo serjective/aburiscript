@@ -53,6 +53,18 @@ bool variable_template_specialization_depends_on_template_parameters(
     return false;
 }
 
+std::shared_ptr<CType> encode_resolved_type_for_cache(QualType type) {
+    if (!type) {
+        return nullptr;
+    }
+    if (type.get_qualifiers() == QUAL_NONE) {
+        return type.get_shared();
+    }
+    // we do this because we need a CType for the cache whilst not destroying the qualifiers.
+    // todo: refactor
+    return std::make_shared<TypedefType>("", type);
+}
+
 const VariableDecl* find_template_dependent_variable_definition(
     const Symbol* sym) {
     if (!sym || sym->kind != SymbolKind::VARIABLE) {
@@ -836,7 +848,7 @@ QualType Collect::resolve_deferred_template_specialization_type(
     if (resolved_alias_type) {
         query_publish_template_specialization_resolved_type(
             &specialization,
-            resolved_alias_type.get_shared());
+            encode_resolved_type_for_cache(resolved_alias_type));
     }
     return original_type;
 }
@@ -938,7 +950,7 @@ QualType Collect::resolve_deferred_dependent_name_type(
         mode);
     query_publish_dependent_name_resolved_type(
         &dependent_name,
-        resolved_nested_type.get_shared());
+        encode_resolved_type_for_cache(resolved_nested_type));
     return original_type;
 }
 
