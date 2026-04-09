@@ -18,6 +18,7 @@
 #include "target_feature_gate.h"
 #include "toolchain_profile.h"
 #include <llvm/Config/llvm-config.h>
+#include <llvm/ADT/SmallString.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Program.h>
@@ -1410,6 +1411,8 @@ int main(int argc, char** argv) {
         std::vector<std::string> objectFiles;
         std::vector<std::string> tempFiles;
         bool link_as_cxx = false;
+        std::optional<std::filesystem::path> temp_object_dir;
+        size_t temp_object_counter = 0;
 
         // Separate source files from object/library files that should be
         // passed directly to the linker (e.g. .o, .a, .so, .dylib).
@@ -1678,6 +1681,29 @@ int main(int argc, char** argv) {
             std::string objOut;
             if (CompileOnly && !OutputFilename.empty() && InputFilenames.size() == 1) {
                 objOut = OutputFilename;
+            } else if (!CompileOnly) {
+                if (!temp_object_dir.has_value()) {
+                    llvm::SmallString<256> temp_dir_storage;
+                    std::error_code temp_dir_ec =
+                        llvm::sys::fs::createUniqueDirectory(
+                            "aburi-link-%%%%%%",
+                            temp_dir_storage);
+                    if (temp_dir_ec) {
+                        std::cerr << "Error: unable to create temporary link object directory: "
+                                  << temp_dir_ec.message() << std::endl;
+                        return 1;
+                    }
+                    temp_object_dir =
+                        std::filesystem::path(std::string(temp_dir_storage.str()));
+                }
+                std::string stem = inputPath.stem().string();
+                if (stem.empty()) {
+                    stem = "input";
+                }
+                std::filesystem::path temp_obj_path =
+                    *temp_object_dir /
+                    (stem + "." + std::to_string(temp_object_counter++) + ".o");
+                objOut = temp_obj_path.string();
             } else {
                 objOut = inputPath.stem().string() + ".o";
             }
@@ -1736,6 +1762,10 @@ int main(int argc, char** argv) {
             // Clean up temp object files
             for (const auto& temp : tempFiles) {
                 std::filesystem::remove(temp);
+            }
+            if (temp_object_dir.has_value()) {
+                std::error_code cleanup_ec;
+                std::filesystem::remove_all(*temp_object_dir, cleanup_ec);
             }
         }
 

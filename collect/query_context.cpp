@@ -254,6 +254,11 @@ CollectQueryContext::lookup_template_specialization_resolved_type(
     if (!type) {
         return QualType();
     }
+    if (type->external_semantic_owner_id != 0 &&
+        type->external_semantic_owner_id != store.registry_id()) {
+        ++metrics_.template_specialization_type_misses;
+        return QualType();
+    }
     for (auto it = tentative_overlays_.rbegin();
          it != tentative_overlays_.rend();
          ++it) {
@@ -279,6 +284,7 @@ void CollectQueryContext::publish_template_specialization_resolved_type(
         return;
     }
     ++metrics_.template_specialization_type_publications;
+    type->external_semantic_owner_id = store.registry_id();
     if (tentative_overlays_.empty()) {
         store.set_template_specialization_resolved_type(type,
                                                         std::move(resolved_type));
@@ -292,6 +298,11 @@ QualType CollectQueryContext::lookup_dependent_name_resolved_type(
     const DependentNameType* type,
     const CollectSemanticStore& store) const {
     if (!type) {
+        return QualType();
+    }
+    if (type->external_semantic_owner_id != 0 &&
+        type->external_semantic_owner_id != store.registry_id()) {
+        ++metrics_.dependent_name_type_misses;
         return QualType();
     }
     for (auto it = tentative_overlays_.rbegin();
@@ -319,6 +330,7 @@ void CollectQueryContext::publish_dependent_name_resolved_type(
         return;
     }
     ++metrics_.dependent_name_type_publications;
+    type->external_semantic_owner_id = store.registry_id();
     if (tentative_overlays_.empty()) {
         store.set_dependent_name_resolved_type(type, std::move(resolved_type));
         return;

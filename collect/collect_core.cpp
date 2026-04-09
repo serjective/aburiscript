@@ -54,6 +54,88 @@ struct CollectTentativeMetricsReporter {
 
 CollectTentativeMetricsReporter g_collect_tentative_metrics_reporter;
 
+bool nested_type_matches_equivalent(
+    const RecordSemanticState::NestedType& lhs,
+    const RecordSemanticState::NestedType& rhs) {
+    if (lhs.decl && rhs.decl) {
+        return lhs.decl == rhs.decl;
+    }
+    if (lhs.symbol && rhs.symbol) {
+        return lhs.symbol.get() == rhs.symbol.get();
+    }
+    return lhs.name == rhs.name && lhs.type.equals_qualified(rhs.type);
+}
+
+const ObjectDecl* canonical_record_owner_decl(const ObjectDecl* decl) {
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto record_type = decl->get_record_type()) {
+        if (auto* canonical_decl =
+                dyn_cast<ObjectDecl>(record_type->get_decl())) {
+            return canonical_decl;
+        }
+    }
+    return decl;
+}
+
+void collect_record_base_nested_type_matches(
+    const ObjectDecl* owner_decl,
+    const std::string& name,
+    std::unordered_set<const ObjectDecl*>& active_stack,
+    std::vector<RecordSemanticState::NestedType>& matches) {
+    if (!owner_decl || name.empty()) {
+        return;
+    }
+    if (!active_stack.insert(owner_decl).second) {
+        return;
+    }
+
+    const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
+    if (!state) {
+        active_stack.erase(owner_decl);
+        return;
+    }
+
+    for (auto it = state->nested_types.rbegin();
+         it != state->nested_types.rend();
+         ++it) {
+        if (it->name != name) {
+            continue;
+        }
+        bool duplicate = false;
+        for (const auto& existing_match : matches) {
+            if (nested_type_matches_equivalent(existing_match, *it)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            matches.push_back(*it);
+        }
+    }
+
+    auto visit_base = [&](const ObjectDecl* base_decl) {
+        if (!base_decl) {
+            return;
+        }
+        collect_record_base_nested_type_matches(
+            base_decl,
+            name,
+            active_stack,
+            matches);
+    };
+
+    for (const auto& base : state->bases) {
+        visit_base(base.record_decl);
+    }
+    for (const auto& virtual_base : state->virtual_bases) {
+        visit_base(virtual_base.record_decl);
+    }
+
+    active_stack.erase(owner_decl);
+}
+
 void bump_snapshot_materializations() {
     if (!refactor_metrics_enabled()) {
         return;
@@ -1188,6 +1270,7 @@ QualType Collect::collect_lookup_record_nested_type(QualType owner_type,
     if (!owner_decl) {
         return QualType();
     }
+    owner_decl = const_cast<ObjectDecl*>(canonical_record_owner_decl(owner_decl));
 
     const RecordSemanticState* state = record_semantics_cache_lookup(owner_decl);
     if (!state) {
@@ -1198,6 +1281,29 @@ QualType Collect::collect_lookup_record_nested_type(QualType owner_type,
         if (it->name == name) {
             return it->type;
         }
+    }
+
+    std::unordered_set<const ObjectDecl*> active_stack;
+    active_stack.insert(owner_decl);
+    std::vector<RecordSemanticState::NestedType> base_matches;
+    auto visit_base = [&](const ObjectDecl* base_decl) {
+        if (!base_decl) {
+            return;
+        }
+        collect_record_base_nested_type_matches(
+            base_decl,
+            name,
+            active_stack,
+            base_matches);
+    };
+    for (const auto& base : state->bases) {
+        visit_base(base.record_decl);
+    }
+    for (const auto& virtual_base : state->virtual_bases) {
+        visit_base(virtual_base.record_decl);
+    }
+    if (base_matches.size() == 1) {
+        return base_matches.front().type;
     }
     return QualType();
 }

@@ -334,11 +334,12 @@ bool deduce_class_template_argument_binding(
             return desugar_type(pattern_argument.type).equals_qualified(
                 desugar_type(argument_argument.type));
         }
-        return deduce_function_template_argument_types(
+        return deduce_template_argument_types_impl(
             pattern_argument.type,
             argument_argument.type,
             parameters,
-            deduced_bindings);
+            deduced_bindings,
+            TemplateTypeDeductionMode::PartialOrdering);
     }
 
     if (pattern_argument.is_dependent &&
@@ -597,7 +598,8 @@ bool bind_deduced_template_argument(
     const TemplateTypeParmType* parm_type,
     QualType argument_type,
     const TemplateParameterList& parameters,
-    TemplateArgumentBindings& deduced_arguments) {
+    TemplateArgumentBindings& deduced_arguments,
+    TemplateTypeDeductionMode deduction_mode) {
     auto index = find_template_parameter_index(parm_type, parameters);
     if (!index.has_value() || *index >= deduced_arguments.size()) {
         return false;
@@ -605,10 +607,14 @@ bool bind_deduced_template_argument(
 
     auto deduced_type = desugar_typedefs(argument_type);
     if (pattern_type.get_qualifiers() != QUAL_NONE) {
-        if ((deduced_type.get_qualifiers() & pattern_type.get_qualifiers()) !=
-            pattern_type.get_qualifiers()) {
+        if (deduction_mode != TemplateTypeDeductionMode::Call &&
+            (deduced_type.get_qualifiers() & pattern_type.get_qualifiers()) !=
+                pattern_type.get_qualifiers()) {
             return false;
         }
+        // Function-call deduction should bind through qualifiers written around
+        // the template parameter itself. For shapes like `const T*` against
+        // `int*` or `const int*`, bind `T` to `int`.
         deduced_type = QualType(
             deduced_type.get_shared(),
             static_cast<uint8_t>(
@@ -801,7 +807,8 @@ bool deduce_template_argument_types_impl(
             parm_type.get(),
             argument_type,
             parameters,
-            deduced_arguments);
+            deduced_arguments,
+            deduction_mode);
     }
 
     spelled_pattern = strip_top_level_qualifiers(spelled_pattern);
@@ -1302,7 +1309,20 @@ bool Collect::deduce_function_template_call_arguments(
         }
     }
     std::optional<size_t> pack_param_index;
-    for (size_t idx = 0; idx < pattern->parameters.size(); ++idx) {
+    size_t implicit_object_parameter_count = 0;
+    if (const auto* method_decl = dyn_cast<CppMethodDecl>(pattern);
+        method_decl && method_decl->storage_class != StorageClass::STATIC) {
+        implicit_object_parameter_count = 1;
+        if (call_args.size() < implicit_object_parameter_count ||
+            pattern->parameters.size() < implicit_object_parameter_count) {
+            deduced_arguments_out.clear();
+            return false;
+        }
+    }
+
+    for (size_t idx = implicit_object_parameter_count;
+         idx < pattern->parameters.size();
+         ++idx) {
         auto* param_decl = dyn_cast<ParamDecl>(pattern->parameters[idx].get());
         if (!param_decl || !param_decl->is_parameter_pack) {
             continue;
@@ -1345,35 +1365,49 @@ bool Collect::deduce_function_template_call_arguments(
     };
 
     if (!pack_param_index.has_value()) {
-        size_t compare_count = std::min(call_args.size(), pattern->parameters.size());
+        size_t compare_count =
+            std::min(call_args.size() - implicit_object_parameter_count,
+                     pattern->parameters.size() - implicit_object_parameter_count);
         for (size_t idx = 0; idx < compare_count; ++idx) {
-            if (!deduce_one_parameter(idx, idx)) {
+            if (!deduce_one_parameter(
+                    implicit_object_parameter_count + idx,
+                    implicit_object_parameter_count + idx)) {
                 return false;
             }
         }
     } else {
-        size_t leading_count = *pack_param_index;
-        size_t trailing_count = pattern->parameters.size() - *pack_param_index - 1;
-        if (call_args.size() < leading_count + trailing_count) {
+        size_t leading_count = *pack_param_index - implicit_object_parameter_count;
+        size_t trailing_count =
+            pattern->parameters.size() - *pack_param_index - 1;
+        if (call_args.size() - implicit_object_parameter_count <
+            leading_count + trailing_count) {
             deduced_arguments_out.clear();
             return false;
         }
         for (size_t idx = 0; idx < leading_count; ++idx) {
-            if (!deduce_one_parameter(idx, idx)) {
+            if (!deduce_one_parameter(
+                    implicit_object_parameter_count + idx,
+                    implicit_object_parameter_count + idx)) {
                 return false;
             }
         }
 
-        size_t pack_arg_count = call_args.size() - leading_count - trailing_count;
+        size_t pack_arg_count =
+            call_args.size() - implicit_object_parameter_count -
+            leading_count - trailing_count;
         for (size_t idx = 0; idx < pack_arg_count; ++idx) {
-            if (!deduce_one_parameter(*pack_param_index, leading_count + idx)) {
+            if (!deduce_one_parameter(
+                    *pack_param_index,
+                    implicit_object_parameter_count + leading_count + idx)) {
                 return false;
             }
         }
 
         for (size_t idx = 0; idx < trailing_count; ++idx) {
             size_t param_index = *pack_param_index + 1 + idx;
-            size_t arg_index = leading_count + pack_arg_count + idx;
+            size_t arg_index =
+                implicit_object_parameter_count + leading_count +
+                pack_arg_count + idx;
             if (!deduce_one_parameter(param_index, arg_index)) {
                 return false;
             }

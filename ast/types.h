@@ -104,6 +104,7 @@ class QualType;
 
 struct CType {
     TypeKind kind;
+    mutable uint32_t external_semantic_owner_id = 0;
     explicit CType(): kind(TypeKind::Other) {}
     explicit CType(TypeKind k) : kind(k) {}
     virtual ~CType() = default;

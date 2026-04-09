@@ -1441,14 +1441,21 @@ void CollectSemanticStore::set_template_specialization_resolved_type(
     }
     if (!resolved_type) {
         template_specialization_resolved_type_map_.erase(type);
+        if (type->external_semantic_owner_id == registry_id_) {
+            type->external_semantic_owner_id = 0;
+        }
         return;
     }
+    type->external_semantic_owner_id = registry_id_;
     template_specialization_resolved_type_map_[type] = std::move(resolved_type);
 }
 
 QualType CollectSemanticStore::get_template_specialization_resolved_type(
     const TemplateSpecializationType* type) const {
     if (!type) {
+        return QualType();
+    }
+    if (type->external_semantic_owner_id != registry_id_) {
         return QualType();
     }
     auto it = template_specialization_resolved_type_map_.find(type);
@@ -1459,6 +1466,12 @@ QualType CollectSemanticStore::get_template_specialization_resolved_type(
 }
 
 void CollectSemanticStore::clear_template_specialization_resolved_types() {
+    for (const auto& entry : template_specialization_resolved_type_map_) {
+        if (entry.first &&
+            entry.first->external_semantic_owner_id == registry_id_) {
+            entry.first->external_semantic_owner_id = 0;
+        }
+    }
     template_specialization_resolved_type_map_.clear();
 }
 
@@ -1470,14 +1483,21 @@ void CollectSemanticStore::set_dependent_name_resolved_type(
     }
     if (!resolved_type) {
         dependent_name_resolved_type_map_.erase(type);
+        if (type->external_semantic_owner_id == registry_id_) {
+            type->external_semantic_owner_id = 0;
+        }
         return;
     }
+    type->external_semantic_owner_id = registry_id_;
     dependent_name_resolved_type_map_[type] = std::move(resolved_type);
 }
 
 QualType CollectSemanticStore::get_dependent_name_resolved_type(
     const DependentNameType* type) const {
     if (!type) {
+        return QualType();
+    }
+    if (type->external_semantic_owner_id != registry_id_) {
         return QualType();
     }
     auto it = dependent_name_resolved_type_map_.find(type);
@@ -1488,6 +1508,12 @@ QualType CollectSemanticStore::get_dependent_name_resolved_type(
 }
 
 void CollectSemanticStore::clear_dependent_name_resolved_types() {
+    for (const auto& entry : dependent_name_resolved_type_map_) {
+        if (entry.first &&
+            entry.first->external_semantic_owner_id == registry_id_) {
+            entry.first->external_semantic_owner_id = 0;
+        }
+    }
     dependent_name_resolved_type_map_.clear();
 }
 

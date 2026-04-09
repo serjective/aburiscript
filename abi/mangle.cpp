@@ -53,6 +53,106 @@ void append_source_name(std::string& out, std::string_view name) {
     out.append(name.data(), name.size());
 }
 
+const AttributeList& empty_attribute_list_for_mangling() {
+    static const AttributeList empty;
+    return empty;
+}
+
+const AttributeList& attrs_for_decl_node(uint32_t node_id) {
+    if (auto* ast_ctx = get_active_side_table_ast_context()) {
+        return ast_ctx->get_attrs(node_id);
+    }
+    return empty_attribute_list_for_mangling();
+}
+
+void collect_abi_tags_from_attribute_list(const AttributeList& attrs,
+                                          std::vector<std::string>& out) {
+    for (const auto& attr : attrs.attrs) {
+        if (attr.resolved_kind != AttributeKind::ABI_TAG) {
+            continue;
+        }
+        for (const auto& arg : attr.args) {
+            switch (arg.kind) {
+                case AttributeArg::Kind::STRING:
+                case AttributeArg::Kind::IDENTIFIER:
+                    if (!arg.str_value.empty()) {
+                        out.push_back(arg.str_value);
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+}
+
+void normalize_abi_tags(std::vector<std::string>& abi_tags) {
+    abi_tags.erase(
+        std::remove_if(
+            abi_tags.begin(),
+            abi_tags.end(),
+            [](const std::string& tag) { return tag.empty(); }),
+        abi_tags.end());
+    std::sort(abi_tags.begin(), abi_tags.end());
+    abi_tags.erase(
+        std::unique(abi_tags.begin(), abi_tags.end()),
+        abi_tags.end());
+}
+
+std::vector<std::string> merge_abi_tags(const AttributeList* first,
+                                        const AttributeList* second = nullptr) {
+    std::vector<std::string> abi_tags;
+    if (first) {
+        collect_abi_tags_from_attribute_list(*first, abi_tags);
+    }
+    if (second) {
+        collect_abi_tags_from_attribute_list(*second, abi_tags);
+    }
+    normalize_abi_tags(abi_tags);
+    return abi_tags;
+}
+
+std::vector<std::string> abi_tags_for_decl(const Decl& decl) {
+    return merge_abi_tags(&attrs_for_decl_node(decl.node_id));
+}
+
+std::vector<std::string> abi_tags_for_function_decl(const FuncDecl& decl) {
+    return abi_tags_for_decl(decl);
+}
+
+std::vector<std::string> abi_tags_for_variable_decl(const VariableDecl& decl) {
+    const AttributeList* decl_attrs = &attrs_for_decl_node(decl.node_id);
+    const AttributeList* symbol_attrs =
+        decl.sym ? &decl.sym->sym_attrs : nullptr;
+    return merge_abi_tags(decl_attrs, symbol_attrs);
+}
+
+std::vector<std::string> abi_tags_for_symbol(const Symbol& sym) {
+    return merge_abi_tags(&sym.sym_attrs);
+}
+
+std::vector<std::string> abi_tags_for_class_template_primary(
+    const Decl* primary_template) {
+    auto* class_template =
+        dyn_cast<ClassTemplateDecl>(const_cast<Decl*>(primary_template));
+    if (!class_template) {
+        return {};
+    }
+    auto* record = class_template->record_decl();
+    if (!record) {
+        return {};
+    }
+    return abi_tags_for_decl(*record);
+}
+
+void append_itanium_abi_tags(std::string& out,
+                             const std::vector<std::string>& abi_tags) {
+    for (const auto& tag : abi_tags) {
+        out += 'B';
+        append_source_name(out, tag);
+    }
+}
+
 std::vector<std::string_view> split_cxx_qualifier_prefix(std::string_view prefix) {
     std::vector<std::string_view> components;
     size_t cursor = 0;
@@ -166,12 +266,14 @@ void append_itanium_unqualified_function_name(
     std::string& out,
     std::string_view name,
     const FunctionTemplateSpecializationInfo* specialization,
+    const std::vector<std::string>& abi_tags,
     ItaniumMangleContext& ctx);
 
 void append_itanium_unqualified_variable_name(
     std::string& out,
     std::string_view name,
     const VariableTemplateSpecializationInfo* specialization,
+    const std::vector<std::string>& abi_tags,
     ItaniumMangleContext& ctx);
 
 std::shared_ptr<ObjectType> owner_object_type_for_naming(QualType owner_type) {
@@ -207,16 +309,19 @@ void append_itanium_function_name(std::string& out,
                                   std::string_view qualifier_prefix,
                                   QualType owner_type,
                                   const FunctionTemplateSpecializationInfo* specialization,
+                                  const std::vector<std::string>& abi_tags,
                                   ItaniumMangleContext& ctx) {
     auto owner_object = owner_object_type_for_naming(owner_type);
     if (qualifier_prefix.empty() && !owner_object) {
-        append_itanium_unqualified_function_name(out, name, specialization, ctx);
+        append_itanium_unqualified_function_name(
+            out, name, specialization, abi_tags, ctx);
         return;
     }
     auto components =
         normalized_member_qualifier_components(qualifier_prefix, owner_type);
     if (components.empty() && !owner_object) {
-        append_itanium_unqualified_function_name(out, name, specialization, ctx);
+        append_itanium_unqualified_function_name(
+            out, name, specialization, abi_tags, ctx);
         return;
     }
     size_t implicit_object_params =
@@ -244,7 +349,8 @@ void append_itanium_function_name(std::string& out,
     if (owner_object) {
         append_object_name_encoding(out, *owner_object, ctx);
     }
-    append_itanium_unqualified_function_name(out, name, specialization, ctx);
+    append_itanium_unqualified_function_name(
+        out, name, specialization, abi_tags, ctx);
     out += 'E';
 }
 
@@ -439,8 +545,10 @@ void append_itanium_unqualified_function_name(
     std::string& out,
     std::string_view name,
     const FunctionTemplateSpecializationInfo* specialization,
+    const std::vector<std::string>& abi_tags,
     ItaniumMangleContext& ctx) {
     append_itanium_unqualified_name(out, name);
+    append_itanium_abi_tags(out, abi_tags);
     if (!specialization || !specialization->primary_template) {
         return;
     }
@@ -457,8 +565,10 @@ void append_itanium_unqualified_variable_name(
     std::string& out,
     std::string_view name,
     const VariableTemplateSpecializationInfo* specialization,
+    const std::vector<std::string>& abi_tags,
     ItaniumMangleContext& ctx) {
     append_itanium_unqualified_name(out, name);
+    append_itanium_abi_tags(out, abi_tags);
     if (!specialization || !specialization->primary_template) {
         return;
     }
@@ -836,11 +946,13 @@ void append_template_specialization_name(std::string& out,
                                          std::string_view template_name,
                                          const Decl* primary_template,
                                          const std::vector<TemplateArgument>& arguments,
+                                         const std::vector<std::string>& abi_tags,
                                          ItaniumMangleContext& ctx) {
     std::string prefix_key =
         template_prefix_substitution_key(template_name, primary_template);
     if (!ctx.try_emit_substitution(out, prefix_key)) {
         append_source_name(out, template_name);
+        append_itanium_abi_tags(out, abi_tags);
         ctx.remember_substitution(std::move(prefix_key));
     }
     out += 'I';
@@ -855,6 +967,8 @@ void append_object_name_encoding(std::string& out,
                                  ItaniumMangleContext& ctx) {
     auto* decl = dyn_cast<ObjectDecl>(object.get_decl());
     if (object.is_class_template_specialization()) {
+        auto abi_tags =
+            abi_tags_for_class_template_primary(object.get_primary_class_template());
         append_template_specialization_name(
             out,
             class_template_name(
@@ -862,6 +976,7 @@ void append_object_name_encoding(std::string& out,
                 decl ? decl->get_tag_name() : std::string_view("record")),
             object.get_primary_class_template(),
             object.get_template_specialization_arguments(),
+            abi_tags,
             ctx);
         return;
     }
@@ -871,6 +986,7 @@ void append_object_name_encoding(std::string& out,
     }
     if (!decl->get_tag_name().empty()) {
         append_source_name(out, decl->get_tag_name());
+        append_itanium_abi_tags(out, abi_tags_for_decl(*decl));
         return;
     }
     append_vendor_extended_type(out, "record");
@@ -1064,6 +1180,7 @@ void append_type_encoding(std::string& out, const QualType& qt, ItaniumMangleCon
                     specialization->template_name),
                 specialization->primary_template,
                 specialization->arguments,
+                abi_tags_for_class_template_primary(specialization->primary_template),
                 ctx);
             break;
         }
@@ -1232,6 +1349,7 @@ size_t implicit_object_parameter_count(const FunctionType& fn,
 void append_itanium_constructor_name(std::string& out,
                                      std::string_view qualifier_prefix,
                                      QualType owner_type,
+                                     const std::vector<std::string>& abi_tags,
                                      ItaniumMangleContext& ctx) {
     auto components =
         normalized_member_qualifier_components(qualifier_prefix, owner_type);
@@ -1239,6 +1357,7 @@ void append_itanium_constructor_name(std::string& out,
     if (components.empty() && !owner_object) {
         // Fallback to complete-object constructor code without a nested prefix.
         out += "C1";
+        append_itanium_abi_tags(out, abi_tags);
         return;
     }
     out += 'N';
@@ -1250,12 +1369,14 @@ void append_itanium_constructor_name(std::string& out,
     }
     // Itanium ctor-name: use complete-object constructor form.
     out += "C1";
+    append_itanium_abi_tags(out, abi_tags);
     out += 'E';
 }
 
 void append_itanium_destructor_name(std::string& out,
                                     std::string_view qualifier_prefix,
                                     QualType owner_type,
+                                    const std::vector<std::string>& abi_tags,
                                     ItaniumMangleContext& ctx) {
     auto components =
         normalized_member_qualifier_components(qualifier_prefix, owner_type);
@@ -1263,6 +1384,7 @@ void append_itanium_destructor_name(std::string& out,
     if (components.empty() && !owner_object) {
         // Fallback to complete-object destructor code without a nested prefix.
         out += "D1";
+        append_itanium_abi_tags(out, abi_tags);
         return;
     }
     out += 'N';
@@ -1274,6 +1396,7 @@ void append_itanium_destructor_name(std::string& out,
     }
     // Itanium dtor-name: use complete-object destructor form.
     out += "D1";
+    append_itanium_abi_tags(out, abi_tags);
     out += 'E';
 }
 
@@ -1289,18 +1412,21 @@ std::string mangle_function_entity_itanium(const std::string& name,
                                            QualType owner_type,
                                            CxxSpecialMemberKind special_kind,
                                            const FunctionTemplateSpecializationInfo* specialization,
+                                           const std::vector<std::string>& abi_tags,
                                            const FunctionType* specialization_pattern_type) {
     std::string out = "_Z";
     ItaniumMangleContext ctx;
     if (special_kind == CxxSpecialMemberKind::Constructor) {
-        append_itanium_constructor_name(out, qualifier_prefix, owner_type, ctx);
+        append_itanium_constructor_name(
+            out, qualifier_prefix, owner_type, abi_tags, ctx);
         size_t param_start =
             implicit_object_parameter_count(fn, qualifier_prefix, owner_type);
         append_bare_function_type(out, fn, param_start, ctx);
         return out;
     }
     if (special_kind == CxxSpecialMemberKind::Destructor) {
-        append_itanium_destructor_name(out, qualifier_prefix, owner_type, ctx);
+        append_itanium_destructor_name(
+            out, qualifier_prefix, owner_type, abi_tags, ctx);
         size_t param_start =
             implicit_object_parameter_count(fn, qualifier_prefix, owner_type);
         append_bare_function_type(out, fn, param_start, ctx);
@@ -1315,6 +1441,7 @@ std::string mangle_function_entity_itanium(const std::string& name,
         qualifier_prefix,
         owner_type,
         specialization,
+        abi_tags,
         ctx);
     if (specialization && specialization_pattern_type) {
         append_bare_function_type_with_return(
@@ -1332,19 +1459,22 @@ std::string mangle_variable_entity_itanium(
     const std::string& name,
     std::string_view qualifier_prefix,
     QualType owner_type,
-    const VariableTemplateSpecializationInfo* specialization) {
+    const VariableTemplateSpecializationInfo* specialization,
+    const std::vector<std::string>& abi_tags) {
     std::string out = "_Z";
     ItaniumMangleContext ctx;
     auto owner_object = owner_object_type_for_naming(owner_type);
     if (qualifier_prefix.empty() && !owner_object) {
-        append_itanium_unqualified_variable_name(out, name, specialization, ctx);
+        append_itanium_unqualified_variable_name(
+            out, name, specialization, abi_tags, ctx);
         return out;
     }
 
     auto components =
         normalized_member_qualifier_components(qualifier_prefix, owner_type);
     if (components.empty() && !owner_object) {
-        append_itanium_unqualified_variable_name(out, name, specialization, ctx);
+        append_itanium_unqualified_variable_name(
+            out, name, specialization, abi_tags, ctx);
         return out;
     }
 
@@ -1355,7 +1485,8 @@ std::string mangle_variable_entity_itanium(
     if (owner_object) {
         append_object_name_encoding(out, *owner_object, ctx);
     }
-    append_itanium_unqualified_variable_name(out, name, specialization, ctx);
+    append_itanium_unqualified_variable_name(
+        out, name, specialization, abi_tags, ctx);
     out += 'E';
     return out;
 }
@@ -1451,6 +1582,7 @@ std::string mangle_function_name_itanium(const std::string& name,
         QualType(),
         CxxSpecialMemberKind::None,
         nullptr,
+        {},
         nullptr);
 }
 
@@ -1481,6 +1613,7 @@ std::string mangle_function_name_itanium(const FuncDecl& decl, const AbiPolicy& 
     }
     const auto* specialization =
         get_func_decl_function_template_specialization(&decl);
+    auto abi_tags = abi_tags_for_function_decl(decl);
     return mangle_function_entity_itanium(
         decl.name,
         *fn,
@@ -1488,6 +1621,7 @@ std::string mangle_function_name_itanium(const FuncDecl& decl, const AbiPolicy& 
         owner_type,
         special_kind,
         specialization,
+        abi_tags,
         specialization_pattern_function_type(specialization));
 }
 
@@ -1562,6 +1696,7 @@ std::string mangle_function_symbol_name_for_policy(const Symbol& sym,
                 get_symbol_owner_record_type(&sym),
                 special_kind,
                 specialization,
+                abi_tags_for_symbol(sym),
                 specialization_pattern_function_type(specialization));
         }
         case ManglingKind::Msvc:
@@ -1593,7 +1728,8 @@ std::string mangle_variable_decl_name_for_policy(const VariableDecl& decl,
                 spelling,
                 qualifier_prefix,
                 owner_type,
-                specialization);
+                specialization,
+                abi_tags_for_variable_decl(decl));
         }
         case ManglingKind::Msvc:
         case ManglingKind::C:
@@ -1620,7 +1756,8 @@ std::string mangle_variable_symbol_name_for_policy(const Symbol& sym,
                     ? std::string_view(*get_symbol_cxx_qualifier_prefix(&sym))
                     : std::string_view{},
                 get_symbol_owner_record_type(&sym),
-                specialization);
+                specialization,
+                abi_tags_for_symbol(sym));
             }
         case ManglingKind::Msvc:
         case ManglingKind::C:
