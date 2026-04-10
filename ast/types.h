@@ -1449,6 +1449,12 @@ struct RecordSemanticState {
         bool default_constructor_is_deleted = false;
         bool has_copy_constructor = false;
         bool has_move_constructor = false;
+        bool has_user_declared_copy_constructor = false;
+        bool has_user_declared_move_constructor = false;
+        bool has_copy_assignment = false;
+        bool has_move_assignment = false;
+        bool has_user_declared_copy_assignment = false;
+        bool has_user_declared_move_assignment = false;
         bool has_user_declared_destructor = false;
         bool has_deleted_destructor = false;
     };
@@ -1468,6 +1474,7 @@ struct RecordSemanticState {
         std::string name;
         QualType type;
         RecordMemberAccess declared_access = RecordMemberAccess::Public;
+        bool is_implicit = false;
         bool is_static = false;
         bool is_deleted = false;
         bool is_defaulted = false;

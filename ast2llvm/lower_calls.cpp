@@ -1,4 +1,5 @@
 #include "ast2llvm.h"
+#include "lower_helpers.h"
 #include "../abi/darwin_blocks.h"
 #include "../abi/mangle.h"
 #include "../constexpr/consteval_compat.h"
@@ -260,15 +261,7 @@ llvm::Value* ASTToLLVM::convert_function_call(FuncCall *expr) {
     for (size_t i = 0; i < expr->args.size(); ++i) {
         Expr* arg_expr = expr->args[i].get();
         if (i < named_params && reference_param[i]) {
-            Expr* lvalue_base = arg_expr;
-            while (auto* cast = dyn_cast<ImplicitCast>(lvalue_base)) {
-                if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
-                    lvalue_base = cast->expr.get();
-                    continue;
-                }
-                break;
-            }
-
+            Expr* lvalue_base = unwrap_reference_binding_expr(arg_expr);
             llvm::Value* ref_ptr = get_lvalue(lvalue_base).address;
             if (!ref_ptr) {
                 // Temporary materialization for reference binding.
@@ -334,15 +327,7 @@ llvm::Value* ASTToLLVM::convert_function_call(FuncCall *expr) {
 
                     // Darwin/AArch64 varargs: large aggregates are passed indirectly.
                     if (arg_size > 16) {
-                        Expr* lvalue_base = arg_expr;
-                        while (auto* cast = dyn_cast<ImplicitCast>(lvalue_base)) {
-                            if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
-                                lvalue_base = cast->expr.get();
-                                continue;
-                            }
-                            break;
-                        }
-
+                        Expr* lvalue_base = unwrap_reference_binding_expr(arg_expr);
                         llvm::Value* arg_ptr = get_lvalue(lvalue_base).address;
                         if (!arg_ptr) {
                             llvm::Function* func = builder.GetInsertBlock()->getParent();
@@ -689,15 +674,7 @@ llvm::Value* ASTToLLVM::convert_cpp_member_call(CppMemberCallExpr *expr) {
             arg_val = call_this_ptr;
         } else if (idx < named_param_count && param_info[idx].reference) {
             Expr* arg_expr = lowered_call->args[idx].get();
-            Expr* lvalue_base = arg_expr;
-            while (auto* cast = dyn_cast<ImplicitCast>(lvalue_base)) {
-                if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
-                    lvalue_base = cast->expr.get();
-                    continue;
-                }
-                break;
-            }
-
+            Expr* lvalue_base = unwrap_reference_binding_expr(arg_expr);
             llvm::Value* ref_ptr = get_lvalue(lvalue_base).address;
             if (!ref_ptr) {
                 llvm::Value* materialized_arg = convert_expression(arg_expr);
@@ -1137,15 +1114,7 @@ llvm::Value* ASTToLLVM::emit_member_pointer_dispatch(
             param_index < named_params;
 
         if (is_named_param && param_info[param_index].reference) {
-            Expr* lvalue_base = arg_expr;
-            while (auto* cast = dyn_cast<ImplicitCast>(lvalue_base)) {
-                if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
-                    lvalue_base = cast->expr.get();
-                    continue;
-                }
-                break;
-            }
-
+            Expr* lvalue_base = unwrap_reference_binding_expr(arg_expr);
             llvm::Value* ref_ptr = get_lvalue(lvalue_base).address;
             if (!ref_ptr) {
                 llvm::Value* arg_val = convert_expression(arg_expr);
@@ -1229,15 +1198,7 @@ llvm::Value* ASTToLLVM::emit_member_pointer_dispatch(
                 size_t arg_size = module->getDataLayout().getTypeAllocSize(arg_ty);
 
                 if (arg_size > 16) {
-                    Expr* lvalue_base = arg_expr;
-                    while (auto* cast = dyn_cast<ImplicitCast>(lvalue_base)) {
-                        if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
-                            lvalue_base = cast->expr.get();
-                            continue;
-                        }
-                        break;
-                    }
-
+                    Expr* lvalue_base = unwrap_reference_binding_expr(arg_expr);
                     llvm::Value* arg_ptr = get_lvalue(lvalue_base).address;
                     if (!arg_ptr) {
                         llvm::Function* fn = builder.GetInsertBlock()->getParent();

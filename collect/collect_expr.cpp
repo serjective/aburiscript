@@ -2700,8 +2700,26 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                             FunctionExceptionSpecKind::NonThrowing) {
                         return false;
                     }
-                    if (require_trivial && !ctor.is_implicit) {
-                        return false;
+                    if (require_trivial) {
+                        bool trivial_ctor = ctor.is_implicit;
+                        if (!trivial_ctor &&
+                            ctor.decl &&
+                            ctor.decl->is_defaulted &&
+                            (cpp_constructor_is_copy_constructor(
+                                 ctor,
+                                 target_type,
+                                 ast_ctx_.get()) ||
+                             cpp_constructor_is_move_constructor(
+                                 ctor,
+                                 target_type,
+                                 ast_ctx_.get()) ||
+                             cpp_compute_constructor_user_param_info(ctor)
+                                     .required_user_param_count == 0)) {
+                            trivial_ctor = true;
+                        }
+                        if (!trivial_ctor) {
+                            return false;
+                        }
                     }
 
                     CppConstructorUserParamInfo info =
@@ -2739,9 +2757,7 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                         return true;
                     }
                 }
-                return require_trivial
-                    ? !state->definition_data.has_user_declared_constructor
-                    : state->constructors.empty();
+                return false;
             }
 
             for (const auto& ctor : state->constructors) {
@@ -3007,7 +3023,12 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                     return false;
                 }
                 return trait_is_standard_layout_type(canonical) &&
-                       !state->definition_data.has_user_declared_constructor &&
+                       trait_is_constructible_from(
+                           canonical,
+                           {},
+                           /*require_nothrow=*/false,
+                           /*require_trivial=*/true) &&
+                       trait_is_trivially_copyable_type(canonical) &&
                        cpp_type_is_trivially_destructible(canonical, ast_ctx_.get());
             }
             default:
@@ -3063,54 +3084,41 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                 }
 
                 for (const auto& ctor : state->constructors) {
-                    if (!ctor.decl || ctor.is_implicit) {
+                    if (!cpp_constructor_is_copy_constructor(
+                            ctor,
+                            canonical,
+                            ast_ctx_.get()) &&
+                        !cpp_constructor_is_move_constructor(
+                            ctor,
+                            canonical,
+                            ast_ctx_.get())) {
                         continue;
                     }
-                    auto fn_type =
-                        desugar_type(ctor.type, ast_ctx_.get()).as_shared<FunctionType>();
-                    if (!fn_type) {
-                        continue;
+                    if (ctor.is_deleted) {
+                        return false;
                     }
-                    CppConstructorUserParamInfo info =
-                        cpp_compute_constructor_user_param_info(ctor);
-                    if (info.max_user_param_count != 1 ||
-                        info.user_param_start >= fn_type->parameters.size()) {
-                        continue;
-                    }
-                    QualType param_type =
-                        desugar_type(fn_type->parameters[info.user_param_start], ast_ctx_.get());
-                    auto ref_type = param_type.as_shared<ReferenceType>();
-                    if (!ref_type || !ref_type->referred_type) {
-                        continue;
-                    }
-                    QualType referred =
-                        desugar_type(ref_type->referred_type, ast_ctx_.get());
-                    if (!referred || !referred.equals_unqualified(canonical)) {
-                        continue;
-                    }
-                    if (!ctor.decl->is_defaulted) {
+                    if (!ctor.is_implicit &&
+                        (!ctor.decl || !ctor.decl->is_defaulted)) {
                         return false;
                     }
                 }
 
                 for (const auto& method : state->methods) {
-                    if (method.is_static || !method.decl || method.name != "operator=") {
+                    if (!cpp_method_is_copy_assignment(
+                            method,
+                            canonical,
+                            ast_ctx_.get()) &&
+                        !cpp_method_is_move_assignment(
+                            method,
+                            canonical,
+                            ast_ctx_.get())) {
                         continue;
                     }
-                    auto fn_type =
-                        desugar_type(method.type, ast_ctx_.get()).as_shared<FunctionType>();
-                    if (!fn_type || fn_type->parameters.size() != 1) {
-                        continue;
+                    if (method.is_deleted) {
+                        return false;
                     }
-                    QualType param_type =
-                        desugar_type(fn_type->parameters.front(), ast_ctx_.get());
-                    auto ref_type = param_type.as_shared<ReferenceType>();
-                    if (!ref_type || !ref_type->referred_type) {
-                        continue;
-                    }
-                    QualType referred =
-                        desugar_type(ref_type->referred_type, ast_ctx_.get());
-                    if (referred && referred.equals_unqualified(canonical)) {
+                    if (!method.is_implicit &&
+                        (!method.decl || !method.decl->is_defaulted)) {
                         return false;
                     }
                 }
@@ -3355,6 +3363,51 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                 target_kind == TypeKind::Array) {
                 return false;
             }
+            if (target_kind == TypeKind::Object) {
+                auto target_object =
+                    desugar_type(target_type, ast_ctx_.get()).as_shared<ObjectType>();
+                const auto* record_decl = canonical_record_decl(
+                    dyn_cast<ObjectDecl>(target_object ? target_object->get_decl()
+                                                       : nullptr));
+                const auto* state =
+                    record_decl ? query_lookup_record_semantics(record_decl) : nullptr;
+                if (!state || state->is_incomplete) {
+                    return false;
+                }
+
+                bool rhs_is_lvalue = false;
+                if (auto rhs_ref = rhs->as_shared<ReferenceType>()) {
+                    rhs_is_lvalue = rhs_ref->isLValueReference();
+                }
+                const RecordSemanticState::Method* selected_method = nullptr;
+                if (!rhs_is_lvalue) {
+                    for (const auto& method : state->methods) {
+                        if (cpp_method_is_move_assignment(
+                                method,
+                                target_type,
+                                ast_ctx_.get())) {
+                            selected_method = &method;
+                            break;
+                        }
+                    }
+                }
+                if (!selected_method) {
+                    for (const auto& method : state->methods) {
+                        if (cpp_method_is_copy_assignment(
+                                method,
+                                target_type,
+                                ast_ctx_.get())) {
+                            selected_method = &method;
+                            break;
+                        }
+                    }
+                }
+                return selected_method &&
+                       !selected_method->is_deleted &&
+                       cpp_access_allows_member(
+                           selected_method->declared_access,
+                           /*allow_protected_access=*/false);
+            }
             return build_implicit_conversion_sequence(
                        *rhs,
                        target_type,
@@ -3380,6 +3433,62 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             if (target_type->isVoid() || target_kind == TypeKind::Function ||
                 target_kind == TypeKind::Array) {
                 return false;
+            }
+            if (target_kind == TypeKind::Object) {
+                auto target_object =
+                    desugar_type(target_type, ast_ctx_.get()).as_shared<ObjectType>();
+                const auto* record_decl = canonical_record_decl(
+                    dyn_cast<ObjectDecl>(target_object ? target_object->get_decl()
+                                                       : nullptr));
+                const auto* state =
+                    record_decl ? query_lookup_record_semantics(record_decl) : nullptr;
+                if (!state || state->is_incomplete) {
+                    return false;
+                }
+
+                bool rhs_is_lvalue = false;
+                if (auto rhs_ref = rhs->as_shared<ReferenceType>()) {
+                    rhs_is_lvalue = rhs_ref->isLValueReference();
+                }
+                const RecordSemanticState::Method* selected_method = nullptr;
+                if (!rhs_is_lvalue) {
+                    for (const auto& method : state->methods) {
+                        if (cpp_method_is_move_assignment(
+                                method,
+                                target_type,
+                                ast_ctx_.get())) {
+                            selected_method = &method;
+                            break;
+                        }
+                    }
+                }
+                if (!selected_method) {
+                    for (const auto& method : state->methods) {
+                        if (cpp_method_is_copy_assignment(
+                                method,
+                                target_type,
+                                ast_ctx_.get())) {
+                            selected_method = &method;
+                            break;
+                        }
+                    }
+                }
+                if (!selected_method ||
+                    selected_method->is_deleted ||
+                    !cpp_access_allows_member(
+                        selected_method->declared_access,
+                        /*allow_protected_access=*/false)) {
+                    return false;
+                }
+                if (kind == BuiltinKind::IS_TRIVIALLY_ASSIGNABLE) {
+                    return trait_is_trivially_copyable_type(target_type);
+                }
+                auto fn_type =
+                    desugar_type(selected_method->type, ast_ctx_.get())
+                        .as_shared<FunctionType>();
+                return fn_type &&
+                       fn_type->exception_spec ==
+                           FunctionExceptionSpecKind::NonThrowing;
             }
             bool assignable = build_implicit_conversion_sequence(
                                   *rhs,
@@ -4537,6 +4646,34 @@ std::unique_ptr<Expr> Collect::collect_cpp_new_expression(
     std::shared_ptr<Symbol> selected_ctor_sym = nullptr;
     std::vector<std::unique_ptr<Expr>> constructor_args;
     bool is_list_init = false;
+    auto should_use_implicit_special_member_ctor =
+        [&](const Expr* init_expr) -> bool {
+        if (!pointee_record_state || !init_expr) {
+            return false;
+        }
+        if (!pointee_record_state->definition_data.has_copy_constructor &&
+            !pointee_record_state->definition_data.has_move_constructor) {
+            return false;
+        }
+        const Expr* source_expr = init_expr;
+        if (auto* init_list = dyn_cast<InitListExpr>(init_expr)) {
+            if (init_list->elements.size() != 1) {
+                return false;
+            }
+            const auto& element = init_list->elements.front();
+            if (!element.value || !element.designators.empty()) {
+                return false;
+            }
+            source_expr = element.value.get();
+        }
+        QualType source_type =
+            source_expr ? const_cast<Expr*>(source_expr)->get_type() : QualType();
+        QualType canonical_source =
+            remove_reference_and_desugar(source_type, ast_ctx_.get());
+        return canonical_source &&
+               canonical_source->kind == TypeKind::Object &&
+               canonical_source.equals_unqualified(canonical_pointee);
+    };
 
     if (is_array_form &&
         pointee_record &&
@@ -4554,7 +4691,8 @@ std::unique_ptr<Expr> Collect::collect_cpp_new_expression(
     if (pointee_record &&
         pointee_record_state &&
         !is_array_form &&
-        pointee_record_state->definition_data.has_user_declared_constructor &&
+        (pointee_record_state->definition_data.has_user_declared_constructor ||
+         should_use_implicit_special_member_ctor(initializer.get())) &&
         !pointee_record_state->constructors.empty()) {
         std::vector<std::unique_ptr<Expr>> ctor_input_args;
         bool ctor_is_list_init = false;

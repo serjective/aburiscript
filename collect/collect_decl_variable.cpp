@@ -27,6 +27,58 @@ bool any_initializer_argument_depends_on_template_parameters(
     return false;
 }
 
+const Expr* extract_first_value_init_list(const Expr* init) {
+    if (!init) {
+        return nullptr;
+    }
+    auto* init_list = dyn_cast<InitListExpr>(init);
+    if (!init_list) {
+        return init;
+    }
+    if (init_list->elements.size() != 1) {
+        return nullptr;
+    }
+    const auto& element = init_list->elements.front();
+    if (!element.designators.empty()) {
+        return nullptr;
+    }
+    return element.value.get();
+}
+
+bool should_use_implicit_special_member_constructor_overload(
+    QualType target_type,
+    const RecordSemanticState* record_state,
+    const Expr* init,
+    const ASTContext* ast_ctx) {
+    if (!target_type || !record_state || !init) {
+        return false;
+    }
+    if (!record_state->definition_data.has_copy_constructor &&
+        !record_state->definition_data.has_move_constructor) {
+        return false;
+    }
+
+    const Expr* source_expr =
+        extract_first_value_init_list(init);
+    if (!source_expr) {
+        return false;
+    }
+    QualType source_type = const_cast<Expr*>(source_expr)->get_type();
+    if (!source_type) {
+        return false;
+    }
+
+    QualType canonical_target =
+        collect_internal::remove_reference_and_desugar(target_type, ast_ctx);
+    QualType canonical_source =
+        collect_internal::remove_reference_and_desugar(source_type, ast_ctx);
+    return canonical_target &&
+           canonical_source &&
+           canonical_target->kind == TypeKind::Object &&
+           canonical_source->kind == TypeKind::Object &&
+           canonical_source.equals_unqualified(canonical_target);
+}
+
 } // namespace
 /*
  * Does this variable have "bearing" or is it a simple visibility statment (like for extern)
@@ -102,7 +154,8 @@ Collect::ArrayBoundResult Collect::collect_array_bound_expression(std::unique_pt
 }
 
 
-std::unique_ptr<Decl> Collect::collect_static_assert_declaration(std::unique_ptr<Expr> condition, std::string message, bool has_message, SrcLoc loc) const {
+std::unique_ptr<Decl> Collect::collect_static_assert_declaration(std::unique_ptr<Expr> condition,
+    std::string message, bool has_message, SrcLoc loc) const {
 
     if (!condition) {
         report_error("static assertion requires a constant expression", loc);
@@ -241,7 +294,12 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
     analysis.should_use_constructor_overload =
         record_state &&
         !record_state->constructors.empty() &&
-        record_state->definition_data.has_user_declared_constructor;
+        (record_state->definition_data.has_user_declared_constructor ||
+         should_use_implicit_special_member_constructor_overload(
+             declared_type,
+             record_state,
+             init.get(),
+             ast_ctx_.get()));
 
     if (is_block_byref) {
         if (!analysis.is_automatic_storage) {

@@ -1102,7 +1102,20 @@ public:
         CollectRecordBuildContext& ctx) const;
     void collect_record_materialize_defaulted_method_bodies(
         CollectRecordBuildContext& ctx);
+    bool collect_materialize_defaulted_constructor(
+        CppConstructorDecl* ctor_decl,
+        const ObjectDecl* owner_record_decl,
+        const RecordSemanticState& owner_state);
+    bool collect_materialize_defaulted_assignment_body(
+        CppMethodDecl* method_decl,
+        const ObjectDecl* owner_record_decl,
+        const RecordSemanticState& owner_state,
+        bool use_move);
     bool collect_materialize_defaulted_copy_assignment_body(
+        CppMethodDecl* method_decl,
+        const ObjectDecl* owner_record_decl,
+        const RecordSemanticState& owner_state);
+    bool collect_materialize_defaulted_move_assignment_body(
         CppMethodDecl* method_decl,
         const ObjectDecl* owner_record_decl,
         const RecordSemanticState& owner_state);

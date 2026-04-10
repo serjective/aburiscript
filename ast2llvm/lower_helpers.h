@@ -154,6 +154,25 @@ static Expr* unwrap_lvalue_to_rvalue_casts(Expr* expr) {
     return current;
 }
 
+// Strip frontend wrappers that do not change which object a reference binds to.
+// This keeps the original object address for xvalue bindings such as
+// static_cast<T&&>(obj) while preserving casts that must be lowered explicitly.
+static Expr* unwrap_reference_binding_expr(Expr* expr) {
+    Expr* current = expr;
+    while (auto* cast = dyn_cast<ImplicitCast>(current)) {
+        if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
+            current = cast->expr.get();
+            continue;
+        }
+        if (cast->expr && cast->expr->isLValue()) {
+            current = cast->expr.get();
+            continue;
+        }
+        break;
+    }
+    return current;
+}
+
 // Apply volatile and atomic memory semantics to a load instruction.
 // Must be called after CreateLoad to ensure memory model compliance.
 static void apply_load_qualifiers(llvm::LoadInst* load, const QualType& type,

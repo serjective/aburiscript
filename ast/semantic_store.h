@@ -198,6 +198,9 @@ public:
     void clear_all_semantic_state();
 
     void retain_external_decl(std::unique_ptr<Decl> decl);
+    const std::vector<std::unique_ptr<Decl>>& retained_external_decls() const {
+        return retained_external_decls_;
+    }
 
 private:
     using FuncExternalSemanticInfoMap =

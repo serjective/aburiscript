@@ -615,6 +615,7 @@ public:
     // Retain declaration nodes that are only needed for semantic/type
     // ownership and are not inserted into the traversed AST.
     void retain_external_decl(std::unique_ptr<Decl> decl);
+    const std::vector<std::unique_ptr<Decl>>& retained_external_decls() const;
 
     // --- Shared context objects ---
     std::shared_ptr<TypeContext> type_ctx;

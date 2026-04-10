@@ -1063,15 +1063,7 @@ bool ASTToLLVM::emit_cpp_construct_call(const std::shared_ptr<Symbol>& ctor_sym,
         llvm::Value* arg_val = nullptr;
         if (canonical_type_kind(param_semantic_type, ast_ctx.get()) ==
             TypeKind::Reference) {
-            Expr* lvalue_base = arg_expr;
-            while (auto* cast = dyn_cast<ImplicitCast>(lvalue_base)) {
-                if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
-                    lvalue_base = cast->expr.get();
-                    continue;
-                }
-                break;
-            }
-
+            Expr* lvalue_base = unwrap_reference_binding_expr(arg_expr);
             arg_val = get_lvalue(lvalue_base).address;
             if (!arg_val) {
                 auto ref_type =
@@ -1350,18 +1342,7 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
             return;
         }
 
-        Expr* binding_expr = varDecl->init.get();
-        while (auto* cast = dyn_cast<ImplicitCast>(binding_expr)) {
-            if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
-                binding_expr = cast->expr.get();
-                continue;
-            }
-            if (cast->expr && cast->expr->isLValue()) {
-                binding_expr = cast->expr.get();
-                continue;
-            }
-            break;
-        }
+        Expr* binding_expr = unwrap_reference_binding_expr(varDecl->init.get());
 
         llvm::Value* bound_addr = get_lvalue(binding_expr).address;
         if (!bound_addr) {
@@ -1625,7 +1606,7 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                 return;
             }
 
-            Expr* binding_expr = unwrap_lvalue_to_rvalue_casts(varDecl->init.get());
+            Expr* binding_expr = unwrap_reference_binding_expr(varDecl->init.get());
 
             llvm::Value* bound_addr = get_lvalue(binding_expr).address;
             bool is_global_storage = varDecl->storage_class == StorageClass::STATIC ||

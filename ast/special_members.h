@@ -20,6 +20,30 @@ bool cpp_access_allows_member(RecordMemberAccess access,
 CppConstructorUserParamInfo cpp_compute_constructor_user_param_info(
     const RecordSemanticState::Constructor& ctor);
 
+bool cpp_constructor_is_copy_constructor(
+    const RecordSemanticState::Constructor& ctor,
+    QualType owner_type,
+    const ASTContext* ast_ctx = nullptr,
+    ReferenceKind* param_ref_kind_out = nullptr);
+
+bool cpp_constructor_is_move_constructor(
+    const RecordSemanticState::Constructor& ctor,
+    QualType owner_type,
+    const ASTContext* ast_ctx = nullptr,
+    ReferenceKind* param_ref_kind_out = nullptr);
+
+bool cpp_method_is_copy_assignment(
+    const RecordSemanticState::Method& method,
+    QualType owner_type,
+    const ASTContext* ast_ctx = nullptr,
+    ReferenceKind* rhs_ref_kind_out = nullptr);
+
+bool cpp_method_is_move_assignment(
+    const RecordSemanticState::Method& method,
+    QualType owner_type,
+    const ASTContext* ast_ctx = nullptr,
+    ReferenceKind* rhs_ref_kind_out = nullptr);
+
 bool cpp_constructor_is_viable_default_candidate(
     const RecordSemanticState::Constructor& ctor,
     bool allow_protected_access);
@@ -56,5 +80,13 @@ bool cpp_expression_is_known_noexcept(
 void cpp_recompute_default_constructor_traits(
     RecordSemanticState::DefinitionData& definition_data,
     const std::vector<RecordSemanticState::Constructor>& constructors);
+
+void cpp_recompute_special_member_definition_data(
+    RecordSemanticState::DefinitionData& definition_data,
+    QualType owner_type,
+    const std::vector<RecordSemanticState::Constructor>& constructors,
+    const std::vector<RecordSemanticState::Method>& methods,
+    const std::vector<RecordSemanticState::Destructor>& destructors,
+    const ASTContext* ast_ctx = nullptr);
 
 #endif // ABURI_SPECIAL_MEMBERS_H

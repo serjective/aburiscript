@@ -1260,6 +1260,11 @@ void ASTContext::retain_external_decl(std::unique_ptr<Decl> decl) {
     semantic_store_->retain_external_decl(std::move(decl));
 }
 
+const std::vector<std::unique_ptr<Decl>>& ASTContext::retained_external_decls()
+    const {
+    return semantic_store_->retained_external_decls();
+}
+
 // --- Attribute side table ---
 
 void ASTContext::set_attrs(uint32_t id, AttributeList attrs) {

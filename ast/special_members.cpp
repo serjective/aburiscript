@@ -181,6 +181,143 @@ CppConstructorUserParamInfo cpp_compute_constructor_user_param_info(
     return info;
 }
 
+namespace {
+bool cpp_constructor_matches_special_member_parameter(
+    const RecordSemanticState::Constructor& ctor,
+    QualType owner_type,
+    const ASTContext* ast_ctx,
+    ReferenceKind expected_ref_kind,
+    ReferenceKind* param_ref_kind_out) {
+    if (!owner_type) {
+        return false;
+    }
+
+    auto function_type =
+        desugar_type(ctor.type, ast_ctx).as_shared<FunctionType>();
+    if (!function_type) {
+        return false;
+    }
+
+    CppConstructorUserParamInfo info =
+        cpp_compute_constructor_user_param_info(ctor);
+    if (info.max_user_param_count != 1 ||
+        info.user_param_start >= function_type->parameters.size()) {
+        return false;
+    }
+
+    auto param_ref =
+        desugar_type(function_type->parameters[info.user_param_start], ast_ctx)
+            .as_shared<ReferenceType>();
+    if (!param_ref || !param_ref->referred_type) {
+        return false;
+    }
+
+    QualType canonical_owner =
+        remove_reference(owner_type, ast_ctx).without_qualifiers();
+    QualType canonical_param =
+        remove_reference(param_ref->referred_type, ast_ctx).without_qualifiers();
+    if (!canonical_param.equals_unqualified(canonical_owner) ||
+        param_ref->reference_kind != expected_ref_kind) {
+        return false;
+    }
+
+    if (param_ref_kind_out) {
+        *param_ref_kind_out = param_ref->reference_kind;
+    }
+    return true;
+}
+
+bool cpp_method_matches_assignment_parameter(
+    const RecordSemanticState::Method& method,
+    QualType owner_type,
+    const ASTContext* ast_ctx,
+    ReferenceKind expected_ref_kind,
+    ReferenceKind* rhs_ref_kind_out) {
+    if (!owner_type || method.is_static || method.name != "operator=") {
+        return false;
+    }
+
+    auto function_type =
+        desugar_type(method.type, ast_ctx).as_shared<FunctionType>();
+    if (!function_type || function_type->parameters.size() != 2) {
+        return false;
+    }
+
+    auto rhs_ref =
+        desugar_type(function_type->parameters[1], ast_ctx)
+            .as_shared<ReferenceType>();
+    if (!rhs_ref || !rhs_ref->referred_type) {
+        return false;
+    }
+
+    QualType canonical_owner =
+        remove_reference(owner_type, ast_ctx).without_qualifiers();
+    QualType canonical_rhs =
+        remove_reference(rhs_ref->referred_type, ast_ctx).without_qualifiers();
+    if (!canonical_rhs.equals_unqualified(canonical_owner) ||
+        rhs_ref->reference_kind != expected_ref_kind) {
+        return false;
+    }
+
+    if (rhs_ref_kind_out) {
+        *rhs_ref_kind_out = rhs_ref->reference_kind;
+    }
+    return true;
+}
+} // namespace
+
+bool cpp_constructor_is_copy_constructor(
+    const RecordSemanticState::Constructor& ctor,
+    QualType owner_type,
+    const ASTContext* ast_ctx,
+    ReferenceKind* param_ref_kind_out) {
+    return cpp_constructor_matches_special_member_parameter(
+        ctor,
+        owner_type,
+        ast_ctx,
+        ReferenceKind::LValue,
+        param_ref_kind_out);
+}
+
+bool cpp_constructor_is_move_constructor(
+    const RecordSemanticState::Constructor& ctor,
+    QualType owner_type,
+    const ASTContext* ast_ctx,
+    ReferenceKind* param_ref_kind_out) {
+    return cpp_constructor_matches_special_member_parameter(
+        ctor,
+        owner_type,
+        ast_ctx,
+        ReferenceKind::RValue,
+        param_ref_kind_out);
+}
+
+bool cpp_method_is_copy_assignment(
+    const RecordSemanticState::Method& method,
+    QualType owner_type,
+    const ASTContext* ast_ctx,
+    ReferenceKind* rhs_ref_kind_out) {
+    return cpp_method_matches_assignment_parameter(
+        method,
+        owner_type,
+        ast_ctx,
+        ReferenceKind::LValue,
+        rhs_ref_kind_out);
+}
+
+bool cpp_method_is_move_assignment(
+    const RecordSemanticState::Method& method,
+    QualType owner_type,
+    const ASTContext* ast_ctx,
+    ReferenceKind* rhs_ref_kind_out) {
+    return cpp_method_matches_assignment_parameter(
+        method,
+        owner_type,
+        ast_ctx,
+        ReferenceKind::RValue,
+        rhs_ref_kind_out);
+}
+
 bool cpp_constructor_is_viable_default_candidate(
     const RecordSemanticState::Constructor& ctor,
     bool allow_protected_access) {
@@ -489,6 +626,71 @@ void cpp_recompute_default_constructor_traits(
         definition_data.has_default_constructor = true;
         if (ctor.is_deleted) {
             definition_data.default_constructor_is_deleted = true;
+        }
+    }
+}
+
+void cpp_recompute_special_member_definition_data(
+    RecordSemanticState::DefinitionData& definition_data,
+    QualType owner_type,
+    const std::vector<RecordSemanticState::Constructor>& constructors,
+    const std::vector<RecordSemanticState::Method>& methods,
+    const std::vector<RecordSemanticState::Destructor>& destructors,
+    const ASTContext* ast_ctx) {
+    definition_data.has_user_declared_constructor = false;
+    definition_data.has_default_constructor = false;
+    definition_data.default_constructor_is_deleted = false;
+    definition_data.has_copy_constructor = false;
+    definition_data.has_move_constructor = false;
+    definition_data.has_user_declared_copy_constructor = false;
+    definition_data.has_user_declared_move_constructor = false;
+    definition_data.has_copy_assignment = false;
+    definition_data.has_move_assignment = false;
+    definition_data.has_user_declared_copy_assignment = false;
+    definition_data.has_user_declared_move_assignment = false;
+    definition_data.has_user_declared_destructor = false;
+    definition_data.has_deleted_destructor = false;
+
+    cpp_recompute_default_constructor_traits(definition_data, constructors);
+
+    for (const auto& ctor : constructors) {
+        if (!ctor.is_implicit) {
+            definition_data.has_user_declared_constructor = true;
+        }
+        if (cpp_constructor_is_copy_constructor(ctor, owner_type, ast_ctx)) {
+            definition_data.has_copy_constructor = true;
+            if (!ctor.is_implicit) {
+                definition_data.has_user_declared_copy_constructor = true;
+            }
+        } else if (cpp_constructor_is_move_constructor(
+                       ctor, owner_type, ast_ctx)) {
+            definition_data.has_move_constructor = true;
+            if (!ctor.is_implicit) {
+                definition_data.has_user_declared_move_constructor = true;
+            }
+        }
+    }
+
+    for (const auto& method : methods) {
+        if (cpp_method_is_copy_assignment(method, owner_type, ast_ctx)) {
+            definition_data.has_copy_assignment = true;
+            if (!method.is_implicit) {
+                definition_data.has_user_declared_copy_assignment = true;
+            }
+        } else if (cpp_method_is_move_assignment(method, owner_type, ast_ctx)) {
+            definition_data.has_move_assignment = true;
+            if (!method.is_implicit) {
+                definition_data.has_user_declared_move_assignment = true;
+            }
+        }
+    }
+
+    for (const auto& dtor : destructors) {
+        if (!dtor.is_implicit) {
+            definition_data.has_user_declared_destructor = true;
+        }
+        if (dtor.is_deleted) {
+            definition_data.has_deleted_destructor = true;
         }
     }
 }

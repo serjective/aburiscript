@@ -25,18 +25,7 @@ llvm::Value* ASTToLLVM::convert_implicit_cast(ImplicitCast *expr) {
             return nullptr;
         }
 
-        Expr* binding_expr = expr->expr.get();
-        while (auto* inner = dyn_cast<ImplicitCast>(binding_expr)) {
-            if (inner->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
-                binding_expr = inner->expr.get();
-                continue;
-            }
-            if (inner->expr && inner->expr->isLValue()) {
-                binding_expr = inner->expr.get();
-                continue;
-            }
-            break;
-        }
+        Expr* binding_expr = unwrap_reference_binding_expr(expr->expr.get());
 
         llvm::Value* bound_addr = get_lvalue(binding_expr).address;
         if (bound_addr) {
@@ -662,7 +651,8 @@ llvm::Value* ASTToLLVM::convert_explicit_cast(ExplicitCast *expr) {
             return nullptr;
         }
 
-        llvm::Value* bound_addr = get_lvalue(expr->expr.get()).address;
+        Expr* binding_expr = unwrap_reference_binding_expr(expr->expr.get());
+        llvm::Value* bound_addr = get_lvalue(binding_expr).address;
         if (bound_addr) {
             return bound_addr;
         }

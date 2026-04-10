@@ -2108,6 +2108,12 @@ void ASTToLLVM::convert_translation_unit(Decl *decl) {
         deal_global_variable_declaration(decls.get());
     }
     if (ast_ctx) {
+        for (const auto& retained_decl : ast_ctx->retained_external_decls()) {
+            if (!retained_decl) {
+                continue;
+            }
+            deal_global_variable_declaration(retained_decl.get());
+        }
         for (const auto& specialization :
              ast_ctx->class_template_specializations()) {
             if (!specialization || specialization->instantiation_failed) {
@@ -2128,6 +2134,12 @@ void ASTToLLVM::convert_translation_unit(Decl *decl) {
         convert_declaration(decls.get());
     }
     if (ast_ctx) {
+        for (const auto& retained_decl : ast_ctx->retained_external_decls()) {
+            if (!retained_decl) {
+                continue;
+            }
+            convert_declaration(retained_decl.get());
+        }
         for (const auto& specialization :
              ast_ctx->function_template_specializations()) {
             if (!specialization || !specialization->specialization_decl ||
