@@ -485,29 +485,12 @@ std::unique_ptr<Expr> Collect::append_member_template_overload_candidates(
             deduction_args.push_back(arg.get());
         }
 
-        std::vector<TemplateArgument> specialization_arguments;
-        if (!deduce_function_template_call_arguments(
+        std::shared_ptr<Symbol> specialization_symbol = nullptr;
+        if (!probe_function_template_call_specialization(
                 function_template,
                 deduction_args,
-                specialization_arguments)) {
-            continue;
-        }
-        if (!are_template_constraints_satisfied(
-                function_template,
-                specialization_arguments,
-                loc)) {
-            continue;
-        }
-
-        std::shared_ptr<Symbol> specialization_symbol = nullptr;
-        auto* specialization_decl =
-            instantiate_function_template_specialization(
-                function_template,
-                specialization_arguments,
                 loc,
-                &specialization_symbol,
-                /*instantiate_definition=*/false);
-        if (!specialization_decl || !specialization_symbol) {
+                specialization_symbol)) {
             continue;
         }
         saw_template_instantiation_out = true;
@@ -597,29 +580,12 @@ void Collect::append_unqualified_function_template_overload_candidates(
             continue;
         }
 
-        std::vector<TemplateArgument> specialization_arguments;
-        if (!deduce_function_template_call_arguments(
+        std::shared_ptr<Symbol> specialization_symbol = nullptr;
+        if (!probe_function_template_call_specialization(
                 function_template,
                 deduction_args,
-                specialization_arguments)) {
-            continue;
-        }
-        if (!are_template_constraints_satisfied(
-                function_template,
-                specialization_arguments,
-                loc)) {
-            continue;
-        }
-
-        std::shared_ptr<Symbol> specialization_symbol = nullptr;
-        auto* specialization_decl =
-            instantiate_function_template_specialization(
-                function_template,
-                specialization_arguments,
                 loc,
-                &specialization_symbol,
-                /*instantiate_definition=*/false);
-        if (!specialization_decl || !specialization_symbol) {
+                specialization_symbol)) {
             continue;
         }
 
@@ -628,6 +594,78 @@ void Collect::append_unqualified_function_template_overload_candidates(
         candidate.implicit_object_arg_kind = implicit_arg_kind;
         candidates_out.push_back(std::move(candidate));
     }
+}
+
+bool Collect::probe_function_template_call_specialization(
+    const FunctionTemplateDecl* function_template,
+    const std::vector<Expr*>& call_args,
+    SrcLoc loc,
+    std::shared_ptr<Symbol>& specialization_symbol_out,
+    const TemplateArgumentBindings* initial_bindings,
+    std::vector<TemplateArgument>* specialization_arguments_out) {
+
+    specialization_symbol_out = nullptr;
+    if (specialization_arguments_out) {
+        specialization_arguments_out->clear();
+    }
+    if (!function_template) {
+        return false;
+    }
+
+    auto try_probe =
+        [&](std::vector<TemplateArgument>& specialization_arguments) {
+            if (!deduce_function_template_call_arguments(
+                    function_template,
+                    call_args,
+                    specialization_arguments,
+                    initial_bindings)) {
+                return false;
+            }
+            if (!are_template_constraints_satisfied(
+                    function_template,
+                    specialization_arguments,
+                    loc)) {
+                return false;
+            }
+
+            auto* specialization_decl =
+                instantiate_function_template_specialization(
+                    function_template,
+                    specialization_arguments,
+                    loc,
+                    &specialization_symbol_out,
+                    /*instantiate_definition=*/false);
+            return specialization_decl && specialization_symbol_out;
+        };
+
+    std::vector<TemplateArgument> specialization_arguments;
+    // technically we should always have a diag_engine
+    if (!diag_engine_) {
+        if (!try_probe(specialization_arguments)) {
+            specialization_symbol_out = nullptr;
+            return false;
+        }
+        if (specialization_arguments_out) {
+            *specialization_arguments_out = std::move(specialization_arguments);
+        }
+        return true;
+    }
+
+    auto checkpoint = diag_engine_->checkpoint();
+    bool success = try_probe(specialization_arguments);
+    bool probe_reported_diagnostic =
+        diag_engine_->error_count > checkpoint.error_count ||
+        diag_engine_->diagnostics.size() > checkpoint.diagnostics_size;
+    diag_engine_->restore(checkpoint);
+    if (!success || probe_reported_diagnostic) {
+        specialization_symbol_out = nullptr;
+        return false;
+    }
+
+    if (specialization_arguments_out) {
+        *specialization_arguments_out = std::move(specialization_arguments);
+    }
+    return true;
 }
 
 

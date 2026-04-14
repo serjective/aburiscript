@@ -552,6 +552,12 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
         return nullptr;
     }
 
+    std::vector<Expr*> raw_call_args;
+    raw_call_args.reserve(call->args.size());
+    for (const auto& arg : call->args) {
+        raw_call_args.push_back(arg.get());
+    }
+
     const auto* qualified_info = callee_ref->get_cpp_qualified_info();
     if (qualified_info && qualified_info->is_type_qualified) {
         auto qualified_owner_analysis =
@@ -637,29 +643,12 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
                 }
             }
 
-            std::vector<TemplateArgument> deduced_arguments;
-            if (!deduce_function_template_call_arguments(
-                    function_template,
-                    call->args,
-                    deduced_arguments)) {
-                continue;
-            }
-            if (!are_template_constraints_satisfied(
-                    function_template,
-                    deduced_arguments,
-                    loc)) {
-                continue;
-            }
-
             std::shared_ptr<Symbol> specialization_symbol = nullptr;
-            auto* specialization_decl =
-                instantiate_function_template_specialization(
+            if (!probe_function_template_call_specialization(
                     function_template,
-                    deduced_arguments,
+                    raw_call_args,
                     loc,
-                    &specialization_symbol,
-                    /*instantiate_definition=*/false);
-            if (!specialization_decl || !specialization_symbol) {
+                    specialization_symbol)) {
                 continue;
             }
             saw_template_instantiation = true;
@@ -835,27 +824,12 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
         overload_candidates.push_back(std::move(call_candidate));
     }
     for (const auto* function_template : template_candidates) {
-        std::vector<TemplateArgument> deduced_arguments;
-        if (!deduce_function_template_call_arguments(
-                function_template, call->args, deduced_arguments)) {
-            continue;
-        }
-        if (!are_template_constraints_satisfied(
-                function_template,
-                deduced_arguments,
-                loc)) {
-            continue;
-        }
-
         std::shared_ptr<Symbol> specialization_symbol = nullptr;
-        auto* specialization_decl =
-            instantiate_function_template_specialization(
+        if (!probe_function_template_call_specialization(
                 function_template,
-                deduced_arguments,
+                raw_call_args,
                 loc,
-                &specialization_symbol,
-                /*instantiate_definition=*/false);
-        if (!specialization_decl || !specialization_symbol) {
+                specialization_symbol)) {
             continue;
         }
 
@@ -1438,30 +1412,13 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                 deduction_args.push_back(arg.get());
             }
 
-            std::vector<TemplateArgument> specialization_arguments;
-            if (!deduce_function_template_call_arguments(
+            std::shared_ptr<Symbol> specialization_symbol = nullptr;
+            if (!probe_function_template_call_specialization(
                     function_template,
                     deduction_args,
-                    specialization_arguments,
-                    &explicit_bindings)) {
-                continue;
-            }
-            if (!are_template_constraints_satisfied(
-                    function_template,
-                    specialization_arguments,
-                    loc)) {
-                continue;
-            }
-
-            std::shared_ptr<Symbol> specialization_symbol = nullptr;
-            auto* specialization_decl =
-                instantiate_function_template_specialization(
-                    function_template,
-                    specialization_arguments,
                     loc,
-                    &specialization_symbol,
-                    /*instantiate_definition=*/false);
-            if (!specialization_decl || !specialization_symbol) {
+                    specialization_symbol,
+                    &explicit_bindings)) {
                 continue;
             }
             saw_instantiation = true;
@@ -1719,30 +1676,13 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                 deduction_args.push_back(arg.get());
             }
 
-            std::vector<TemplateArgument> specialization_arguments;
-            if (!deduce_function_template_call_arguments(
+            std::shared_ptr<Symbol> specialization_symbol = nullptr;
+            if (!probe_function_template_call_specialization(
                     function_template,
                     deduction_args,
-                    specialization_arguments,
-                    &explicit_bindings)) {
-                continue;
-            }
-            if (!are_template_constraints_satisfied(
-                    function_template,
-                    specialization_arguments,
-                    loc)) {
-                continue;
-            }
-
-            std::shared_ptr<Symbol> specialization_symbol = nullptr;
-            auto* specialization_decl =
-                instantiate_function_template_specialization(
-                    function_template,
-                    specialization_arguments,
                     loc,
-                    &specialization_symbol,
-                    /*instantiate_definition=*/false);
-            if (!specialization_decl || !specialization_symbol) {
+                    specialization_symbol,
+                    &explicit_bindings)) {
                 continue;
             }
             saw_instantiation = true;
@@ -1871,6 +1811,11 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
     std::vector<OverloadCallCandidate> overload_candidates;
     overload_candidates.reserve(template_candidates.size());
     bool saw_instantiation = false;
+    std::vector<Expr*> raw_args;
+    raw_args.reserve(args.size());
+    for (const auto& arg : args) {
+        raw_args.push_back(arg.get());
+    }
     for (const auto* function_template : template_candidates) {
         TemplateArgumentBindings explicit_bindings;
         std::string binding_error;
@@ -1889,30 +1834,13 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
             continue;
         }
 
-        std::vector<TemplateArgument> specialization_arguments;
-        if (!deduce_function_template_call_arguments(
-                function_template,
-                args,
-                specialization_arguments,
-                &explicit_bindings)) {
-            continue;
-        }
-        if (!are_template_constraints_satisfied(
-                function_template,
-                specialization_arguments,
-                loc)) {
-            continue;
-        }
-
         std::shared_ptr<Symbol> specialization_symbol = nullptr;
-        auto* specialization_decl =
-            instantiate_function_template_specialization(
+        if (!probe_function_template_call_specialization(
                 function_template,
-                specialization_arguments,
+                raw_args,
                 loc,
-                &specialization_symbol,
-                /*instantiate_definition=*/false);
-        if (!specialization_decl || !specialization_symbol) {
+                specialization_symbol,
+                &explicit_bindings)) {
             continue;
         }
         saw_instantiation = true;

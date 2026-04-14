@@ -1535,6 +1535,14 @@ private:
         std::vector<TemplateArgument>& deduced_arguments_out,
         const TemplateArgumentBindings* initial_bindings = nullptr) ;
 
+    bool probe_function_template_call_specialization(
+        const FunctionTemplateDecl* function_template,
+        const std::vector<Expr*>& call_args,
+        SrcLoc loc,
+        std::shared_ptr<Symbol>& specialization_symbol_out,
+        const TemplateArgumentBindings* initial_bindings = nullptr,
+        std::vector<TemplateArgument>* specialization_arguments_out = nullptr) ;
+
     enum class TemplatePartialOrderingResult : uint8_t {
         Unordered,
         Equivalent,
