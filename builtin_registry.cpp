@@ -268,6 +268,9 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__builtin_sqrt", BuiltinKind::SQRT, 1, 1, false, false});
     register_builtin({"__builtin_sqrtf", BuiltinKind::SQRTF, 1, 1, false, false});
     register_builtin({"__builtin_sqrtl", BuiltinKind::SQRTL, 1, 1, false, false});
+    register_builtin({"__builtin_cbrt", BuiltinKind::CBRT, 1, 1, false, false});
+    register_builtin({"__builtin_cbrtf", BuiltinKind::CBRTF, 1, 1, false, false});
+    register_builtin({"__builtin_cbrtl", BuiltinKind::CBRTL, 1, 1, false, false});
     register_builtin({"__builtin_sin", BuiltinKind::SIN, 1, 1, false, false});
     register_builtin({"__builtin_sinf", BuiltinKind::SINF, 1, 1, false, false});
     register_builtin({"__builtin_cos", BuiltinKind::COS, 1, 1, false, false});
@@ -291,10 +294,15 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__builtin_copysign", BuiltinKind::COPYSIGN, 2, 2, false, false});
     register_builtin({"__builtin_copysignf", BuiltinKind::COPYSIGNF, 2, 2, false, false});
     register_builtin({"__builtin_copysignl", BuiltinKind::COPYSIGNL, 2, 2, false, false});
+    register_builtin({"__builtin_hypot", BuiltinKind::HYPOT, 2, 2, false, false});
+    register_builtin({"__builtin_hypotf", BuiltinKind::HYPOTF, 2, 2, false, false});
+    register_builtin({"__builtin_hypotl", BuiltinKind::HYPOTL, 2, 2, false, false});
     register_builtin({"__builtin_fmin", BuiltinKind::FMIN, 2, 2, false, false});
     register_builtin({"__builtin_fminf", BuiltinKind::FMINF, 2, 2, false, false});
+    register_builtin({"__builtin_fminl", BuiltinKind::FMINL, 2, 2, false, false});
     register_builtin({"__builtin_fmax", BuiltinKind::FMAX, 2, 2, false, false});
     register_builtin({"__builtin_fmaxf", BuiltinKind::FMAXF, 2, 2, false, false});
+    register_builtin({"__builtin_fmaxl", BuiltinKind::FMAXL, 2, 2, false, false});
 
     register_builtin({"__builtin_modf", BuiltinKind::MODF, 2, 2, false, false});
     register_builtin({"__builtin_modff", BuiltinKind::MODFF, 2, 2, false, false});

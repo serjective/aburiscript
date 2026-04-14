@@ -1190,6 +1190,19 @@ static BuiltinLoweringResult lower_builtin_math_group(
     auto cast_llvm_type = [&](llvm::Value* v, llvm::Type* t, bool u) {
         return lower.cast_llvm_type(v, t, u);
     };
+    auto coerce_builtin_fp_arg =
+        [&](llvm::Value* value, llvm::Type* target_ty) -> llvm::Value* {
+        if (!value || !target_ty || value->getType() == target_ty) {
+            return value;
+        }
+        if (value->getType()->isFloatingPointTy()) {
+            return builder.CreateFPCast(value, target_ty);
+        }
+        if (value->getType()->isIntegerTy()) {
+            return builder.CreateSIToFP(value, target_ty);
+        }
+        return value;
+    };
 
     switch (expr->kind) {
     // --- Float classification ---
@@ -1399,6 +1412,24 @@ static BuiltinLoweringResult lower_builtin_math_group(
         auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::sqrt, {val->getType()});
         return {true, builder.CreateCall(fn, {val}, "sqrt")};
     }
+    case BuiltinKind::CBRT:
+    case BuiltinKind::CBRTF:
+    case BuiltinKind::CBRTL: {
+        auto val = convert_expression(expr->args[0].get());
+        llvm::Type* fp_ty = convert_type(expr->result_type);
+        if (!fp_ty || !fp_ty->isFloatingPointTy()) {
+            fp_ty = val->getType()->isFloatingPointTy()
+                ? val->getType()
+                : llvm::Type::getDoubleTy(ctx);
+        }
+        val = coerce_builtin_fp_arg(val, fp_ty);
+        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty}, false);
+        const char* name = fp_ty->isFloatTy()
+            ? "cbrtf"
+            : (fp_ty->isDoubleTy() ? "cbrt" : "cbrtl");
+        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
+        return {true, builder.CreateCall(callee, {val}, "cbrt")};
+    }
     case BuiltinKind::SIN: case BuiltinKind::SINF: {
         auto val = convert_expression(expr->args[0].get());
         auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::sin, {val->getType()});
@@ -1489,17 +1520,61 @@ static BuiltinLoweringResult lower_builtin_math_group(
         auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::copysign, {target_ty});
         return {true, builder.CreateCall(fn, {mag, sgn}, "copysign")};
     }
-    case BuiltinKind::FMIN: case BuiltinKind::FMINF: {
+    case BuiltinKind::HYPOT:
+    case BuiltinKind::HYPOTF:
+    case BuiltinKind::HYPOTL: {
+        auto lhs = convert_expression(expr->args[0].get());
+        auto rhs = convert_expression(expr->args[1].get());
+        llvm::Type* fp_ty = convert_type(expr->result_type);
+        if (!fp_ty || !fp_ty->isFloatingPointTy()) {
+            fp_ty = lhs->getType()->isFloatingPointTy()
+                ? lhs->getType()
+                : (rhs->getType()->isFloatingPointTy()
+                    ? rhs->getType()
+                    : llvm::Type::getDoubleTy(ctx));
+        }
+        lhs = coerce_builtin_fp_arg(lhs, fp_ty);
+        rhs = coerce_builtin_fp_arg(rhs, fp_ty);
+        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty, fp_ty}, false);
+        const char* name = fp_ty->isFloatTy()
+            ? "hypotf"
+            : (fp_ty->isDoubleTy() ? "hypot" : "hypotl");
+        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
+        return {true, builder.CreateCall(callee, {lhs, rhs}, "hypot")};
+    }
+    case BuiltinKind::FMIN:
+    case BuiltinKind::FMINF:
+    case BuiltinKind::FMINL: {
         auto a = convert_expression(expr->args[0].get());
         auto b = convert_expression(expr->args[1].get());
-        if (b->getType() != a->getType()) b = builder.CreateFPCast(b, a->getType());
+        llvm::Type* fp_ty = convert_type(expr->result_type);
+        if (!fp_ty || !fp_ty->isFloatingPointTy()) {
+            fp_ty = a->getType()->isFloatingPointTy()
+                ? a->getType()
+                : (b->getType()->isFloatingPointTy()
+                    ? b->getType()
+                    : llvm::Type::getDoubleTy(ctx));
+        }
+        a = coerce_builtin_fp_arg(a, fp_ty);
+        b = coerce_builtin_fp_arg(b, fp_ty);
         auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::minnum, {a->getType()});
         return {true, builder.CreateCall(fn, {a, b}, "fmin")};
     }
-    case BuiltinKind::FMAX: case BuiltinKind::FMAXF: {
+    case BuiltinKind::FMAX:
+    case BuiltinKind::FMAXF:
+    case BuiltinKind::FMAXL: {
         auto a = convert_expression(expr->args[0].get());
         auto b = convert_expression(expr->args[1].get());
-        if (b->getType() != a->getType()) b = builder.CreateFPCast(b, a->getType());
+        llvm::Type* fp_ty = convert_type(expr->result_type);
+        if (!fp_ty || !fp_ty->isFloatingPointTy()) {
+            fp_ty = a->getType()->isFloatingPointTy()
+                ? a->getType()
+                : (b->getType()->isFloatingPointTy()
+                    ? b->getType()
+                    : llvm::Type::getDoubleTy(ctx));
+        }
+        a = coerce_builtin_fp_arg(a, fp_ty);
+        b = coerce_builtin_fp_arg(b, fp_ty);
         auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::maxnum, {a->getType()});
         return {true, builder.CreateCall(fn, {a, b}, "fmax")};
     }

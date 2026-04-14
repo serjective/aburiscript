@@ -6748,6 +6748,7 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::FABS:
         case BuiltinKind::POW:
         case BuiltinKind::SQRT:
+        case BuiltinKind::CBRT:
         case BuiltinKind::SIN:
         case BuiltinKind::COS:
         case BuiltinKind::LOG:
@@ -6759,6 +6760,7 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::FLOOR:
         case BuiltinKind::ROUND:
         case BuiltinKind::COPYSIGN:
+        case BuiltinKind::HYPOT:
         case BuiltinKind::FMIN:
         case BuiltinKind::FMAX:
         case BuiltinKind::MODF:
@@ -6770,6 +6772,7 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::FABSF:
         case BuiltinKind::POWF:
         case BuiltinKind::SQRTF:
+        case BuiltinKind::CBRTF:
         case BuiltinKind::SINF:
         case BuiltinKind::COSF:
         case BuiltinKind::LOGF:
@@ -6781,6 +6784,7 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::FLOORF:
         case BuiltinKind::ROUNDF:
         case BuiltinKind::COPYSIGNF:
+        case BuiltinKind::HYPOTF:
         case BuiltinKind::FMINF:
         case BuiltinKind::FMAXF:
         case BuiltinKind::MODFF:
@@ -6794,7 +6798,11 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::FABSL:
         case BuiltinKind::POWL:
         case BuiltinKind::SQRTL:
+        case BuiltinKind::CBRTL:
         case BuiltinKind::COPYSIGNL:
+        case BuiltinKind::HYPOTL:
+        case BuiltinKind::FMINL:
+        case BuiltinKind::FMAXL:
         case BuiltinKind::MODFL:
             return collect_make<BuiltinCallExpr>(kind, std::move(args), long_double_type, loc);
         case BuiltinKind::CEXPI:
