@@ -330,11 +330,14 @@ std::unique_ptr<Expr> Collect::append_member_overload_candidates(
 
     had_member_match_out = true;
     const ObjectDecl* object_record_decl = record_decl_from_record_type(record_type);
-    const ObjectDecl* access_context_decl = nullptr;
-    if (lang_opts_.is_cxx_mode() && session_.func_state_.current_function_is_cpp_member) {
-        access_context_decl =
-            current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
-    }
+    const ObjectDecl* access_context_decl =
+        lang_opts_.is_cxx_mode()
+            ? current_access_context_record_decl(
+                  session_.func_state_.current_function_is_cpp_member,
+                  session_.func_state_.current_function_cpp_this_type,
+                  session_.current_cpp_record_lookup_type_,
+                  ast_ctx_.get())
+            : nullptr;
 
     candidates_out.reserve(candidates_out.size() + methods.size());
     for (const auto& method_match : methods) {
@@ -409,11 +412,14 @@ std::unique_ptr<Expr> Collect::append_member_template_overload_candidates(
     had_member_match_out = true;
     had_template_member_match_out = true;
     const ObjectDecl* object_record_decl = record_decl_from_record_type(record_type);
-    const ObjectDecl* access_context_decl = nullptr;
-    if (lang_opts_.is_cxx_mode() && session_.func_state_.current_function_is_cpp_member) {
-        access_context_decl =
-            current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
-    }
+    const ObjectDecl* access_context_decl =
+        lang_opts_.is_cxx_mode()
+            ? current_access_context_record_decl(
+                  session_.func_state_.current_function_is_cpp_member,
+                  session_.func_state_.current_function_cpp_this_type,
+                  session_.current_cpp_record_lookup_type_,
+                  ast_ctx_.get())
+            : nullptr;
 
     for (const auto& method_template_match : method_templates) {
         const auto* method_template = method_template_match.method_template;

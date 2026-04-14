@@ -973,6 +973,32 @@ const ObjectDecl* record_decl_from_record_type(const ObjectType* record_type) {
     return canonical_record_decl(dyn_cast<ObjectDecl>(record_type->get_decl()));
 }
 
+const ObjectDecl* current_access_context_record_decl(
+    bool current_function_is_cpp_member,
+    QualType current_function_cpp_this_type,
+    QualType current_cpp_record_lookup_type,
+    const ASTContext* ast_ctx) {
+    auto lookup_record =
+        desugar_type(current_cpp_record_lookup_type, ast_ctx)
+            .as_shared<ObjectType>();
+    if (const ObjectDecl* lookup_decl =
+            record_decl_from_record_type(lookup_record.get())) {
+        return lookup_decl;
+    }
+
+    if (current_function_is_cpp_member) {
+        auto current_record =
+            current_record_from_this_type(
+                current_function_cpp_this_type,
+                ast_ctx);
+        if (const ObjectDecl* current_decl =
+                record_decl_from_record_type(current_record.get())) {
+            return current_decl;
+        }
+    }
+    return nullptr;
+}
+
 const ObjectDecl* current_record_decl_from_this_type(QualType this_type) {
     auto record = current_record_from_this_type(this_type);
     if (!record) {
@@ -1169,7 +1195,17 @@ bool is_same_record_or_any_access_derived(const ObjectDecl* derived_or_same,
     if (!derived_or_same || !base_decl) {
         return false;
     }
-    if (derived_or_same == base_decl) {
+    auto same_record_identity_or_tag =
+        [](const ObjectDecl* lhs, const ObjectDecl* rhs) {
+            if (!lhs || !rhs) {
+                return false;
+            }
+            if (lhs == rhs) {
+                return true;
+            }
+            return lhs->tag == rhs->tag;
+        };
+    if (same_record_identity_or_tag(derived_or_same, base_decl)) {
         return true;
     }
     return has_any_access_unambiguous_base_path(derived_or_same, base_decl);
@@ -1195,7 +1231,9 @@ bool can_access_private_member_in_context(const ObjectDecl* member_owner_decl,
                                           const ObjectDecl* access_context_decl) {
     const ObjectDecl* owner_decl = canonical_record_decl(member_owner_decl);
     const ObjectDecl* context_decl = canonical_record_decl(access_context_decl);
-    return owner_decl && context_decl && owner_decl == context_decl;
+    return owner_decl &&
+           context_decl &&
+           (owner_decl == context_decl || owner_decl->tag == context_decl->tag);
 }
 
 bool is_local_variable_or_parameter_symbol(const std::shared_ptr<Symbol>& sym) {

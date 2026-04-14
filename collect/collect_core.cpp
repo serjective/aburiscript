@@ -843,13 +843,25 @@ bool Collect::with_function_definition_state(
                 new_state.current_function_cxx_auto_return_pattern =
                     function_type->ret_type;
             }
+            bool is_cpp_member_function =
+                isa<CppMethodDecl>(const_cast<FuncDecl*>(function_decl)) ||
+                isa<CppConstructorDecl>(const_cast<FuncDecl*>(function_decl)) ||
+                isa<CppDestructorDecl>(const_cast<FuncDecl*>(function_decl));
+            bool is_static_cpp_member_function = false;
             if (auto* method = dyn_cast<CppMethodDecl>(
-                    const_cast<FuncDecl*>(function_decl));
-                method &&
-                method->storage_class != StorageClass::STATIC &&
-                !function_type->parameters.empty()) {
+                    const_cast<FuncDecl*>(function_decl))) {
+                is_static_cpp_member_function =
+                    method->storage_class == StorageClass::STATIC;
+            }
+            if (is_cpp_member_function) {
                 new_state.current_function_is_cpp_member = true;
-                QualType this_type = function_type->parameters.front();
+                new_state.current_function_is_static_cpp_member =
+                    is_static_cpp_member_function;
+                QualType this_type = nullptr;
+                if (!is_static_cpp_member_function &&
+                    !function_type->parameters.empty()) {
+                    this_type = function_type->parameters.front();
+                }
                 if (QualType owner_type =
                         get_func_decl_owner_record_type(function_decl)) {
                     uint8_t pointee_quals = QUAL_NONE;
