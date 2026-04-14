@@ -5489,9 +5489,11 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
             loc);
     }
 
-    if (lang_opts_.is_cxx_mode() &&
+    bool has_dependent_operand =
+        lang_opts_.is_cxx_mode() &&
         (expression_depends_on_template_parameters(lhs.get()) ||
-         expression_depends_on_template_parameters(rhs.get()))) {
+         expression_depends_on_template_parameters(rhs.get()));
+    if (has_dependent_operand) {
         auto dependent_assignment_result_type = [&]() -> QualType {
             QualType lhs_type = lhs ? lhs->get_type() : QualType();
             if (canonical_type_kind(lhs_type, ast_ctx_.get()) == TypeKind::Reference) {
@@ -6163,6 +6165,34 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
 
 
 std::unique_ptr<Expr> Collect::collect_compound_assign_operation(std::unique_ptr<Expr> lhs, std::unique_ptr<Expr> rhs, BinOpTypes bop, SrcLoc loc) const {
+    if (lang_opts_.is_cxx_mode()) {
+        QualType lhs_type = lhs ? lhs->get_type() : QualType();
+        QualType rhs_type = rhs ? rhs->get_type() : QualType();
+        bool has_dependent_operand =
+            (lhs && expression_depends_on_template_parameters(lhs.get())) ||
+            (rhs && expression_depends_on_template_parameters(rhs.get())) ||
+            type_depends_on_template_parameters(lhs_type, ast_ctx_.get()) ||
+            type_depends_on_template_parameters(rhs_type, ast_ctx_.get());
+        if (has_dependent_operand) {
+            QualType dependent_result_type = lhs_type;
+            if (canonical_type_kind(dependent_result_type, ast_ctx_.get()) ==
+                TypeKind::Reference) {
+                dependent_result_type =
+                    remove_reference(dependent_result_type, ast_ctx_.get());
+            }
+            if (!dependent_result_type) {
+                dependent_result_type = QualType(
+                    std::make_shared<AutoType>(
+                        AutoTypeFlavor::TemplateNonType));
+            }
+            return collect_make<DependentBinaryExpr>(
+                std::move(lhs),
+                std::move(rhs),
+                bop,
+                dependent_result_type,
+                loc);
+        }
+    }
 
     rhs = collect_apply_standard_conversions(std::move(rhs), ExprUseContext::RValue);
     if (!is_modifiable_lvalue(lhs.get())) {
@@ -6249,7 +6279,8 @@ std::unique_ptr<Expr> Collect::collect_compound_assign_operation(std::unique_ptr
 }
 
 
-std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Expr> cond, std::unique_ptr<Expr> true_expr, std::unique_ptr<Expr> false_expr, QualType forced_type, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Expr> cond,
+    std::unique_ptr<Expr> true_expr, std::unique_ptr<Expr> false_expr, QualType forced_type, SrcLoc loc) const {
 
     cond = collect_apply_standard_conversions(std::move(cond), ExprUseContext::Condition);
     bool preserve_cpp_conditional_operands = lang_opts_.is_cxx_mode();
@@ -6259,11 +6290,10 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
     if (!preserve_cpp_conditional_operands) {
         false_expr = collect_apply_standard_conversions(std::move(false_expr), ExprUseContext::ConditionalOperand);
     }
+    bool cond_is_dependent = false;
     if (cond) {
         auto cond_ty = cond->get_type();
-        bool cond_is_dependent =
-            lang_opts_.is_cxx_mode() &&
-            expression_depends_on_template_parameters(cond.get());
+        cond_is_dependent = expression_depends_on_template_parameters(cond.get());
         if (!cond_is_dependent &&
             cond_ty &&
             !allows_condition_conversion(cond_ty, ast_ctx_.get())) {
@@ -6279,7 +6309,43 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
         auto false_ty = false_expr ? false_expr->get_type() : QualType();
         auto true_kind = canonical_type_kind(true_ty);
         auto false_kind = canonical_type_kind(false_ty);
-        if (true_ty && false_ty && true_ty.equals_qualified(false_ty)) {
+        auto operand_type_is_deferred_or_dependent = [&](QualType type) {
+            return type &&
+                   (type_depends_on_template_parameters(type, ast_ctx_.get()) ||
+                    contains_deferred_semantic_type(type.get_shared()));
+        };
+        auto operand_is_bool = [&](QualType type) {
+            auto builtin =
+                desugar_type(type, ast_ctx_.get()).as_shared<BuiltinType>();
+            return builtin && builtin->builtin_kind == BuiltinTypes::Bool;
+        };
+        bool is_operands_dep =
+            expression_depends_on_template_parameters(true_expr.get())
+            || expression_depends_on_template_parameters(false_expr.get());
+        bool operand_type_defdep = operand_type_is_deferred_or_dependent(true_ty)
+        || operand_type_is_deferred_or_dependent(false_ty);
+        bool template_dependent_conditional = cond_is_dependent ||
+            is_operands_dep || operand_type_defdep;
+        if (lang_opts_.is_cxx_mode() && template_dependent_conditional) {
+            if (true_ty && false_ty && true_ty.equals_qualified(false_ty)) {
+                result_type = true_ty;
+            } else if (operand_is_bool(true_ty) || operand_is_bool(false_ty)) {
+                result_type = QualType(get_builtin_bool());
+            } else if (true_ty && false_ty &&
+                       ((is_arithmetic_adjacent(true_ty, ast_ctx_.get()) &&
+                         is_arithmetic_adjacent(false_ty, ast_ctx_.get())) ||
+                        true_ty->isComplex() || false_ty->isComplex())) {
+                result_type = usual_arithmetic_conversion_type(true_ty, false_ty);
+            } else if (true_ty) {
+                result_type = true_ty;
+            } else if (false_ty) {
+                result_type = false_ty;
+            } else {
+                result_type =
+                    QualType(std::make_shared<AutoType>(
+                        AutoTypeFlavor::TemplateNonType));
+            }
+        } else if (true_ty && false_ty && true_ty.equals_qualified(false_ty)) {
             result_type = true_ty;
         } else if (true_ty && false_ty &&
                    is_nullptr_type(true_ty, ast_ctx_.get()) &&

@@ -203,6 +203,13 @@ std::unique_ptr<Expr> Collect::collect_condition_expression(std::unique_ptr<Expr
         report_error(stmt_name + " condition has unknown type", loc);
         return condition;
     }
+    bool condition_is_dependent =
+        lang_opts_.is_cxx_mode() &&
+        (expression_depends_on_template_parameters(condition.get()) ||
+         type_depends_on_template_parameters(condition_type, ast_ctx_.get()));
+    if (condition_is_dependent) {
+        return condition;
+    }
     if (!condition_type->isScalar()) {
         if (!allows_condition_conversion(condition_type, ast_ctx_.get())) {
             report_error("statement requires expression of scalar type ('" +
