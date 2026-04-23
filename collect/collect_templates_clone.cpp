@@ -192,6 +192,186 @@ TemplateClonePassBuilder::build_dependent_resolution_pass(
     return pass;
 }
 
+bool materialize_specialized_fold_expression(
+    Collect& collect,
+    std::unique_ptr<Expr>& expr,
+    QualType implicit_this_type,
+    std::shared_ptr<CType> bool_type,
+    const TemplateParameterList& parameters,
+    const TemplateArgumentBindings& specialization_bindings,
+    const std::function<std::unique_ptr<Expr>(size_t, const Expr*, std::string*)>&
+        clone_pattern_element,
+    std::string* error_out) {
+    auto* fold = dyn_cast<FoldExpr>(expr.get());
+    if (!fold) {
+        return true;
+    }
+
+    TemplatePackExpansionShape shape;
+    if (!collect_pack_expansion_shape_in_expr(
+            fold->pattern.get(),
+            parameters,
+            shape)) {
+        if (shape.has_unsupported_dependency) {
+            return true;
+        }
+        if (error_out && error_out->empty()) {
+            *error_out = "failed to collect fold-expression pack shape";
+        }
+        return false;
+    }
+    if (shape.has_unsupported_dependency) {
+        return true;
+    }
+    if (shape.referenced_parameters.empty()) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "fold expression pattern does not reference a template parameter pack";
+        }
+        return false;
+    }
+
+    std::string arity_error;
+    auto expansion_arity = find_pack_expansion_arity_for_bindings(
+        shape,
+        parameters,
+        specialization_bindings,
+        &arity_error);
+    if (!expansion_arity.has_value()) {
+        if (arity_error.empty()) {
+            return true;
+        }
+        if (error_out && error_out->empty()) {
+            *error_out = arity_error;
+        }
+        return false;
+    }
+
+    auto owned_fold = std::unique_ptr<FoldExpr>(
+        static_cast<FoldExpr*>(expr.release()));
+    if (*expansion_arity == 0) {
+        if (owned_fold->init) {
+            expr = std::move(owned_fold->init);
+            return true;
+        }
+        if (owned_fold->op == BinOpTypes::LOGICAL_AND) {
+            expr = collect.collect_integer_literal(
+                "1",
+                std::move(bool_type),
+                owned_fold->location);
+            return expr != nullptr;
+        }
+        if (owned_fold->op == BinOpTypes::LOGICAL_OR) {
+            expr = collect.collect_integer_literal(
+                "0",
+                std::move(bool_type),
+                owned_fold->location);
+            return expr != nullptr;
+        }
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "empty unary fold expression is not supported for this operator";
+        }
+        return false;
+    }
+
+    std::vector<std::unique_ptr<Expr>> pattern_elements;
+    pattern_elements.reserve(*expansion_arity);
+    for (size_t element_index = 0;
+         element_index < *expansion_arity;
+         ++element_index) {
+        auto element_expr =
+            clone_pattern_element(
+                element_index,
+                owned_fold->pattern.get(),
+                error_out);
+        if (!element_expr) {
+            return false;
+        }
+        pattern_elements.push_back(std::move(element_expr));
+    }
+
+    auto combine =
+        [&](std::unique_ptr<Expr> lhs,
+            std::unique_ptr<Expr> rhs) -> std::unique_ptr<Expr> {
+            auto combined = collect.collect_binary_operation(
+                std::move(lhs),
+                std::move(rhs),
+                owned_fold->op,
+                owned_fold->location);
+            if (!combined) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "failed to materialize fold-expression binary operation";
+                }
+                return nullptr;
+            }
+            if (!collect.resolve_dependent_expr_after_substitution(
+                    combined,
+                    implicit_this_type,
+                    error_out)) {
+                return nullptr;
+            }
+            return combined;
+        };
+
+    auto resolve_accumulator = [&](std::unique_ptr<Expr>& candidate) -> bool {
+        return !candidate ||
+               collect.resolve_dependent_expr_after_substitution(
+                   candidate,
+                   implicit_this_type,
+                   error_out);
+    };
+
+    std::unique_ptr<Expr> result;
+    if (owned_fold->is_binary_fold()) {
+        result = std::move(owned_fold->init);
+        if (!resolve_accumulator(result)) {
+            return false;
+        }
+        if (owned_fold->direction == FoldDirection::Left) {
+            for (auto& element : pattern_elements) {
+                result = combine(std::move(result), std::move(element));
+                if (!result) {
+                    return false;
+                }
+            }
+        } else {
+            for (size_t index = pattern_elements.size(); index-- > 0;) {
+                result = combine(
+                    std::move(pattern_elements[index]),
+                    std::move(result));
+                if (!result) {
+                    return false;
+                }
+            }
+        }
+    } else if (owned_fold->direction == FoldDirection::Left) {
+        result = std::move(pattern_elements.front());
+        for (size_t index = 1; index < pattern_elements.size(); ++index) {
+            result = combine(
+                std::move(result),
+                std::move(pattern_elements[index]));
+            if (!result) {
+                return false;
+            }
+        }
+    } else {
+        result = std::move(pattern_elements.back());
+        for (size_t index = pattern_elements.size() - 1; index-- > 0;) {
+            result = combine(
+                std::move(pattern_elements[index]),
+                std::move(result));
+            if (!result) {
+                return false;
+            }
+        }
+    }
+
+    expr = std::move(result);
+    return true;
+}
+
 TemplateClonePassBuilder make_template_binding_clone_pass_builder(
     ASTContext* ast_ctx,
     Collect* collect,

@@ -150,6 +150,17 @@ bool build_pack_element_argument_bindings(
     TemplateArgumentBindings& element_bindings,
     std::string* error_out);
 
+bool materialize_specialized_fold_expression(
+    Collect& collect,
+    std::unique_ptr<Expr>& expr,
+    QualType implicit_this_type,
+    std::shared_ptr<CType> bool_type,
+    const TemplateParameterList& parameters,
+    const TemplateArgumentBindings& specialization_bindings,
+    const std::function<std::unique_ptr<Expr>(size_t, const Expr*, std::string*)>&
+        clone_pattern_element,
+    std::string* error_out);
+
 std::string make_parameter_pack_element_name(const std::string& base_name,
                                              size_t element_index);
 
