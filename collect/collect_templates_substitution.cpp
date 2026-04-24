@@ -12,7 +12,9 @@ using template_sema_internal::find_unique_parameter_pack_index_in_type;
 using template_sema_internal::make_template_binding_clone_pass_builder;
 using template_sema_internal::materialize_specialized_fold_expression;
 using template_sema_internal::normalize_concrete_template_value_argument;
+using template_sema_internal::TemplateClonePassBuilder;
 using template_sema_internal::template_arguments_depend_on_template_parameters;
+using template_sema_internal::TemplateSubstitutionPass;
 
 namespace {
 
@@ -86,6 +88,103 @@ const TemplateArgument* find_template_argument_for_non_type_parameter_symbol(
         return specialization_bindings[idx].single_argument();
     }
     return nullptr;
+}
+
+using FinishSubstitutedFoldPatternElement =
+    std::function<bool(std::unique_ptr<Expr>&,
+                       const TemplateArgumentBindings&,
+                       const TemplateClonePassBuilder&,
+                       const TemplateSubstitutionPass&,
+                       std::string*)>;
+using RewriteSubstitutedFoldElementType =
+    std::function<QualType(QualType, const TemplateArgumentBindings&)>;
+using RewriteSubstitutedFoldElementArguments =
+    std::function<std::vector<TemplateArgument>(
+        const std::vector<TemplateArgument>&,
+        const TemplateArgumentBindings&)>;
+
+// Shared setup for the two substitution paths that materialize folds: bind the
+// selected pack element, clone the fold pattern under those bindings, then let
+// the caller run its path-specific resolution.
+std::unique_ptr<Expr> clone_substituted_fold_pattern_element(
+    Collect& collect,
+    ASTContext* ast_ctx,
+    const TemplateParameterList& parameters,
+    const TemplateArgumentBindings& active_bindings,
+    size_t element_index,
+    const Expr* pattern_expr,
+    SrcLoc loc,
+    const char* binding_error_message,
+    const char* value_error_message,
+    const char* clone_error_message,
+    const RewriteSubstitutedFoldElementType& rewrite_type_for_bindings,
+    const RewriteSubstitutedFoldElementArguments&
+        rewrite_arguments_for_bindings,
+    const FinishSubstitutedFoldPatternElement& finish_element,
+    std::string* error_out) {
+    TemplateArgumentBindings element_bindings;
+    std::string binding_error;
+    if (!build_pack_element_argument_bindings(
+            parameters,
+            active_bindings,
+            element_index,
+            element_bindings,
+            &binding_error)) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                binding_error.empty() ? binding_error_message : binding_error;
+        }
+        return nullptr;
+    }
+
+    auto rewrite_element_type =
+        [&](QualType nested_type) -> QualType {
+            return rewrite_type_for_bindings(
+                nested_type,
+                element_bindings);
+        };
+    auto rewrite_element_arguments =
+        [&](const std::vector<TemplateArgument>& template_arguments)
+        -> std::vector<TemplateArgument> {
+            return rewrite_arguments_for_bindings(
+                template_arguments,
+                element_bindings);
+        };
+    auto element_builder =
+        make_template_binding_clone_pass_builder(
+            ast_ctx,
+            &collect,
+            parameters,
+            element_bindings,
+            loc,
+            value_error_message,
+            rewrite_element_type,
+            rewrite_element_arguments,
+            {},
+            {});
+    auto element_clone_pass = element_builder.build_substitution_pass();
+
+    std::string clone_error;
+    auto element_expr = element_clone_pass.clone_expr(
+        pattern_expr,
+        &clone_error);
+    if (!element_expr) {
+        if (error_out && error_out->empty()) {
+            *error_out = clone_error.empty() ? clone_error_message
+                                             : clone_error;
+        }
+        return nullptr;
+    }
+
+    if (!finish_element(
+            element_expr,
+            element_bindings,
+            element_builder,
+            element_clone_pass,
+            error_out)) {
+        return nullptr;
+    }
+    return element_expr;
 }
 
 } // namespace
@@ -255,104 +354,84 @@ QualType Collect::substitute_template_type_with_bindings(
                             error_out)) {
                         return false;
                     }
+                    auto rewrite_fold_element_type =
+                        [&](QualType nested_type,
+                            const TemplateArgumentBindings& element_bindings)
+                        -> QualType {
+                            auto rewritten_type =
+                                substitute_template_type_with_bindings(
+                                    nested_type,
+                                    parameters,
+                                    element_bindings,
+                                    loc,
+                                    allow_unsubstituted_parameters);
+                            return finalize_deferred_semantic_type(
+                                rewritten_type,
+                                loc);
+                        };
+                    auto rewrite_fold_element_arguments =
+                        [&](const std::vector<TemplateArgument>& template_arguments,
+                            const TemplateArgumentBindings& element_bindings)
+                        -> std::vector<TemplateArgument> {
+                            return substitute_template_arguments_with_bindings(
+                                template_arguments,
+                                parameters,
+                                element_bindings,
+                                loc,
+                                allow_unsubstituted_parameters);
+                        };
                     auto clone_fold_pattern_element =
                         [&](size_t element_index,
                             const Expr* pattern_expr,
                             std::string* element_error_out)
                             -> std::unique_ptr<Expr> {
-                            TemplateArgumentBindings element_bindings;
-                            std::string binding_error;
-                            if (!build_pack_element_argument_bindings(
-                                    parameters,
-                                    active_bindings,
-                                    element_index,
-                                    element_bindings,
-                                    &binding_error)) {
-                                if (element_error_out &&
-                                    element_error_out->empty()) {
-                                    *element_error_out =
-                                        binding_error.empty()
-                                            ? "failed to materialize fold-expression bindings"
-                                            : binding_error;
-                                }
-                                return nullptr;
-                            }
-
-                            auto rewrite_element_type =
-                                [&](QualType nested_type) -> QualType {
-                                    auto rewritten_type =
-                                        substitute_template_type_with_bindings(
-                                            nested_type,
-                                            parameters,
-                                            element_bindings,
-                                            loc,
-                                            allow_unsubstituted_parameters);
-                                    return finalize_deferred_semantic_type(
-                                        rewritten_type,
-                                        loc);
-                                };
-                            auto rewrite_element_arguments =
-                                [&](const std::vector<TemplateArgument>& template_arguments)
-                                -> std::vector<TemplateArgument> {
-                                    return substitute_template_arguments_with_bindings(
-                                        template_arguments,
-                                        parameters,
+                            return clone_substituted_fold_pattern_element(
+                                *this,
+                                ast_ctx_.get(),
+                                parameters,
+                                active_bindings,
+                                element_index,
+                                pattern_expr,
+                                loc,
+                                "failed to materialize fold-expression bindings",
+                                "failed to substitute fold-expression pattern",
+                                "fold-expression pattern cloning is not supported",
+                                rewrite_fold_element_type,
+                                rewrite_fold_element_arguments,
+                                [&](std::unique_ptr<Expr>& element_expr,
+                                    const TemplateArgumentBindings&
                                         element_bindings,
-                                        loc,
-                                        allow_unsubstituted_parameters);
-                                };
-                            auto element_builder =
-                                make_template_binding_clone_pass_builder(
-                                    ast_ctx_.get(),
-                                    this,
-                                    parameters,
-                                    element_bindings,
-                                    loc,
-                                    "failed to substitute fold-expression pattern",
-                                    rewrite_element_type,
-                                    rewrite_element_arguments,
-                                    {},
-                                    {});
-                            auto element_clone_pass =
-                                element_builder.build_substitution_pass();
-                            auto element_resolution_pass =
-                                element_builder.build_dependent_resolution_pass(
-                                    element_clone_pass,
-                                    [&](std::unique_ptr<Expr>& element_expr,
-                                        std::string* nested_error_out) -> bool {
-                                        if (!resolve_specialized_expr(
-                                                element_expr,
-                                                element_bindings,
-                                                nested_error_out)) {
-                                            return false;
-                                        }
-                                        return resolve_dependent_expr_after_substitution(
+                                    const TemplateClonePassBuilder&
+                                        element_builder,
+                                    const TemplateSubstitutionPass&
+                                        element_clone_pass,
+                                    std::string* nested_error_out) -> bool {
+                                    auto element_resolution_pass =
+                                        element_builder
+                                            .build_dependent_resolution_pass(
+                                                element_clone_pass,
+                                                [&](std::unique_ptr<Expr>&
+                                                        nested_expr,
+                                                    std::string*
+                                                        resolution_error_out)
+                                                    -> bool {
+                                                    if (!resolve_specialized_expr(
+                                                            nested_expr,
+                                                            element_bindings,
+                                                            resolution_error_out)) {
+                                                        return false;
+                                                    }
+                                                    return resolve_dependent_expr_after_substitution(
+                                                        nested_expr,
+                                                        QualType(nullptr),
+                                                        resolution_error_out);
+                                                });
+                                    return element_resolution_pass
+                                        .resolve_expr_in_place(
                                             element_expr,
-                                            QualType(nullptr),
                                             nested_error_out);
-                                    });
-
-                            std::string clone_error;
-                            auto element_expr =
-                                element_clone_pass.clone_expr(
-                                    pattern_expr,
-                                    &clone_error);
-                            if (!element_expr) {
-                                if (element_error_out &&
-                                    element_error_out->empty()) {
-                                    *element_error_out =
-                                        clone_error.empty()
-                                            ? "fold-expression pattern cloning is not supported"
-                                            : clone_error;
-                                }
-                                return nullptr;
-                            }
-                            if (!element_resolution_pass.resolve_expr_in_place(
-                                    element_expr,
-                                    element_error_out)) {
-                                return nullptr;
-                            }
-                            return element_expr;
+                                },
+                                element_error_out);
                         };
 
                     if (!materialize_specialized_fold_expression(
@@ -1447,36 +1526,10 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                     }
 
                     std::string resolve_error;
-                    std::function<std::unique_ptr<Expr>(
-                        size_t,
-                        const Expr*,
-                        std::string*)>
-                        clone_fold_pattern_element;
-                    clone_fold_pattern_element =
-                        [&](size_t element_index,
-                            const Expr* pattern_expr,
-                            std::string* element_error_out)
-                            -> std::unique_ptr<Expr> {
-                        TemplateArgumentBindings element_bindings;
-                        std::string binding_error;
-                        if (!build_pack_element_argument_bindings(
-                                parameters,
-                                active_bindings,
-                                element_index,
-                                element_bindings,
-                                &binding_error)) {
-                            if (element_error_out &&
-                                element_error_out->empty()) {
-                                *element_error_out =
-                                    binding_error.empty()
-                                        ? "failed to materialize non-type template argument fold bindings"
-                                        : binding_error;
-                            }
-                            return nullptr;
-                        }
-
-                        auto rewrite_element_type =
-                            [&](QualType type) -> QualType {
+                    auto rewrite_fold_element_type =
+                        [&](QualType type,
+                            const TemplateArgumentBindings& element_bindings)
+                        -> QualType {
                             auto rewritten_type =
                                 substitute_template_type_with_bindings(
                                     type,
@@ -1488,9 +1541,10 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                 rewritten_type,
                                 loc);
                         };
-                        auto rewrite_element_arguments =
-                            [&](const std::vector<TemplateArgument>& template_arguments)
-                            -> std::vector<TemplateArgument> {
+                    auto rewrite_fold_element_arguments =
+                        [&](const std::vector<TemplateArgument>& template_arguments,
+                            const TemplateArgumentBindings& element_bindings)
+                        -> std::vector<TemplateArgument> {
                             return substitute_template_arguments_with_bindings(
                                 template_arguments,
                                 parameters,
@@ -1498,53 +1552,52 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                 loc,
                                 allow_unsubstituted_parameters);
                         };
-                        auto element_builder =
-                            make_template_binding_clone_pass_builder(
-                                ast_ctx_.get(),
-                                this,
-                                parameters,
-                                element_bindings,
-                                loc,
-                                "failed to substitute non-type template argument fold element",
-                                rewrite_element_type,
-                                rewrite_element_arguments,
-                                {},
-                                {});
-                        auto element_clone_pass =
-                            element_builder.build_substitution_pass();
-
-                        std::string element_clone_error;
-                        auto element_expr = element_clone_pass.clone_expr(
-                            pattern_expr,
-                            &element_clone_error);
-                        if (!element_expr) {
-                            if (element_error_out &&
-                                element_error_out->empty()) {
-                                *element_error_out =
-                                    element_clone_error.empty()
-                                        ? "non-type template argument fold element cloning is not supported"
-                                        : element_clone_error;
-                            }
-                            return nullptr;
-                        }
-                        if (!materialize_specialized_fold_expression(
+                    std::function<std::unique_ptr<Expr>(
+                        size_t,
+                        const Expr*,
+                        std::string*)>
+                        clone_fold_pattern_element;
+                    clone_fold_pattern_element =
+                        [&](size_t element_index,
+                            const Expr* pattern_expr,
+                            std::string* element_error_out)
+                            -> std::unique_ptr<Expr> {
+                            return clone_substituted_fold_pattern_element(
                                 *this,
-                                element_expr,
-                                QualType(),
-                                QualType(get_builtin_bool()).get_shared(),
+                                ast_ctx_.get(),
                                 parameters,
-                                element_bindings,
-                                clone_fold_pattern_element,
-                                element_error_out)) {
-                            return nullptr;
-                        }
-                        if (!resolve_dependent_expr_after_substitution(
-                                element_expr,
-                                QualType(),
-                                element_error_out)) {
-                            return nullptr;
-                        }
-                        return element_expr;
+                                active_bindings,
+                                element_index,
+                                pattern_expr,
+                                loc,
+                                "failed to materialize non-type template argument fold bindings",
+                                "failed to substitute non-type template argument fold element",
+                                "non-type template argument fold element cloning is not supported",
+                                rewrite_fold_element_type,
+                                rewrite_fold_element_arguments,
+                                [&](std::unique_ptr<Expr>& element_expr,
+                                    const TemplateArgumentBindings&
+                                        element_bindings,
+                                    const TemplateClonePassBuilder&,
+                                    const TemplateSubstitutionPass&,
+                                    std::string* nested_error_out) -> bool {
+                                    if (!materialize_specialized_fold_expression(
+                                            *this,
+                                            element_expr,
+                                            QualType(),
+                                            QualType(get_builtin_bool()).get_shared(),
+                                            parameters,
+                                            element_bindings,
+                                            clone_fold_pattern_element,
+                                            nested_error_out)) {
+                                        return false;
+                                    }
+                                    return resolve_dependent_expr_after_substitution(
+                                        element_expr,
+                                        QualType(),
+                                        nested_error_out);
+                                },
+                                element_error_out);
                     };
                     if (!materialize_specialized_fold_expression(
                             *this,
