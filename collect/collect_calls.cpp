@@ -3010,6 +3010,22 @@ bool Collect::resolve_dependent_expr_after_substitution(
     if (auto* dependent_binary = dyn_cast<DependentBinaryExpr>(expr.get())) {
         strip_stale_dependent_implicit_casts(dependent_binary->left);
         strip_stale_dependent_implicit_casts(dependent_binary->right);
+        if (dependent_binary->left &&
+            !resolve_dependent_expr_after_substitution(
+                dependent_binary->left,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        if (dependent_binary->right &&
+            !resolve_dependent_expr_after_substitution(
+                dependent_binary->right,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        strip_stale_dependent_implicit_casts(dependent_binary->left);
+        strip_stale_dependent_implicit_casts(dependent_binary->right);
         if (!dependent_binary->left ||
             !dependent_binary->right ||
             expression_depends_on_template_parameters(
