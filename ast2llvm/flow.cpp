@@ -668,6 +668,9 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
         return;
     }
     if (!mainFunc->empty()) {
+        if (get_func_decl_function_template_specialization(node)) {
+            return;
+        }
         // we've already done the function body
         std::string fn_name = mainFunc->getName().str();
         error("convert_function_declaration(): function already defined ('" +
