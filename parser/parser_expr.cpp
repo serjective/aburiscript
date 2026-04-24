@@ -261,6 +261,13 @@ std::unique_ptr<Expr> Parser::parse_assignment_expression_with_optional_pack_exp
     return maybe_parse_pack_expansion_expression(parse_assignment_expression());
 }
 
+std::unique_ptr<Expr> Parser::parse_call_argument_expression() {
+    if (is_cxx_mode_active() && gentle_check(TokenType::LEFT_BRACE)) {
+        return maybe_parse_pack_expansion_expression(parse_init_list());
+    }
+    return parse_assignment_expression_with_optional_pack_expansion();
+}
+
 std::unique_ptr<Expr> Parser::try_parse_fold_expression(SrcLoc lparen_loc) {
     if (!is_cxx_mode_active()) {
         return nullptr;
@@ -2036,8 +2043,7 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                         std::vector<std::unique_ptr<Expr>> args;
                         if (!gentle_check(TokenType::RIGHT_PAREN)) {
                             do {
-                                auto arg =
-                                    parse_assignment_expression_with_optional_pack_expansion();
+                                auto arg = parse_call_argument_expression();
                                 args.push_back(std::move(arg));
                             } while (gentle_check_and_consume(TokenType::COMMA));
                         }
@@ -2066,8 +2072,7 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             std::vector<std::unique_ptr<Expr>> args;
             if (!gentle_check(TokenType::RIGHT_PAREN)) {
                 do {
-                    auto arg =
-                        parse_assignment_expression_with_optional_pack_expansion();
+                    auto arg = parse_call_argument_expression();
                     args.push_back(std::move(arg));
                 } while (gentle_check_and_consume(TokenType::COMMA));
             }

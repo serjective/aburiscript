@@ -314,6 +314,7 @@ private:
     std::unique_ptr<Expr> maybe_parse_pack_expansion_expression(
         std::unique_ptr<Expr> expr);
     std::unique_ptr<Expr> parse_assignment_expression_with_optional_pack_expansion();
+    std::unique_ptr<Expr> parse_call_argument_expression();
     std::unique_ptr<Expr> try_parse_fold_expression(SrcLoc lparen_loc);
 
     std::unique_ptr<Expr> parse_postfix_expression();
