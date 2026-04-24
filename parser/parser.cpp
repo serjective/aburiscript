@@ -246,6 +246,11 @@ void Parser::set_token_idx(size_t idx) {
 Token Parser::peek_token(size_t offset) {
     return tok_mgnt.peek_token(offset);
 }
+// Will check if offset is 0 and call current_token instead of that is the case
+Token Parser::peek_token_shortcut(size_t offset) {
+    if (offset == 0) return tok_mgnt.current_token();
+    return tok_mgnt.peek_token(offset);
+}
 void Parser::advance() {
     tok_mgnt.advance();
 }

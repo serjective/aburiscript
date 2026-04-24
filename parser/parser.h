@@ -275,6 +275,9 @@ private:
     void set_token_idx(size_t idx);
 
     Token peek_token(size_t offset = 1);
+
+    Token peek_token_shortcut(size_t offset);
+
     void advance();
     bool gentle_check_and_consume(TokenType type);
     bool gentle_check(TokenType type);
