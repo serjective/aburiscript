@@ -196,10 +196,65 @@ QualType Collect::substitute_template_type_with_bindings(
                                const TemplateArgumentBindings&,
                                std::string*)>
                 resolve_specialized_expr;
+            auto materialize_substituted_type_value_initializer =
+                [&](std::unique_ptr<Expr>& candidate,
+                    const TemplateArgumentBindings& active_bindings,
+                    std::string* error_out) -> bool {
+                    if (!candidate) {
+                        return true;
+                    }
+
+                    if (auto* dependent_call =
+                            dyn_cast<DependentCallExpr>(candidate.get())) {
+                        auto* callee_ref = dyn_cast<VarRef>(
+                            strip_implicit_casts(dependent_call->callee.get()));
+                        auto parm_type = callee_ref && callee_ref->symref &&
+                                         callee_ref->symref->kind ==
+                                             SymbolKind::TYPE
+                            ? callee_ref->symref->type
+                                  .as_shared<TemplateTypeParmType>()
+                            : nullptr;
+                        const TemplateArgument* replacement = parm_type
+                            ? find_template_argument_for_parameter(
+                                  parm_type.get(),
+                                  parameters,
+                                  active_bindings,
+                                  !allow_unsubstituted_parameters)
+                            : nullptr;
+                        if (replacement &&
+                            replacement->kind == TemplateArgumentKind::Type &&
+                            !replacement->type.is_null() &&
+                            !type_depends_on_template_parameters(
+                                replacement->type,
+                                ast_ctx_.get())) {
+                            if (!dependent_call->args.empty()) {
+                                if (error_out && error_out->empty()) {
+                                    *error_out =
+                                        "substituted type value-initializer arguments are not supported";
+                                }
+                                return false;
+                            }
+                            candidate = collect_make<CppConstructExpr>(
+                                nullptr,
+                                std::vector<std::unique_ptr<Expr>>(),
+                                replacement->type,
+                                false,
+                                dependent_call->location);
+                            return true;
+                        }
+                    }
+                    return true;
+                };
             resolve_specialized_expr =
                 [&](std::unique_ptr<Expr>& rewritten_expr,
                     const TemplateArgumentBindings& active_bindings,
                     std::string* error_out) -> bool {
+                    if (!materialize_substituted_type_value_initializer(
+                            rewritten_expr,
+                            active_bindings,
+                            error_out)) {
+                        return false;
+                    }
                     auto clone_fold_pattern_element =
                         [&](size_t element_index,
                             const Expr* pattern_expr,
