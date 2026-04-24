@@ -169,17 +169,14 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
         if (!is_cxx_mode_active()) {
             return false;
         }
-        auto token_at = [&](size_t offset) -> Token {
-            return offset == 0 ? current_token() : peek_token(offset);
-        };
         auto consume_scope_resolution = [&](size_t& offset) -> bool {
-            Token tok = token_at(offset);
+            Token tok = peek_token_shortcut(offset);
             if (tok.type == TokenType::SCOPE_RESOLUTION) {
                 ++offset;
                 return true;
             }
             if (tok.type == TokenType::COLON &&
-                token_at(offset + 1).type == TokenType::COLON) {
+                peek_token_shortcut(offset + 1).type == TokenType::COLON) {
                 offset += 2;
                 return true;
             }
@@ -188,7 +185,7 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
 
         size_t offset = 0;
         bool has_global_qualifier = consume_scope_resolution(offset);
-        Token owner_tok = token_at(offset);
+        Token owner_tok = peek_token_shortcut(offset);
         if (owner_tok.type != TokenType::IDENTIFIER) {
             return false;
         }
@@ -564,17 +561,14 @@ std::unique_ptr<Stmt> Parser::parse_for_stmt() {
         if (!is_cxx_mode_active()) {
             return false;
         }
-        auto token_at = [&](size_t offset) -> Token {
-            return offset == 0 ? current_token() : peek_token(offset);
-        };
         auto consume_scope_resolution = [&](size_t& offset) -> bool {
-            Token tok = token_at(offset);
+            Token tok = peek_token_shortcut(offset);
             if (tok.type == TokenType::SCOPE_RESOLUTION) {
                 ++offset;
                 return true;
             }
             if (tok.type == TokenType::COLON &&
-                token_at(offset + 1).type == TokenType::COLON) {
+                peek_token_shortcut(offset + 1).type == TokenType::COLON) {
                 offset += 2;
                 return true;
             }
@@ -583,7 +577,7 @@ std::unique_ptr<Stmt> Parser::parse_for_stmt() {
 
         size_t offset = 0;
         bool has_global_qualifier = consume_scope_resolution(offset);
-        Token owner_tok = token_at(offset);
+        Token owner_tok = peek_token_shortcut(offset);
         if (owner_tok.type != TokenType::IDENTIFIER) {
             return false;
         }

@@ -2375,17 +2375,14 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
     }
 
     if (is_cxx_mode_active() && tok.type == TokenType::BITWISE_AND) {
-        auto token_at = [&](size_t offset) -> Token {
-            return offset == 0 ? current_token() : peek_token(offset);
-        };
         auto consume_scope_resolution = [&](size_t& offset) -> bool {
-            Token sep = token_at(offset);
+            Token sep = peek_token_shortcut(offset);
             if (sep.type == TokenType::SCOPE_RESOLUTION) {
                 ++offset;
                 return true;
             }
             if (sep.type == TokenType::COLON &&
-                token_at(offset + 1).type == TokenType::COLON) {
+                peek_token_shortcut(offset + 1).type == TokenType::COLON) {
                 offset += 2;
                 return true;
             }
@@ -2399,16 +2396,16 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
         if (consume_scope_resolution(offset)) {
             saw_scope_resolution = true;
         }
-        if (token_at(offset).type == TokenType::IDENTIFIER) {
-            qualified_components.push_back(token_at(offset).value);
+        if (peek_token_shortcut(offset).type == TokenType::IDENTIFIER) {
+            qualified_components.push_back(peek_token_shortcut(offset).value);
             ++offset;
             while (consume_scope_resolution(offset)) {
                 saw_scope_resolution = true;
-                if (token_at(offset).type != TokenType::IDENTIFIER) {
+                if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER) {
                     qualified_components.clear();
                     break;
                 }
-                qualified_components.push_back(token_at(offset).value);
+                qualified_components.push_back(peek_token_shortcut(offset).value);
                 ++offset;
             }
         }

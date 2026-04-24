@@ -1717,25 +1717,22 @@ void Parser::emit_declaration_head_side_decls(DeclarationParser& decl_parser,
 std::shared_ptr<CType> Parser::parse_declaration_head(Token start_token,
     DeclarationParser& decl_parser,
     std::vector<std::unique_ptr<Decl>>& ret_vec) {
+
+    // example: Distance::operator double()
     auto looks_like_typeless_cpp_conversion_declaration =
         [&]() -> bool {
             if (!is_cxx_mode_active()) {
                 return false;
             }
-
-            auto token_at = [&](size_t offset) -> Token {
-                return offset == 0
-                    ? current_token()
-                    : peek_token(static_cast<int>(offset));
-            };
             auto consume_scope_resolution =
                 [&](size_t& offset) -> bool {
-                    if (token_at(offset).type == TokenType::SCOPE_RESOLUTION) {
+                    Token tok = peek_token_shortcut(offset);
+                    if (tok.type == TokenType::SCOPE_RESOLUTION) {
                         ++offset;
                         return true;
                     }
-                    if (token_at(offset).type == TokenType::COLON &&
-                        token_at(offset + 1).type == TokenType::COLON) {
+                    if (tok.type == TokenType::COLON &&
+                        peek_token_shortcut(offset + 1).type == TokenType::COLON) {
                         offset += 2;
                         return true;
                     }
@@ -1744,10 +1741,11 @@ std::shared_ptr<CType> Parser::parse_declaration_head(Token start_token,
 
             size_t offset = 0;
             bool saw_scope_resolution = false;
-            if (token_at(offset).type == TokenType::EXPLICIT_KW) {
+            TokenType toktype = peek_token_shortcut(offset).type;
+            if (toktype == TokenType::EXPLICIT_KW) {
                 ++offset;
             }
-            if (token_at(offset).type == TokenType::OPERATOR_KW) {
+            if (toktype == TokenType::OPERATOR_KW) {
                 return true;
             }
 
@@ -1755,7 +1753,7 @@ std::shared_ptr<CType> Parser::parse_declaration_head(Token start_token,
                 saw_scope_resolution = true;
             }
 
-            while (token_at(offset).type == TokenType::IDENTIFIER) {
+            while (peek_token_shortcut(offset).type == TokenType::IDENTIFIER) {
                 ++offset;
                 if (!consume_scope_resolution(offset)) {
                     break;
@@ -1763,7 +1761,7 @@ std::shared_ptr<CType> Parser::parse_declaration_head(Token start_token,
                 saw_scope_resolution = true;
             }
             return saw_scope_resolution &&
-                   token_at(offset).type == TokenType::OPERATOR_KW;
+                   peek_token_shortcut(offset).type == TokenType::OPERATOR_KW;
         };
 
     if (looks_like_typeless_cpp_conversion_declaration()) {
