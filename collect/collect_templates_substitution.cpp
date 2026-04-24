@@ -1447,7 +1447,115 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                     }
 
                     std::string resolve_error;
-                    if (!resolve_dependent_expr_after_substitution(
+                    std::function<std::unique_ptr<Expr>(
+                        size_t,
+                        const Expr*,
+                        std::string*)>
+                        clone_fold_pattern_element;
+                    clone_fold_pattern_element =
+                        [&](size_t element_index,
+                            const Expr* pattern_expr,
+                            std::string* element_error_out)
+                            -> std::unique_ptr<Expr> {
+                        TemplateArgumentBindings element_bindings;
+                        std::string binding_error;
+                        if (!build_pack_element_argument_bindings(
+                                parameters,
+                                active_bindings,
+                                element_index,
+                                element_bindings,
+                                &binding_error)) {
+                            if (element_error_out &&
+                                element_error_out->empty()) {
+                                *element_error_out =
+                                    binding_error.empty()
+                                        ? "failed to materialize non-type template argument fold bindings"
+                                        : binding_error;
+                            }
+                            return nullptr;
+                        }
+
+                        auto rewrite_element_type =
+                            [&](QualType type) -> QualType {
+                            auto rewritten_type =
+                                substitute_template_type_with_bindings(
+                                    type,
+                                    parameters,
+                                    element_bindings,
+                                    loc,
+                                    allow_unsubstituted_parameters);
+                            return finalize_deferred_semantic_type(
+                                rewritten_type,
+                                loc);
+                        };
+                        auto rewrite_element_arguments =
+                            [&](const std::vector<TemplateArgument>& template_arguments)
+                            -> std::vector<TemplateArgument> {
+                            return substitute_template_arguments_with_bindings(
+                                template_arguments,
+                                parameters,
+                                element_bindings,
+                                loc,
+                                allow_unsubstituted_parameters);
+                        };
+                        auto element_builder =
+                            make_template_binding_clone_pass_builder(
+                                ast_ctx_.get(),
+                                this,
+                                parameters,
+                                element_bindings,
+                                loc,
+                                "failed to substitute non-type template argument fold element",
+                                rewrite_element_type,
+                                rewrite_element_arguments,
+                                {},
+                                {});
+                        auto element_clone_pass =
+                            element_builder.build_substitution_pass();
+
+                        std::string element_clone_error;
+                        auto element_expr = element_clone_pass.clone_expr(
+                            pattern_expr,
+                            &element_clone_error);
+                        if (!element_expr) {
+                            if (element_error_out &&
+                                element_error_out->empty()) {
+                                *element_error_out =
+                                    element_clone_error.empty()
+                                        ? "non-type template argument fold element cloning is not supported"
+                                        : element_clone_error;
+                            }
+                            return nullptr;
+                        }
+                        if (!materialize_specialized_fold_expression(
+                                *this,
+                                element_expr,
+                                QualType(),
+                                QualType(get_builtin_bool()).get_shared(),
+                                parameters,
+                                element_bindings,
+                                clone_fold_pattern_element,
+                                element_error_out)) {
+                            return nullptr;
+                        }
+                        if (!resolve_dependent_expr_after_substitution(
+                                element_expr,
+                                QualType(),
+                                element_error_out)) {
+                            return nullptr;
+                        }
+                        return element_expr;
+                    };
+                    if (!materialize_specialized_fold_expression(
+                            *this,
+                            cloned_expr,
+                            QualType(),
+                            QualType(get_builtin_bool()).get_shared(),
+                            parameters,
+                            active_bindings,
+                            clone_fold_pattern_element,
+                            &resolve_error) ||
+                        !resolve_dependent_expr_after_substitution(
                             cloned_expr,
                             QualType(),
                             &resolve_error)) {
