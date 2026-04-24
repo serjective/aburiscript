@@ -60,6 +60,7 @@ enum class BuiltinKind {
     IS_DESTRUCTIBLE,
     IS_TRIVIALLY_DESTRUCTIBLE,
     HAS_TRIVIAL_DESTRUCTOR,
+    INTEGER_PACK,
 
     // Tier 2: Overflow builtins
     ADD_OVERFLOW,

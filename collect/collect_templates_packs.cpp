@@ -38,6 +38,29 @@ const TemplateParameterDecl* resolve_pack_parameter_reference(
     return nullptr;
 }
 
+bool is_integer_pack_template_argument(const TemplateArgument& argument) {
+    if (argument.kind != TemplateArgumentKind::Value ||
+        !argument.expands_parameter_pack ||
+        !argument.value_expr) {
+        return false;
+    }
+    auto* stripped = Collect::strip_implicit_casts(argument.value_expr.get());
+    if (const auto* builtin = dyn_cast<BuiltinCallExpr>(stripped)) {
+        return builtin->kind == BuiltinKind::INTEGER_PACK;
+    }
+    if (const auto* dependent_call = dyn_cast<DependentCallExpr>(stripped)) {
+        const auto* callee_ref = dyn_cast<VarRef>(
+            Collect::strip_implicit_casts(dependent_call->callee.get()));
+        return callee_ref && callee_ref->get_name() == "__integer_pack";
+    }
+    if (const auto* call = dyn_cast<FuncCall>(stripped)) {
+        const auto* callee_ref = dyn_cast<VarRef>(
+            Collect::strip_implicit_casts(call->func.get()));
+        return callee_ref && callee_ref->get_name() == "__integer_pack";
+    }
+    return false;
+}
+
 bool add_pack_reference(const TemplateParameterDecl* parameter,
                         const TemplateParameterList& parameters,
                         TemplatePackExpansionShape& shape_out) {
@@ -249,6 +272,10 @@ bool collect_pack_expansion_shape_in_template_argument(
     const TemplateArgument& argument,
     const TemplateParameterList& parameters,
     TemplatePackExpansionShape& shape_out) {
+    if (is_integer_pack_template_argument(argument)) {
+        return true;
+    }
+
     if (argument.expands_parameter_pack) {
         if (!argument.pack_expansion_parameters.empty()) {
             for (const auto* parameter : argument.pack_expansion_parameters) {

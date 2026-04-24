@@ -125,6 +125,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__is_destructible", BuiltinKind::IS_DESTRUCTIBLE, 1, 1, true, true});
     register_builtin({"__is_trivially_destructible", BuiltinKind::IS_TRIVIALLY_DESTRUCTIBLE, 1, 1, true, true});
     register_builtin({"__has_trivial_destructor", BuiltinKind::HAS_TRIVIAL_DESTRUCTOR, 1, 1, true, true});
+    register_builtin({"__integer_pack", BuiltinKind::INTEGER_PACK, 1, 1, false, true});
 
     // Tier 2: Overflow builtins
     register_builtin({"__builtin_add_overflow", BuiltinKind::ADD_OVERFLOW, 3, 3, false, false});

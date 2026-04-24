@@ -6618,6 +6618,12 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_special_cases(
             node->const_value = 0;
             return node;
         }
+        case BuiltinKind::INTEGER_PACK:
+            return collect_make<BuiltinCallExpr>(
+                kind,
+                std::move(args),
+                QualType(get_builtin_ulong()),
+                loc);
         case BuiltinKind::ATOMIC_LOAD_N: {
             if (args.size() == 3) {
                 // Generic __atomic_load(ptr, out_ptr, order) stores through out_ptr.

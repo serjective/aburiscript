@@ -28,6 +28,25 @@ Token make_template_split_token(const Token& source,
     return split;
 }
 
+bool is_integer_pack_builtin_expr(const Expr* expr) {
+    auto* stripped = Collect::strip_implicit_casts(const_cast<Expr*>(expr));
+    const auto* builtin = dyn_cast<BuiltinCallExpr>(stripped);
+    if (builtin && builtin->kind == BuiltinKind::INTEGER_PACK) {
+        return true;
+    }
+    if (const auto* dependent_call = dyn_cast<DependentCallExpr>(stripped)) {
+        const auto* callee_ref = dyn_cast<VarRef>(
+            Collect::strip_implicit_casts(dependent_call->callee.get()));
+        return callee_ref && callee_ref->get_name() == "__integer_pack";
+    }
+    if (const auto* call = dyn_cast<FuncCall>(stripped)) {
+        const auto* callee_ref = dyn_cast<VarRef>(
+            Collect::strip_implicit_casts(call->func.get()));
+        return callee_ref && callee_ref->get_name() == "__integer_pack";
+    }
+    return false;
+}
+
 } // namespace
 
 bool Parser::is_cxx_mode_active() const {
@@ -617,6 +636,10 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_typed_braced_template_argument_expr(
 TemplateArgument Parser::parse_cpp_template_argument() {
     auto finalize_template_argument =
         [&](TemplateArgument argument) -> TemplateArgument {
+        const bool is_integer_pack_argument =
+            argument.kind == TemplateArgumentKind::Value &&
+            argument.value_expr &&
+            is_integer_pack_builtin_expr(argument.value_expr.get());
         if (gentle_check(TokenType::ELLIPSIS)) {
             if (!is_in_template_pattern_context()) {
                 error_custloc(
@@ -625,6 +648,11 @@ TemplateArgument Parser::parse_cpp_template_argument() {
             }
             advance();
             argument = argument.as_pack_expansion();
+        }
+        if (is_integer_pack_argument && !argument.expands_parameter_pack) {
+            error_custloc(
+                "__integer_pack must be expanded with '...'",
+                current_token().loc);
         }
         if (!is_cpp_template_argument_boundary_here()) {
             error_custloc("expected template argument", current_token().loc);
@@ -642,6 +670,14 @@ TemplateArgument Parser::parse_cpp_template_argument() {
         if (!argument_type) {
             error_custloc("template argument has invalid type",
                           parsed_expr->location);
+        }
+
+        if (is_integer_pack_builtin_expr(parsed_expr.get())) {
+            std::shared_ptr<Expr> shared_expr(parsed_expr.release());
+            return TemplateArgument::dependent_value_argument(
+                argument_type,
+                std::move(shared_expr),
+                "__integer_pack");
         }
 
         if (expr_depends_on_active_template_parameter(parsed_expr.get())) {

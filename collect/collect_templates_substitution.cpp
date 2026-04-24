@@ -187,6 +187,149 @@ std::unique_ptr<Expr> clone_substituted_fold_pattern_element(
     return element_expr;
 }
 
+const Expr* integer_pack_size_operand_from_expr(const Expr* expr) {
+    auto* stripped = Collect::strip_implicit_casts(const_cast<Expr*>(expr));
+    if (const auto* builtin = dyn_cast<BuiltinCallExpr>(stripped);
+        builtin && builtin->kind == BuiltinKind::INTEGER_PACK &&
+        builtin->args.size() == 1) {
+        return builtin->args.front().get();
+    }
+    if (const auto* dependent_call = dyn_cast<DependentCallExpr>(stripped)) {
+        const auto* callee_ref = dyn_cast<VarRef>(
+            Collect::strip_implicit_casts(dependent_call->callee.get()));
+        if (callee_ref && callee_ref->get_name() == "__integer_pack" &&
+            dependent_call->args.size() == 1) {
+            return dependent_call->args.front().get();
+        }
+    }
+    if (const auto* call = dyn_cast<FuncCall>(stripped)) {
+        const auto* callee_ref = dyn_cast<VarRef>(
+            Collect::strip_implicit_casts(call->func.get()));
+        if (callee_ref && callee_ref->get_name() == "__integer_pack" &&
+            call->args.size() == 1) {
+            return call->args.front().get();
+        }
+    }
+    return nullptr;
+}
+
+bool is_integer_pack_template_argument(const TemplateArgument& argument) {
+    if (argument.kind != TemplateArgumentKind::Value ||
+        !argument.expands_parameter_pack ||
+        !argument.value_expr) {
+        return false;
+    }
+    return integer_pack_size_operand_from_expr(argument.value_expr.get()) != nullptr;
+}
+
+bool append_integer_pack_template_arguments(
+    Collect& collect,
+    ASTContext* ast_ctx,
+    const TemplateArgument& argument,
+    const TemplateParameterList& parameters,
+    const TemplateArgumentBindings& active_bindings,
+    SrcLoc loc,
+    bool allow_unsubstituted_parameters,
+    const std::function<QualType(QualType)>& rewrite_type,
+    const std::function<std::vector<TemplateArgument>(
+        const std::vector<TemplateArgument>&)>& rewrite_template_arguments,
+    const std::function<void(const std::string&, SrcLoc)>& report_error,
+    QualType fallback_value_type,
+    std::vector<TemplateArgument>& rewritten) {
+    auto clone_pass_builder =
+        make_template_binding_clone_pass_builder(
+            ast_ctx,
+            &collect,
+            parameters,
+            active_bindings,
+            loc,
+            "__integer_pack argument requires a concrete integral value",
+            rewrite_type,
+            rewrite_template_arguments,
+            {},
+            {});
+    auto clone_pass = clone_pass_builder.build_substitution_pass();
+
+    std::string clone_error;
+    auto cloned_expr = clone_pass.clone_expr(
+        argument.value_expr.get(),
+        &clone_error);
+    if (!cloned_expr) {
+        if (allow_unsubstituted_parameters) {
+            rewritten.push_back(argument);
+            return true;
+        }
+        report_error(
+            clone_error.empty()
+                ? "failed to substitute __integer_pack expression"
+                : clone_error,
+            loc);
+        return false;
+    }
+
+    std::string resolve_error;
+    if (!collect.resolve_dependent_expr_after_substitution(
+            cloned_expr,
+            QualType(),
+            &resolve_error)) {
+        if (allow_unsubstituted_parameters) {
+            rewritten.push_back(argument);
+            return true;
+        }
+        report_error(
+            resolve_error.empty()
+                ? "failed to resolve __integer_pack expression after substitution"
+                : resolve_error,
+            loc);
+        return false;
+    }
+
+    const Expr* size_operand =
+        integer_pack_size_operand_from_expr(cloned_expr.get());
+    if (!size_operand) {
+        report_error("invalid __integer_pack expression", loc);
+        return false;
+    }
+
+    ConstEvalResult eval = evaluate_with_consteval_compat(
+        const_cast<Expr*>(size_operand),
+        ConstEvalMode::cpp_non_type_template_argument());
+    if (eval.status != ConstEvalStatus::Constant ||
+        !eval.value.has_value() ||
+        eval.value->kind != ConstValueKind::Integer) {
+        if (allow_unsubstituted_parameters) {
+            rewritten.push_back(argument);
+            return true;
+        }
+        report_error(
+            "__integer_pack argument must be an integral constant expression",
+            loc);
+        return false;
+    }
+
+    const auto& size_value = eval.value->int_value;
+    if (!size_value.is_unsigned && size_value.to_signed_i64() < 0) {
+        report_error(
+            "__integer_pack argument must be non-negative",
+            loc);
+        return false;
+    }
+
+    uint64_t pack_size = size_value.to_unsigned_u64();
+    QualType element_value_type = rewrite_type(argument.value_type);
+    if (!element_value_type) {
+        element_value_type = fallback_value_type;
+    }
+
+    for (uint64_t idx = 0; idx < pack_size; ++idx) {
+        rewritten.push_back(TemplateArgument::value_argument(
+            element_value_type,
+            ConstValue::integer(ConstIntValue::from_unsigned(idx, 64)),
+            std::to_string(idx)));
+    }
+    return true;
+}
+
 } // namespace
 
 QualType Collect::substitute_template_type(
@@ -1291,6 +1434,47 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
         append_rewritten_argument =
             [&](const TemplateArgument& argument,
                 const TemplateArgumentBindings& active_bindings) -> bool {
+        if (is_integer_pack_template_argument(argument)) {
+            auto rewrite_integer_pack_type =
+                [&](QualType type) -> QualType {
+                    auto rewritten_type =
+                        substitute_template_type_with_bindings(
+                            type,
+                            parameters,
+                            active_bindings,
+                            loc,
+                            allow_unsubstituted_parameters);
+                    return finalize_deferred_semantic_type(
+                        rewritten_type,
+                        loc);
+                };
+            auto rewrite_integer_pack_arguments =
+                [&](const std::vector<TemplateArgument>& template_arguments)
+                -> std::vector<TemplateArgument> {
+                    return substitute_template_arguments_with_bindings(
+                        template_arguments,
+                        parameters,
+                        active_bindings,
+                        loc,
+                        allow_unsubstituted_parameters);
+                };
+            return append_integer_pack_template_arguments(
+                *this,
+                ast_ctx_.get(),
+                argument,
+                parameters,
+                active_bindings,
+                loc,
+                allow_unsubstituted_parameters,
+                rewrite_integer_pack_type,
+                rewrite_integer_pack_arguments,
+                [&](const std::string& message, SrcLoc error_loc) {
+                    report_error(message, error_loc);
+                },
+                QualType(get_builtin_ulong()),
+                rewritten);
+        }
+
         if (argument.expands_parameter_pack) {
             template_sema_internal::TemplatePackExpansionShape shape;
             if (!collect_pack_expansion_shape_in_template_argument(
