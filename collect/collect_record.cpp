@@ -1997,24 +1997,27 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
         auto* method_decl = dyn_cast<CppMethodDecl>(member.get());
         if (const auto* method_template =
                 dyn_cast<FunctionTemplateDecl>(member.get())) {
+            auto* templated_function = method_template->function_decl();
             auto* templated_method =
-                dyn_cast<CppMethodDecl>(method_template->function_decl());
-            if (!templated_method) {
+                dyn_cast<CppMethodDecl>(templated_function);
+            auto* templated_ctor =
+                dyn_cast<CppConstructorDecl>(templated_function);
+            if (!templated_method && !templated_ctor) {
                 continue;
             }
 
             std::string method_prefix;
             if (auto* existing_prefix =
-                    get_func_decl_cxx_qualifier_prefix(templated_method)) {
+                    get_func_decl_cxx_qualifier_prefix(templated_function)) {
                 method_prefix = *existing_prefix;
             }
             if (method_prefix.empty()) {
                 method_prefix = ctx.tag;
             }
             ensure_namespace_qualifier_prefix(method_prefix);
-            set_func_decl_cxx_qualifier_prefix(templated_method, method_prefix);
+            set_func_decl_cxx_qualifier_prefix(templated_function, method_prefix);
             set_func_decl_owner_record_type(
-                templated_method,
+                templated_function,
                 QualType(ctx.record_type));
 
             if (ast_ctx_) {
@@ -2022,26 +2025,39 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 member_info.declared_access = static_cast<uint8_t>(current_access);
                 member_info.is_method = true;
                 member_info.is_static =
+                    templated_method &&
                     templated_method->storage_class == StorageClass::STATIC;
-                member_info.is_constructor = false;
+                member_info.is_constructor = templated_ctor != nullptr;
                 member_info.is_destructor = false;
-                member_info.is_virtual = templated_method->is_virtual;
-                member_info.is_override = templated_method->is_override;
-                member_info.is_final = templated_method->is_final;
-                member_info.is_pure = templated_method->is_pure;
-                member_info.is_constexpr = templated_method->is_constexpr;
+                member_info.is_explicit = templated_ctor
+                    ? templated_ctor->is_explicit
+                    : templated_method->is_explicit_conversion;
+                member_info.is_virtual =
+                    templated_method ? templated_method->is_virtual : false;
+                member_info.is_override =
+                    templated_method ? templated_method->is_override : false;
+                member_info.is_final =
+                    templated_method ? templated_method->is_final : false;
+                member_info.is_pure =
+                    templated_method ? templated_method->is_pure : false;
+                member_info.is_constexpr = templated_function->is_constexpr;
                 ast_ctx_->set_cpp_member_decl_info(
-                    templated_method->node_id,
+                    templated_function->node_id,
                     member_info);
             }
 
             RecordSemanticState::MethodTemplate method_template_state;
-            method_template_state.name = templated_method->name;
+            method_template_state.name = templated_function->name;
             method_template_state.declared_access = current_access;
             method_template_state.is_static =
+                templated_method &&
                 templated_method->storage_class == StorageClass::STATIC;
             method_template_state.decl = method_template;
             ctx.method_templates.push_back(std::move(method_template_state));
+            if (templated_ctor) {
+                ctx.semantic_state.definition_data.has_user_declared_constructor =
+                    true;
+            }
             continue;
         }
         if (!method_decl) {
@@ -2236,22 +2252,25 @@ void Collect::collect_record_synthesize_implicit_members(
         set_func_decl_cxx_qualifier_prefix(ctor_decl.get(), ctor_prefix);
         set_func_decl_owner_record_type(ctor_decl.get(), owner_type);
 
-        auto ctor_sym = mutable_self->collect_declare_function_symbol(
-            ctor_decl->name,
-            QualType(ctor_decl->type),
-            ctor_decl->storage_class,
-            ctor_decl->is_constexpr,
-            ctor_decl->is_inline,
-            true,
-            ctx.loc,
-            ctor_decl->get_language_linkage(),
-            true,
-            ctor_decl->is_deleted,
-            ctor_decl->is_defaulted);
-        if (ctor_sym) {
-            set_symbol_cxx_qualifier_prefix(ctor_sym.get(), ctor_prefix);
-            set_symbol_owner_record_type(ctor_sym.get(), owner_type);
-            ctor_sym->function_definition = ctor_decl.get();
+        std::shared_ptr<Symbol> ctor_sym = nullptr;
+        if (source_ref_kind.has_value()) {
+            ctor_sym = mutable_self->collect_declare_function_symbol(
+                ctor_decl->name,
+                QualType(ctor_decl->type),
+                ctor_decl->storage_class,
+                ctor_decl->is_constexpr,
+                ctor_decl->is_inline,
+                true,
+                ctx.loc,
+                ctor_decl->get_language_linkage(),
+                true,
+                ctor_decl->is_deleted,
+                ctor_decl->is_defaulted);
+            if (ctor_sym) {
+                set_symbol_cxx_qualifier_prefix(ctor_sym.get(), ctor_prefix);
+                set_symbol_owner_record_type(ctor_sym.get(), owner_type);
+                ctor_sym->function_definition = ctor_decl.get();
+            }
         }
 
         if (ast_ctx_) {

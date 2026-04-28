@@ -672,12 +672,87 @@ std::string ASTToLLVM::get_asm_label_name(const std::string& label) {
     return "\01" + label;
 }
 
-std::string ASTToLLVM::get_function_llvm_name(const FuncDecl& decl) const {
-    if (!(ast_ctx && ast_ctx->abi_policy)) {
-        if (decl.asm_label) {
-            return get_asm_label_name(*decl.asm_label);
+std::shared_ptr<Symbol> ASTToLLVM::get_function_symbol_for_decl(
+    const FuncDecl& decl) const {
+    auto owner_type =
+        desugar_type(get_func_decl_owner_record_type(&decl), ast_ctx.get())
+            .as_shared<ObjectType>();
+    auto* owner_decl =
+        owner_type ? dyn_cast<ObjectDecl>(owner_type->get_decl()) : nullptr;
+    const RecordSemanticState* state = lookup_cpp_record_state(owner_decl);
+    if (!state) {
+        return nullptr;
+    }
+
+    if (const auto* ctor = dyn_cast<CppConstructorDecl>(&decl)) {
+        for (const auto& candidate : state->constructors) {
+            if (candidate.decl == ctor) {
+                return candidate.symbol;
+            }
         }
-        return decl.name == "main" ? "main" : decl.name;
+        return nullptr;
+    }
+    if (const auto* dtor = dyn_cast<CppDestructorDecl>(&decl)) {
+        for (const auto& candidate : state->destructors) {
+            if (candidate.decl == dtor) {
+                return candidate.symbol;
+            }
+        }
+        return nullptr;
+    }
+    if (const auto* method = dyn_cast<CppMethodDecl>(&decl)) {
+        for (const auto& candidate : state->methods) {
+            if (candidate.decl == method) {
+                return candidate.symbol;
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool ASTToLLVM::is_cxx_default_constructor_symbol(
+    const std::shared_ptr<Symbol>& sym) const {
+    if (!sym || sym->kind != SymbolKind::FUNCTION) {
+        return false;
+    }
+    auto owner_type =
+        desugar_type(get_symbol_owner_record_type(sym.get()), ast_ctx.get())
+            .as_shared<ObjectType>();
+    auto* owner_decl =
+        owner_type ? dyn_cast<ObjectDecl>(owner_type->get_decl()) : nullptr;
+    const RecordSemanticState* state = lookup_cpp_record_state(owner_decl);
+    if (!state) {
+        return false;
+    }
+    for (const auto& ctor : state->constructors) {
+        if (ctor.symbol.get() != sym.get()) {
+            continue;
+        }
+        auto fn_type = desugar_type(ctor.type, ast_ctx.get())
+            .as_shared<FunctionType>();
+        return fn_type && fn_type->parameters.size() == 1;
+    }
+    return false;
+}
+
+std::string ASTToLLVM::get_function_llvm_name(const FuncDecl& decl) const {
+    if (decl.asm_label) {
+        return get_asm_label_name(*decl.asm_label);
+    }
+    if (decl.name == "main") {
+        return "main";
+    }
+    if (auto sym = get_function_symbol_for_decl(decl)) {
+        if (!(ast_ctx && ast_ctx->abi_policy) ||
+            ast_ctx->abi_policy->mangling == ManglingKind::C) {
+            return get_function_llvm_name(sym, decl.name);
+        }
+    }
+    if (!(ast_ctx && ast_ctx->abi_policy)) {
+        if (auto sym = get_function_symbol_for_decl(decl)) {
+            return get_function_llvm_name(sym, decl.name);
+        }
+        return decl.name;
     }
     auto resolved = resolve_function_linkage_name(decl, *ast_ctx->abi_policy);
     if (resolved.from_asm_label) {
@@ -688,6 +763,23 @@ std::string ASTToLLVM::get_function_llvm_name(const FuncDecl& decl) const {
 
 std::string ASTToLLVM::get_function_llvm_name(const std::shared_ptr<Symbol>& sym,
                                               const std::string& fallback_spelling) const {
+    if (sym && sym->asm_label.has_value()) {
+        return get_asm_label_name(sym->asm_label.value());
+    }
+    if (sym && sym->kind == SymbolKind::FUNCTION) {
+        if (sym->name == "main") {
+            return "main";
+        }
+        if (!sym->uid.empty() &&
+            get_symbol_owner_record_type(sym.get()) &&
+            (!(ast_ctx && ast_ctx->abi_policy) ||
+             ast_ctx->abi_policy->mangling == ManglingKind::C)) {
+            if (is_cxx_default_constructor_symbol(sym)) {
+                return fallback_spelling.empty() ? sym->name : fallback_spelling;
+            }
+            return mangleCIdentifier(sym->uid);
+        }
+    }
     if (sym && sym->kind == SymbolKind::FUNCTION && ast_ctx && ast_ctx->abi_policy) {
         auto resolved = resolve_function_linkage_name(
             *sym, *ast_ctx->abi_policy, fallback_spelling);
@@ -696,13 +788,7 @@ std::string ASTToLLVM::get_function_llvm_name(const std::shared_ptr<Symbol>& sym
         }
         return resolved.name;
     }
-    if (sym && sym->asm_label.has_value()) {
-        return get_asm_label_name(sym->asm_label.value());
-    }
     if (sym && sym->kind == SymbolKind::FUNCTION) {
-        if (sym->name == "main") {
-            return "main";
-        }
         return sym->name;
     }
     return fallback_spelling;

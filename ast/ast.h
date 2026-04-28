@@ -307,6 +307,16 @@ struct Expr: ValueStmt {
         return s->get_kind() >= StmtKind::FirstExpr && s->get_kind() <= StmtKind::LastExpr;
     }
 };
+
+struct CppExplicitSpecifier {
+    bool is_present = false;
+    bool is_conditional = false;
+    bool is_dependent = false;
+    bool effective_value = false;
+    std::shared_ptr<Expr> condition = nullptr;
+    SrcLoc location;
+};
+
 struct CompoundStmt: Stmt {
     explicit CompoundStmt(std::vector<std::unique_ptr<Stmt>> statements, SrcLoc loc = SrcLoc())
     : Stmt(StmtKind::CompoundStmt, loc), statements(std::move(statements)), scope(nullptr) {}
@@ -661,6 +671,7 @@ struct CppMethodDecl : FuncDecl {
     size_t deferred_inline_body_begin_token_idx;
     size_t deferred_inline_body_end_token_idx;
     QualType conversion_target_type;
+    CppExplicitSpecifier explicit_specifier;
 
     CppMethodDecl(const std::string name, const std::shared_ptr<CType> type,
                   std::vector<std::unique_ptr<Decl>> parameters, std::unique_ptr<Stmt> body,
@@ -732,6 +743,7 @@ struct CppConstructorDecl : FuncDecl {
     uint8_t has_deferred_inline_body_tokens : 1;
     size_t deferred_inline_body_begin_token_idx;
     size_t deferred_inline_body_end_token_idx;
+    CppExplicitSpecifier explicit_specifier;
     std::vector<CppCtorInitializer> ctor_initializers;
 
     CppConstructorDecl(const std::string name, const std::shared_ptr<CType> type,

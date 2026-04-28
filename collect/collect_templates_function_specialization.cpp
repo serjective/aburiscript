@@ -4,13 +4,16 @@
 using template_sema_internal::build_pack_element_argument_bindings;
 using template_sema_internal::clone_function_body_for_specialization;
 using template_sema_internal::clone_function_parameters_for_specialization;
+using template_sema_internal::clone_ctor_initializers_for_specialization;
 using template_sema_internal::copy_cpp_member_decl_info;
+using template_sema_internal::finalize_specialized_ctor_initializers;
 using template_sema_internal::lookup_symbol_remap_in_clone_context;
 using template_sema_internal::make_template_binding_clone_pass_builder;
 using template_sema_internal::materialize_specialized_fold_expression;
 using template_sema_internal::normalize_concrete_template_value_argument;
 using template_sema_internal::rebind_member_expr_for_specialized_record;
 using template_sema_internal::rebind_specialized_function_owner;
+using template_sema_internal::substitute_cpp_explicit_specifier_for_specialization;
 using template_sema_internal::template_argument_has_known_payload;
 using template_sema_internal::template_arguments_depend_on_template_parameters;
 using template_sema_internal::TemplateSubstitutionPass;
@@ -437,7 +440,113 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
     std::unique_ptr<FuncDecl> create_specialization_decl(
         const std::shared_ptr<FunctionType>& canonical_function_type) {
         std::unique_ptr<FuncDecl> specialization_decl;
-        if (auto* pattern_method = dyn_cast<CppMethodDecl>(pattern)) {
+        auto substitute_explicit_specifier =
+            [&](const CppExplicitSpecifier& pattern_specifier,
+                FuncDecl* specialized_decl,
+                CppExplicitSpecifier& specialized_specifier,
+                bool& effective_value_out) -> bool {
+            auto rewrite_function_template_type =
+                [&](QualType type) -> QualType {
+                auto rewritten =
+                    collect.substitute_template_type_with_bindings(
+                        type,
+                        function_template->parameters,
+                        specialization_bindings,
+                        loc);
+                return collect.finalize_deferred_semantic_type(rewritten, loc);
+            };
+            auto rewrite_function_template_arguments =
+                [&](const std::vector<TemplateArgument>& template_arguments)
+                    -> std::vector<TemplateArgument> {
+                return collect.substitute_template_arguments_with_bindings(
+                    template_arguments,
+                    function_template->parameters,
+                    specialization_bindings,
+                    loc);
+            };
+            auto clone_pass_builder = make_template_binding_clone_pass_builder(
+                ast_ctx(),
+                &collect,
+                function_template->parameters,
+                specialization_bindings,
+                loc,
+                "function template non-type parameter requires a concrete integral value",
+                rewrite_function_template_type,
+                rewrite_function_template_arguments,
+                {},
+                {});
+            auto clone_pass = clone_pass_builder.build_substitution_pass();
+            QualType specialization_this_type =
+                template_sema_internal::implicit_this_type_for_specialized_function(
+                    specialized_decl);
+            auto resolution_pass =
+                clone_pass_builder.build_dependent_resolution_pass(
+                    clone_pass,
+                    [&](std::unique_ptr<Expr>& expr,
+                        std::string* error_out) -> bool {
+                        return collect.resolve_dependent_expr_after_substitution(
+                            expr,
+                            specialization_this_type,
+                            error_out);
+                    });
+            std::string explicit_error;
+            if (!substitute_cpp_explicit_specifier_for_specialization(
+                    collect,
+                    pattern_specifier,
+                    specialized_specifier,
+                    clone_pass,
+                    resolution_pass,
+                    loc,
+                    &explicit_error)) {
+                fail(
+                    explicit_error.empty()
+                        ? "failed to substitute explicit specifier expression"
+                        : explicit_error,
+                    pattern_specifier.location.isInvalid()
+                        ? loc
+                        : pattern_specifier.location);
+                return false;
+            }
+            effective_value_out = specialized_specifier.effective_value;
+            return true;
+        };
+
+        if (auto* pattern_ctor = dyn_cast<CppConstructorDecl>(pattern)) {
+            auto specialized_ctor = collect.collect_make<CppConstructorDecl>();
+            specialized_ctor->location = pattern_ctor->location;
+            specialized_ctor->name = pattern_ctor->name;
+            specialized_ctor->type = canonical_function_type;
+            specialized_ctor->storage_class = pattern_ctor->storage_class;
+            specialized_ctor->is_inline = pattern_ctor->is_inline;
+            specialized_ctor->is_constexpr = pattern_ctor->is_constexpr;
+            specialized_ctor->is_deleted = pattern_ctor->is_deleted;
+            specialized_ctor->is_defaulted = pattern_ctor->is_defaulted;
+            specialized_ctor->set_language_linkage(
+                pattern_ctor->get_language_linkage());
+            specialized_ctor->is_explicit = pattern_ctor->is_explicit;
+            bool specialized_ctor_is_explicit = specialized_ctor->is_explicit;
+            if (!substitute_explicit_specifier(
+                    pattern_ctor->explicit_specifier,
+                    specialized_ctor.get(),
+                    specialized_ctor->explicit_specifier,
+                    specialized_ctor_is_explicit)) {
+                return nullptr;
+            }
+            specialized_ctor->is_explicit = specialized_ctor_is_explicit;
+            if (pattern_ctor->asm_label) {
+                specialized_ctor->set_asm_label(*pattern_ctor->asm_label);
+            }
+            copy_cpp_member_decl_info(
+                ast_ctx(),
+                pattern_ctor->node_id,
+                specialized_ctor->node_id);
+            if (auto* member_info =
+                    ast_ctx()->get_cpp_member_decl_info(
+                        specialized_ctor->node_id)) {
+                member_info->is_explicit = specialized_ctor->is_explicit;
+            }
+            specialization_decl = std::move(specialized_ctor);
+        } else if (auto* pattern_method = dyn_cast<CppMethodDecl>(pattern)) {
             auto specialized_method = collect.collect_make<CppMethodDecl>();
             specialized_method->location = pattern_method->location;
             specialized_method->name = pattern_method->name;
@@ -457,6 +566,17 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 pattern_method->is_conversion_function;
             specialized_method->is_explicit_conversion =
                 pattern_method->is_explicit_conversion;
+            bool specialized_method_is_explicit =
+                specialized_method->is_explicit_conversion;
+            if (!substitute_explicit_specifier(
+                    pattern_method->explicit_specifier,
+                    specialized_method.get(),
+                    specialized_method->explicit_specifier,
+                    specialized_method_is_explicit)) {
+                return nullptr;
+            }
+            specialized_method->is_explicit_conversion =
+                specialized_method_is_explicit;
             if (pattern_method->conversion_target_type) {
                 specialized_method->conversion_target_type =
                     collect.finalize_deferred_semantic_type(
@@ -474,6 +594,12 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 ast_ctx(),
                 pattern_method->node_id,
                 specialized_method->node_id);
+            if (auto* member_info =
+                    ast_ctx()->get_cpp_member_decl_info(
+                        specialized_method->node_id)) {
+                member_info->is_explicit =
+                    specialized_method->is_explicit_conversion;
+            }
             specialization_decl = std::move(specialized_method);
         } else {
             auto specialized_function = collect.collect_make<FuncDecl>();
@@ -1065,6 +1191,38 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             default_arguments,
             nullptr);
         resolution_pass.sync_from_substitution_pass(clone_pass);
+
+        if (auto* pattern_ctor = dyn_cast<CppConstructorDecl>(pattern)) {
+            auto* specialization_ctor =
+                dyn_cast<CppConstructorDecl>(specialization_decl_ptr);
+            if (!specialization_ctor) {
+                return fail_instantiation(
+                    "internal error: function template constructor specialization did not preserve a constructor declaration",
+                    pattern->location);
+            }
+            if (!clone_ctor_initializers_for_specialization(
+                    pattern_ctor,
+                    specialization_ctor,
+                    clone_pass,
+                    resolution_pass,
+                    &clone_error)) {
+                return fail_instantiation(
+                    clone_error.empty()
+                        ? "constructor template initializer cloning is not supported"
+                        : clone_error,
+                    pattern_ctor->location);
+            }
+            if (!finalize_specialized_ctor_initializers(
+                    collect,
+                    specialization_ctor,
+                    &clone_error)) {
+                return fail_instantiation(
+                    clone_error.empty()
+                        ? "constructor template initializer finalization failed"
+                        : clone_error,
+                    pattern_ctor->location);
+            }
+        }
 
         specialization_decl_ptr->body.reset();
         if (!clone_function_body_for_specialization(

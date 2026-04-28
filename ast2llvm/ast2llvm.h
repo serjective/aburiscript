@@ -201,6 +201,9 @@ public:
     // Get the LLVM IR name for an asm label. Prepends \01 to prevent LLVM from
     // adding the Mach-O underscore prefix, since asm labels are exact symbol names.
     static std::string get_asm_label_name(const std::string& label);
+    std::shared_ptr<Symbol> get_function_symbol_for_decl(const FuncDecl& decl) const;
+    bool is_cxx_default_constructor_symbol(
+        const std::shared_ptr<Symbol>& sym) const;
     std::string get_function_llvm_name(const FuncDecl& decl) const;
     std::string get_function_llvm_name(const std::shared_ptr<Symbol>& sym,
                                        const std::string& fallback_spelling = "") const;

@@ -988,15 +988,18 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
         }
 
         if (const auto* method_template = dyn_cast<FunctionTemplateDecl>(member.get())) {
+            auto* templated_function = method_template->function_decl();
             auto* templated_method =
-                dyn_cast<CppMethodDecl>(method_template->function_decl());
-            if (!templated_method) {
+                dyn_cast<CppMethodDecl>(templated_function);
+            auto* templated_ctor =
+                dyn_cast<CppConstructorDecl>(templated_function);
+            if (!templated_method && !templated_ctor) {
                 continue;
             }
 
             std::string method_prefix;
             if (auto* qualifier_prefix =
-                    get_func_decl_cxx_qualifier_prefix(templated_method)) {
+                    get_func_decl_cxx_qualifier_prefix(templated_function)) {
                 method_prefix = *qualifier_prefix;
             }
             if (method_prefix.empty()) {
@@ -1004,17 +1007,26 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             }
             ensure_namespace_qualifier_prefix(method_prefix);
             if (!method_prefix.empty()) {
-                set_func_decl_cxx_qualifier_prefix(templated_method, method_prefix);
+                set_func_decl_cxx_qualifier_prefix(
+                    templated_function,
+                    method_prefix);
             }
-            set_func_decl_owner_record_type(templated_method, QualType(record_type));
+            set_func_decl_owner_record_type(
+                templated_function,
+                QualType(record_type));
 
             RecordSemanticState::MethodTemplate method_template_state;
-            method_template_state.name = templated_method->name;
+            method_template_state.name = templated_function->name;
             method_template_state.declared_access = current_access;
             method_template_state.is_static =
+                templated_method &&
                 templated_method->storage_class == StorageClass::STATIC;
             method_template_state.decl = method_template;
             method_templates.push_back(std::move(method_template_state));
+            if (templated_ctor) {
+                semantic_state.definition_data.has_user_declared_constructor =
+                    true;
+            }
             continue;
         }
 
@@ -1395,11 +1407,13 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
         };
     auto parse_deferred_inline_method_template_body =
         [&](FunctionTemplateDecl* method_template) {
+        auto* templated_function =
+            method_template ? method_template->function_decl() : nullptr;
         auto* templated_method =
-            method_template
-                ? dyn_cast<CppMethodDecl>(method_template->function_decl())
-                : nullptr;
-        if (!templated_method) {
+            dyn_cast<CppMethodDecl>(templated_function);
+        auto* templated_ctor =
+            dyn_cast<CppConstructorDecl>(templated_function);
+        if (!templated_method && !templated_ctor) {
             return;
         }
 
@@ -1459,6 +1473,17 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                         non_type_parameter->sym);
                 }
             }
+        }
+
+        if (templated_ctor) {
+            parse_deferred_inline_member_body(
+                templated_ctor,
+                false,
+                true,
+                [&](CppConstructorDecl* ctor) {
+                    parse_deferred_constructor_member_initializers(ctor);
+                });
+            return;
         }
 
         parse_deferred_inline_member_body(
@@ -1738,13 +1763,48 @@ std::shared_ptr<CType> Parser::parse_declaration_head(Token start_token,
                     }
                     return false;
                 };
+            auto skip_balanced_tokens =
+                [&](size_t& offset,
+                    TokenType open_tok,
+                    TokenType close_tok) -> bool {
+                if (peek_token_shortcut(offset).type != open_tok) {
+                    return false;
+                }
+                int depth = 0;
+                while (peek_token_shortcut(offset).type != TokenType::Eof) {
+                    TokenType tok = peek_token_shortcut(offset).type;
+                    if (tok == open_tok) {
+                        ++depth;
+                    } else if (tok == close_tok) {
+                        --depth;
+                        if (depth == 0) {
+                            ++offset;
+                            return true;
+                        }
+                    }
+                    ++offset;
+                }
+                return false;
+            };
+            auto skip_explicit_specifier =
+                [&](size_t& offset) -> bool {
+                if (peek_token_shortcut(offset).type != TokenType::EXPLICIT_KW) {
+                    return false;
+                }
+                ++offset;
+                if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN) {
+                    skip_balanced_tokens(
+                        offset,
+                        TokenType::LEFT_PAREN,
+                        TokenType::RIGHT_PAREN);
+                }
+                return true;
+            };
 
             size_t offset = 0;
             bool saw_scope_resolution = false;
+            skip_explicit_specifier(offset);
             TokenType toktype = peek_token_shortcut(offset).type;
-            if (toktype == TokenType::EXPLICIT_KW) {
-                ++offset;
-            }
             if (toktype == TokenType::OPERATOR_KW) {
                 return true;
             }
@@ -2745,6 +2805,11 @@ Parser::DeclaratorHandlingResult Parser::handle_typedef_declarator(
     std::vector<ParsedAttribute>& trailing_attrs,
     bool declaration_is_constexpr,
     std::vector<std::unique_ptr<Decl>>& ret_vec) {
+    if (decl_parser.explicit_specifier.is_present) {
+        error_custloc(
+            "'explicit' is only allowed on constructors and conversion functions",
+            decl_parser.explicit_specifier.location);
+    }
     if (declaration_is_constexpr) {
         error("'constexpr' cannot be combined with 'typedef'");
     }
@@ -2824,6 +2889,13 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
     LanguageLinkage declaration_language_linkage,
     QualifiedDeclaratorInfo& qualified_declarator,
     std::vector<std::unique_ptr<Decl>>& ret_vec) {
+    if (decl_parser.explicit_specifier.is_present) {
+        error_custloc(
+            qualified_declarator.owner_record_decl
+                ? "'explicit' is only allowed on declarations inside a class definition"
+                : "'explicit' is only allowed on constructors and conversion functions",
+            decl_parser.explicit_specifier.location);
+    }
     if (qualified_declarator.owner_record_decl) {
         bool matched_member_template =
             qualified_declarator.method_template_match != nullptr;
@@ -2955,6 +3027,9 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         out_of_line_method->is_explicit_conversion = matched_method_decl
             ? matched_method_decl->is_explicit_conversion
             : qualified_declarator.method_match->is_explicit;
+        out_of_line_method->explicit_specifier = matched_method_decl
+            ? matched_method_decl->explicit_specifier
+            : CppExplicitSpecifier{};
         out_of_line_method->conversion_target_type = matched_method_decl
             ? matched_method_decl->conversion_target_type
             : qualified_declarator.method_match->conversion_target_type;
@@ -3167,6 +3242,8 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                 out_of_line_method->is_conversion_function;
             matched_method_decl->is_explicit_conversion =
                 out_of_line_method->is_explicit_conversion;
+            matched_method_decl->explicit_specifier =
+                out_of_line_method->explicit_specifier;
             matched_method_decl->conversion_target_type =
                 out_of_line_method->conversion_target_type;
             matched_method_decl->set_language_linkage(
@@ -3362,6 +3439,11 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
     QualifiedDeclaratorInfo& qualified_declarator,
     std::optional<QualType>& first_cxx_auto_deduced_type,
     std::vector<std::unique_ptr<Decl>>& ret_vec) {
+    if (decl_parser.explicit_specifier.is_present) {
+        error_custloc(
+            "'explicit' is only allowed on constructors and conversion functions",
+            decl_parser.explicit_specifier.location);
+    }
     auto has_cxx_auto_type = [&](const std::shared_ptr<CType>& type) -> bool {
         return auto_type_utils::has_cxx_auto_type(type);
     };
@@ -3905,6 +3987,9 @@ std::unique_ptr<Decl> Parser::parse_parameter_declaration() {
     if (decl_parser.is_constexpr) {
         error("'constexpr' is not valid for function parameter declarations");
     }
+    if (decl_parser.explicit_specifier.is_present) {
+        error("'explicit' is not valid for function parameter declarations");
+    }
     std::shared_ptr<Symbol> sym = nullptr;
     if (!name.empty()) {
         sym = collect_->collect_declare_variable_symbol(
@@ -3951,16 +4036,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
         return fields;
     }
 
-    bool leading_explicit_specifier = false;
-    if (is_cxx_mode_active() &&
-        is_parsing_cpp_record_body() &&
-        !cxx_record_parse_stack_.empty() &&
-        cxx_record_parse_stack_.back().kind != CppRecordKind::Union &&
-        gentle_check(TokenType::EXPLICIT_KW)) {
-        leading_explicit_specifier = true;
-        advance();
-    }
-
     DeclarationParser decl_parser(this);
     decl_parser.allow_typeless_conversion_function =
         is_cxx_mode_active() &&
@@ -3991,6 +4066,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             retain_type_specifier_decl_if_needed(*param_parser);
             if (param_parser->is_constexpr) {
                 error("'constexpr' is not valid for function parameter declarations");
+            }
+            if (param_parser->explicit_specifier.is_present) {
+                error("'explicit' is not valid for function parameter declarations");
             }
             if (param_parser->result_type &&
                 param_parser->result_type->isVoid()) {
@@ -4051,8 +4129,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
         decl_parser.reset_declarator_parsing_state();
         auto field_type = decl_parser.parse_declarator(base_type);
         std::string field_name = decl_parser.name;
-        bool member_explicit = leading_explicit_specifier;
-        leading_explicit_specifier = false;
+        CppExplicitSpecifier member_explicit_specifier =
+            decl_parser.explicit_specifier;
+        bool member_explicit = member_explicit_specifier.effective_value;
 
         // Parse attributes that appear right after the declarator.
         auto field_attrs_before_colon = try_parse_attributes();
@@ -4105,7 +4184,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             if (member_explicit &&
                 !is_constructor_member &&
                 !decl_parser.is_conversion_function) {
-                error("'explicit' is only allowed on constructors");
+                error("'explicit' is only allowed on constructors and conversion functions");
             }
             if (decl_parser.is_conversion_function) {
                 auto method_fn_type = dyn_cast_shared<FunctionType>(field_type);
@@ -4234,6 +4313,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     member_explicit,
                     t.loc);
                 ctor_decl->type = field_type;
+                ctor_decl->explicit_specifier =
+                    std::move(member_explicit_specifier);
                 ctor_decl->is_constexpr = decl_parser.is_constexpr;
                 ctor_decl->is_deleted = ctor_is_deleted;
                 ctor_decl->is_defaulted = ctor_is_defaulted;
@@ -4427,6 +4508,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->is_conversion_function =
                     decl_parser.is_conversion_function;
                 cpp_method->is_explicit_conversion = member_explicit;
+                cpp_method->explicit_specifier = member_explicit_specifier;
                 cpp_method->conversion_target_type =
                     decl_parser.conversion_target_type;
                 cpp_method->is_virtual = method_is_virtual;
@@ -4470,6 +4552,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->is_conversion_function =
                     decl_parser.is_conversion_function;
                 cpp_method->is_explicit_conversion = member_explicit;
+                cpp_method->explicit_specifier = member_explicit_specifier;
                 cpp_method->conversion_target_type =
                     decl_parser.conversion_target_type;
                 cpp_method->is_virtual = method_is_virtual;
@@ -4602,8 +4685,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             error("'virtual' can only be specified for class member functions");
         }
 
-        if (member_explicit) {
-            error("'explicit' is only allowed on constructors");
+        if (member_explicit_specifier.is_present) {
+            error("'explicit' is only allowed on constructors and conversion functions");
         }
 
         bool in_cpp_record_body =
@@ -5507,6 +5590,9 @@ bool Parser::isTokenDeclarationSpec(Token s) {
         return is_cxx_mode_active();
     }
     if (s.type == TokenType::TYPENAME) {
+        return is_cxx_mode_active();
+    }
+    if (s.type == TokenType::EXPLICIT_KW) {
         return is_cxx_mode_active();
     }
     if ((s.type == TokenType::CONSTEXPR_KW) ||

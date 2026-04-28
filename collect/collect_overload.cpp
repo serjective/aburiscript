@@ -525,6 +525,9 @@ void Collect::append_unqualified_overload_candidates(
         std::string(function_name), session_.current_scope_, true);
     candidates_out.reserve(candidates_out.size() + function_candidates.size());
     for (const auto& fn_sym : function_candidates) {
+        if (fn_sym && get_symbol_owner_record_type(fn_sym.get())) {
+            continue;
+        }
         OverloadCallCandidate call_candidate;
         call_candidate.symbol = fn_sym;
         call_candidate.implicit_object_arg_kind = implicit_arg_kind;

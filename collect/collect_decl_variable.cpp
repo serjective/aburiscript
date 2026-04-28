@@ -291,10 +291,22 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         record_type &&
         canonical_type_kind(declared_type, ast_ctx_.get()) == TypeKind::Object &&
         (!analysis.is_abstract_object_type || allow_abstract_object_type_instantiation);
+    bool has_constructor_template = false;
+    if (record_state) {
+        for (const auto& method_template : record_state->method_templates) {
+            auto* function_template = method_template.decl;
+            if (function_template &&
+                isa<CppConstructorDecl>(function_template->function_decl())) {
+                has_constructor_template = true;
+                break;
+            }
+        }
+    }
     analysis.should_use_constructor_overload =
         record_state &&
-        !record_state->constructors.empty() &&
-        (record_state->definition_data.has_user_declared_constructor ||
+        (!record_state->constructors.empty() || has_constructor_template) &&
+        (has_constructor_template ||
+         record_state->definition_data.has_user_declared_constructor ||
          should_use_implicit_special_member_constructor_overload(
              declared_type,
              record_state,

@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <optional>
 
 namespace {
 Token make_template_split_token(const Token& source,
@@ -2696,7 +2697,111 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     std::vector<std::unique_ptr<Decl>> templated_decls;
     std::vector<TemplateArgument> record_specialization_arguments;
     bool record_has_specialization_argument_list = false;
-    if (gentle_check(TokenType::CLASS) ||
+    auto member_template_constructor_name_offset = [&]() -> std::optional<size_t> {
+        if (!member_template_declaration ||
+            cxx_record_parse_stack_.empty() ||
+            cxx_record_parse_stack_.back().kind == CppRecordKind::Union ||
+            cxx_record_parse_stack_.back().name.empty()) {
+            return std::nullopt;
+        }
+        auto skip_balanced_tokens =
+            [&](size_t& offset,
+                TokenType open_tok,
+                TokenType close_tok) -> bool {
+            if (peek_token_shortcut(offset).type != open_tok) {
+                return false;
+            }
+            int depth = 0;
+            while (peek_token_shortcut(offset).type != TokenType::Eof) {
+                TokenType tok = peek_token_shortcut(offset).type;
+                if (tok == open_tok) {
+                    ++depth;
+                } else if (tok == close_tok) {
+                    --depth;
+                    if (depth == 0) {
+                        ++offset;
+                        return true;
+                    }
+                }
+                ++offset;
+            }
+            return false;
+        };
+        auto skip_gnu_attribute = [&](size_t& offset) -> bool {
+            if (!is_gnu_attribute_token(peek_token_shortcut(offset))) {
+                return false;
+            }
+            ++offset;
+            if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN) {
+                skip_balanced_tokens(
+                    offset,
+                    TokenType::LEFT_PAREN,
+                    TokenType::RIGHT_PAREN);
+            }
+            return true;
+        };
+        auto skip_cxx_attribute = [&](size_t& offset) -> bool {
+            if (peek_token_shortcut(offset).type != TokenType::LEFT_BRACKET ||
+                peek_token_shortcut(offset + 1).type != TokenType::LEFT_BRACKET) {
+                return false;
+            }
+            offset += 2;
+            while (peek_token_shortcut(offset).type != TokenType::Eof) {
+                if (peek_token_shortcut(offset).type == TokenType::RIGHT_BRACKET &&
+                    peek_token_shortcut(offset + 1).type == TokenType::RIGHT_BRACKET) {
+                    offset += 2;
+                    return true;
+                }
+                ++offset;
+            }
+            return false;
+        };
+        size_t offset = 0;
+        while (true) {
+            Token tok = peek_token_shortcut(offset);
+            if (tok.type == TokenType::EXPLICIT_KW) {
+                ++offset;
+                if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN) {
+                    skip_balanced_tokens(
+                        offset,
+                        TokenType::LEFT_PAREN,
+                        TokenType::RIGHT_PAREN);
+                }
+                continue;
+            }
+            if (tok.type == TokenType::CONSTEXPR_KW ||
+                tok.type == TokenType::INLINE) {
+                ++offset;
+                continue;
+            }
+            if (skip_gnu_attribute(offset) || skip_cxx_attribute(offset)) {
+                continue;
+            }
+            if (tok.type == TokenType::ALIGNAS) {
+                ++offset;
+                if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN) {
+                    skip_balanced_tokens(
+                        offset,
+                        TokenType::LEFT_PAREN,
+                        TokenType::RIGHT_PAREN);
+                }
+                continue;
+            }
+            break;
+        }
+        const std::string& record_name = cxx_record_parse_stack_.back().name;
+        Token ctor_name_tok = peek_token_shortcut(offset);
+        if (ctor_name_tok.type == TokenType::IDENTIFIER &&
+            ctor_name_tok.value == record_name &&
+            peek_token_shortcut(offset + 1).type == TokenType::LEFT_PAREN) {
+            return offset;
+        }
+        return std::nullopt;
+    };
+
+    if (member_template_constructor_name_offset().has_value()) {
+        templated_decls.push_back(parse_cpp_constructor_member());
+    } else if (gentle_check(TokenType::CLASS) ||
         gentle_check(TokenType::STRUCT) ||
         gentle_check(TokenType::UNION)) {
         auto record_decl =
@@ -4385,6 +4490,74 @@ void Parser::fail_cpp_future_work(std::string_view feature,
     error_custloc(make_cpp_future_work_message(feature, future_work_item), loc);
 }
 
+CppExplicitSpecifier Parser::parse_cpp_optional_explicit_specifier() {
+    CppExplicitSpecifier specifier;
+    if (!is_cxx_mode_active() || !gentle_check(TokenType::EXPLICIT_KW)) {
+        return specifier;
+    }
+
+    Token explicit_tok = current_token();
+    specifier.is_present = true;
+    specifier.effective_value = true;
+    specifier.location = explicit_tok.loc;
+    advance(); // 'explicit'
+
+    if (!gentle_check(TokenType::LEFT_PAREN)) {
+        return specifier;
+    }
+
+    if (!lang_opts.is_cxx20_or_later()) {
+        error_custloc(
+            "conditional explicit specifier requires C++20",
+            explicit_tok.loc);
+    }
+
+    specifier.is_conditional = true;
+    SrcLoc lparen_loc = current_token().loc;
+    advance(); // '('
+    if (gentle_check(TokenType::RIGHT_PAREN)) {
+        error_custloc(
+            "explicit specifier requires a constant expression",
+            lparen_loc);
+    }
+
+    auto condition = parse_conditional_expression();
+    if (!condition) {
+        error_custloc(
+            "explicit specifier requires a constant expression",
+            lparen_loc);
+    }
+
+    bool is_dependent =
+        (collect_ &&
+         collect_->expression_depends_on_template_parameters(condition.get())) ||
+        type_depends_on_template_parameters(
+            condition ? condition->get_type() : QualType(),
+            ast_ctx.get());
+
+    specifier.condition = std::shared_ptr<Expr>(condition.release());
+    if (is_dependent) {
+        specifier.is_dependent = true;
+        specifier.effective_value = true;
+    } else {
+        auto eval = try_evaluate_with_consteval_compat(
+            specifier.condition.get(),
+            ConstEvalMode::cpp_core_constant_expression());
+        if (!eval.has_value()) {
+            SrcLoc diag_loc = specifier.condition
+                ? specifier.condition->location
+                : lparen_loc;
+            error_custloc(
+                "explicit specifier expression must be an integer constant expression",
+                diag_loc);
+        }
+        specifier.effective_value = *eval != 0;
+    }
+
+    check_and_consume(TokenType::RIGHT_PAREN);
+    return specifier;
+}
+
 void Parser::parse_cpp_optional_noexcept_spec(FunctionType& function_type) {
     if (!is_cxx_mode_active() || !gentle_check(TokenType::NOEXCEPT_KW)) {
         return;
@@ -5011,17 +5184,16 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     }
     const std::string& record_name = record_frame.name;
 
-    bool is_explicit = false;
+    CppExplicitSpecifier explicit_specifier;
     bool is_constexpr = false;
     bool is_inline = false;
     std::vector<ParsedAttribute> leading_attrs;
     while (true) {
         if (gentle_check(TokenType::EXPLICIT_KW)) {
-            if (is_explicit) {
+            if (explicit_specifier.is_present) {
                 error_custloc("duplicate 'explicit' specifier", current_token().loc);
             }
-            is_explicit = true;
-            advance();
+            explicit_specifier = parse_cpp_optional_explicit_specifier();
             continue;
         }
         if (gentle_check(TokenType::CONSTEXPR_KW)) {
@@ -5304,9 +5476,10 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
         std::unordered_set<std::string>{},
         StorageClass::NONE,
         is_inline,
-        is_explicit,
+        explicit_specifier.effective_value,
         ctor_name_tok.loc);
     ctor_decl->type = ctor_fn_type;
+    ctor_decl->explicit_specifier = std::move(explicit_specifier);
     ctor_decl->is_constexpr = is_constexpr;
     ctor_decl->is_deleted = is_deleted;
     ctor_decl->is_defaulted = is_defaulted;
@@ -6053,9 +6226,13 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 changed = true;
             } else if (auto* method_template_decl =
                            dyn_cast<FunctionTemplateDecl>(member_decl)) {
+                auto* templated_function =
+                    method_template_decl->function_decl();
                 auto* templated_method =
-                    dyn_cast<CppMethodDecl>(method_template_decl->function_decl());
-                if (!templated_method) {
+                    dyn_cast<CppMethodDecl>(templated_function);
+                auto* templated_ctor =
+                    dyn_cast<CppConstructorDecl>(templated_function);
+                if (!templated_method && !templated_ctor) {
                     return;
                 }
                 for (const auto& existing_method_template :
@@ -6068,21 +6245,25 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 std::string qualifier_prefix = build_member_qualifier_prefix();
                 if (!qualifier_prefix.empty()) {
                     set_func_decl_cxx_qualifier_prefix(
-                        templated_method,
+                        templated_function,
                         qualifier_prefix);
                 }
                 set_func_decl_owner_record_type(
-                    templated_method,
+                    templated_function,
                     semantic_owner_record_type);
 
                 RecordSemanticState::MethodTemplate semantic_method_template;
-                semantic_method_template.name = templated_method->name;
+                semantic_method_template.name = templated_function->name;
                 semantic_method_template.declared_access = member_access;
                 semantic_method_template.is_static =
+                    templated_method &&
                     templated_method->storage_class == StorageClass::STATIC;
                 semantic_method_template.decl = method_template_decl;
                 state.method_templates.push_back(
                     std::move(semantic_method_template));
+                if (templated_ctor) {
+                    state.definition_data.has_user_declared_constructor = true;
+                }
                 changed = true;
             } else if (auto* method_decl = dyn_cast<CppMethodDecl>(member_decl)) {
                 for (const auto& existing_method : state.methods) {
@@ -6324,8 +6505,18 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                         size_t offset = 0;
                         while (true) {
                             Token tok = peek_token_shortcut(offset);
-                            if (tok.type == TokenType::EXPLICIT_KW ||
-                                tok.type == TokenType::CONSTEXPR_KW ||
+                            if (tok.type == TokenType::EXPLICIT_KW) {
+                                ++offset;
+                                if (peek_token_shortcut(offset).type ==
+                                    TokenType::LEFT_PAREN) {
+                                    skip_balanced_tokens(
+                                        offset,
+                                        TokenType::LEFT_PAREN,
+                                        TokenType::RIGHT_PAREN);
+                                }
+                                continue;
+                            }
+                            if (tok.type == TokenType::CONSTEXPR_KW ||
                                 tok.type == TokenType::INLINE) {
                                 ++offset;
                                 continue;

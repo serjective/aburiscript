@@ -1258,7 +1258,8 @@ std::unique_ptr<Expr> Collect::process_initializer_for_type(std::unique_ptr<Expr
 
     if (type->kind == TypeKind::Object) {
         auto init_type = desugar_type(init->get_type(), ast_ctx_.get());
-        if (!init_type || !init_type.equals_unqualified(type)) {
+        auto init_object_type = remove_reference(init_type, ast_ctx_.get());
+        if (!init_object_type || !init_object_type.equals_unqualified(type)) {
             report_error("invalid initializer for aggregate type", loc);
         }
         return cast_if_needed(

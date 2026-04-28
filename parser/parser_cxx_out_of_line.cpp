@@ -56,6 +56,7 @@ void merge_out_of_line_constructor_definition(
     matched_ctor_decl->stmt_labels = std::move(parsed_ctor->stmt_labels);
     matched_ctor_decl->ctor_initializers = std::move(parsed_ctor->ctor_initializers);
     matched_ctor_decl->is_explicit = parsed_ctor->is_explicit;
+    matched_ctor_decl->explicit_specifier = parsed_ctor->explicit_specifier;
     matched_ctor_decl->is_deleted = parsed_ctor->is_deleted;
     matched_ctor_decl->is_defaulted = parsed_ctor->is_defaulted;
     matched_ctor_decl->is_constexpr = parsed_ctor->is_constexpr;

@@ -1,5 +1,6 @@
 #include "collect.h"
 #include "collect_decl_internal.h"
+#include "collect_internal.h"
 #include "../helpers/auto_type_utils.h"
 #include "../ast/expr_clone.h"
 #include "../ast/special_members.h"
@@ -616,7 +617,7 @@ bool Collect::materialize_variable_constructor_selection(
         all_ctor_args.push_back(std::move(provided_arg));
     }
 
-    if (chosen.is_synthesized_implicit_copy) {
+    if (chosen.is_synthesized_implicit_copy && !chosen.ctor->symbol) {
         if (all_ctor_args.size() != 1) {
             report_error(
                 "internal error: implicit copy constructor requires one argument",
@@ -627,6 +628,12 @@ bool Collect::materialize_variable_constructor_selection(
             std::move(all_ctor_args.front()),
             declared_type,
             loc);
+        return true;
+    }
+    if (chosen.ctor->is_implicit && chosen.max_user_param_count == 0) {
+        selection.constructor_is_list_init = ctor_is_list_init;
+        selection.constructor_args.clear();
+        selection.constructor_symbol = nullptr;
         return true;
     }
     if (chosen.ctor->is_implicit && !chosen.ctor->symbol) {
@@ -739,6 +746,17 @@ bool Collect::materialize_variable_constructor_selection(
     selection.constructor_args = std::move(converted_args);
     selection.constructor_is_list_init = ctor_is_list_init;
     note_specialization_use_for_symbol(selection.constructor_symbol, loc);
+    if (auto completion_error =
+            complete_selected_function_template_specialization_symbol(
+                selection.constructor_symbol,
+                loc,
+                "failed to instantiate selected constructor template specialization")) {
+        (void)completion_error;
+        report_error(
+            "failed to instantiate selected constructor template specialization",
+            loc);
+        return false;
+    }
     return true;
 }
 
@@ -767,13 +785,79 @@ bool Collect::select_constructor_for_variable_initialization(
         return false;
     }
     const RecordSemanticState* record_state = record_semantics_cache_lookup(record_decl);
-    if (!record_state || record_state->constructors.empty()) {
+    if (!record_state ||
+        (record_state->constructors.empty() &&
+         record_state->method_templates.empty())) {
         return false;
     }
 
+    std::vector<RecordSemanticState::Constructor> template_constructors;
+    if (!record_state->method_templates.empty()) {
+        std::vector<Expr*> deduction_args;
+        deduction_args.reserve(ctor_args.size() + 1);
+        deduction_args.push_back(nullptr);
+        for (const auto& arg : ctor_args) {
+            deduction_args.push_back(arg.get());
+        }
+
+        for (const auto& method_template : record_state->method_templates) {
+            auto* function_template = method_template.decl;
+            if (!function_template) {
+                continue;
+            }
+            auto* pattern_ctor =
+                dyn_cast<CppConstructorDecl>(function_template->function_decl());
+            if (!pattern_ctor) {
+                continue;
+            }
+
+            std::vector<TemplateArgument> specialization_arguments;
+            std::shared_ptr<Symbol> probe_symbol = nullptr;
+            if (!probe_function_template_call_specialization(
+                    function_template,
+                    deduction_args,
+                    loc,
+                    probe_symbol,
+                    nullptr,
+                    &specialization_arguments)) {
+                continue;
+            }
+
+            std::shared_ptr<Symbol> specialization_symbol = nullptr;
+            auto* specialization_decl =
+                instantiate_function_template_specialization(
+                    function_template,
+                    specialization_arguments,
+                    loc,
+                    &specialization_symbol,
+                    /*instantiate_definition=*/false);
+            auto* specialized_ctor =
+                dyn_cast<CppConstructorDecl>(specialization_decl);
+            if (!specialized_ctor || !specialization_symbol) {
+                continue;
+            }
+
+            RecordSemanticState::Constructor ctor;
+            ctor.name = specialized_ctor->name;
+            ctor.type = QualType(specialized_ctor->type);
+            ctor.declared_access = method_template.declared_access;
+            ctor.is_implicit = false;
+            ctor.is_explicit = specialized_ctor->is_explicit;
+            ctor.is_deleted = specialized_ctor->is_deleted;
+            ctor.decl = specialized_ctor;
+            ctor.symbol = std::move(specialization_symbol);
+            template_constructors.push_back(std::move(ctor));
+        }
+    }
+
     std::vector<ConstructorCandidateEval> evaluated;
-    evaluated.reserve(record_state->constructors.size());
+    evaluated.reserve(
+        record_state->constructors.size() + template_constructors.size());
     for (const auto& ctor : record_state->constructors) {
+        evaluated.push_back(evaluate_variable_constructor_candidate(
+            ctor, record_decl, ctor_args, ctor_is_copy_initialization));
+    }
+    for (const auto& ctor : template_constructors) {
         evaluated.push_back(evaluate_variable_constructor_candidate(
             ctor, record_decl, ctor_args, ctor_is_copy_initialization));
     }

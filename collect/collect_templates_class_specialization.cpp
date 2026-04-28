@@ -503,6 +503,45 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return false;
     }
 
+    bool substitute_member_explicit_specifier(
+        const CppExplicitSpecifier& pattern_specifier,
+        FuncDecl* specialized_decl,
+        CppExplicitSpecifier& specialized_specifier,
+        bool& effective_value_out) {
+        QualType specialized_this_type =
+            template_sema_internal::implicit_this_type_for_specialized_function(
+                specialized_decl);
+        auto resolution_pass =
+            clone_pass_builder.build_dependent_resolution_pass(
+                clone_pass,
+                [&](std::unique_ptr<Expr>& expr,
+                    std::string* error_out) -> bool {
+                    return collect.resolve_dependent_expr_after_substitution(
+                        expr,
+                        specialized_this_type,
+                        error_out);
+                });
+        std::string explicit_error;
+        if (!substitute_cpp_explicit_specifier_for_specialization(
+                collect,
+                pattern_specifier,
+                specialized_specifier,
+                clone_pass,
+                resolution_pass,
+                loc,
+                &explicit_error)) {
+            return fail_instantiation(
+                explicit_error.empty()
+                    ? "failed to substitute explicit specifier expression"
+                    : explicit_error,
+                pattern_specifier.location.isInvalid()
+                    ? loc
+                    : pattern_specifier.location);
+        }
+        effective_value_out = specialized_specifier.effective_value;
+        return true;
+    }
+
     bool bind_and_select_pattern() {
         std::string binding_error;
         if (!collect.bind_template_arguments_for_specialization(
@@ -2165,6 +2204,12 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 method_template_decl->location);
         }
         auto* method_decl = dyn_cast<CppMethodDecl>(function_decl);
+        auto* ctor_decl = dyn_cast<CppConstructorDecl>(function_decl);
+        if (!method_decl && !ctor_decl) {
+            return fail_instantiation(
+                "class template member template instantiation for this function kind is not supported yet",
+                function_decl->location);
+        }
 
         auto rewritten_type = clone_pass.rewrite_type(QualType(function_decl->type));
         auto canonical_type =
@@ -2175,47 +2220,80 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 function_decl->location);
         }
 
-        auto cloned_method_decl = collect.collect_make<CppMethodDecl>();
-        cloned_method_decl->location = function_decl->location;
-        cloned_method_decl->name = function_decl->name;
-        cloned_method_decl->type = canonical_type;
-        cloned_method_decl->storage_class = function_decl->storage_class;
-        cloned_method_decl->is_inline = function_decl->is_inline;
-        cloned_method_decl->is_constexpr = function_decl->is_constexpr;
-        cloned_method_decl->is_deleted = function_decl->is_deleted;
-        cloned_method_decl->is_defaulted = function_decl->is_defaulted;
-        cloned_method_decl->set_language_linkage(
-            function_decl->get_language_linkage());
-        cloned_method_decl->is_virtual =
-            method_decl ? method_decl->is_virtual : false;
-        cloned_method_decl->is_override =
-            method_decl ? method_decl->is_override : false;
-        cloned_method_decl->is_final =
-            method_decl ? method_decl->is_final : false;
-        cloned_method_decl->is_pure =
-            method_decl ? method_decl->is_pure : false;
+        auto copy_common_function_state = [&](FuncDecl* cloned_decl) {
+            cloned_decl->location = function_decl->location;
+            cloned_decl->name = function_decl->name;
+            cloned_decl->type = canonical_type;
+            cloned_decl->storage_class = function_decl->storage_class;
+            cloned_decl->is_inline = function_decl->is_inline;
+            cloned_decl->is_constexpr = function_decl->is_constexpr;
+            cloned_decl->is_deleted = function_decl->is_deleted;
+            cloned_decl->is_defaulted = function_decl->is_defaulted;
+            cloned_decl->set_language_linkage(
+                function_decl->get_language_linkage());
+        };
+
+        std::unique_ptr<FuncDecl> cloned_function_decl;
+        if (ctor_decl) {
+            auto cloned_ctor_decl = collect.collect_make<CppConstructorDecl>();
+            copy_common_function_state(cloned_ctor_decl.get());
+            cloned_ctor_decl->is_explicit = ctor_decl->is_explicit;
+            cloned_ctor_decl->explicit_specifier = ctor_decl->explicit_specifier;
+            cloned_function_decl = std::move(cloned_ctor_decl);
+        } else {
+            auto cloned_method_decl = collect.collect_make<CppMethodDecl>();
+            copy_common_function_state(cloned_method_decl.get());
+            cloned_method_decl->is_virtual = method_decl->is_virtual;
+            cloned_method_decl->is_override = method_decl->is_override;
+            cloned_method_decl->is_final = method_decl->is_final;
+            cloned_method_decl->is_pure = method_decl->is_pure;
+            cloned_method_decl->is_conversion_function =
+                method_decl->is_conversion_function;
+            cloned_method_decl->is_explicit_conversion =
+                method_decl->is_explicit_conversion;
+            cloned_method_decl->conversion_target_type =
+                rewrite_class_template_type(
+                    method_decl->conversion_target_type,
+                    specialization_bindings);
+            cloned_method_decl->explicit_specifier =
+                method_decl->explicit_specifier;
+            cloned_function_decl = std::move(cloned_method_decl);
+        }
+
+        auto* cloned_function_ptr = cloned_function_decl.get();
         if (function_decl->asm_label) {
-            cloned_method_decl->set_asm_label(*function_decl->asm_label);
+            cloned_function_ptr->set_asm_label(*function_decl->asm_label);
         }
 
         auto namespace_prefix = namespace_prefix_from_member_qualifier(
             get_func_decl_cxx_qualifier_prefix(function_decl));
         if (namespace_prefix.has_value()) {
             set_func_decl_cxx_qualifier_prefix(
-                cloned_method_decl.get(),
+                cloned_function_ptr,
                 *namespace_prefix);
         }
-        set_func_decl_owner_record_type(cloned_method_decl.get(), owner_type);
-        if (method_decl) {
+        set_func_decl_owner_record_type(cloned_function_ptr, owner_type);
+        if (method_decl || ctor_decl) {
             copy_cpp_member_decl_info(
                 ast_ctx(),
-                method_decl->node_id,
-                cloned_method_decl->node_id);
+                function_decl->node_id,
+                cloned_function_ptr->node_id);
+            if (auto* member_info =
+                    ast_ctx()->get_cpp_member_decl_info(
+                        cloned_function_ptr->node_id)) {
+                member_info->is_static =
+                    method_decl &&
+                    method_decl->storage_class == StorageClass::STATIC;
+                member_info->is_constructor = ctor_decl != nullptr;
+                member_info->is_explicit = ctor_decl
+                    ? ctor_decl->is_explicit
+                    : method_decl->is_explicit_conversion;
+            }
         }
 
         auto cloned_template_decl = collect.collect_make<FunctionTemplateDecl>(
             TemplateParameterList{},
-            std::move(cloned_method_decl),
+            std::move(cloned_function_decl),
             method_template_decl->location);
         set_template_decl_canonical_decl(
             cloned_template_decl.get(),
@@ -2309,9 +2387,13 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         semantic_method_template.name = function_decl->name;
         semantic_method_template.declared_access = declared_access;
         semantic_method_template.is_static =
-            function_decl->storage_class == StorageClass::STATIC;
+            method_decl &&
+            method_decl->storage_class == StorageClass::STATIC;
         semantic_method_template.decl = cloned_template_decl.get();
         method_templates.push_back(std::move(semantic_method_template));
+        if (ctor_decl) {
+            semantic_state.definition_data.has_user_declared_constructor = true;
+        }
 
         pending_method_template_clones.push_back(std::move(pending_method_template));
         entry->map_owner_specialized_member_template(
@@ -2397,6 +2479,16 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_conversion_function = method_decl->is_conversion_function;
         cloned_decl->is_explicit_conversion =
             method_decl->is_explicit_conversion;
+        bool cloned_method_is_explicit =
+            cloned_decl->is_explicit_conversion;
+        if (!substitute_member_explicit_specifier(
+                method_decl->explicit_specifier,
+                cloned_decl.get(),
+                cloned_decl->explicit_specifier,
+                cloned_method_is_explicit)) {
+            return false;
+        }
+        cloned_decl->is_explicit_conversion = cloned_method_is_explicit;
         cloned_decl->conversion_target_type =
             rewrite_class_template_type(
                 method_decl->conversion_target_type,
@@ -2417,6 +2509,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             ast_ctx(),
             method_decl->node_id,
             cloned_decl->node_id);
+        if (auto* member_info =
+                ast_ctx()->get_cpp_member_decl_info(cloned_decl->node_id)) {
+            member_info->is_explicit = cloned_decl->is_explicit_conversion;
+        }
 
         auto pattern_symbol_it = pattern_method_symbols.find(method_decl);
         auto cloned_symbol = clone_member_symbol(
@@ -2483,6 +2579,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_constexpr = ctor_decl->is_constexpr;
         cloned_decl->set_language_linkage(ctor_decl->get_language_linkage());
         cloned_decl->is_explicit = ctor_decl->is_explicit;
+        bool cloned_ctor_is_explicit = cloned_decl->is_explicit;
+        if (!substitute_member_explicit_specifier(
+                ctor_decl->explicit_specifier,
+                cloned_decl.get(),
+                cloned_decl->explicit_specifier,
+                cloned_ctor_is_explicit)) {
+            return false;
+        }
+        cloned_decl->is_explicit = cloned_ctor_is_explicit;
         cloned_decl->is_deleted = ctor_decl->is_deleted;
         cloned_decl->is_defaulted = ctor_decl->is_defaulted;
         if (ctor_decl->asm_label) {
@@ -2501,6 +2606,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             ast_ctx(),
             ctor_decl->node_id,
             cloned_decl->node_id);
+        if (auto* member_info =
+                ast_ctx()->get_cpp_member_decl_info(cloned_decl->node_id)) {
+            member_info->is_explicit = cloned_decl->is_explicit;
+        }
 
         auto pattern_symbol_it = pattern_constructor_symbols.find(ctor_decl);
         auto cloned_symbol = clone_member_symbol(
@@ -3091,18 +3200,32 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
         for (const auto& pending_method_template : pending_method_template_clones) {
             auto* pattern_template = pending_method_template.pattern_template;
-            auto* pattern_method = pending_method_template.pattern_function;
+            auto* pattern_function = pending_method_template.pattern_function;
             auto* specialized_template =
                 pending_method_template.specialized_template;
-            auto* specialized_method =
+            auto* specialized_function =
                 specialized_template
-                    ? dyn_cast<CppMethodDecl>(specialized_template->function_decl())
+                    ? specialized_template->function_decl()
                     : nullptr;
-            if (!pattern_template || !specialized_template || !pattern_method ||
-                !specialized_method) {
+            if (!pattern_template || !specialized_template || !pattern_function ||
+                !specialized_function) {
                 return fail_instantiation(
                     "internal error: missing class template member template clone state",
                     loc);
+            }
+            auto* pattern_method_decl =
+                dyn_cast<CppMethodDecl>(pattern_function);
+            auto* specialized_method_decl =
+                dyn_cast<CppMethodDecl>(specialized_function);
+            auto* pattern_ctor_decl =
+                dyn_cast<CppConstructorDecl>(pattern_function);
+            auto* specialized_ctor_decl =
+                dyn_cast<CppConstructorDecl>(specialized_function);
+            if ((pattern_method_decl && !specialized_method_decl) ||
+                (pattern_ctor_decl && !specialized_ctor_decl)) {
+                return fail_instantiation(
+                    "internal error: class template member template clone did not preserve function kind",
+                    pattern_function->location);
             }
 
             auto member_template_builder =
@@ -3285,7 +3408,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             auto rewritten_member_template_type =
                 remap_template_parameter_types_in_type(
                     member_template_clone_pass.rewrite_type(
-                        QualType(pattern_method->type)),
+                        QualType(pattern_function->type)),
                     pending_method_template.parameter_rebinds);
             auto canonical_member_template_type =
                 desugar_type(rewritten_member_template_type, ast_ctx())
@@ -3293,9 +3416,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             if (!canonical_member_template_type) {
                 return fail_instantiation(
                     "internal error: class template member template specialization did not produce a function type",
-                    pattern_method->location);
+                    pattern_function->location);
             }
-            specialized_method->type = canonical_member_template_type;
+            specialized_function->type = canonical_member_template_type;
 
             for (size_t index = 0;
                  index < pattern_template->parameters.size() &&
@@ -3345,10 +3468,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     pattern_template->location);
             }
 
-            specialized_method->parameters.clear();
+            specialized_function->parameters.clear();
             QualType member_template_this_type =
                 template_sema_internal::implicit_this_type_for_specialized_function(
-                    specialized_method);
+                    specialized_function);
             auto member_template_resolution_pass =
                 member_template_builder.build_dependent_resolution_pass(
                     member_template_clone_pass,
@@ -3363,10 +3486,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             std::string clone_error;
             if (!clone_function_parameters_for_specialization(
                     collect,
-                    pattern_method,
+                    pattern_function,
                     *selected_parameters,
                     specialization_bindings,
-                    specialized_method,
+                    specialized_function,
                     member_template_clone_pass,
                     member_template_resolution_pass,
                     loc,
@@ -3386,14 +3509,97 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     clone_error.empty()
                         ? "internal error: class template member template parameter clone failed"
                         : clone_error,
-                    pattern_method->location);
+                    pattern_function->location);
             }
             member_template_resolution_pass.sync_from_substitution_pass(
                 member_template_clone_pass);
+
+            auto substitute_member_template_explicit_specifier =
+                [&](const CppExplicitSpecifier& pattern_specifier,
+                    CppExplicitSpecifier& specialized_specifier,
+                    bool& effective_value_out) -> bool {
+                std::string explicit_error;
+                if (!substitute_cpp_explicit_specifier_for_specialization(
+                        collect,
+                        pattern_specifier,
+                        specialized_specifier,
+                        member_template_clone_pass,
+                        member_template_resolution_pass,
+                        loc,
+                        &explicit_error)) {
+                    return fail_instantiation(
+                        explicit_error.empty()
+                            ? "failed to substitute explicit specifier expression"
+                            : explicit_error,
+                        pattern_specifier.location.isInvalid()
+                            ? loc
+                            : pattern_specifier.location);
+                }
+                effective_value_out = specialized_specifier.effective_value;
+                return true;
+            };
+            if (pattern_ctor_decl && specialized_ctor_decl) {
+                bool specialized_is_explicit =
+                    specialized_ctor_decl->is_explicit;
+                if (!substitute_member_template_explicit_specifier(
+                        pattern_ctor_decl->explicit_specifier,
+                        specialized_ctor_decl->explicit_specifier,
+                        specialized_is_explicit)) {
+                    return false;
+                }
+                specialized_ctor_decl->is_explicit = specialized_is_explicit;
+                if (auto* member_info = ast_ctx()->get_cpp_member_decl_info(
+                        specialized_ctor_decl->node_id)) {
+                    member_info->is_explicit =
+                        specialized_ctor_decl->is_explicit;
+                }
+            } else if (pattern_method_decl && specialized_method_decl) {
+                bool specialized_is_explicit =
+                    specialized_method_decl->is_explicit_conversion;
+                if (!substitute_member_template_explicit_specifier(
+                        pattern_method_decl->explicit_specifier,
+                        specialized_method_decl->explicit_specifier,
+                        specialized_is_explicit)) {
+                    return false;
+                }
+                specialized_method_decl->is_explicit_conversion =
+                    specialized_is_explicit;
+                if (auto* member_info = ast_ctx()->get_cpp_member_decl_info(
+                        specialized_method_decl->node_id)) {
+                    member_info->is_explicit =
+                        specialized_method_decl->is_explicit_conversion;
+                }
+            }
+
+            if (pattern_ctor_decl && specialized_ctor_decl) {
+                if (!clone_ctor_initializers_for_specialization(
+                        pattern_ctor_decl,
+                        specialized_ctor_decl,
+                        member_template_clone_pass,
+                        member_template_resolution_pass,
+                        &clone_error)) {
+                    return fail_instantiation(
+                        clone_error.empty()
+                            ? "constructor template initializer cloning is not supported"
+                            : clone_error,
+                        pattern_ctor_decl->location);
+                }
+                if (!finalize_specialized_ctor_initializers(
+                        collect,
+                        specialized_ctor_decl,
+                        &clone_error)) {
+                    return fail_instantiation(
+                        clone_error.empty()
+                            ? "constructor template initializer finalization failed"
+                            : clone_error,
+                        pattern_ctor_decl->location);
+                }
+            }
+
             if (!clone_function_body_for_specialization(
                     collect,
-                    pattern_method,
-                    specialized_method,
+                    pattern_function,
+                    specialized_function,
                     member_template_clone_pass,
                     member_template_resolution_pass,
                     "class template member template",
@@ -3403,8 +3609,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     clone_error.empty()
                         ? "class template member template body cloning is not supported"
                         : clone_error,
-                    pattern_method->body ? pattern_method->body->location
-                                         : pattern_method->location);
+                    pattern_function->body ? pattern_function->body->location
+                                           : pattern_function->location);
             }
         }
         return true;

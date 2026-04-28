@@ -636,6 +636,7 @@ private:
                 for (const auto& param : node->parameters) {
                     visit_decl(param.get());
                 }
+                visit_stmt(node->explicit_specifier.condition.get());
                 visit_stmt(node->body.get());
                 return;
             }
@@ -654,6 +655,7 @@ private:
                 for (const auto& param : node->parameters) {
                     visit_decl(param.get());
                 }
+                visit_stmt(node->explicit_specifier.condition.get());
                 visit_stmt(node->body.get());
                 return;
             }

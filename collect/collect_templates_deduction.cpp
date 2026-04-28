@@ -1313,6 +1313,10 @@ bool Collect::deduce_function_template_call_arguments(
     if (const auto* method_decl = dyn_cast<CppMethodDecl>(pattern);
         method_decl && method_decl->storage_class != StorageClass::STATIC) {
         implicit_object_parameter_count = 1;
+    } else if (isa<CppConstructorDecl>(pattern)) {
+        implicit_object_parameter_count = 1;
+    }
+    if (implicit_object_parameter_count != 0) {
         if (call_args.size() < implicit_object_parameter_count ||
             pattern->parameters.size() < implicit_object_parameter_count) {
             deduced_arguments_out.clear();
@@ -1446,6 +1450,8 @@ bool Collect::deduce_function_template_specialization_arguments(
     uint8_t parsed_trailing_cv_qualifiers = QUAL_NONE;
     if (const auto* method_decl = dyn_cast<CppMethodDecl>(pattern);
         method_decl && method_decl->storage_class != StorageClass::STATIC) {
+        implicit_object_parameter_count = 1;
+    } else if (isa<CppConstructorDecl>(pattern)) {
         implicit_object_parameter_count = 1;
     }
 

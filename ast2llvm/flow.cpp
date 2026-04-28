@@ -1914,10 +1914,13 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
     // only be emitted if they are actually referenced in this translation
     // unit. GNU inline definitions with a prior non-inline declaration still
     // need a real out-of-line definition, so keep emitting those eagerly.
-    if (node->is_inline &&
+    bool should_defer_unused_inline_definition =
+        node->is_inline &&
         node->storage_class != StorageClass::EXTERN &&
-        (suppress_external_definition ||
-         node->storage_class == StorageClass::STATIC) &&
+        (lang_opts.is_cxx_mode() ||
+         suppress_external_definition ||
+         node->storage_class == StorageClass::STATIC);
+    if (should_defer_unused_inline_definition &&
         mainFunc->empty() &&
         mainFunc->use_empty() &&
         (!base_variant_func || base_variant_func->use_empty())) {

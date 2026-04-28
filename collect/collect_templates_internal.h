@@ -276,6 +276,15 @@ bool clone_ctor_initializers_for_specialization(
     TemplateDependentResolutionPass& resolution_pass,
     std::string* error_out);
 
+bool substitute_cpp_explicit_specifier_for_specialization(
+    Collect& collect,
+    const CppExplicitSpecifier& pattern,
+    CppExplicitSpecifier& specialization,
+    TemplateSubstitutionPass& substitution_pass,
+    TemplateDependentResolutionPass& resolution_pass,
+    SrcLoc loc,
+    std::string* error_out);
+
 bool deduce_class_template_partial_specialization_bindings(
     const ClassTemplatePartialSpecializationDecl* partial_specialization,
     const std::vector<TemplateArgument>& actual_arguments,

@@ -602,6 +602,7 @@ private:
     void skip_cpp_function_try_block_tokens(
         bool allow_ctor_mem_initializer_after_try);
     void parse_cpp_optional_noexcept_spec(FunctionType& function_type);
+    CppExplicitSpecifier parse_cpp_optional_explicit_specifier();
     std::shared_ptr<Scope> resolve_named_namespace_scope(
         const DeclContext* start_context,
         const std::string& namespace_name,
@@ -759,6 +760,7 @@ struct DeclarationParser {
     bool is_thread_local = false;
     bool is_block_byref = false;
     bool is_constexpr = false;
+    CppExplicitSpecifier explicit_specifier;
     std::unique_ptr<Expr> trailing_requires_clause = nullptr;
     uint8_t qualifiers = QUAL_NONE; // outermost type qualifiers (for the variable itself)
     std::optional<std::string> asm_label;

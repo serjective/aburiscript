@@ -194,6 +194,9 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
             if (i->is_constexpr) {
                 error("'constexpr' is not valid for function parameter declarations");
             }
+            if (i->explicit_specifier.is_present) {
+                error("'explicit' is not valid for function parameter declarations");
+            }
             if (i->result_type->isVoid()) {
                 seenVoid = true;
                 if (!i->name.empty()) {

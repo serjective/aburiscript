@@ -249,6 +249,7 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
         typedef_resolved_type = nullptr;
         typedef_resolved_qualifiers = QUAL_NONE;
         is_block_byref = false;
+        explicit_specifier = CppExplicitSpecifier{};
         bool parsing = true;
         std::shared_ptr<CType> atomic_type_specifier = nullptr; // _Atomic(type-name) resolved type
         // Collect declaration-specifier tokens first; semantic normalization is
@@ -404,6 +405,19 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     qualifiers |= QUAL_ATOMIC;
                     break;
                 case TokenType::INLINE:   tally.inline_count++; break;
+                case TokenType::EXPLICIT_KW:
+                    if (!pars->is_cxx_mode_active()) {
+                        parsing = false;
+                        continue;
+                    }
+                    if (explicit_specifier.is_present) {
+                        error_custloc(
+                            "duplicate 'explicit' specifier",
+                            t.loc);
+                    }
+                    explicit_specifier =
+                        pars->parse_cpp_optional_explicit_specifier();
+                    continue;
                     // Storage Class Specifiers
                 case TokenType::STATIC:   tally.static_count++; break;
                 case TokenType::EXTERN:   tally.extern_count++; break;

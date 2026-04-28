@@ -385,11 +385,13 @@ void Parser::build_cpp_record_parse_deferred_bodies(
     };
     auto parse_deferred_inline_method_template_body =
         [&](FunctionTemplateDecl* method_template) {
+        auto* templated_function =
+            method_template ? method_template->function_decl() : nullptr;
         auto* templated_method =
-            method_template
-                ? dyn_cast<CppMethodDecl>(method_template->function_decl())
-                : nullptr;
-        if (!templated_method) {
+            dyn_cast<CppMethodDecl>(templated_function);
+        auto* templated_ctor =
+            dyn_cast<CppConstructorDecl>(templated_function);
+        if (!templated_method && !templated_ctor) {
             return;
         }
 
@@ -449,6 +451,11 @@ void Parser::build_cpp_record_parse_deferred_bodies(
                         non_type_parameter->sym);
                 }
             }
+        }
+
+        if (templated_ctor) {
+            parse_deferred_inline_constructor_body(templated_ctor);
+            return;
         }
 
         parse_deferred_inline_method_body(templated_method);

@@ -1593,4 +1593,71 @@ bool clone_ctor_initializers_for_specialization(
     return true;
 }
 
+bool substitute_cpp_explicit_specifier_for_specialization(
+    Collect& collect,
+    const CppExplicitSpecifier& pattern,
+    CppExplicitSpecifier& specialization,
+    TemplateSubstitutionPass& substitution_pass,
+    TemplateDependentResolutionPass& resolution_pass,
+    SrcLoc loc,
+    std::string* error_out) {
+    specialization = pattern;
+    if (!pattern.is_present) {
+        return true;
+    }
+    if (!pattern.is_conditional || !pattern.condition) {
+        specialization.is_dependent = false;
+        specialization.effective_value = true;
+        return true;
+    }
+
+    std::string clone_error;
+    auto cloned_condition =
+        substitution_pass.clone_expr(pattern.condition.get(), &clone_error);
+    if (!cloned_condition) {
+        if (error_out) {
+            *error_out =
+                clone_error.empty()
+                    ? "failed to substitute explicit specifier expression"
+                    : clone_error;
+        }
+        return false;
+    }
+    if (!resolution_pass.resolve_expr_in_place(cloned_condition, &clone_error)) {
+        if (error_out) {
+            *error_out =
+                clone_error.empty()
+                    ? "failed to resolve explicit specifier expression after substitution"
+                    : clone_error;
+        }
+        return false;
+    }
+
+    bool is_dependent =
+        collect.expression_depends_on_template_parameters(
+            cloned_condition.get()) ||
+        type_depends_on_template_parameters(
+            cloned_condition ? cloned_condition->get_type() : QualType());
+    specialization.condition = std::shared_ptr<Expr>(cloned_condition.release());
+    specialization.is_dependent = is_dependent;
+    if (is_dependent) {
+        specialization.effective_value = true;
+        return true;
+    }
+
+    auto eval = try_evaluate_with_consteval_compat(
+        specialization.condition.get(),
+        ConstEvalMode::cpp_core_constant_expression());
+    if (!eval.has_value()) {
+        if (error_out) {
+            *error_out =
+                "explicit specifier expression must be an integer constant expression";
+        }
+        (void)loc;
+        return false;
+    }
+    specialization.effective_value = *eval != 0;
+    return true;
+}
+
 } // namespace template_sema_internal
