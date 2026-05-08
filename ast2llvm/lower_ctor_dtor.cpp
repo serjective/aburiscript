@@ -621,6 +621,62 @@ void ASTToLLVM::emit_cpp_global_object_dtor_thunk(
     }
 }
 
+void ASTToLLVM::emit_cpp_global_object_ctor_thunk(
+    const std::string& thunk_name,
+    const CppConstructExpr* ctor_init,
+    llvm::Value* object_addr,
+    SrcLoc loc,
+    const std::string& construction_context,
+    llvm::GlobalValue::LinkageTypes thunk_linkage,
+    llvm::Constant* comdat_association) {
+    if (!ctor_init || !object_addr) {
+        return;
+    }
+
+    llvm::Function* ctor_thunk = module->getFunction(thunk_name);
+    if (!ctor_thunk) {
+        auto* thunk_type = llvm::FunctionType::get(
+            llvm::Type::getVoidTy(*context), false);
+        ctor_thunk = llvm::Function::Create(
+            thunk_type,
+            thunk_linkage,
+            thunk_name,
+            module.get());
+        if (auto* associated_global =
+                llvm::dyn_cast_or_null<llvm::GlobalObject>(comdat_association);
+            associated_global && associated_global->hasComdat()) {
+            ctor_thunk->setComdat(associated_global->getComdat());
+        }
+        llvm::appendToGlobalCtors(
+            *module, ctor_thunk, 65535, comdat_association);
+    }
+
+    if (!ctor_thunk->empty()) {
+        return;
+    }
+
+    llvm::BasicBlock* saved_block = builder.GetInsertBlock();
+    auto saved_ip = builder.saveIP();
+
+    llvm::BasicBlock* entry_bb =
+        llvm::BasicBlock::Create(*context, "entry", ctor_thunk);
+    builder.SetInsertPoint(entry_bb);
+
+    (void)emit_cpp_construct_call(
+        ctor_init,
+        object_addr,
+        loc,
+        construction_context,
+        CppCtorDtorVariant::Complete);
+    builder.CreateRetVoid();
+
+    if (saved_block) {
+        builder.restoreIP(saved_ip);
+    } else {
+        builder.ClearInsertionPoint();
+    }
+}
+
 llvm::Function* ASTToLLVM::get_or_create_cpp_deleting_destructor_function(
     const std::shared_ptr<Symbol>& dtor_sym,
     SrcLoc loc,

@@ -777,13 +777,26 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
     named_values[mangled] = gVar;
 
     // Now evaluate the initializer (the variable is already in named_values)
+    const CppConstructExpr* ctor_init = varDecl->get_cpp_construct_init();
+    bool needs_dynamic_ctor_thunk = false;
     llvm::Constant* initVal = nullptr;
     if (varDecl->init) {
         if (is_global_defined.contains(varDecl->name)) {
             error("re-defining global variable", varDecl->location);
         } else {
             llvm::Value* val = nullptr;
-            if (canonical_type_kind(varDecl->type, ast_ctx.get()) ==
+            if (ctor_init && ctor_init->ctor_sym) {
+                if (varDecl->is_thread_local) {
+                    error("deal_global_variable_declaration(): thread_local dynamic constructor initialization is not supported",
+                          varDecl->location);
+                    return;
+                }
+                gVar->setConstant(false);
+                initVal = varType->isArrayTy()
+                    ? static_cast<llvm::Constant*>(llvm::ConstantAggregateZero::get(varType))
+                    : static_cast<llvm::Constant*>(llvm::Constant::getNullValue(varType));
+                needs_dynamic_ctor_thunk = true;
+            } else if (canonical_type_kind(varDecl->type, ast_ctx.get()) ==
                 TypeKind::Reference) {
                 auto ref_type =
                     desugar_type(varDecl->type, ast_ctx.get())
@@ -949,6 +962,24 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
             default:
                 break;
         }
+    }
+
+    if (needs_dynamic_ctor_thunk) {
+        bool mergeable_ctor_thunk =
+            variable_decl_is_inline_equivalent_external_definition(*this, varDecl);
+        std::string ctor_thunk_name = linkage_identity + ".cxx.global.ctor";
+        emit_cpp_global_object_ctor_thunk(
+            ctor_thunk_name,
+            ctor_init,
+            gVar,
+            varDecl->location,
+            "deal_global_variable_declaration() global ctor thunk",
+            mergeable_ctor_thunk
+                ? llvm::GlobalValue::LinkOnceODRLinkage
+                : llvm::GlobalValue::InternalLinkage,
+            mergeable_ctor_thunk
+                ? static_cast<llvm::Constant*>(gVar)
+                : nullptr);
     }
 
     if (ast_ctx &&

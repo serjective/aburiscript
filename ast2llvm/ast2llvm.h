@@ -286,6 +286,14 @@ public:
                                             const std::string& teardown_context,
                                             CppCtorDtorVariant dtor_variant =
                                                 CppCtorDtorVariant::Complete);
+    void emit_cpp_global_object_ctor_thunk(const std::string& thunk_name,
+                                           const CppConstructExpr* ctor_init,
+                                           llvm::Value* object_addr,
+                                           SrcLoc loc,
+                                           const std::string& construction_context,
+                                           llvm::GlobalValue::LinkageTypes thunk_linkage =
+                                               llvm::GlobalValue::InternalLinkage,
+                                           llvm::Constant* comdat_association = nullptr);
     void emit_cpp_global_object_dtor_thunk(const std::string& thunk_name,
                                            const QualType& object_type,
                                            llvm::Value* object_addr,

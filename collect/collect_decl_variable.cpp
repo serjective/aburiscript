@@ -256,6 +256,7 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
 
     struct VarDeclAnalysis {
         bool is_automatic_storage = false;
+        bool is_definition_bearing = false;
         bool is_plain_extern_declaration = false;
         bool is_abstract_object_type = false;
         bool may_use_constructor_initialization = false;
@@ -268,6 +269,11 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         storage_class != StorageClass::STATIC &&
         storage_class != StorageClass::EXTERN &&
         !is_thread_local;
+    analysis.is_definition_bearing =
+        is_definition_bearing_variable_declaration(
+            storage_class,
+            flags,
+            init.get());
     analysis.is_plain_extern_declaration =
         storage_class == StorageClass::EXTERN && !init;
     analysis.is_abstract_object_type =
@@ -290,6 +296,7 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         lang_opts_.is_cxx_mode() &&
         record_type &&
         canonical_type_kind(declared_type, ast_ctx_.get()) == TypeKind::Object &&
+        analysis.is_definition_bearing &&
         (!analysis.is_abstract_object_type || allow_abstract_object_type_instantiation);
     bool has_constructor_template = false;
     if (record_state) {
@@ -397,6 +404,7 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
     }
 
     analysis.supports_non_automatic_destructor_cleanup =
+        analysis.is_definition_bearing &&
         !is_thread_local &&
         (is_file_scope || storage_class == StorageClass::STATIC);
 

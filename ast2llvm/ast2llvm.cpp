@@ -641,6 +641,12 @@ int ASTToLLVM::run() {
         return -500;
     }
 
+    if (auto err = (*jit)->initialize(jd)) {
+        std::cerr << "Failed to run JIT initializers: "
+                  << llvm::toString(std::move(err)) << std::endl;
+        return -500;
+    }
+
     auto main_sym = (*jit)->lookup("main");
     if (!main_sym) {
         std::cerr << "Failed to find main: "
@@ -650,6 +656,12 @@ int ASTToLLVM::run() {
 
     auto *main_fn = main_sym->toPtr<int()>();
     int result = main_fn();
+
+    if (auto err = (*jit)->deinitialize(jd)) {
+        std::cerr << "Failed to run JIT deinitializers: "
+                  << llvm::toString(std::move(err)) << std::endl;
+        return -500;
+    }
 
     // Recreate context and module for potential reuse
     context = std::make_unique<llvm::LLVMContext>();
