@@ -292,10 +292,16 @@ void Collect::validate_variable_declared_type(QualType& declared_type,
         is_file_scope &&
         init == nullptr &&
         (storage_class == StorageClass::NONE || storage_class == StorageClass::STATIC);
+    bool allow_incomplete_cpp_static_data_member =
+        lang_opts_.is_cxx_mode() &&
+        is_cpp_static_data_member &&
+        init == nullptr &&
+        storage_class == StorageClass::STATIC;
     if (declared_kind() == TypeKind::Object &&
         declared_type->isIncomplete() &&
         storage_class != StorageClass::EXTERN &&
-        !allow_tentative_incomplete_object) {
+        !allow_tentative_incomplete_object &&
+        !allow_incomplete_cpp_static_data_member) {
         report_error("variable has incomplete type '" + declared_type.to_string() + "'", loc);
     }
     if (declared_kind() == TypeKind::Array) {
