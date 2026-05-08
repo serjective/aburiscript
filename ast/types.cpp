@@ -369,6 +369,29 @@ bool expr_structurally_matches(const Expr* lhs, const Expr* rhs) {
                        lhs_call->lowered_call.get(),
                        rhs_call->lowered_call.get());
         }
+        case StmtKind::CppConstructExpr: {
+            const auto* lhs_construct =
+                static_cast<const CppConstructExpr*>(lhs);
+            const auto* rhs_construct =
+                static_cast<const CppConstructExpr*>(rhs);
+            return lhs_construct->ctor_sym == rhs_construct->ctor_sym &&
+                   lhs_construct->ctype.equals_qualified(rhs_construct->ctype) &&
+                   lhs_construct->is_list_init == rhs_construct->is_list_init &&
+                   expr_vector_structurally_matches(
+                       lhs_construct->args,
+                       rhs_construct->args);
+        }
+        case StmtKind::CppImmediateInvocationExpr: {
+            const auto* lhs_immediate =
+                static_cast<const CppImmediateInvocationExpr*>(lhs);
+            const auto* rhs_immediate =
+                static_cast<const CppImmediateInvocationExpr*>(rhs);
+            return lhs_immediate->ctype.equals_qualified(
+                       rhs_immediate->ctype) &&
+                   expr_structurally_matches(
+                       lhs_immediate->invocation.get(),
+                       rhs_immediate->invocation.get());
+        }
         case StmtKind::MemberExpr: {
             const auto* lhs_member = static_cast<const MemberExpr*>(lhs);
             const auto* rhs_member = static_cast<const MemberExpr*>(rhs);
@@ -593,6 +616,13 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
             const auto* call = static_cast<const CppMemberCallExpr*>(expr);
             return expr_depends_on_template_parameters_for_type(
                 call->lowered_call.get(),
+                ast_ctx);
+        }
+        case StmtKind::CppImmediateInvocationExpr: {
+            const auto* immediate =
+                static_cast<const CppImmediateInvocationExpr*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                immediate->invocation.get(),
                 ast_ctx);
         }
         case StmtKind::MemberExpr:

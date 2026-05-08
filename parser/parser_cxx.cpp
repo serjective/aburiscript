@@ -2770,6 +2770,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                 continue;
             }
             if (tok.type == TokenType::CONSTEXPR_KW ||
+                tok.type == TokenType::CONSTEVAL_KW ||
                 tok.type == TokenType::INLINE) {
                 ++offset;
                 continue;
@@ -5186,6 +5187,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
 
     CppExplicitSpecifier explicit_specifier;
     bool is_constexpr = false;
+    bool is_consteval = false;
     bool is_inline = false;
     std::vector<ParsedAttribute> leading_attrs;
     while (true) {
@@ -5200,7 +5202,31 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
             if (is_constexpr) {
                 error_custloc("duplicate 'constexpr' specifier", current_token().loc);
             }
+            if (is_consteval) {
+                error_custloc(
+                    "'constexpr' cannot be combined with 'consteval'",
+                    current_token().loc);
+            }
             is_constexpr = true;
+            advance();
+            continue;
+        }
+        if (gentle_check(TokenType::CONSTEVAL_KW)) {
+            if (!lang_opts.is_cxx20_or_later()) {
+                error_custloc("'consteval' is only available in C++20",
+                              current_token().loc);
+            }
+            if (is_consteval) {
+                error_custloc("duplicate 'consteval' specifier", current_token().loc);
+            }
+            if (is_constexpr) {
+                error_custloc(
+                    "'constexpr' cannot be combined with 'consteval'",
+                    current_token().loc);
+            }
+            is_consteval = true;
+            is_constexpr = true;
+            is_inline = true;
             advance();
             continue;
         }
@@ -5253,6 +5279,9 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
             auto param_type_raw = param_parser.parse_declaration();
             if (!param_type_raw) {
                 error("invalid constructor parameter declaration");
+            }
+            if (param_parser.is_consteval) {
+                error("'consteval' is not valid for function parameter declarations");
             }
             if (param_parser.is_constexpr) {
                 error("'constexpr' is not valid for function parameter declarations");
@@ -5481,6 +5510,11 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     ctor_decl->type = ctor_fn_type;
     ctor_decl->explicit_specifier = std::move(explicit_specifier);
     ctor_decl->is_constexpr = is_constexpr;
+    ctor_decl->is_consteval = is_consteval;
+    if (ctor_decl->is_consteval) {
+        ctor_decl->is_constexpr = true;
+        ctor_decl->is_inline = true;
+    }
     ctor_decl->is_deleted = is_deleted;
     ctor_decl->is_defaulted = is_defaulted;
     ctor_decl->set_language_linkage(current_decl_language_linkage());
@@ -5580,6 +5614,10 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
         error("internal error: destructor parser requires a named class context");
     }
     const std::string& record_name = record_frame.name;
+
+    if (gentle_check(TokenType::CONSTEVAL_KW)) {
+        error_custloc("destructor cannot be consteval", current_token().loc);
+    }
 
     Token tilde_tok = current_token();
     if (!gentle_check(TokenType::BITWISE_NOT)) {
@@ -6288,6 +6326,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     method_decl->type,
                     method_decl->storage_class,
                     method_decl->is_constexpr,
+                    method_decl->is_consteval,
                     method_decl->is_inline,
                     is_definition,
                     method_decl->location,
@@ -6321,6 +6360,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     method_decl->storage_class == StorageClass::STATIC;
                 semantic_method.is_deleted = method_decl->is_deleted;
                 semantic_method.is_defaulted = method_decl->is_defaulted;
+                semantic_method.is_consteval = method_decl->is_consteval;
                 semantic_method.is_explicit =
                     method_decl->is_explicit_conversion;
                 semantic_method.is_virtual = method_decl->is_virtual;
@@ -6517,6 +6557,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                                 continue;
                             }
                             if (tok.type == TokenType::CONSTEXPR_KW ||
+                                tok.type == TokenType::CONSTEVAL_KW ||
                                 tok.type == TokenType::INLINE) {
                                 ++offset;
                                 continue;
@@ -6562,10 +6603,19 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                         }
                     }
                 }
-                if (gentle_check(TokenType::BITWISE_NOT) &&
-                    peek_token().type == TokenType::IDENTIFIER &&
-                    peek_token().value == record_name &&
-                    peek_token(2).type == TokenType::LEFT_PAREN) {
+                size_t destructor_prefix_offset = 0;
+                if (peek_token_shortcut(destructor_prefix_offset).type ==
+                    TokenType::CONSTEVAL_KW) {
+                    ++destructor_prefix_offset;
+                }
+                if (peek_token_shortcut(destructor_prefix_offset).type ==
+                        TokenType::BITWISE_NOT &&
+                    peek_token_shortcut(destructor_prefix_offset + 1).type ==
+                        TokenType::IDENTIFIER &&
+                    peek_token_shortcut(destructor_prefix_offset + 1).value ==
+                        record_name &&
+                    peek_token_shortcut(destructor_prefix_offset + 2).type ==
+                        TokenType::LEFT_PAREN) {
                     auto dtor_member = parse_cpp_destructor_member();
                     if (member_leading_virtual) {
                         if (auto* dtor_decl = dyn_cast<CppDestructorDecl>(dtor_member.get())) {

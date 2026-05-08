@@ -1289,6 +1289,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
             symbol->type = QualType(decl->type);
             symbol->is_constexpr = decl->is_constexpr;
+            symbol->is_consteval = decl->is_consteval;
             symbol->is_deleted = decl->is_deleted;
             symbol->is_defaulted = decl->is_defaulted;
             symbol->is_defined = is_definition;
@@ -1312,6 +1313,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             decl->is_inline != 0);
         synthesized_symbol->is_defined = is_definition;
         synthesized_symbol->is_constexpr = decl->is_constexpr;
+        synthesized_symbol->is_consteval = decl->is_consteval;
         synthesized_symbol->is_deleted = decl->is_deleted;
         synthesized_symbol->is_defaulted = decl->is_defaulted;
         synthesized_symbol->set_language_linkage(
@@ -2227,6 +2229,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_decl->storage_class = function_decl->storage_class;
             cloned_decl->is_inline = function_decl->is_inline;
             cloned_decl->is_constexpr = function_decl->is_constexpr;
+            cloned_decl->is_consteval = function_decl->is_consteval;
             cloned_decl->is_deleted = function_decl->is_deleted;
             cloned_decl->is_defaulted = function_decl->is_defaulted;
             cloned_decl->set_language_linkage(
@@ -2469,6 +2472,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->storage_class = method_decl->storage_class;
         cloned_decl->is_inline = method_decl->is_inline;
         cloned_decl->is_constexpr = method_decl->is_constexpr;
+        cloned_decl->is_consteval = method_decl->is_consteval;
         cloned_decl->is_deleted = method_decl->is_deleted;
         cloned_decl->is_defaulted = method_decl->is_defaulted;
         cloned_decl->set_language_linkage(method_decl->get_language_linkage());
@@ -2577,6 +2581,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->storage_class = ctor_decl->storage_class;
         cloned_decl->is_inline = ctor_decl->is_inline;
         cloned_decl->is_constexpr = ctor_decl->is_constexpr;
+        cloned_decl->is_consteval = ctor_decl->is_consteval;
         cloned_decl->set_language_linkage(ctor_decl->get_language_linkage());
         cloned_decl->is_explicit = ctor_decl->is_explicit;
         bool cloned_ctor_is_explicit = cloned_decl->is_explicit;
@@ -2665,6 +2670,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->storage_class = dtor_decl->storage_class;
         cloned_decl->is_inline = dtor_decl->is_inline;
         cloned_decl->is_constexpr = dtor_decl->is_constexpr;
+        cloned_decl->is_consteval = dtor_decl->is_consteval;
         cloned_decl->set_language_linkage(dtor_decl->get_language_linkage());
         cloned_decl->is_deleted = dtor_decl->is_deleted;
         cloned_decl->is_defaulted = dtor_decl->is_defaulted;

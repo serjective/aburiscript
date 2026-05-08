@@ -60,6 +60,11 @@ void merge_out_of_line_constructor_definition(
     matched_ctor_decl->is_deleted = parsed_ctor->is_deleted;
     matched_ctor_decl->is_defaulted = parsed_ctor->is_defaulted;
     matched_ctor_decl->is_constexpr = parsed_ctor->is_constexpr;
+    matched_ctor_decl->is_consteval = parsed_ctor->is_consteval;
+    if (matched_ctor_decl->is_consteval) {
+        matched_ctor_decl->is_constexpr = true;
+        matched_ctor_decl->is_inline = true;
+    }
     matched_ctor_decl->set_language_linkage(parsed_ctor->get_language_linkage());
     if (parsed_ctor->asm_label) {
         matched_ctor_decl->set_asm_label(*parsed_ctor->asm_label);
@@ -82,6 +87,9 @@ void merge_out_of_line_constructor_definition(
         matched_symbol->is_defined = true;
         matched_symbol->is_deleted = matched_ctor_decl->is_deleted;
         matched_symbol->is_defaulted = matched_ctor_decl->is_defaulted;
+        matched_symbol->is_constexpr = matched_ctor_decl->is_constexpr;
+        matched_symbol->is_consteval = matched_ctor_decl->is_consteval;
+        matched_symbol->is_inline = matched_ctor_decl->is_inline;
         matched_symbol->type = QualType(matched_ctor_decl->type);
         matched_symbol->function_definition = matched_ctor_decl;
     }
@@ -96,6 +104,7 @@ void merge_out_of_line_constructor_definition(
             ctor.decl = matched_ctor_decl;
             ctor.type = QualType(matched_ctor_decl->type);
             ctor.is_deleted = matched_ctor_decl->is_deleted;
+            ctor.is_consteval = matched_ctor_decl->is_consteval;
             if (matched_symbol) {
                 ctor.symbol = matched_symbol;
             }
@@ -143,6 +152,11 @@ bool Parser::is_cpp_out_of_line_constructor_declaration_start() {
     }
 
     RevertingTentativeParsingAction tentative(*this);
+    while (gentle_check(TokenType::CONSTEXPR_KW) ||
+           gentle_check(TokenType::CONSTEVAL_KW) ||
+           gentle_check(TokenType::INLINE)) {
+        advance();
+    }
     consume_cpp_scope_resolution(); // Allow optional leading '::'.
 
     std::vector<CppQualifiedNameComponent> components;
@@ -196,6 +210,9 @@ bool Parser::is_cpp_out_of_line_destructor_declaration_start() {
     }
 
     RevertingTentativeParsingAction tentative(*this);
+    while (gentle_check(TokenType::CONSTEVAL_KW)) {
+        advance();
+    }
     consume_cpp_scope_resolution(); // Allow optional leading '::'.
 
     std::vector<CppQualifiedNameComponent> owner_components;
@@ -259,6 +276,52 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
     }
 
     SrcLoc decl_loc = current_token().loc;
+    bool prefix_constexpr = false;
+    bool prefix_consteval = false;
+    bool prefix_inline = false;
+    while (true) {
+        if (gentle_check(TokenType::CONSTEXPR_KW)) {
+            if (prefix_constexpr) {
+                error_custloc("duplicate 'constexpr' specifier", current_token().loc);
+            }
+            if (prefix_consteval) {
+                error_custloc(
+                    "'constexpr' cannot be combined with 'consteval'",
+                    current_token().loc);
+            }
+            prefix_constexpr = true;
+            advance();
+            continue;
+        }
+        if (gentle_check(TokenType::CONSTEVAL_KW)) {
+            if (!lang_opts.is_cxx20_or_later()) {
+                error_custloc("'consteval' is only available in C++20",
+                              current_token().loc);
+            }
+            if (prefix_consteval) {
+                error_custloc("duplicate 'consteval' specifier", current_token().loc);
+            }
+            if (prefix_constexpr) {
+                error_custloc(
+                    "'constexpr' cannot be combined with 'consteval'",
+                    current_token().loc);
+            }
+            prefix_consteval = true;
+            prefix_constexpr = true;
+            prefix_inline = true;
+            advance();
+            continue;
+        }
+        if (gentle_check(TokenType::INLINE)) {
+            if (prefix_inline) {
+                error_custloc("duplicate 'inline' specifier", current_token().loc);
+            }
+            prefix_inline = true;
+            advance();
+            continue;
+        }
+        break;
+    }
     bool has_global_qualifier = consume_cpp_scope_resolution();
     std::vector<CppQualifiedNameComponent> name_components;
     std::vector<size_t> component_token_indices;
@@ -471,6 +534,17 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
             "internal error: failed to parse out-of-line constructor definition",
             decl_loc);
     }
+    if (prefix_constexpr) {
+        parsed_ctor->is_constexpr = true;
+    }
+    if (prefix_consteval) {
+        parsed_ctor->is_consteval = true;
+        parsed_ctor->is_constexpr = true;
+        parsed_ctor->is_inline = true;
+    }
+    if (prefix_inline) {
+        parsed_ctor->is_inline = true;
+    }
 
     if (owner_class_template && !active_template_parameter_stack_.empty()) {
         const auto& active_parameters = active_template_parameter_stack_.back();
@@ -642,6 +716,12 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                 "'",
             decl_loc);
     }
+    if (matched_ctor_decl->is_consteval != parsed_ctor->is_consteval) {
+        error_custloc(
+            "conflicting consteval specifier for '" +
+                qualified_constructor_name + "'",
+            decl_loc);
+    }
 
     register_function_default_arguments(
         matched_ctor_state ? matched_ctor_state->symbol : nullptr,
@@ -688,6 +768,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
             current_language_linkage_ = LanguageLinkage::None;
             collect_->collect_start_function_definition(
                 ctor_decl->name, QualType(ctor_decl->type), cpp_this_context);
+
+            Collect::ImmediateFunctionContextScope immediate_function_context_guard(
+                collect_.get(), ctor_decl->is_consteval != 0);
 
             for (auto& param_decl_base : ctor_decl->parameters) {
                 auto* param_decl = dyn_cast<ParamDecl>(param_decl_base.get());
@@ -985,6 +1068,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
     }
 
     SrcLoc decl_loc = current_token().loc;
+    if (gentle_check(TokenType::CONSTEVAL_KW)) {
+        error_custloc("destructor cannot be consteval", current_token().loc);
+    }
     bool has_global_qualifier = consume_cpp_scope_resolution();
     std::vector<CppQualifiedNameComponent> owner_components;
 

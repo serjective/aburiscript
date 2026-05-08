@@ -290,10 +290,18 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(const std::stri
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope,
+    std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name,
+    QualType type, StorageClass storage_class, bool is_constexpr, bool is_consteval,
+    bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage,
+    bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
 
     if (!scope || name.empty()) {
         return nullptr;
+    }
+    if (is_consteval) {
+        is_constexpr = true;
+        is_inline = true;
     }
     materialize_tentative_snapshot_if_needed();
     if (contains_deferred_semantic_type(type.get_shared())) {
@@ -435,6 +443,9 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
                 return existing;
             }
             report_linkage_conflict_if_any(existing);
+            if (existing->is_consteval != is_consteval) {
+                report_error("conflicting consteval specifier for '" + name + "'", loc);
+            }
             if (existing->is_constexpr != is_constexpr) {
                 report_error("conflicting constexpr specifier for '" + name + "'", loc);
             }
@@ -460,6 +471,11 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
             }
             if (is_constexpr) {
                 existing->is_constexpr = true;
+            }
+            if (is_consteval) {
+                existing->is_consteval = true;
+                existing->is_constexpr = true;
+                existing->is_inline = true;
             }
             if (is_deleted) {
                 existing->is_deleted = true;
@@ -496,6 +512,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
     }
     sym->is_defined = is_definition;
     sym->is_constexpr = is_constexpr;
+    sym->is_consteval = is_consteval;
     sym->is_deleted = is_deleted;
     sym->is_defaulted = is_defaulted;
     sym->set_language_linkage(requested_language_linkage);
@@ -511,6 +528,26 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
 }
 
 
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
+
+    return collect_declare_function_symbol(
+        std::move(scope),
+        std::move(global_scope),
+        name,
+        type,
+        storage_class,
+        is_constexpr,
+        false,
+        is_inline,
+        is_definition,
+        loc,
+        language_linkage,
+        is_cpp_member_function,
+        is_deleted,
+        is_defaulted);
+}
+
+
 std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
 
     return collect_declare_function_symbol(
@@ -520,6 +557,26 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::stri
         type,
         storage_class,
         is_constexpr,
+        false,
+        is_inline,
+        is_definition,
+        loc,
+        language_linkage,
+        is_cpp_member_function,
+        is_deleted,
+        is_defaulted);
+}
+
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_consteval, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
+
+    return collect_declare_function_symbol(
+        session_.current_scope_,
+        session_.current_global_scope_,
+        name,
+        type,
+        storage_class,
+        is_constexpr,
+        is_consteval,
         is_inline,
         is_definition,
         loc,

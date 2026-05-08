@@ -804,6 +804,16 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
             construct->ctype = rewrite_type(construct->ctype, ctx);
             return true;
         }
+        case StmtKind::CppImmediateInvocationExpr: {
+            auto* immediate =
+                static_cast<CppImmediateInvocationExpr*>(expr.get());
+            if (immediate->invocation &&
+                !rewrite_expr_tree(immediate->invocation, ctx, error_out)) {
+                return false;
+            }
+            immediate->ctype = rewrite_type(immediate->ctype, ctx);
+            return true;
+        }
         case StmtKind::CppThrowExpr: {
             auto* throw_expr = static_cast<CppThrowExpr*>(expr.get());
             if (throw_expr->thrown_expr &&
@@ -1913,6 +1923,7 @@ std::shared_ptr<Symbol> clone_symbol_shallow(const std::shared_ptr<Symbol>& sym,
         sym->is_inline != 0);
     cloned->is_defined = sym->is_defined;
     cloned->is_constexpr = sym->is_constexpr;
+    cloned->is_consteval = sym->is_consteval;
     cloned->is_deleted = sym->is_deleted;
     cloned->is_defaulted = sym->is_defaulted;
     cloned->had_non_inline_declaration = sym->had_non_inline_declaration;

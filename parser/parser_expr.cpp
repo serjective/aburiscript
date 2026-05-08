@@ -2272,6 +2272,8 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
         }
 
         // GCC extension: __alignof__(expression)
+        Collect::UnevaluatedContextScope unevaluated_scope(
+            collect_.get(), "_Alignof");
         auto expr = parse_assignment_expression();
         check_and_consume(TokenType::RIGHT_PAREN);
         return collect_->collect_alignof_expression(std::move(expr), tok.loc);
@@ -2280,6 +2282,8 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
     if (is_cxx_mode_active() && tok.type == TokenType::NOEXCEPT_KW) {
         advance(); // consume 'noexcept'
         check_and_consume(TokenType::LEFT_PAREN);
+        Collect::UnevaluatedContextScope unevaluated_scope(
+            collect_.get(), "noexcept");
         auto expr = parse_expression();
         check_and_consume(TokenType::RIGHT_PAREN);
         return collect_->collect_cpp_noexcept_expression(
@@ -2344,11 +2348,15 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
             // Not a type-name form (or it's a compound literal) — parse as
             // sizeof unary-expression so postfix ops like -> are included.
             // e.g., sizeof ((Stab_Sym*)0)->n_value
+            Collect::UnevaluatedContextScope unevaluated_scope(
+                collect_.get(), "sizeof");
             auto expr = parse_unary_expression();
             return collect_->collect_sizeof_expression(std::move(expr), tok.loc);
         } else {
             // sizeof unary-expression (without parentheses)
             // e.g., sizeof x, sizeof *p, sizeof arr[0]
+            Collect::UnevaluatedContextScope unevaluated_scope(
+                collect_.get(), "sizeof");
             auto expr = parse_unary_expression();
             return collect_->collect_sizeof_expression(std::move(expr), tok.loc);
         }

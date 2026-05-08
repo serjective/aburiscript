@@ -1900,6 +1900,7 @@ bool Collect::finalize_cpp_lambda_semantics(
         static_cast<uint8_t>(CppAccessSpecifier::Public);
     member_info.is_method = true;
     member_info.is_constexpr = synthesized_method->is_constexpr;
+    member_info.is_consteval = synthesized_method->is_consteval;
     ast_ctx_->set_cpp_member_decl_info(synthesized_method->node_id, member_info);
 
     lambda.semantic_info.call_operator_decl = synthesized_method.get();
@@ -1912,6 +1913,7 @@ bool Collect::finalize_cpp_lambda_semantics(
             QualType(synthesized_method->type),
             synthesized_method->storage_class,
             synthesized_method->is_constexpr,
+            synthesized_method->is_consteval,
             synthesized_method->is_inline,
             synthesized_method->body != nullptr,
             synthesized_method->location,

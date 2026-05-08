@@ -80,6 +80,7 @@ struct Symbol {
     uint8_t is_inline : 1;
     uint8_t had_non_inline_declaration : 1;
     uint8_t is_constexpr : 1;
+    uint8_t is_consteval : 1;
     uint8_t is_deleted : 1;
     uint8_t is_defaulted : 1;
     uint8_t is_deprecated : 1;
@@ -108,6 +109,7 @@ struct Symbol {
           is_inline(false),
           had_non_inline_declaration(false),
           is_constexpr(false),
+          is_consteval(false),
           is_deleted(false),
           is_defaulted(false),
           is_deprecated(false),
@@ -127,6 +129,7 @@ struct Symbol {
           is_inline(is_inline),
           had_non_inline_declaration(!is_inline),
           is_constexpr(false),
+          is_consteval(false),
           is_deleted(false),
           is_defaulted(false),
           is_deprecated(false),

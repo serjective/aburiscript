@@ -227,6 +227,13 @@ llvm::Constant* lower_value_constant(const ConstValue& value,
 }
 }
 
+llvm::Constant* lower_const_value_to_llvm_constant(
+    const ConstValue& value,
+    llvm::Type* target_type,
+    bool target_is_unsigned) {
+    return lower_value_constant(value, target_type, target_is_unsigned);
+}
+
 llvm::Constant* lower_consteval_to_llvm_constant(
     Expr* expr,
     llvm::Type* target_type,

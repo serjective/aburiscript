@@ -3418,6 +3418,10 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
             "constexpr recursion depth exceeded", expr->location);
     }
 
+    if (auto* immediate = dyn_cast<CppImmediateInvocationExpr>(expr)) {
+        return ConstEvalResult::constant(immediate->value);
+    }
+
     if (auto* init_list = dyn_cast<InitListExpr>(expr)) {
         if ((is_cpp_core_constant_expression_mode(mode) ||
              is_cpp_non_type_template_argument_mode(mode)) &&

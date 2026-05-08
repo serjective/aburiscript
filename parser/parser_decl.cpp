@@ -98,6 +98,16 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
         in_class_member_context,
         is_static_member,
         loc);
+    bool is_operator_new_delete =
+        decl_parser->name == "operatornew" ||
+        decl_parser->name == "operatornew[]" ||
+        decl_parser->name == "operatordelete" ||
+        decl_parser->name == "operatordelete[]";
+    if (decl_parser->is_consteval && is_operator_new_delete) {
+        error_custloc(
+            "allocation/deallocation function cannot be consteval",
+            loc);
+    }
 
     auto fin_funcdecl = collect_->collect_function_declaration(
         decl_parser->name,
@@ -108,6 +118,16 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
         loc,
         current_decl_language_linkage());
     fin_funcdecl->is_constexpr = decl_parser->is_constexpr;
+    fin_funcdecl->is_consteval = decl_parser->is_consteval;
+    if (fin_funcdecl->is_consteval) {
+        fin_funcdecl->is_constexpr = true;
+        fin_funcdecl->is_inline = true;
+        if (predecl_sym && predecl_sym->kind == SymbolKind::FUNCTION) {
+            predecl_sym->is_consteval = true;
+            predecl_sym->is_constexpr = true;
+            predecl_sym->is_inline = true;
+        }
+    }
     fin_funcdecl->trailing_requires_clause =
         std::move(decl_parser->trailing_requires_clause);
     auto synthesize_parameter_decls_from_function_type =
@@ -191,6 +211,9 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
         bool seenVoid = false;
         for (auto &i: decl_parser->func_args) {
             retain_type_specifier_decl_if_needed(*i);
+            if (i->is_consteval) {
+                error("'consteval' is not valid for function parameter declarations");
+            }
             if (i->is_constexpr) {
                 error("'constexpr' is not valid for function parameter declarations");
             }
@@ -307,6 +330,8 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     collect_->collect_start_function_definition(
         fin_funcdecl->name, QualType(fin_funcdecl->type), cpp_this_context);
     current_language_linkage_ = LanguageLinkage::None;
+    Collect::ImmediateFunctionContextScope immediate_function_context_guard(
+        collect_.get(), fin_funcdecl->is_consteval != 0);
     try {
         if (gentle_check(TokenType::LEFT_BRACE)) {
             compound_stmt = parse_compound_stmt(new_scope);

@@ -3,6 +3,7 @@
 
 #include "../constexpr/consteval_mode.h"
 
+struct ConstValue;
 struct Expr;
 
 namespace llvm {
@@ -18,5 +19,10 @@ llvm::Constant* lower_consteval_to_llvm_constant(
     llvm::Type* target_type,
     bool target_is_unsigned,
     ConstEvalMode mode = ConstEvalMode::c_static_initializer());
+
+llvm::Constant* lower_const_value_to_llvm_constant(
+    const ConstValue& value,
+    llvm::Type* target_type,
+    bool target_is_unsigned);
 
 #endif // ABURI_CONST_LOWERING_H

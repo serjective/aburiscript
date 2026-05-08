@@ -897,6 +897,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 ctor_decl->type,
                 ctor_decl->storage_class,
                 ctor_decl->is_constexpr,
+                ctor_decl->is_consteval,
                 ctor_decl->is_inline,
                 function_decl_defines_entity(ctor_decl),
                 ctor_decl->location,
@@ -922,6 +923,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             ctor.is_implicit = false;
             ctor.is_explicit = ctor_decl->is_explicit;
             ctor.is_deleted = ctor_decl->is_deleted;
+            ctor.is_consteval = ctor_decl->is_consteval;
             ctor.decl = ctor_decl;
             ctor.symbol = std::move(ctor_sym);
             constructors.push_back(std::move(ctor));
@@ -948,6 +950,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 dtor_decl->type,
                 dtor_decl->storage_class,
                 dtor_decl->is_constexpr,
+                dtor_decl->is_consteval,
                 dtor_decl->is_inline,
                 function_decl_defines_entity(dtor_decl),
                 dtor_decl->location,
@@ -973,6 +976,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             dtor.is_implicit = false;
             dtor.is_defaulted = dtor_decl->is_defaulted;
             dtor.is_deleted = dtor_decl->is_deleted;
+            dtor.is_consteval = dtor_decl->is_consteval;
             dtor.is_virtual = dtor_decl->is_virtual;
             dtor.is_override = dtor_decl->is_override;
             dtor.is_final = dtor_decl->is_final;
@@ -1049,6 +1053,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 method_decl->type,
                 method_decl->storage_class,
                 method_decl->is_constexpr,
+                method_decl->is_consteval,
                 method_decl->is_inline,
                 function_decl_defines_entity(method_decl),
                 method_decl->location,
@@ -1074,6 +1079,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             method.is_static = method_decl->storage_class == StorageClass::STATIC;
             method.is_deleted = method_decl->is_deleted;
             method.is_defaulted = method_decl->is_defaulted;
+            method.is_consteval = method_decl->is_consteval;
             method.is_explicit = method_decl->is_explicit_conversion;
             method.is_virtual = method_decl->is_virtual;
             method.is_override = method_decl->is_override;
@@ -1342,6 +1348,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 member_decl->name,
                 QualType(member_decl->type),
                 cpp_this_context);
+            Collect::ImmediateFunctionContextScope immediate_function_context_guard(
+                collect_.get(), member_decl->is_consteval != 0);
 
             for (auto& param_decl_base : member_decl->parameters) {
                 auto* param_decl = dyn_cast<ParamDecl>(param_decl_base.get());
@@ -2804,14 +2812,15 @@ Parser::DeclaratorHandlingResult Parser::handle_typedef_declarator(
     std::shared_ptr<CType>& parsed_decl_type,
     std::vector<ParsedAttribute>& trailing_attrs,
     bool declaration_is_constexpr,
+    bool declaration_is_consteval,
     std::vector<std::unique_ptr<Decl>>& ret_vec) {
     if (decl_parser.explicit_specifier.is_present) {
         error_custloc(
             "'explicit' is only allowed on constructors and conversion functions",
             decl_parser.explicit_specifier.location);
     }
-    if (declaration_is_constexpr) {
-        error("'constexpr' cannot be combined with 'typedef'");
+    if (declaration_is_constexpr || declaration_is_consteval) {
+        error("'constexpr' or 'consteval' cannot be combined with 'typedef'");
     }
     if (gentle_check(TokenType::ASSIGN)) {
         error("illegal initializer in typedef (typedefs do not declare objects)");
@@ -2886,6 +2895,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
     std::vector<ParsedAttribute>& trailing_attrs,
     StorageClass storage_class,
     bool declaration_is_constexpr,
+    bool declaration_is_consteval,
     LanguageLinkage declaration_language_linkage,
     QualifiedDeclaratorInfo& qualified_declarator,
     std::vector<std::unique_ptr<Decl>>& ret_vec) {
@@ -2984,6 +2994,11 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         out_of_line_method->scope = parsed_method_func->scope;
         out_of_line_method->type = parsed_method_func->type;
         out_of_line_method->is_constexpr = parsed_method_func->is_constexpr;
+        out_of_line_method->is_consteval = parsed_method_func->is_consteval;
+        if (out_of_line_method->is_consteval) {
+            out_of_line_method->is_constexpr = true;
+            out_of_line_method->is_inline = true;
+        }
         out_of_line_method->is_deleted = parsed_method_func->is_deleted;
         out_of_line_method->is_defaulted = parsed_method_func->is_defaulted;
         out_of_line_method->explicit_specialization_arguments =
@@ -3138,6 +3153,18 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                 ast_ctx.get())) {
             error_custloc(
                 "only copy and move assignment operators may be defaulted here",
+                    qualified_declarator.loc);
+        }
+
+        if (matched_method_decl &&
+            matched_method_decl->is_consteval != out_of_line_method->is_consteval) {
+            error_custloc(
+                "conflicting consteval specifier for '" +
+                    qualified_name_utils::format_cpp_qualified_name(
+                        qualified_declarator.has_global_qualifier,
+                        qualified_declarator.qualifiers,
+                        decl_parser.name) +
+                    "'",
                 qualified_declarator.loc);
         }
 
@@ -3234,6 +3261,12 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                 std::move(out_of_line_method->stmt_labels);
             matched_method_decl->is_constexpr =
                 out_of_line_method->is_constexpr;
+            matched_method_decl->is_consteval =
+                out_of_line_method->is_consteval;
+            if (matched_method_decl->is_consteval) {
+                matched_method_decl->is_constexpr = true;
+                matched_method_decl->is_inline = true;
+            }
             matched_method_decl->is_deleted =
                 out_of_line_method->is_deleted;
             matched_method_decl->is_defaulted =
@@ -3276,6 +3309,9 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                     matched_method_decl->is_deleted;
                 method_sym->is_deleted = matched_method_decl->is_deleted;
                 method_sym->is_defaulted = matched_method_decl->is_defaulted;
+                method_sym->is_constexpr = matched_method_decl->is_constexpr;
+                method_sym->is_consteval = matched_method_decl->is_consteval;
+                method_sym->is_inline = matched_method_decl->is_inline;
                 method_sym->type = QualType(matched_method_decl->type);
                 method_sym->function_definition = matched_method_decl;
             }
@@ -3293,6 +3329,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                         method.type = QualType(matched_method_decl->type);
                         method.is_deleted = matched_method_decl->is_deleted;
                         method.is_defaulted = matched_method_decl->is_defaulted;
+                        method.is_consteval = matched_method_decl->is_consteval;
                         method.is_explicit =
                             matched_method_decl->is_explicit_conversion;
                         method.is_conversion_function =
@@ -3359,6 +3396,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             QualType(parsed_decl_type),
             storage_class,
             declaration_is_constexpr,
+            declaration_is_consteval,
             decl_parser.is_inline,
             false,
             declarator_token.loc,
@@ -3366,6 +3404,11 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             false,
             false,
             false);
+        if (predecl_sym && declaration_is_consteval) {
+            predecl_sym->is_consteval = true;
+            predecl_sym->is_constexpr = true;
+            predecl_sym->is_inline = true;
+        }
         merge_function_asm_label(decl_parser, predecl_sym, declarator_token.loc);
     }
     auto funct = parse_function(&decl_parser, declarator_token.loc, predecl_sym);
@@ -3385,6 +3428,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             QualType(parsed_decl_type),
             storage_class,
             declaration_is_constexpr,
+            declaration_is_consteval,
             decl_parser.is_inline,
             is_definition,
             declarator_token.loc,
@@ -3392,6 +3436,11 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             false,
             func_decl_check && func_decl_check->is_deleted,
             func_decl_check && func_decl_check->is_defaulted);
+        if (final_sym && declaration_is_consteval) {
+            final_sym->is_consteval = true;
+            final_sym->is_constexpr = true;
+            final_sym->is_inline = true;
+        }
         if (is_definition && func_decl_check) {
             if (predecl_sym) {
                 predecl_sym->function_definition = func_decl_check;
@@ -3435,6 +3484,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
     std::vector<ParsedAttribute>& trailing_attrs,
     StorageClass storage_class,
     bool declaration_is_constexpr,
+    bool declaration_is_consteval,
     LanguageLinkage declaration_language_linkage,
     QualifiedDeclaratorInfo& qualified_declarator,
     std::optional<QualType>& first_cxx_auto_deduced_type,
@@ -3458,6 +3508,9 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
     }
     if (declarator_has_gnu_auto_type && !gentle_check(TokenType::ASSIGN)) {
         error("'__auto_type' requires an initializer");
+    }
+    if (declaration_is_consteval) {
+        error("'consteval' can only be applied to function declarations");
     }
     QualType declared_type(parsed_decl_type, decl_parser.qualifiers);
     if (declaration_is_constexpr && storage_class == StorageClass::EXTERN) {
@@ -3804,6 +3857,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
     auto new_type = parse_declaration_head(t, decl_parser, ret_vec);
     auto storage_class = decl_parser.str_class;
     const bool declaration_is_constexpr = decl_parser.is_constexpr;
+    const bool declaration_is_consteval = decl_parser.is_consteval;
     const LanguageLinkage declaration_language_linkage = current_decl_language_linkage();
     std::optional<QualType> first_cxx_auto_deduced_type;
     // Error production: missing ';' after struct/union/enum definition
@@ -3939,6 +3993,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
                 newer_type,
                 trailing_attrs,
                 declaration_is_constexpr,
+                declaration_is_consteval,
                 ret_vec);
             continue;
         }
@@ -3950,6 +4005,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
                     trailing_attrs,
                     storage_class,
                     declaration_is_constexpr,
+                    declaration_is_consteval,
                     declaration_language_linkage,
                     qualified_declarator,
                     ret_vec) == DeclaratorHandlingResult::Return) {
@@ -3964,6 +4020,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
                 trailing_attrs,
                 storage_class,
                 declaration_is_constexpr,
+                declaration_is_consteval,
                 declaration_language_linkage,
                 qualified_declarator,
                 first_cxx_auto_deduced_type,
@@ -3984,6 +4041,9 @@ std::unique_ptr<Decl> Parser::parse_parameter_declaration() {
     auto ctype = new_type;
     std::string name = decl_parser.name;
     StorageClass sclass = decl_parser.str_class;
+    if (decl_parser.is_consteval) {
+        error("'consteval' is not valid for function parameter declarations");
+    }
     if (decl_parser.is_constexpr) {
         error("'constexpr' is not valid for function parameter declarations");
     }
@@ -4064,8 +4124,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 continue;
             }
             retain_type_specifier_decl_if_needed(*param_parser);
-            if (param_parser->is_constexpr) {
-                error("'constexpr' is not valid for function parameter declarations");
+            if (param_parser->is_constexpr || param_parser->is_consteval) {
+                error("'constexpr/consteval' is not valid for function parameter declarations");
             }
             if (param_parser->explicit_specifier.is_present) {
                 error("'explicit' is not valid for function parameter declarations");
@@ -4503,6 +4563,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     t.loc);
                 cpp_method->type = field_type;
                 cpp_method->is_constexpr = decl_parser.is_constexpr;
+                cpp_method->is_consteval = decl_parser.is_consteval;
                 cpp_method->is_deleted = false;
                 cpp_method->is_defaulted = false;
                 cpp_method->is_conversion_function =
@@ -4547,6 +4608,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->scope = parsed_method->scope;
                 cpp_method->type = parsed_method->type;
                 cpp_method->is_constexpr = parsed_method->is_constexpr;
+                cpp_method->is_consteval = parsed_method->is_consteval;
                 cpp_method->is_deleted = parsed_method->is_deleted;
                 cpp_method->is_defaulted = parsed_method->is_defaulted;
                 cpp_method->is_conversion_function =
@@ -4619,6 +4681,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->name == "operatornew[]" ||
                 cpp_method->name == "operatordelete" ||
                 cpp_method->name == "operatordelete[]";
+            if (cpp_method->is_consteval && is_operator_new_delete) {
+                error_custloc(
+                    "allocation/deallocation function cannot be consteval",
+                    cpp_method->location);
+            }
             bool has_implicit_object_parameter =
                 !is_static_method && !is_operator_new_delete;
             if (has_implicit_object_parameter &&
@@ -4716,6 +4783,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 field_type,
                 field_attrs_before_colon,
                 decl_parser.is_constexpr,
+                decl_parser.is_consteval,
                 fields);
 
             if (gentle_check(TokenType::COMMA)) {
@@ -4730,6 +4798,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             }
             check_and_consume(TokenType::SEMICOLON);
             break;
+        }
+
+        if (decl_parser.is_consteval) {
+            error("'consteval' can only be applied to function declarations");
         }
 
         // Check for bitfield syntax: field_name : width or just : width (anonymous)
@@ -5600,6 +5672,9 @@ bool Parser::isTokenDeclarationSpec(Token s) {
          s.value == "constexpr" &&
          is_c23_constexpr_enabled())) {
         return true;
+    }
+    if (s.type == TokenType::CONSTEVAL_KW) {
+        return is_cxx_mode_active();
     }
     switch (s.type) {
         case TokenType::VOID:

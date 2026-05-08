@@ -324,6 +324,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             return;
         }
         symbol->is_constexpr = source_decl->is_constexpr;
+        symbol->is_consteval = source_decl->is_consteval;
         symbol->is_deleted = source_decl->is_deleted;
         symbol->is_defaulted = source_decl->is_defaulted;
         symbol->set_language_linkage(source_decl->get_language_linkage());
@@ -519,6 +520,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_ctor->storage_class = pattern_ctor->storage_class;
             specialized_ctor->is_inline = pattern_ctor->is_inline;
             specialized_ctor->is_constexpr = pattern_ctor->is_constexpr;
+            specialized_ctor->is_consteval = pattern_ctor->is_consteval;
             specialized_ctor->is_deleted = pattern_ctor->is_deleted;
             specialized_ctor->is_defaulted = pattern_ctor->is_defaulted;
             specialized_ctor->set_language_linkage(
@@ -554,6 +556,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_method->storage_class = pattern_method->storage_class;
             specialized_method->is_inline = pattern_method->is_inline;
             specialized_method->is_constexpr = pattern_method->is_constexpr;
+            specialized_method->is_consteval = pattern_method->is_consteval;
             specialized_method->is_deleted = pattern_method->is_deleted;
             specialized_method->is_defaulted = pattern_method->is_defaulted;
             specialized_method->set_language_linkage(
@@ -609,6 +612,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_function->storage_class = pattern->storage_class;
             specialized_function->is_inline = pattern->is_inline;
             specialized_function->is_constexpr = pattern->is_constexpr;
+            specialized_function->is_consteval = pattern->is_consteval;
             specialized_function->is_deleted = pattern->is_deleted;
             specialized_function->is_defaulted = pattern->is_defaulted;
             specialized_function->set_language_linkage(

@@ -416,6 +416,7 @@ private:
         std::shared_ptr<CType>& parsed_decl_type,
         std::vector<ParsedAttribute>& trailing_attrs,
         bool declaration_is_constexpr,
+        bool declaration_is_consteval,
         std::vector<std::unique_ptr<Decl>>& ret_vec);
     DeclaratorHandlingResult handle_function_declarator(
         DeclarationParser& decl_parser,
@@ -424,6 +425,7 @@ private:
         std::vector<ParsedAttribute>& trailing_attrs,
         StorageClass storage_class,
         bool declaration_is_constexpr,
+        bool declaration_is_consteval,
         LanguageLinkage declaration_language_linkage,
         QualifiedDeclaratorInfo& qualified_declarator,
         std::vector<std::unique_ptr<Decl>>& ret_vec);
@@ -434,6 +436,7 @@ private:
         std::vector<ParsedAttribute>& trailing_attrs,
         StorageClass storage_class,
         bool declaration_is_constexpr,
+        bool declaration_is_consteval,
         LanguageLinkage declaration_language_linkage,
         QualifiedDeclaratorInfo& qualified_declarator,
         std::optional<QualType>& first_cxx_auto_deduced_type,
@@ -760,6 +763,7 @@ struct DeclarationParser {
     bool is_thread_local = false;
     bool is_block_byref = false;
     bool is_constexpr = false;
+    bool is_consteval = false;
     CppExplicitSpecifier explicit_specifier;
     std::unique_ptr<Expr> trailing_requires_clause = nullptr;
     uint8_t qualifiers = QUAL_NONE; // outermost type qualifiers (for the variable itself)
@@ -801,6 +805,7 @@ struct DeclarationParser {
             float16_count = 0;
         int static_count = 0, extern_count = 0, auto_count = 0, register_count = 0, typedef_count = 0;
         int constexpr_count = 0;
+        int consteval_count = 0;
         int inline_count = 0;
         int thread_local_count = 0;
         int block_byref_count = 0;
@@ -997,8 +1002,17 @@ struct DeclarationParser {
         if (tally.constexpr_count > 1) {
             error_custloc("duplicate 'constexpr' specifier", begin_loc);
         }
+        if (tally.consteval_count > 1) {
+            error_custloc("duplicate 'consteval' specifier", begin_loc);
+        }
+        if (tally.constexpr_count && tally.consteval_count) {
+            error_custloc("'constexpr' cannot be combined with 'consteval'", begin_loc);
+        }
         if (tally.constexpr_count && tally.typedef_count) {
             error_custloc("'constexpr' cannot be combined with 'typedef'", begin_loc);
+        }
+        if (tally.consteval_count && tally.typedef_count) {
+            error_custloc("'consteval' cannot be combined with 'typedef'", begin_loc);
         }
         // Floating-point types cannot be combined with signed/unsigned
         if ((tally.float_count || tally.double_count) && (tally.signed_count || tally.unsigned_count)) {

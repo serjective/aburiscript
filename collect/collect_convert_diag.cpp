@@ -73,6 +73,22 @@ bool Collect::in_unevaluated_context() const {
     return session_.func_state_.unevaluated_depth > 0;
 }
 
+void Collect::enter_immediate_function_context() {
+    materialize_tentative_snapshot_if_needed();
+    ++session_.func_state_.immediate_function_context_depth;
+}
+
+void Collect::leave_immediate_function_context() {
+    if (session_.func_state_.immediate_function_context_depth > 0) {
+        materialize_tentative_snapshot_if_needed();
+        --session_.func_state_.immediate_function_context_depth;
+    }
+}
+
+bool Collect::in_immediate_function_context() const {
+    return session_.func_state_.immediate_function_context_depth > 0;
+}
+
 void Collect::report_conversion_failure(const std::string& context,
                                         QualType from,
                                         QualType to,

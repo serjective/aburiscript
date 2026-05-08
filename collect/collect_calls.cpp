@@ -4271,6 +4271,43 @@ std::unique_ptr<Expr> Collect::wrap_member_call_expression(
     return member_call;
 }
 
+std::unique_ptr<Expr> Collect::maybe_wrap_immediate_invocation(
+    std::unique_ptr<Expr> invocation,
+    const std::shared_ptr<Symbol>& callee_symbol,
+    SrcLoc loc) {
+    if (!invocation ||
+        !callee_symbol ||
+        callee_symbol->kind != SymbolKind::FUNCTION ||
+        !callee_symbol->is_consteval) {
+        return invocation;
+    }
+    if (in_unevaluated_context() || in_immediate_function_context()) {
+        return invocation;
+    }
+    if (expression_depends_on_template_parameters(invocation.get()) ||
+        type_depends_on_template_parameters(invocation->get_type(), ast_ctx_.get())) {
+        return invocation;
+    }
+
+    ConstEvalResult result = evaluate_with_consteval_compat(
+        invocation.get(), ConstEvalMode::cpp_immediate_function());
+    if (result.status == ConstEvalStatus::Constant && result.value.has_value()) {
+        QualType invocation_type = invocation->get_type();
+        return collect_make<CppImmediateInvocationExpr>(
+            std::move(invocation),
+            *result.value,
+            invocation_type,
+            loc);
+    }
+
+    report_error(
+        "immediate invocation of consteval function '" +
+            callee_symbol->name + "' is not a constant expression: " +
+            describe_consteval_failure(result),
+        loc);
+    return collect_make<ErrorExpr>("invalid immediate invocation", loc);
+}
+
 std::unique_ptr<Expr> Collect::finalize_call_expression(
     std::unique_ptr<FuncCall> call,
     const MemberCallSelection& member_call_selection,
@@ -4302,15 +4339,23 @@ std::unique_ptr<Expr> Collect::finalize_call_expression(
     if (context.constructor_call &&
         context.constructor_symbol &&
         context.constructor_object_type) {
-        return collect_make<CppConstructExpr>(
+        auto construct_expr = collect_make<CppConstructExpr>(
             context.constructor_symbol,
             std::move(call->args),
             context.constructor_object_type,
             false,
             loc);
+        return maybe_wrap_immediate_invocation(
+            std::move(construct_expr),
+            context.constructor_symbol,
+            loc);
     }
 
     call->ctype = context.function_type->ret_type;
-    return wrap_member_call_expression(
+    auto invocation = wrap_member_call_expression(
         std::move(call), member_call_selection, loc);
+    return maybe_wrap_immediate_invocation(
+        std::move(invocation),
+        context.callee_symbol,
+        loc);
 }

@@ -139,6 +139,7 @@ enum class TokenType {
     FRIEND_KW,
     EXPLICIT_KW,
     CONSTEXPR_KW,
+    CONSTEVAL_KW,
     CONCEPT_KW,
     REQUIRES_KW,
     // GCC extensions
@@ -302,6 +303,7 @@ struct Token {
             case TokenType::FRIEND_KW:
             case TokenType::EXPLICIT_KW:
             case TokenType::CONSTEXPR_KW:
+            case TokenType::CONSTEVAL_KW:
             case TokenType::CONCEPT_KW:
             case TokenType::REQUIRES_KW:
             // GCC extensions

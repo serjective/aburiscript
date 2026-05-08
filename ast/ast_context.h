@@ -62,6 +62,7 @@ struct CppMemberDeclInfo {
     bool is_final = false;
     bool is_pure = false;
     bool is_constexpr = false;
+    bool is_consteval = false;
     CppMemberRefQualifier ref_qualifier = CppMemberRefQualifier::None;
 };
 

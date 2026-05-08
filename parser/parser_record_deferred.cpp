@@ -295,6 +295,8 @@ void Parser::build_cpp_record_parse_deferred_bodies(
             member_decl->name,
             QualType(member_decl->type),
             cpp_this_context);
+        Collect::ImmediateFunctionContextScope immediate_function_context_guard(
+            collect_.get(), member_decl->is_consteval != 0);
 
         for (auto& param_decl_base : member_decl->parameters) {
             auto* param_decl = dyn_cast<ParamDecl>(param_decl_base.get());

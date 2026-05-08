@@ -1599,6 +1599,29 @@ llvm::Value * ASTToLLVM::convert_expression(Expr *expr) {
         case StmtKind::CppConstructExpr:
             return convert_cpp_construct_temporary_expression(
                 static_cast<CppConstructExpr*>(expr), expr->location);
+        case StmtKind::CppImmediateInvocationExpr: {
+            auto* immediate =
+                static_cast<CppImmediateInvocationExpr*>(expr);
+            if (!immediate->get_type() || immediate->get_type()->isVoid()) {
+                return nullptr;
+            }
+            llvm::Type* target_type = convert_type(immediate->get_type());
+            if (!target_type) {
+                error("convert_expression(): failed to lower immediate invocation type",
+                      expr->location);
+                return nullptr;
+            }
+            llvm::Constant* lowered = lower_const_value_to_llvm_constant(
+                immediate->value,
+                target_type,
+                immediate->get_type()->isUnsigned());
+            if (!lowered) {
+                error("convert_expression(): unsupported consteval immediate invocation constant",
+                      expr->location);
+                return nullptr;
+            }
+            return lowered;
+        }
         case StmtKind::CondExpr:
             return convert_conditional_expr(static_cast<CondExpr*>(expr));
         case StmtKind::UnaryOperation:

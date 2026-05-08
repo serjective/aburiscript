@@ -151,6 +151,7 @@ const std::unordered_map<std::string_view, TokenType>& cxx_keyword_table() {
         {"friend", TokenType::FRIEND_KW},
         {"explicit", TokenType::EXPLICIT_KW},
         {"constexpr", TokenType::CONSTEXPR_KW},
+        {"consteval", TokenType::CONSTEVAL_KW},
     };
     return keywords;
 }
@@ -1435,6 +1436,7 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::FRIEND_KW: return "'friend'";
         case TokenType::EXPLICIT_KW: return "'explicit'";
         case TokenType::CONSTEXPR_KW: return "'constexpr'";
+        case TokenType::CONSTEVAL_KW: return "'consteval'";
         case TokenType::CONCEPT_KW: return "'concept'";
         case TokenType::REQUIRES_KW: return "'requires'";
         case TokenType::NULLABILITY_QUALIFIER: return "nullability qualifier";

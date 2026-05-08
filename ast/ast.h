@@ -1,6 +1,8 @@
 #ifndef ABURI_AST_H
 #define ABURI_AST_H
 
+#include "../constexpr/const_value.h"
+
 // ============================================================================
 // AST Node Ownership Conventions
 // ============================================================================
@@ -111,6 +113,7 @@ enum class StmtKind : uint8_t {
     FoldExpr,
     CppMemberCallExpr,
     CppConstructExpr,
+    CppImmediateInvocationExpr,
     CondExpr,
     UnaryOperation,
     BinaryOperation,
@@ -601,7 +604,9 @@ struct FuncDecl: Decl {
     bool has_explicit_specialization_argument_list = false;
     uint8_t is_inline : 1;
     uint8_t has_prior_non_inline_declaration : 1;
+    // todo: combine constexpr/consteval fields?
     uint8_t is_constexpr : 1;
+    uint8_t is_consteval : 1;
     uint8_t is_deleted : 1;
     uint8_t is_defaulted : 1;
     uint8_t language_linkage : 2;
@@ -642,6 +647,7 @@ protected:
                asm_label(nullptr),
                storage_class(storage_class), is_inline(is_inline),
                has_prior_non_inline_declaration(false), is_constexpr(false),
+               is_consteval(false),
                is_deleted(false), is_defaulted(false),
                language_linkage(static_cast<uint8_t>(LanguageLinkage::None)) {}
     FuncDecl(DeclKind kind, SrcLoc loc = SrcLoc()): Decl(kind, loc), type(nullptr), body(nullptr), scope(nullptr),
@@ -649,6 +655,7 @@ protected:
                                                      storage_class(StorageClass::NONE), is_inline(false),
                                                      has_prior_non_inline_declaration(false),
                                                      is_constexpr(false),
+                                                     is_consteval(false),
                                                      is_deleted(false),
                                                      is_defaulted(false),
                                                      language_linkage(static_cast<uint8_t>(LanguageLinkage::None)) {}
@@ -1372,6 +1379,28 @@ struct CppConstructExpr: Expr {
 
     static bool classof(const Stmt *s) {
         return s->get_kind() == StmtKind::CppConstructExpr;
+    }
+};
+struct CppImmediateInvocationExpr: Expr {
+    std::unique_ptr<Expr> invocation;
+    ConstValue value;
+    QualType ctype;
+
+    CppImmediateInvocationExpr(std::unique_ptr<Expr> invocation,
+                               ConstValue value,
+                               QualType ctype,
+                               SrcLoc loc = SrcLoc())
+        : Expr(StmtKind::CppImmediateInvocationExpr, loc),
+          invocation(std::move(invocation)),
+          value(std::move(value)),
+          ctype(std::move(ctype)) {}
+
+    QualType get_type() override {
+        return ctype;
+    }
+
+    static bool classof(const Stmt *s) {
+        return s->get_kind() == StmtKind::CppImmediateInvocationExpr;
     }
 };
 struct CppThrowExpr: Expr {

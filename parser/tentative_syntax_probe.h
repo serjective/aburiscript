@@ -636,6 +636,7 @@ private:
                 case TokenType::NORETURN_KW:
                 case TokenType::EXTENSION_KW:
                 case TokenType::CONSTEXPR_KW:
+                case TokenType::CONSTEVAL_KW:
                     saw_specifier = true;
                     advance();
                     continue;

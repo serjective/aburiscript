@@ -176,6 +176,8 @@ const char* stmt_kind_name(StmtKind kind) {
         case StmtKind::FoldExpr: return "FoldExpr";
         case StmtKind::CppMemberCallExpr: return "CppMemberCallExpr";
         case StmtKind::CppConstructExpr: return "CppConstructExpr";
+        case StmtKind::CppImmediateInvocationExpr:
+            return "CppImmediateInvocationExpr";
         case StmtKind::CondExpr: return "CondExpr";
         case StmtKind::UnaryOperation: return "UnaryOperation";
         case StmtKind::BinaryOperation: return "BinaryOperation";
@@ -1071,6 +1073,14 @@ private:
                 for (const auto& arg : node->args) {
                     visit_stmt(arg.get());
                 }
+                return;
+            }
+            case StmtKind::CppImmediateInvocationExpr: {
+                auto* node =
+                    static_cast<const CppImmediateInvocationExpr*>(stmt);
+                record_stmt<CppImmediateInvocationExpr>(
+                    StmtKind::CppImmediateInvocationExpr);
+                visit_stmt(node->invocation.get());
                 return;
             }
             case StmtKind::CondExpr: {

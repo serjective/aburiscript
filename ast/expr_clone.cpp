@@ -731,6 +731,22 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
             assign_node_id(result.get(), ast_ctx);
             return result;
         }
+        case StmtKind::CppImmediateInvocationExpr: {
+            const auto* immediate =
+                static_cast<const CppImmediateInvocationExpr*>(expr);
+            auto cloned_invocation = clone_expr_impl(
+                immediate->invocation.get(), ast_ctx, error_out);
+            if (immediate->invocation && !cloned_invocation) {
+                return {};
+            }
+            auto result = std::make_unique<CppImmediateInvocationExpr>(
+                std::move(cloned_invocation),
+                immediate->value,
+                immediate->ctype,
+                immediate->location);
+            assign_node_id(result.get(), ast_ctx);
+            return result;
+        }
         case StmtKind::CppThrowExpr: {
             const auto* throw_expr = static_cast<const CppThrowExpr*>(expr);
             auto cloned_thrown_expr = clone_expr_impl(

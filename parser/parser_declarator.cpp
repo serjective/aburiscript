@@ -249,6 +249,9 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
         typedef_resolved_type = nullptr;
         typedef_resolved_qualifiers = QUAL_NONE;
         is_block_byref = false;
+        is_constexpr = false;
+        is_consteval = false;
+        is_inline = false;
         explicit_specifier = CppExplicitSpecifier{};
         bool parsing = true;
         std::shared_ptr<CType> atomic_type_specifier = nullptr; // _Atomic(type-name) resolved type
@@ -405,6 +408,17 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     qualifiers |= QUAL_ATOMIC;
                     break;
                 case TokenType::INLINE:   tally.inline_count++; break;
+                case TokenType::CONSTEVAL_KW:
+                    if (!pars->is_cxx_mode_active()) {
+                        parsing = false;
+                        continue;
+                    }
+                    if (!pars->lang_opts.is_cxx20_or_later()) {
+                        error_custloc("'consteval' is only available in C++20",
+                                      t.loc);
+                    }
+                    tally.consteval_count++;
+                    break;
                 case TokenType::EXPLICIT_KW:
                     if (!pars->is_cxx_mode_active()) {
                         parsing = false;
@@ -562,6 +576,8 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     mgnt->check_and_consume(TokenType::LEFT_PAREN);
                     bool use_declared_type_rule =
                         mgnt->current_token().type != TokenType::LEFT_PAREN;
+                    Collect::UnevaluatedContextScope unevaluated_scope(
+                        pars->collect_.get(), "decltype");
                     auto decltype_expr = pars->parse_expression();
                     if (!decltype_expr) {
                         error("Error parsing expression in decltype");
@@ -690,9 +706,10 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
         }
 
         str_class = resolveStorageClass(tally);
-        is_inline = tally.inline_count > 0;
+        is_consteval = tally.consteval_count > 0;
+        is_inline = tally.inline_count > 0 || is_consteval;
         is_thread_local = tally.thread_local_count > 0;
-        is_constexpr = tally.constexpr_count > 0;
+        is_constexpr = tally.constexpr_count > 0 || is_consteval;
         base_qualifiers = qualifiers; // save base qualifiers for multi-declarator lists
 
         // If we have a struct type, use it

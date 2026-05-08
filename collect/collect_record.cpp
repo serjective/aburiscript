@@ -1836,6 +1836,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 ctor_decl->type,
                 ctor_decl->storage_class,
                 ctor_decl->is_constexpr,
+                ctor_decl->is_consteval,
                 ctor_decl->is_inline,
                 is_definition,
                 ctor_decl->location,
@@ -1869,6 +1870,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 member_info.is_destructor = false;
                 member_info.is_explicit = ctor_decl->is_explicit;
                 member_info.is_constexpr = ctor_decl->is_constexpr;
+                member_info.is_consteval = ctor_decl->is_consteval;
                 ast_ctx_->set_cpp_member_decl_info(ctor_decl->node_id, member_info);
             }
 
@@ -1879,6 +1881,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             ctor.is_implicit = false;
             ctor.is_explicit = ctor_decl->is_explicit;
             ctor.is_deleted = ctor_decl->is_deleted;
+            ctor.is_consteval = ctor_decl->is_consteval;
             ctor.decl = ctor_decl;
             ctor.symbol = std::move(ctor_sym);
             ctx.constructors.push_back(std::move(ctor));
@@ -1937,6 +1940,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 dtor_decl->type,
                 dtor_decl->storage_class,
                 dtor_decl->is_constexpr,
+                dtor_decl->is_consteval,
                 dtor_decl->is_inline,
                 is_definition,
                 dtor_decl->location,
@@ -1969,6 +1973,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 member_info.is_final = dtor_decl->is_final;
                 member_info.is_pure = dtor_decl->is_pure;
                 member_info.is_constexpr = dtor_decl->is_constexpr;
+                member_info.is_consteval = dtor_decl->is_consteval;
                 ast_ctx_->set_cpp_member_decl_info(dtor_decl->node_id, member_info);
             }
 
@@ -1979,6 +1984,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             dtor.is_implicit = false;
             dtor.is_defaulted = dtor_decl->is_defaulted;
             dtor.is_deleted = dtor_decl->is_deleted;
+            dtor.is_consteval = dtor_decl->is_consteval;
             dtor.is_virtual = dtor_decl->is_virtual;
             dtor.is_override = dtor_decl->is_override;
             dtor.is_final = dtor_decl->is_final;
@@ -2087,6 +2093,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             method_decl->type,
             method_decl->storage_class,
             method_decl->is_constexpr,
+            method_decl->is_consteval,
             method_decl->is_inline,
             is_definition,
             method_decl->location,
@@ -2124,6 +2131,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             member_info.is_final = method_decl->is_final;
             member_info.is_pure = method_decl->is_pure;
             member_info.is_constexpr = method_decl->is_constexpr;
+            member_info.is_consteval = method_decl->is_consteval;
             ast_ctx_->set_cpp_member_decl_info(method_decl->node_id, member_info);
         }
 
@@ -2135,6 +2143,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
         method.is_static = is_static_method || is_operator_new_delete;
         method.is_deleted = method_decl->is_deleted;
         method.is_defaulted = method_decl->is_defaulted;
+        method.is_consteval = method_decl->is_consteval;
         method.is_explicit = method_decl->is_explicit_conversion;
         method.is_virtual = method_decl->is_virtual;
         method.is_override = method_decl->is_override;
@@ -2259,6 +2268,7 @@ void Collect::collect_record_synthesize_implicit_members(
                 QualType(ctor_decl->type),
                 ctor_decl->storage_class,
                 ctor_decl->is_constexpr,
+                ctor_decl->is_consteval,
                 ctor_decl->is_inline,
                 true,
                 ctx.loc,
@@ -2364,6 +2374,7 @@ void Collect::collect_record_synthesize_implicit_members(
             QualType(method_decl->type),
             method_decl->storage_class,
             method_decl->is_constexpr,
+            method_decl->is_consteval,
             method_decl->is_inline,
             true,
             ctx.loc,

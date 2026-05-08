@@ -838,6 +838,7 @@ public:
                                                             QualType type,
                                                             StorageClass storage_class,
                                                             bool is_constexpr,
+                                                            bool is_consteval,
                                                             bool is_inline,
                                                             bool is_definition,
                                                             SrcLoc loc,
@@ -851,6 +852,33 @@ public:
                                                             const std::string& name,
                                                             QualType type,
                                                             StorageClass storage_class,
+                                                            bool is_constexpr,
+                                                            bool is_inline,
+                                                            bool is_definition,
+                                                            SrcLoc loc,
+                                                            LanguageLinkage language_linkage = LanguageLinkage::None,
+                                                            bool is_cpp_member_function = false,
+                                                            bool is_deleted = false,
+                                                            bool is_defaulted = false) ;
+
+    std::shared_ptr<Symbol> collect_declare_function_symbol(std::shared_ptr<Scope> scope,
+                                                            std::shared_ptr<GlobalIdentTracker> global_scope,
+                                                            const std::string& name,
+                                                            QualType type,
+                                                            StorageClass storage_class,
+                                                            bool is_inline,
+                                                            bool is_definition,
+                                                            SrcLoc loc,
+                                                            LanguageLinkage language_linkage = LanguageLinkage::None,
+                                                            bool is_cpp_member_function = false,
+                                                            bool is_deleted = false,
+                                                            bool is_defaulted = false) ;
+
+    std::shared_ptr<Symbol> collect_declare_function_symbol(const std::string& name,
+                                                            QualType type,
+                                                            StorageClass storage_class,
+                                                            bool is_constexpr,
+                                                            bool is_consteval,
                                                             bool is_inline,
                                                             bool is_definition,
                                                             SrcLoc loc,
@@ -1010,6 +1038,61 @@ public:
         const VariableDeclFlags& flags,
         const Expr* init) const ;
 
+    void enter_unevaluated_context(const char* reason) ;
+
+    void leave_unevaluated_context() ;
+
+    bool in_unevaluated_context() const ;
+
+    class UnevaluatedContextScope {
+    public:
+        UnevaluatedContextScope(Collect* collect, const char* reason)
+            : collect_(collect) {
+            if (collect_) {
+                collect_->enter_unevaluated_context(reason);
+            }
+        }
+        ~UnevaluatedContextScope() {
+            if (collect_) {
+                collect_->leave_unevaluated_context();
+            }
+        }
+        UnevaluatedContextScope(const UnevaluatedContextScope&) = delete;
+        UnevaluatedContextScope& operator=(const UnevaluatedContextScope&) = delete;
+    private:
+        Collect* collect_ = nullptr;
+    };
+
+    void enter_immediate_function_context() ;
+
+    void leave_immediate_function_context() ;
+
+    bool in_immediate_function_context() const ;
+
+    class ImmediateFunctionContextScope {
+    public:
+        ImmediateFunctionContextScope(Collect* collect, bool active)
+            : collect_(collect), active_(active) {
+            if (collect_ && active_) {
+                collect_->enter_immediate_function_context();
+            }
+        }
+
+        ~ImmediateFunctionContextScope() {
+            if (collect_ && active_) {
+                collect_->leave_immediate_function_context();
+            }
+        }
+
+        ImmediateFunctionContextScope(const ImmediateFunctionContextScope&) = delete;
+        ImmediateFunctionContextScope& operator=(
+            const ImmediateFunctionContextScope&) = delete;
+
+    private:
+        Collect* collect_ = nullptr;
+        bool active_ = false;
+    };
+
 private:
     friend class CollectRecordBuilder;
 
@@ -1047,25 +1130,6 @@ private:
         bool is_error = true;
         std::string message;
         SrcLoc loc;
-    };
-
-    class UnevaluatedContextScope {
-    public:
-        UnevaluatedContextScope(Collect* collect, const char* reason)
-            : collect_(collect) {
-            if (collect_) {
-                collect_->enter_unevaluated_context(reason);
-            }
-        }
-        ~UnevaluatedContextScope() {
-            if (collect_) {
-                collect_->leave_unevaluated_context();
-            }
-        }
-        UnevaluatedContextScope(const UnevaluatedContextScope&) = delete;
-        UnevaluatedContextScope& operator=(const UnevaluatedContextScope&) = delete;
-    private:
-        Collect* collect_ = nullptr;
     };
 
     struct SwitchContext {
@@ -1173,6 +1237,7 @@ private:
         std::unordered_map<std::string, SrcLoc> label_reference_locs;
         std::vector<DelayedDiagnostic> delayed_diagnostics;
         int unevaluated_depth = 0;
+        int immediate_function_context_depth = 0;
         std::vector<std::string> unevaluated_context_stack;
 
         CppThisContext cpp_this_context() const {
@@ -1771,12 +1836,6 @@ private:
 
     void flush_delayed_diagnostics() ;
 
-    void enter_unevaluated_context(const char* reason) ;
-
-    void leave_unevaluated_context() ;
-
-    bool in_unevaluated_context() const ;
-
     std::unique_ptr<Expr> prepare_unevaluated_operand(std::unique_ptr<Expr> expr,
                                                                const char* reason) ;
 
@@ -2046,6 +2105,12 @@ private:
         std::unique_ptr<FuncCall> call,
         const MemberCallSelection& member_call_selection,
         SrcLoc loc) const ;
+
+
+    std::unique_ptr<Expr> maybe_wrap_immediate_invocation(
+        std::unique_ptr<Expr> invocation,
+        const std::shared_ptr<Symbol>& callee_symbol,
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> append_member_overload_candidates(
         const ObjectType* record_type,
