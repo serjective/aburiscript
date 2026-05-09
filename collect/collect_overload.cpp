@@ -766,14 +766,36 @@ std::unique_ptr<Expr> Collect::select_overload_candidate(
     SrcLoc loc,
     std::shared_ptr<Symbol>& selected_symbol_out,
     OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) {
+    OverloadCandidateSelection selection;
+    if (auto error = select_overload_candidate(
+            callee_name,
+            candidates,
+            explicit_args,
+            implicit_object_arg,
+            loc,
+            selection)) {
+        return error;
+    }
+    selected_symbol_out = selection.symbol;
+    selected_implicit_object_arg_kind_out =
+        selection.implicit_object_arg_kind;
+    return nullptr;
+}
+
+std::unique_ptr<Expr> Collect::select_overload_candidate(
+    std::string_view callee_name,
+    const std::vector<OverloadCallCandidate>& candidates,
+    const std::vector<std::unique_ptr<Expr>>& explicit_args,
+    Expr* implicit_object_arg,
+    SrcLoc loc,
+    OverloadCandidateSelection& selection_out) {
     return select_overload_candidate(
         callee_name,
         candidates,
         make_raw_explicit_args(explicit_args),
         implicit_object_arg,
         loc,
-        selected_symbol_out,
-        selected_implicit_object_arg_kind_out);
+        selection_out);
 }
 
 std::unique_ptr<Expr> Collect::select_overload_candidate(
@@ -784,16 +806,42 @@ std::unique_ptr<Expr> Collect::select_overload_candidate(
     SrcLoc loc,
     std::shared_ptr<Symbol>& selected_symbol_out,
     OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) {
+    OverloadCandidateSelection selection;
+    if (auto error = select_overload_candidate(
+            callee_name,
+            candidates,
+            explicit_args,
+            implicit_object_arg,
+            loc,
+            selection)) {
+        return error;
+    }
+    selected_symbol_out = selection.symbol;
+    selected_implicit_object_arg_kind_out =
+        selection.implicit_object_arg_kind;
+    return nullptr;
+}
 
-    selected_symbol_out = nullptr;
-    selected_implicit_object_arg_kind_out = OverloadImplicitObjectArgKind::None;
+std::unique_ptr<Expr> Collect::select_overload_candidate(
+    std::string_view callee_name,
+    const std::vector<OverloadCallCandidate>& candidates,
+    const std::vector<Expr*>& explicit_args,
+    Expr* implicit_object_arg,
+    SrcLoc loc,
+    OverloadCandidateSelection& selection_out) {
+
+    selection_out = OverloadCandidateSelection{};
     if (candidates.empty()) {
         return nullptr;
     }
     if (candidates.size() == 1 && !lang_opts_.is_cxx_mode()) {
-        selected_symbol_out = candidates.front().symbol;
-        selected_implicit_object_arg_kind_out =
+        selection_out.symbol = candidates.front().symbol;
+        selection_out.implicit_object_arg_kind =
             candidates.front().implicit_object_arg_kind;
+        selection_out.operator_rewrite_kind =
+            candidates.front().operator_rewrite_kind;
+        selection_out.is_synthesized_reversed_operator_candidate =
+            candidates.front().is_synthesized_reversed_operator_candidate;
         return nullptr;
     }
     return resolve_overloaded_call_candidates(
@@ -802,8 +850,7 @@ std::unique_ptr<Expr> Collect::select_overload_candidate(
         explicit_args,
         implicit_object_arg,
         loc,
-        selected_symbol_out,
-        selected_implicit_object_arg_kind_out);
+        selection_out);
 }
 
 
@@ -1962,6 +2009,20 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
     eval.candidate_kind = OverloadCandidateKind::Function;
     eval.symbol = candidate_info.symbol;
     eval.implicit_object_arg_kind = candidate_info.implicit_object_arg_kind;
+    eval.operator_rewrite_kind = candidate_info.operator_rewrite_kind;
+    eval.is_synthesized_reversed_operator_candidate =
+        candidate_info.is_synthesized_reversed_operator_candidate;
+
+    std::vector<Expr*> operator_explicit_args;
+    const std::vector<Expr*>* effective_explicit_args = &explicit_args;
+    Expr* effective_implicit_object_arg = implicit_object_arg;
+    if (candidate_info.has_operator_operand_overrides) {
+        effective_implicit_object_arg =
+            candidate_info.operator_implicit_object_arg;
+        operator_explicit_args.push_back(candidate_info.operator_explicit_arg);
+        effective_explicit_args = &operator_explicit_args;
+    }
+    const std::vector<Expr*>& call_explicit_args = *effective_explicit_args;
 
     if (!candidate_info.symbol ||
         candidate_info.symbol->kind != SymbolKind::FUNCTION) {
@@ -1994,7 +2055,7 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
     bool has_implicit_object_arg =
         eval.implicit_object_arg_kind != OverloadImplicitObjectArgKind::None;
     size_t implicit_arg_count = has_implicit_object_arg ? 1 : 0;
-    size_t provided_arg_count = explicit_args.size() + implicit_arg_count;
+    size_t provided_arg_count = call_explicit_args.size() + implicit_arg_count;
     bool has_void_param = (candidate_fn->parameters.size() == 1 &&
                            candidate_fn->parameters[0]->isVoid());
     size_t named_param_count = has_void_param ? 0 : candidate_fn->parameters.size();
@@ -2043,7 +2104,7 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
     eval.conversions.reserve(provided_arg_count);
 
     if (has_implicit_object_arg) {
-        if (!implicit_object_arg) {
+        if (!effective_implicit_object_arg) {
             eval.viable = false;
             eval.failure.kind = OverloadFailureKind::ImplicitObjectMissing;
             eval.failure.argument_index = 1;
@@ -2055,13 +2116,13 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
             auto seq = (eval.implicit_object_arg_kind ==
                         OverloadImplicitObjectArgKind::MemberObject)
                 ? evaluate_overload_implicit_object_conversion(
-                      implicit_object_arg,
+                      effective_implicit_object_arg,
                       param_type,
                       eval.implicit_object_arg_kind,
                       candidate_fn->member_ref_qualifier,
                       conversion_cache)
                 : build_cpp_overload_conversion_sequence_cached(
-                      implicit_object_arg,
+                      effective_implicit_object_arg,
                       param_type,
                       /*allow_user_defined=*/true,
                       conversion_cache);
@@ -2074,7 +2135,8 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
                         : OverloadFailureKind::ImplicitObjectConversionFailure;
                 eval.failure.argument_index = 1;
                 eval.failure.from =
-                    seq.from ? seq.from : implicit_object_arg->get_type();
+                    seq.from ? seq.from
+                             : effective_implicit_object_arg->get_type();
                 eval.failure.to = param_type;
                 eval.failure.ref_qualifier = candidate_fn->member_ref_qualifier;
                 eval.failure.note = seq.note;
@@ -2085,20 +2147,20 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
             seq.kind = ConversionSequenceKind::Numeric;
             seq.rank = ConversionSequenceRank::Conversion;
             seq.detail_kind = ConversionSequenceDetailKind::None;
-            seq.from = implicit_object_arg->get_type();
+            seq.from = effective_implicit_object_arg->get_type();
             seq.to = nullptr;
             seq.viable = true;
             eval.conversions.push_back(seq);
         }
     }
 
-    for (size_t i = 0; eval.viable && i < explicit_args.size(); ++i) {
+    for (size_t i = 0; eval.viable && i < call_explicit_args.size(); ++i) {
         size_t param_index = i + implicit_arg_count;
         if (candidate_fn->has_prototype && param_index < named_param_count) {
             QualType param_type =
                 decay_parameter_type(candidate_fn->parameters[param_index]);
             auto seq = build_cpp_overload_conversion_sequence_cached(
-                explicit_args[i],
+                call_explicit_args[i],
                 param_type,
                 /*allow_user_defined=*/true,
                 conversion_cache);
@@ -2108,8 +2170,9 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
                 eval.failure.argument_index = param_index + 1;
                 eval.failure.from =
                     seq.from ? seq.from
-                             : (explicit_args[i] ? explicit_args[i]->get_type()
-                                                 : QualType());
+                             : (call_explicit_args[i]
+                                    ? call_explicit_args[i]->get_type()
+                                    : QualType());
                 eval.failure.to = param_type;
                 eval.failure.note = seq.note;
                 eval.conversions.push_back(seq);
@@ -2123,13 +2186,19 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
             seq.kind = ConversionSequenceKind::Numeric;
             seq.rank = ConversionSequenceRank::Conversion;
             seq.detail_kind = ConversionSequenceDetailKind::None;
-            seq.from = explicit_args[i] ? explicit_args[i]->get_type() : QualType();
+            seq.from = call_explicit_args[i]
+                ? call_explicit_args[i]->get_type()
+                : QualType();
             seq.to = nullptr;
             seq.viable = true;
             eval.conversions.push_back(seq);
         }
     }
 
+    if (eval.is_synthesized_reversed_operator_candidate &&
+        eval.conversions.size() == 2) {
+        std::swap(eval.conversions[0], eval.conversions[1]);
+    }
     return eval;
 }
 
@@ -2279,6 +2348,20 @@ bool Collect::overload_note_order_less(
             return !lhs_is_template_specialization &&
                 rhs_is_template_specialization;
         }
+
+        bool lhs_rewritten =
+            lhs.operator_rewrite_kind != OverloadOperatorRewriteKind::None;
+        bool rhs_rewritten =
+            rhs.operator_rewrite_kind != OverloadOperatorRewriteKind::None;
+        if (lhs_rewritten != rhs_rewritten) {
+            return !lhs_rewritten && rhs_rewritten;
+        }
+        if (lhs_rewritten && rhs_rewritten &&
+            lhs.is_synthesized_reversed_operator_candidate !=
+                rhs.is_synthesized_reversed_operator_candidate) {
+            return !lhs.is_synthesized_reversed_operator_candidate &&
+                rhs.is_synthesized_reversed_operator_candidate;
+        }
     } else {
         int lhs_reason_category = overload_failure_category(lhs.failure);
         int rhs_reason_category = overload_failure_category(rhs.failure);
@@ -2396,6 +2479,20 @@ bool Collect::is_better_overload_candidate(
         }
     }
 
+    bool lhs_rewritten =
+        lhs.operator_rewrite_kind != OverloadOperatorRewriteKind::None;
+    bool rhs_rewritten =
+        rhs.operator_rewrite_kind != OverloadOperatorRewriteKind::None;
+    if (lhs_rewritten != rhs_rewritten) {
+        return !lhs_rewritten && rhs_rewritten;
+    }
+    if (lhs_rewritten && rhs_rewritten &&
+        lhs.is_synthesized_reversed_operator_candidate !=
+            rhs.is_synthesized_reversed_operator_candidate) {
+        return !lhs.is_synthesized_reversed_operator_candidate &&
+            rhs.is_synthesized_reversed_operator_candidate;
+    }
+
     return false;
 }
 
@@ -2451,14 +2548,36 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
     SrcLoc loc,
     std::shared_ptr<Symbol>& selected_symbol_out,
     OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) {
+    OverloadCandidateSelection selection;
+    if (auto error = resolve_overloaded_call_candidates(
+            callee_name,
+            candidates,
+            explicit_args,
+            implicit_object_arg,
+            loc,
+            selection)) {
+        return error;
+    }
+    selected_symbol_out = selection.symbol;
+    selected_implicit_object_arg_kind_out =
+        selection.implicit_object_arg_kind;
+    return nullptr;
+}
+
+std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
+    std::string_view callee_name,
+    const std::vector<OverloadCallCandidate>& candidates,
+    const std::vector<std::unique_ptr<Expr>>& explicit_args,
+    Expr* implicit_object_arg,
+    SrcLoc loc,
+    OverloadCandidateSelection& selection_out) {
     return resolve_overloaded_call_candidates(
         callee_name,
         candidates,
         make_raw_explicit_args(explicit_args),
         implicit_object_arg,
         loc,
-        selected_symbol_out,
-        selected_implicit_object_arg_kind_out);
+        selection_out);
 }
 
 std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
@@ -2469,9 +2588,31 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
     SrcLoc loc,
     std::shared_ptr<Symbol>& selected_symbol_out,
     OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) {
+    OverloadCandidateSelection selection;
+    if (auto error = resolve_overloaded_call_candidates(
+            callee_name,
+            candidates,
+            explicit_args,
+            implicit_object_arg,
+            loc,
+            selection)) {
+        return error;
+    }
+    selected_symbol_out = selection.symbol;
+    selected_implicit_object_arg_kind_out =
+        selection.implicit_object_arg_kind;
+    return nullptr;
+}
 
-    selected_symbol_out = nullptr;
-    selected_implicit_object_arg_kind_out = OverloadImplicitObjectArgKind::None;
+std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
+    std::string_view callee_name,
+    const std::vector<OverloadCallCandidate>& candidates,
+    const std::vector<Expr*>& explicit_args,
+    Expr* implicit_object_arg,
+    SrcLoc loc,
+    OverloadCandidateSelection& selection_out) {
+
+    selection_out = OverloadCandidateSelection{};
     if (!lang_opts_.is_cxx_mode() || candidates.empty()) {
         return nullptr;
     }
@@ -2513,8 +2654,11 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_call_candidates(
         return collect_make<ErrorExpr>("deleted overload", loc);
     }
 
-    selected_symbol_out = chosen.symbol;
-    selected_implicit_object_arg_kind_out =
+    selection_out.symbol = chosen.symbol;
+    selection_out.implicit_object_arg_kind =
         chosen.implicit_object_arg_kind;
+    selection_out.operator_rewrite_kind = chosen.operator_rewrite_kind;
+    selection_out.is_synthesized_reversed_operator_candidate =
+        chosen.is_synthesized_reversed_operator_candidate;
     return nullptr;
 }

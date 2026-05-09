@@ -6,6 +6,7 @@
 #include "../ast/expr_clone.h"
 #include "../ast/special_members.h"
 #include "lookup_engine.h"
+#include <algorithm>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -5794,7 +5795,25 @@ std::unique_ptr<Expr> Collect::collect_builtin_three_way_compare(
     return build_strong();
 }
 
-std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lhs, std::unique_ptr<Expr> rhs, BinOpTypes bop, SrcLoc loc) {
+std::unique_ptr<Expr> Collect::collect_binary_operation(
+    std::unique_ptr<Expr> lhs,
+    std::unique_ptr<Expr> rhs,
+    BinOpTypes bop,
+    SrcLoc loc) {
+    return collect_binary_operation_impl(
+        std::move(lhs),
+        std::move(rhs),
+        bop,
+        loc,
+        /*allow_cpp_rewritten_candidates=*/true);
+}
+
+std::unique_ptr<Expr> Collect::collect_binary_operation_impl(
+    std::unique_ptr<Expr> lhs,
+    std::unique_ptr<Expr> rhs,
+    BinOpTypes bop,
+    SrcLoc loc,
+    bool allow_cpp_rewritten_candidates) {
 
     if (bop == BinOpTypes::MEMBER_PTR_DOT ||
         bop == BinOpTypes::MEMBER_PTR_ARROW) {
@@ -5846,52 +5865,13 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
     // In C++, user-defined operators get first chance before built-in operator
     // typing/conversion rules.
     if (auto overloaded =
-            try_cpp_binary_operator_overload(lhs, rhs, bop, loc)) {
+            try_cpp_binary_operator_overload(
+                lhs,
+                rhs,
+                bop,
+                loc,
+                allow_cpp_rewritten_candidates)) {
         return overloaded;
-    }
-
-    auto is_cpp_class_operand = [&](QualType type) {
-        QualType canonical = remove_reference(type, ast_ctx_.get());
-        return canonical_type_kind(canonical, ast_ctx_.get()) ==
-            TypeKind::Object;
-    };
-    bool has_cpp_class_operand =
-        lang_opts_.is_cxx_mode() &&
-        ((lhs && is_cpp_class_operand(lhs->get_type())) ||
-         (rhs && is_cpp_class_operand(rhs->get_type())));
-    if (has_cpp_class_operand && bop == BinOpTypes::NOT_EQUAL) {
-        auto equality = collect_binary_operation(
-            std::move(lhs),
-            std::move(rhs),
-            BinOpTypes::EQUAL,
-            loc);
-        if (!equality) {
-            return nullptr;
-        }
-        return collect_unary_operation(
-            UnaryOpTypes::LOGICAL_NOT,
-            std::move(equality),
-            loc);
-    }
-    if (has_cpp_class_operand &&
-        (bop == BinOpTypes::LESS_THAN ||
-         bop == BinOpTypes::LESS_EQUAL_THAN ||
-         bop == BinOpTypes::GREATER_THAN ||
-         bop == BinOpTypes::GREATER_EQUAL_THAN)) {
-        auto three_way = collect_binary_operation(
-            std::move(lhs),
-            std::move(rhs),
-            BinOpTypes::THREE_WAY_COMPARE,
-            loc);
-        if (!three_way) {
-            return nullptr;
-        }
-        auto zero = collect_integer_literal("0", get_builtin_int(), loc);
-        return collect_binary_operation(
-            std::move(three_way),
-            std::move(zero),
-            bop,
-            loc);
     }
 
     if (bop == BinOpTypes::THREE_WAY_COMPARE) {
@@ -6424,7 +6404,8 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
     std::unique_ptr<Expr>& lhs,
     std::unique_ptr<Expr>& rhs,
     BinOpTypes bop,
-    SrcLoc loc) {
+    SrcLoc loc,
+    bool allow_rewritten_candidates) {
     if (!lang_opts_.is_cxx_mode() ||
         !lhs ||
         !rhs ||
@@ -6442,48 +6423,387 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
         return nullptr;
     }
 
-    std::string op_name = "operator";
-    op_name += op_suffix;
+    auto make_operator_name = [](std::string_view suffix) {
+        std::string name = "operator";
+        name += suffix;
+        return name;
+    };
+
+    auto function_signature_matches_ignoring_return =
+        [&](QualType lhs_type, QualType rhs_type) {
+        auto lhs_fn = desugar_type(lhs_type, ast_ctx_.get())
+            .as_shared<FunctionType>();
+        auto rhs_fn = desugar_type(rhs_type, ast_ctx_.get())
+            .as_shared<FunctionType>();
+        if (!lhs_fn || !rhs_fn) {
+            return false;
+        }
+        FunctionType rhs_with_lhs_return = *rhs_fn;
+        rhs_with_lhs_return.ret_type = lhs_fn->ret_type;
+        return lhs_fn->equals(rhs_with_lhs_return);
+    };
+
+    auto function_template_primary = [](const std::shared_ptr<Symbol>& symbol)
+        -> const FunctionTemplateDecl* {
+        const auto* specialization =
+            symbol ? get_symbol_function_template_specialization(symbol.get())
+                   : nullptr;
+        return specialization ? specialization->primary_template : nullptr;
+    };
+
+    auto candidate_pattern_type = [&](const OverloadCallCandidate& candidate) {
+        if (const auto* primary = function_template_primary(candidate.symbol)) {
+            if (auto* fn = primary->function_decl()) {
+                return QualType(fn->type);
+            }
+        }
+        return candidate.symbol ? candidate.symbol->type : QualType();
+    };
+
+    auto candidate_corresponds_to_symbol =
+        [&](const OverloadCallCandidate& candidate,
+            const std::shared_ptr<Symbol>& blocker_symbol) {
+        if (!blocker_symbol || blocker_symbol->kind != SymbolKind::FUNCTION) {
+            return false;
+        }
+        if (function_template_primary(candidate.symbol)) {
+            return false;
+        }
+        return function_signature_matches_ignoring_return(
+            candidate_pattern_type(candidate),
+            blocker_symbol->type);
+    };
+
+    auto candidate_corresponds_to_template =
+        [&](const OverloadCallCandidate& candidate,
+            const FunctionTemplateDecl* blocker_template) {
+        const auto* candidate_template =
+            function_template_primary(candidate.symbol);
+        if (!candidate_template || !blocker_template) {
+            return false;
+        }
+        const FuncDecl* candidate_decl = candidate_template->function_decl();
+        const FuncDecl* blocker_decl = blocker_template->function_decl();
+        if (!candidate_decl || !blocker_decl) {
+            return false;
+        }
+        return function_signature_matches_ignoring_return(
+            QualType(candidate_decl->type),
+            QualType(blocker_decl->type));
+    };
+
+    auto lookup_unqualified_function_templates_for_name =
+        [&](std::string_view name) {
+        std::vector<const FunctionTemplateDecl*> templates;
+        if (!session_.current_scope_) {
+            return templates;
+        }
+        const DeclBinding* binding =
+            LookupEngine::lookup_unqualified_template_binding(
+                std::string(name),
+                session_.current_scope_,
+                true,
+                LookupNamespace::Ordinary);
+        if (!binding) {
+            return templates;
+        }
+        auto append_template = [&](const Decl* decl) {
+            const auto* function_template =
+                dyn_cast<FunctionTemplateDecl>(decl);
+            if (!function_template) {
+                return;
+            }
+            for (const auto* existing : templates) {
+                if (existing == function_template) {
+                    return;
+                }
+            }
+            templates.push_back(function_template);
+        };
+        append_template(binding->template_decl);
+        for (const auto* decl : binding->template_overload_candidates) {
+            append_template(decl);
+        }
+        return templates;
+    };
+
+    auto has_corresponding_not_equal =
+        [&](const OverloadCallCandidate& candidate,
+            Expr* first_operand,
+            Expr* second_operand) {
+        QualType owner_type =
+            candidate.symbol
+                ? get_symbol_owner_record_type(candidate.symbol.get())
+                : QualType();
+        auto first_operand_record = remove_reference_and_desugar(
+            first_operand ? first_operand->get_type() : QualType(),
+            ast_ctx_.get()).as_shared<ObjectType>();
+        auto owner_record = remove_reference_and_desugar(
+            first_operand_record ? QualType(first_operand_record) : owner_type,
+            ast_ctx_.get()).as_shared<ObjectType>();
+        if (owner_record) {
+            for (const auto& method :
+                 find_record_methods(owner_record.get(), "operator!=")) {
+                if (method.method &&
+                    candidate_corresponds_to_symbol(
+                        candidate, method.method->symbol)) {
+                    return true;
+                }
+            }
+            for (const auto& method_template :
+                 find_record_method_templates(owner_record.get(), "operator!=")) {
+                if (method_template.method_template &&
+                    candidate_corresponds_to_template(
+                        candidate,
+                        method_template.method_template->decl)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        auto function_candidates =
+            LookupEngine::lookup_unqualified_function_candidates(
+                "operator!=",
+                session_.current_scope_,
+                true);
+        for (const auto& fn_symbol : function_candidates) {
+            if (fn_symbol && get_symbol_owner_record_type(fn_symbol.get())) {
+                continue;
+            }
+            if (candidate_corresponds_to_symbol(candidate, fn_symbol)) {
+                return true;
+            }
+        }
+        for (const auto* function_template :
+             lookup_unqualified_function_templates_for_name("operator!=")) {
+            if (candidate_corresponds_to_template(candidate, function_template)) {
+                return true;
+            }
+        }
+
+        std::vector<OverloadCallCandidate> adl_not_equal_candidates;
+        std::vector<Expr*> associated_args{first_operand, second_operand};
+        append_adl_friend_overload_candidates(
+            "operator!=",
+            OverloadImplicitObjectArgKind::Regular,
+            associated_args,
+            adl_not_equal_candidates);
+        for (const auto& adl_candidate : adl_not_equal_candidates) {
+            if (candidate_corresponds_to_symbol(
+                    candidate, adl_candidate.symbol)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto is_bool_type = [&](QualType type) {
+        QualType canonical =
+            desugar_type(remove_reference(type, ast_ctx_.get()), ast_ctx_.get());
+        auto builtin = canonical.as_shared<BuiltinType>();
+        return builtin && builtin->builtin_kind == BuiltinTypes::Bool;
+    };
+
+    std::string op_name = make_operator_name(op_suffix);
 
     bool had_member_match = false;
     bool saw_private_method = false;
     bool saw_protected_method = false;
     std::vector<OverloadCallCandidate> overload_candidates;
 
-    auto lhs_record =
-        remove_reference_and_desugar(
-            lhs->get_type(),
-            ast_ctx_.get())
-            .as_shared<ObjectType>();
-    if (auto candidate_error = append_member_overload_candidates(
-            lhs_record.get(),
+    auto tag_candidates =
+        [&](size_t start,
+            OverloadOperatorRewriteKind rewrite_kind,
+            bool is_reversed,
+            Expr* first_operand,
+            Expr* second_operand) {
+        for (size_t index = start; index < overload_candidates.size(); ++index) {
+            overload_candidates[index].operator_rewrite_kind = rewrite_kind;
+            overload_candidates[index].is_synthesized_reversed_operator_candidate =
+                is_reversed;
+            overload_candidates[index].has_operator_operand_overrides = true;
+            overload_candidates[index].operator_implicit_object_arg = first_operand;
+            overload_candidates[index].operator_explicit_arg = second_operand;
+        }
+    };
+
+    auto append_operator_candidates =
+        [&](const std::string& candidate_name,
+            Expr* first_operand,
+            Expr* second_operand,
+            OverloadOperatorRewriteKind rewrite_kind,
+            bool is_reversed,
+            bool require_equality_rewrite_target) -> std::unique_ptr<Expr> {
+        size_t operator_candidate_start = overload_candidates.size();
+        auto first_record =
+            remove_reference_and_desugar(
+                first_operand ? first_operand->get_type() : QualType(),
+                ast_ctx_.get())
+                .as_shared<ObjectType>();
+
+        bool local_had_member_match = false;
+        bool local_saw_private_method = false;
+        bool local_saw_protected_method = false;
+        size_t start = overload_candidates.size();
+        if (auto candidate_error = append_member_overload_candidates(
+                first_record.get(),
+                candidate_name,
+                first_operand,
+                OverloadImplicitObjectArgKind::Regular,
+                overload_candidates,
+                local_had_member_match,
+                local_saw_private_method,
+                local_saw_protected_method,
+                loc)) {
+            return candidate_error;
+        }
+        tag_candidates(
+            start,
+            rewrite_kind,
+            is_reversed,
+            first_operand,
+            second_operand);
+        had_member_match |= local_had_member_match;
+        saw_private_method |= local_saw_private_method;
+        saw_protected_method |= local_saw_protected_method;
+
+        start = overload_candidates.size();
+        append_unqualified_overload_candidates(
+            candidate_name,
+            OverloadImplicitObjectArgKind::Regular,
+            overload_candidates);
+        tag_candidates(
+            start,
+            rewrite_kind,
+            is_reversed,
+            first_operand,
+            second_operand);
+
+        start = overload_candidates.size();
+        std::vector<Expr*> adl_args{first_operand, second_operand};
+        append_adl_friend_overload_candidates(
+            candidate_name,
+            OverloadImplicitObjectArgKind::Regular,
+            adl_args,
+            overload_candidates);
+        tag_candidates(
+            start,
+            rewrite_kind,
+            is_reversed,
+            first_operand,
+            second_operand);
+
+        start = overload_candidates.size();
+        std::vector<Expr*> probe_args{second_operand};
+        append_unqualified_function_template_overload_candidates(
+            candidate_name,
+            first_operand,
+            OverloadImplicitObjectArgKind::Regular,
+            probe_args,
+            overload_candidates,
+            loc);
+        tag_candidates(
+            start,
+            rewrite_kind,
+            is_reversed,
+            first_operand,
+            second_operand);
+
+        if (require_equality_rewrite_target) {
+            overload_candidates.erase(
+                std::remove_if(
+                    overload_candidates.begin() +
+                        static_cast<std::ptrdiff_t>(operator_candidate_start),
+                    overload_candidates.end(),
+                    [&](const OverloadCallCandidate& candidate) {
+                        return has_corresponding_not_equal(
+                            candidate,
+                            first_operand,
+                            second_operand);
+                    }),
+                overload_candidates.end());
+        }
+        return nullptr;
+    };
+
+    if (auto candidate_error = append_operator_candidates(
             op_name,
             lhs.get(),
-            OverloadImplicitObjectArgKind::Regular,
-            overload_candidates,
-            had_member_match,
-            saw_private_method,
-            saw_protected_method,
-            loc)) {
+            rhs.get(),
+            OverloadOperatorRewriteKind::None,
+            false,
+            false)) {
         return candidate_error;
     }
-    std::vector<Expr*> probe_args;
-    probe_args.push_back(rhs.get());
-    append_unqualified_overload_candidates(
-        op_name, OverloadImplicitObjectArgKind::Regular, overload_candidates);
-    std::vector<Expr*> adl_args{lhs.get(), rhs.get()};
-    append_adl_friend_overload_candidates(
-        op_name,
-        OverloadImplicitObjectArgKind::Regular,
-        adl_args,
-        overload_candidates);
-    append_unqualified_function_template_overload_candidates(
-        op_name,
-        lhs.get(),
-        OverloadImplicitObjectArgKind::Regular,
-        probe_args,
-        overload_candidates,
-        loc);
+
+    auto append_equality_rewrites = [&]() -> std::unique_ptr<Expr> {
+        std::string equality_name = make_operator_name("==");
+        if (bop == BinOpTypes::NOT_EQUAL) {
+            if (auto candidate_error = append_operator_candidates(
+                    equality_name,
+                    lhs.get(),
+                    rhs.get(),
+                    OverloadOperatorRewriteKind::Equality,
+                    false,
+                    true)) {
+                return candidate_error;
+            }
+        }
+        if (bop == BinOpTypes::EQUAL || bop == BinOpTypes::NOT_EQUAL) {
+            if (auto candidate_error = append_operator_candidates(
+                    equality_name,
+                    rhs.get(),
+                    lhs.get(),
+                    OverloadOperatorRewriteKind::Equality,
+                    true,
+                    true)) {
+                return candidate_error;
+            }
+        }
+        return nullptr;
+    };
+
+    auto append_three_way_rewrites = [&]() -> std::unique_ptr<Expr> {
+        std::string three_way_name = make_operator_name("<=>");
+        bool is_relational =
+            bop == BinOpTypes::LESS_THAN ||
+            bop == BinOpTypes::LESS_EQUAL_THAN ||
+            bop == BinOpTypes::GREATER_THAN ||
+            bop == BinOpTypes::GREATER_EQUAL_THAN;
+        if (is_relational) {
+            if (auto candidate_error = append_operator_candidates(
+                    three_way_name,
+                    lhs.get(),
+                    rhs.get(),
+                    OverloadOperatorRewriteKind::ThreeWay,
+                    false,
+                    false)) {
+                return candidate_error;
+            }
+        }
+        if (is_relational || bop == BinOpTypes::THREE_WAY_COMPARE) {
+            if (auto candidate_error = append_operator_candidates(
+                    three_way_name,
+                    rhs.get(),
+                    lhs.get(),
+                    OverloadOperatorRewriteKind::ThreeWay,
+                    true,
+                    false)) {
+                return candidate_error;
+            }
+        }
+        return nullptr;
+    };
+    // see [over.match.oper] in the C++ standard
+    if (allow_rewritten_candidates) {
+        if (auto candidate_error = append_equality_rewrites()) {
+            return candidate_error;
+        }
+        if (auto candidate_error = append_three_way_rewrites()) {
+            return candidate_error;
+        }
+    }
 
     if (overload_candidates.empty()) {
         if (had_member_match) {
@@ -6493,45 +6813,115 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
         return nullptr;
     }
 
-    std::shared_ptr<Symbol> selected_symbol = nullptr;
-    OverloadImplicitObjectArgKind selected_implicit_object_arg_kind =
-        OverloadImplicitObjectArgKind::None;
+    std::vector<Expr*> probe_args{rhs.get()};
+    OverloadCandidateSelection selection;
     if (auto overload_error = select_overload_candidate(
             op_name,
             overload_candidates,
             probe_args,
             lhs.get(),
             loc,
-            selected_symbol,
-            selected_implicit_object_arg_kind)) {
+            selection)) {
         return overload_error;
     }
-    if (!selected_symbol) {
+    if (!selection.symbol) {
         return nullptr;
     }
     if (auto completion_error =
             complete_selected_function_template_specialization_symbol(
-                selected_symbol,
+                selection.symbol,
                 loc,
                 "failed to instantiate selected operator function template specialization")) {
         return completion_error;
     }
 
-    auto implicit_object_arg = build_overload_implicit_object_arg(
-        selected_implicit_object_arg_kind,
-        std::move(lhs),
-        /*object_expr_is_pointer=*/false,
-        loc);
+    auto build_selected_call =
+        [&](OverloadCandidateSelection selected,
+            std::unique_ptr<Expr> left,
+            std::unique_ptr<Expr> right) -> std::unique_ptr<Expr> {
+        if (selected.is_synthesized_reversed_operator_candidate) {
+            std::swap(left, right);
+        }
 
-    std::vector<std::unique_ptr<Expr>> explicit_args;
-    explicit_args.push_back(std::move(rhs));
-    if (selected_implicit_object_arg_kind != OverloadImplicitObjectArgKind::None &&
-        implicit_object_arg) {
-        explicit_args.insert(explicit_args.begin(), std::move(implicit_object_arg));
+        auto implicit_object_arg = build_overload_implicit_object_arg(
+            selected.implicit_object_arg_kind,
+            std::move(left),
+            /*object_expr_is_pointer=*/false,
+            loc);
+
+        std::vector<std::unique_ptr<Expr>> explicit_args;
+        explicit_args.push_back(std::move(right));
+        if (selected.implicit_object_arg_kind != OverloadImplicitObjectArgKind::None &&
+            implicit_object_arg) {
+            explicit_args.insert(
+                explicit_args.begin(),
+                std::move(implicit_object_arg));
+        }
+
+        auto callee_expr =
+            make_hidden_overload_callee(std::move(selected.symbol), loc);
+        return collect_function_call(
+            std::move(callee_expr),
+            std::move(explicit_args),
+            loc);
+    };
+
+    if (selection.operator_rewrite_kind ==
+        OverloadOperatorRewriteKind::Equality) {
+        auto equality = build_selected_call(
+            selection,
+            std::move(lhs),
+            std::move(rhs));
+        if (!equality || isa<ErrorExpr>(equality.get())) {
+            return equality;
+        }
+        if (!is_bool_type(equality->get_type())) {
+            report_error(
+                "rewritten 'operator==' candidate must return bool",
+                loc);
+            return collect_make<ErrorExpr>(
+                "invalid rewritten equality candidate", loc);
+        }
+        if (bop == BinOpTypes::NOT_EQUAL) {
+            return collect_unary_operation(
+                UnaryOpTypes::LOGICAL_NOT,
+                std::move(equality),
+                loc);
+        }
+        return equality;
     }
 
-    auto callee_expr = make_hidden_overload_callee(std::move(selected_symbol), loc);
-    return collect_function_call(std::move(callee_expr), std::move(explicit_args), loc);
+    if (selection.operator_rewrite_kind ==
+        OverloadOperatorRewriteKind::ThreeWay) {
+        bool reversed = selection.is_synthesized_reversed_operator_candidate;
+        auto three_way = build_selected_call(
+            selection,
+            std::move(lhs),
+            std::move(rhs));
+        if (!three_way || isa<ErrorExpr>(three_way.get())) {
+            return three_way;
+        }
+        auto zero = collect_integer_literal("0", get_builtin_int(), loc);
+        if (reversed) {
+            return collect_binary_operation_impl(
+                std::move(zero),
+                std::move(three_way),
+                bop,
+                loc,
+                /*allow_cpp_rewritten_candidates=*/false);
+        }
+        return collect_binary_operation_impl(
+            std::move(three_way),
+            std::move(zero),
+            bop,
+            loc,
+            /*allow_cpp_rewritten_candidates=*/false);
+    }
+
+    return build_selected_call(
+        selection,
+        std::move(lhs),
+        std::move(rhs));
 }
 
 

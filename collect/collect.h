@@ -955,6 +955,13 @@ public:
                                                    BinOpTypes bop,
                                                    SrcLoc loc) ;
 
+    std::unique_ptr<Expr> collect_binary_operation_impl(
+        std::unique_ptr<Expr> lhs,
+        std::unique_ptr<Expr> rhs,
+        BinOpTypes bop,
+        SrcLoc loc,
+        bool allow_cpp_rewritten_candidates) ;
+
     std::unique_ptr<Expr> collect_builtin_three_way_compare(
         std::unique_ptr<Expr> lhs,
         std::unique_ptr<Expr> rhs,
@@ -1329,10 +1336,22 @@ private:
         Regular
     };
 
+    enum class OverloadOperatorRewriteKind : uint8_t {
+        None,
+        Equality,
+        ThreeWay
+    };
+
     struct OverloadCallCandidate {
         std::shared_ptr<Symbol> symbol = nullptr;
         OverloadImplicitObjectArgKind implicit_object_arg_kind =
             OverloadImplicitObjectArgKind::None;
+        OverloadOperatorRewriteKind operator_rewrite_kind =
+            OverloadOperatorRewriteKind::None;
+        bool is_synthesized_reversed_operator_candidate = false;
+        bool has_operator_operand_overrides = false;
+        Expr* operator_implicit_object_arg = nullptr;
+        Expr* operator_explicit_arg = nullptr;
     };
 
     enum class OverloadCandidateKind : uint8_t {
@@ -1381,6 +1400,9 @@ private:
         bool is_deleted = false;
         OverloadImplicitObjectArgKind implicit_object_arg_kind =
             OverloadImplicitObjectArgKind::None;
+        OverloadOperatorRewriteKind operator_rewrite_kind =
+            OverloadOperatorRewriteKind::None;
+        bool is_synthesized_reversed_operator_candidate = false;
         OverloadFailure failure;
         const RecordSemanticState::Constructor* constructor = nullptr;
         const RecordSemanticState::Method* conversion_function = nullptr;
@@ -1393,6 +1415,15 @@ private:
     struct OverloadCandidateSet {
         std::vector<OverloadCandidateEval> evaluated;
         std::vector<size_t> viable_indices;
+    };
+
+    struct OverloadCandidateSelection {
+        std::shared_ptr<Symbol> symbol = nullptr;
+        OverloadImplicitObjectArgKind implicit_object_arg_kind =
+            OverloadImplicitObjectArgKind::None;
+        OverloadOperatorRewriteKind operator_rewrite_kind =
+            OverloadOperatorRewriteKind::None;
+        bool is_synthesized_reversed_operator_candidate = false;
     };
 
     struct OverloadConversionMemoKey {
@@ -2198,11 +2229,25 @@ private:
     std::unique_ptr<Expr> select_overload_candidate(
         std::string_view callee_name,
         const std::vector<OverloadCallCandidate>& candidates,
+        const std::vector<std::unique_ptr<Expr>>& explicit_args,
+        Expr* implicit_object_arg,
+        SrcLoc loc,
+        OverloadCandidateSelection& selection_out) ;
+    std::unique_ptr<Expr> select_overload_candidate(
+        std::string_view callee_name,
+        const std::vector<OverloadCallCandidate>& candidates,
         const std::vector<Expr*>& explicit_args,
         Expr* implicit_object_arg,
         SrcLoc loc,
         std::shared_ptr<Symbol>& selected_symbol_out,
         OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) ;
+    std::unique_ptr<Expr> select_overload_candidate(
+        std::string_view callee_name,
+        const std::vector<OverloadCallCandidate>& candidates,
+        const std::vector<Expr*>& explicit_args,
+        Expr* implicit_object_arg,
+        SrcLoc loc,
+        OverloadCandidateSelection& selection_out) ;
 
     std::unique_ptr<Expr> report_inaccessible_member(
         std::string_view member_name,
@@ -2223,7 +2268,8 @@ private:
         std::unique_ptr<Expr>& lhs,
         std::unique_ptr<Expr>& rhs,
         BinOpTypes bop,
-        SrcLoc loc) ;
+        SrcLoc loc,
+        bool allow_rewritten_candidates = true) ;
 
     std::unique_ptr<Expr> resolve_overloaded_call_candidates(
         std::string_view callee_name,
@@ -2236,11 +2282,25 @@ private:
     std::unique_ptr<Expr> resolve_overloaded_call_candidates(
         std::string_view callee_name,
         const std::vector<OverloadCallCandidate>& candidates,
+        const std::vector<std::unique_ptr<Expr>>& explicit_args,
+        Expr* implicit_object_arg,
+        SrcLoc loc,
+        OverloadCandidateSelection& selection_out) ;
+    std::unique_ptr<Expr> resolve_overloaded_call_candidates(
+        std::string_view callee_name,
+        const std::vector<OverloadCallCandidate>& candidates,
         const std::vector<Expr*>& explicit_args,
         Expr* implicit_object_arg,
         SrcLoc loc,
         std::shared_ptr<Symbol>& selected_symbol_out,
         OverloadImplicitObjectArgKind& selected_implicit_object_arg_kind_out) ;
+    std::unique_ptr<Expr> resolve_overloaded_call_candidates(
+        std::string_view callee_name,
+        const std::vector<OverloadCallCandidate>& candidates,
+        const std::vector<Expr*>& explicit_args,
+        Expr* implicit_object_arg,
+        SrcLoc loc,
+        OverloadCandidateSelection& selection_out) ;
 
     ImplicitConversionSequence evaluate_overload_implicit_object_conversion(
         Expr* object_arg,
