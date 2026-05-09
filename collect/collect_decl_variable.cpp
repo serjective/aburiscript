@@ -79,6 +79,35 @@ bool should_use_implicit_special_member_constructor_overload(
            canonical_source.equals_unqualified(canonical_target);
 }
 
+bool is_same_type_object_prvalue_initializer(
+    const Collect& collect,
+    QualType target_type,
+    const Expr* init,
+    const ASTContext* ast_ctx) {
+    if (!target_type || !init) {
+        return false;
+    }
+    QualType source_type = const_cast<Expr*>(init)->get_type();
+    if (!source_type) {
+        return false;
+    }
+
+    QualType canonical_target =
+        collect_internal::remove_reference_and_desugar(target_type, ast_ctx);
+    QualType canonical_source =
+        collect_internal::remove_reference_and_desugar(source_type, ast_ctx);
+    if (!canonical_target ||
+        !canonical_source ||
+        canonical_target->kind != TypeKind::Object ||
+        canonical_source->kind != TypeKind::Object ||
+        !canonical_source.equals_unqualified(canonical_target)) {
+        return false;
+    }
+
+    return collect.classify_value_category(const_cast<Expr*>(init)) ==
+           Collect::ValueCategory::PRValue;
+}
+
 } // namespace
 /*
  * Does this variable have "bearing" or is it a simple visibility statment (like for extern)
@@ -309,8 +338,21 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
             }
         }
     }
+    bool defer_initializer_semantics =
+        should_defer_template_dependent_initializer_semantics(
+            *this,
+            declared_type,
+            init.get());
+    bool same_type_prvalue_initializer =
+        is_same_type_object_prvalue_initializer(
+            *this,
+            declared_type,
+            init.get(),
+            ast_ctx_.get());
     analysis.should_use_constructor_overload =
         record_state &&
+        !defer_initializer_semantics &&
+        !same_type_prvalue_initializer &&
         (!record_state->constructors.empty() || has_constructor_template) &&
         (has_constructor_template ||
          record_state->definition_data.has_user_declared_constructor ||
@@ -449,13 +491,10 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
 
     // --- Initializer processing ---
     if (init && !selection.used_constructor_initialization) {
-        bool defer_initializer_semantics =
-            should_defer_template_dependent_initializer_semantics(
-                *this,
-                declared_type,
-                init.get());
         declared_type = clone_top_level_incomplete_array(declared_type);
-        init = process_initializer_for_type(std::move(init), declared_type, loc);
+        if (!defer_initializer_semantics) {
+            init = process_initializer_for_type(std::move(init), declared_type, loc);
+        }
         if (!defer_initializer_semantics &&
             declared_type &&
             canonical_type_kind(declared_type, ast_ctx_.get()) ==

@@ -694,6 +694,14 @@ QualType Collect::substitute_template_type_with_bindings(
                             self(self, binary->right.get());
                             return;
                         }
+                        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+                            auto* compare =
+                                static_cast<CppBuiltinThreeWayCompareExpr*>(
+                                    candidate);
+                            self(self, compare->left.get());
+                            self(self, compare->right.get());
+                            return;
+                        }
                         case StmtKind::CompoundAssignOperation: {
                             auto* binary =
                                 static_cast<CompoundAssignOperation*>(candidate);

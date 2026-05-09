@@ -954,6 +954,11 @@ public:
                                                    BinOpTypes bop,
                                                    SrcLoc loc) ;
 
+    std::unique_ptr<Expr> collect_builtin_three_way_compare(
+        std::unique_ptr<Expr> lhs,
+        std::unique_ptr<Expr> rhs,
+        SrcLoc loc) ;
+
     std::unique_ptr<Expr> collect_compound_assign_operation(std::unique_ptr<Expr> lhs,
                                                             std::unique_ptr<Expr> rhs,
                                                             BinOpTypes bop,

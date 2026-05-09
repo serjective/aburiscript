@@ -66,6 +66,7 @@ constexpr auto kAllStmtKinds = std::to_array<StmtKind>({
     StmtKind::CondExpr,
     StmtKind::UnaryOperation,
     StmtKind::BinaryOperation,
+    StmtKind::CppBuiltinThreeWayCompareExpr,
     StmtKind::CompoundAssignOperation,
     StmtKind::ImplicitCast,
     StmtKind::ExplicitCast,
@@ -182,6 +183,8 @@ const char* stmt_kind_name(StmtKind kind) {
         case StmtKind::CondExpr: return "CondExpr";
         case StmtKind::UnaryOperation: return "UnaryOperation";
         case StmtKind::BinaryOperation: return "BinaryOperation";
+        case StmtKind::CppBuiltinThreeWayCompareExpr:
+            return "CppBuiltinThreeWayCompareExpr";
         case StmtKind::CompoundAssignOperation: return "CompoundAssignOperation";
         case StmtKind::ImplicitCast: return "ImplicitCast";
         case StmtKind::ExplicitCast: return "ExplicitCast";
@@ -1111,6 +1114,19 @@ private:
                 record_stmt<BinaryOperation>(StmtKind::BinaryOperation);
                 visit_stmt(node->left.get());
                 visit_stmt(node->right.get());
+                return;
+            }
+            case StmtKind::CppBuiltinThreeWayCompareExpr: {
+                auto* node =
+                    static_cast<const CppBuiltinThreeWayCompareExpr*>(stmt);
+                record_stmt<CppBuiltinThreeWayCompareExpr>(
+                    StmtKind::CppBuiltinThreeWayCompareExpr);
+                visit_stmt(node->left.get());
+                visit_stmt(node->right.get());
+                visit_symbol(node->less_member);
+                visit_symbol(node->equivalent_member);
+                visit_symbol(node->greater_member);
+                visit_symbol(node->unordered_member);
                 return;
             }
             case StmtKind::CompoundAssignOperation: {

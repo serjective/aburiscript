@@ -15,6 +15,35 @@ const BlockExpr* returned_block_literal_expr(Expr* expr) {
     expr = Collect::strip_implicit_casts(expr);
     return dyn_cast<BlockExpr>(expr);
 }
+
+bool is_same_type_object_prvalue_return(
+    const Collect& collect,
+    QualType return_type,
+    Expr* expr,
+    const ASTContext* ast_ctx) {
+    if (!return_type || !expr) {
+        return false;
+    }
+    QualType expr_type = expr->get_type();
+    if (!expr_type) {
+        return false;
+    }
+
+    QualType canonical_return =
+        remove_reference_and_desugar(return_type, ast_ctx);
+    QualType canonical_expr =
+        remove_reference_and_desugar(expr_type, ast_ctx);
+    if (!canonical_return ||
+        !canonical_expr ||
+        canonical_return->kind != TypeKind::Object ||
+        canonical_expr->kind != TypeKind::Object ||
+        !canonical_expr.equals_unqualified(canonical_return)) {
+        return false;
+    }
+
+    return collect.classify_value_category(expr) ==
+           Collect::ValueCategory::PRValue;
+}
 }
 
 std::unique_ptr<InitListExpr> Collect::collect_initializer_list_expression(SrcLoc loc) const {
@@ -557,7 +586,14 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
             ? record_semantics_cache_lookup(return_record_decl)
             : nullptr;
 
+        bool same_type_prvalue_return =
+            is_same_type_object_prvalue_return(
+                *this,
+                return_type,
+                expr.get(),
+                ast_ctx_.get());
         if (return_state &&
+            !same_type_prvalue_return &&
             !return_state->constructors.empty() &&
             return_state->definition_data.has_user_declared_constructor) {
             auto temp_decl = collect_variable_declaration(

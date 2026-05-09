@@ -117,6 +117,7 @@ enum class StmtKind : uint8_t {
     CondExpr,
     UnaryOperation,
     BinaryOperation,
+    CppBuiltinThreeWayCompareExpr,
     CompoundAssignOperation,
     ImplicitCast,
     ExplicitCast,
@@ -2149,6 +2150,49 @@ struct BinaryOperation: Expr {
     }
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::BinaryOperation; }
+};
+enum class CppBuiltinThreeWayCompareCategory : uint8_t {
+    Strong,
+    Partial
+};
+
+struct CppBuiltinThreeWayCompareExpr : Expr {
+    std::unique_ptr<Expr> left;
+    std::unique_ptr<Expr> right;
+    QualType ctype;
+    CppBuiltinThreeWayCompareCategory category =
+        CppBuiltinThreeWayCompareCategory::Strong;
+    std::shared_ptr<Symbol> less_member;
+    std::shared_ptr<Symbol> equivalent_member;
+    std::shared_ptr<Symbol> greater_member;
+    std::shared_ptr<Symbol> unordered_member;
+
+    CppBuiltinThreeWayCompareExpr(
+        std::unique_ptr<Expr> left,
+        std::unique_ptr<Expr> right,
+        QualType ctype,
+        CppBuiltinThreeWayCompareCategory category,
+        std::shared_ptr<Symbol> less_member,
+        std::shared_ptr<Symbol> equivalent_member,
+        std::shared_ptr<Symbol> greater_member,
+        std::shared_ptr<Symbol> unordered_member = nullptr,
+        SrcLoc loc = SrcLoc())
+        : Expr(StmtKind::CppBuiltinThreeWayCompareExpr, loc),
+          left(std::move(left)),
+          right(std::move(right)),
+          ctype(std::move(ctype)),
+          category(category),
+          less_member(std::move(less_member)),
+          equivalent_member(std::move(equivalent_member)),
+          greater_member(std::move(greater_member)),
+          unordered_member(std::move(unordered_member)) {}
+
+    QualType get_type() override { return ctype; }
+    bool isLValue() override { return false; }
+
+    static bool classof(const Stmt *s) {
+        return s->get_kind() == StmtKind::CppBuiltinThreeWayCompareExpr;
+    }
 };
 enum class FoldDirection : uint8_t {
     Left,

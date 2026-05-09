@@ -488,6 +488,21 @@ void collect_lambda_referenced_symbols_from_expr(
                 referenced_this);
             return;
         }
+        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+            const auto* compare =
+                static_cast<const CppBuiltinThreeWayCompareExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                compare->left.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_expr(
+                compare->right.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            return;
+        }
         case StmtKind::DependentBinaryExpr: {
             const auto* binary = static_cast<const DependentBinaryExpr*>(expr);
             collect_lambda_referenced_symbols_from_expr(
@@ -5489,6 +5504,295 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
     return node;
 }
 
+std::unique_ptr<Expr> Collect::collect_builtin_three_way_compare(
+    std::unique_ptr<Expr> lhs,
+    std::unique_ptr<Expr> rhs,
+    SrcLoc loc) {
+    struct CategoryMembers {
+        QualType type;
+        std::shared_ptr<Symbol> less;
+        std::shared_ptr<Symbol> equivalent;
+        std::shared_ptr<Symbol> greater;
+        std::shared_ptr<Symbol> unordered;
+    };
+
+    auto make_error = [&](const std::string& message) -> std::unique_ptr<Expr> {
+        report_error(message, loc);
+        return collect_make<ErrorExpr>(message, loc);
+    };
+
+    auto diagnose_missing_compare = [&](const std::string& category_name)
+        -> std::unique_ptr<Expr> {
+        return make_error(
+            "built-in '<=>' requires 'std::" + category_name +
+            "'; include <compare>");
+    };
+
+    auto lookup_compare_category_type =
+        [&](const std::string& category_name) -> QualType {
+        auto current_context = session_.current_decl_context_
+            ? session_.current_decl_context_.get()
+            : (session_.translation_unit_decl_context_
+                   ? session_.translation_unit_decl_context_.get()
+                   : nullptr);
+        if (!current_context) {
+            return QualType();
+        }
+
+        LookupEngine::QualifiedNameSpec spec;
+        spec.qualifiers = {"std"};
+        spec.terminal_name = category_name;
+
+        auto tag_lookup = LookupEngine::lookup_qualified_name(
+            spec,
+            current_context,
+            LookupNamespace::Tag);
+        if (tag_lookup.status == LookupEngine::QualifiedLookupStatus::Found &&
+            tag_lookup.binding &&
+            tag_lookup.binding->type) {
+            return tag_lookup.binding->type;
+        }
+
+        auto ordinary_lookup = LookupEngine::lookup_qualified_name(
+            spec,
+            current_context,
+            LookupNamespace::Ordinary,
+            LookupEngine::OrdinaryFilter::TypedefOnly);
+        if (ordinary_lookup.status ==
+                LookupEngine::QualifiedLookupStatus::Found &&
+            ordinary_lookup.symbol &&
+            ordinary_lookup.symbol->type) {
+            return ordinary_lookup.symbol->type;
+        }
+        if (ordinary_lookup.status ==
+                LookupEngine::QualifiedLookupStatus::Found &&
+            ordinary_lookup.binding &&
+            ordinary_lookup.binding->type) {
+            return ordinary_lookup.binding->type;
+        }
+        return QualType();
+    };
+
+    auto resolve_category_members =
+        [&](CppBuiltinThreeWayCompareCategory category)
+            -> std::optional<CategoryMembers> {
+        const bool partial =
+            category == CppBuiltinThreeWayCompareCategory::Partial;
+        const std::string category_name =
+            partial ? "partial_ordering" : "strong_ordering";
+        QualType category_type = lookup_compare_category_type(category_name);
+        if (!category_type) {
+            diagnose_missing_compare(category_name);
+            return std::nullopt;
+        }
+        auto record_type =
+            desugar_type(category_type, ast_ctx_.get()).as_shared<ObjectType>();
+        if (!record_type) {
+            diagnose_missing_compare(category_name);
+            return std::nullopt;
+        }
+        if (record_type->isIncomplete()) {
+            diagnose_missing_compare(category_name);
+            return std::nullopt;
+        }
+
+        auto find_static_member =
+            [&](const std::string& member_name,
+                bool required = true) -> std::shared_ptr<Symbol> {
+            auto lookup =
+                lookup_record_member_name(record_type.get(), member_name);
+            if (lookup.static_data_matches == 1 &&
+                lookup.single_static_data_member &&
+                lookup.single_static_data_member->symbol) {
+                auto member = lookup.single_static_data_member->symbol;
+                QualType member_type =
+                    remove_reference_and_desugar(member->type, ast_ctx_.get());
+                QualType canonical_category =
+                    remove_reference_and_desugar(category_type, ast_ctx_.get());
+                if (member_type &&
+                    canonical_category &&
+                    !member_type.equals_unqualified(canonical_category)) {
+                    report_error(
+                        "'std::" + category_name + "::" + member_name +
+                        "' must have type 'std::" + category_name + "'",
+                        loc);
+                    return nullptr;
+                }
+                return member;
+            }
+            if (required) {
+                report_error(
+                    "built-in '<=>' requires 'std::" + category_name +
+                    "::" + member_name + "'; include <compare>",
+                    loc);
+            }
+            return nullptr;
+        };
+
+        CategoryMembers members;
+        members.type = category_type;
+        members.less = find_static_member("less");
+        members.greater = find_static_member("greater");
+        if (partial) {
+            members.equivalent = find_static_member("equivalent");
+            members.unordered = find_static_member("unordered");
+        } else {
+            members.equivalent = find_static_member("equal", false);
+            if (!members.equivalent) {
+                members.equivalent = find_static_member("equivalent");
+            }
+        }
+
+        if (!members.less || !members.equivalent || !members.greater ||
+            (partial && !members.unordered)) {
+            return std::nullopt;
+        }
+        return members;
+    };
+
+    auto make_node =
+        [&](CppBuiltinThreeWayCompareCategory category,
+            CategoryMembers members) -> std::unique_ptr<Expr> {
+        return collect_make<CppBuiltinThreeWayCompareExpr>(
+            std::move(lhs),
+            std::move(rhs),
+            members.type,
+            category,
+            std::move(members.less),
+            std::move(members.equivalent),
+            std::move(members.greater),
+            std::move(members.unordered),
+            loc);
+    };
+
+    lhs = collect_apply_standard_conversions(std::move(lhs), ExprUseContext::RValue);
+    rhs = collect_apply_standard_conversions(std::move(rhs), ExprUseContext::RValue);
+    if (!lhs || !rhs) {
+        return make_error("invalid operands to binary expression");
+    }
+
+    QualType lhs_ty = lhs->get_type();
+    QualType rhs_ty = rhs->get_type();
+    auto lhs_kind = canonical_type_kind(lhs_ty, ast_ctx_.get());
+    auto rhs_kind = canonical_type_kind(rhs_ty, ast_ctx_.get());
+    auto refresh_types = [&]() {
+        lhs_ty = lhs ? lhs->get_type() : QualType();
+        rhs_ty = rhs ? rhs->get_type() : QualType();
+        lhs_kind = canonical_type_kind(lhs_ty, ast_ctx_.get());
+        rhs_kind = canonical_type_kind(rhs_ty, ast_ctx_.get());
+    };
+
+    auto build_strong = [&]() -> std::unique_ptr<Expr> {
+        auto members =
+            resolve_category_members(CppBuiltinThreeWayCompareCategory::Strong);
+        if (!members) {
+            return collect_make<ErrorExpr>("missing comparison category", loc);
+        }
+        return make_node(
+            CppBuiltinThreeWayCompareCategory::Strong,
+            std::move(*members));
+    };
+    auto build_partial = [&]() -> std::unique_ptr<Expr> {
+        auto members =
+            resolve_category_members(CppBuiltinThreeWayCompareCategory::Partial);
+        if (!members) {
+            return collect_make<ErrorExpr>("missing comparison category", loc);
+        }
+        return make_node(
+            CppBuiltinThreeWayCompareCategory::Partial,
+            std::move(*members));
+    };
+
+    if (lhs_kind == TypeKind::MemberPointer ||
+        rhs_kind == TypeKind::MemberPointer) {
+        return make_error(
+            "member pointer operands are not supported for built-in '<=>'");
+    }
+
+    bool lhs_nullptr = is_nullptr_type(lhs_ty, ast_ctx_.get());
+    bool rhs_nullptr = is_nullptr_type(rhs_ty, ast_ctx_.get());
+    if (lhs_kind == TypeKind::Pointer ||
+        rhs_kind == TypeKind::Pointer ||
+        lhs_nullptr ||
+        rhs_nullptr) {
+        if (lhs_kind == TypeKind::Pointer && rhs_kind == TypeKind::Pointer) {
+            auto lhs_ptr = desugar_type(lhs_ty, ast_ctx_.get()).as_shared<PointerType>();
+            auto rhs_ptr = desugar_type(rhs_ty, ast_ctx_.get()).as_shared<PointerType>();
+            bool lhs_void = lhs_ptr && lhs_ptr->pointed_type && lhs_ptr->pointed_type->isVoid();
+            bool rhs_void = rhs_ptr && rhs_ptr->pointed_type && rhs_ptr->pointed_type->isVoid();
+            if (!lhs_void && !rhs_void &&
+                !pointers_to_compatible_types(lhs_ty, rhs_ty)) {
+                report_warning("comparison of distinct pointer types", loc);
+            }
+            if (!lhs_ty.equals_unqualified(rhs_ty)) {
+                rhs = collect_make<ImplicitCast>(
+                    ImplicitCastTypes::RAW_CAST, std::move(rhs), lhs_ty);
+                refresh_types();
+            }
+            return build_strong();
+        }
+
+        if (lhs_kind == TypeKind::Pointer &&
+            (rhs_nullptr ||
+             (is_integer_adjacent(rhs_ty, ast_ctx_.get()) &&
+              is_null_pointer_constant_expr(rhs.get())))) {
+            rhs = cast_if_needed(std::move(rhs), lhs_ty);
+            refresh_types();
+            return build_strong();
+        }
+        if (rhs_kind == TypeKind::Pointer &&
+            (lhs_nullptr ||
+             (is_integer_adjacent(lhs_ty, ast_ctx_.get()) &&
+              is_null_pointer_constant_expr(lhs.get())))) {
+            lhs = cast_if_needed(std::move(lhs), rhs_ty);
+            refresh_types();
+            return build_strong();
+        }
+
+        return make_error("invalid operands to binary expression");
+    }
+
+    if (lhs_kind == TypeKind::BlockPointer ||
+        rhs_kind == TypeKind::BlockPointer) {
+        return make_error(
+            "block pointer operands are not supported for built-in '<=>'");
+    }
+
+    if (lhs_kind == TypeKind::Vector || rhs_kind == TypeKind::Vector ||
+        (lhs_ty && lhs_ty->isComplex()) ||
+        (rhs_ty && rhs_ty->isComplex())) {
+        return make_error("invalid operands to binary expression");
+    }
+
+    bool lhs_scoped_enum = is_scoped_enum_type(lhs_ty, ast_ctx_.get());
+    bool rhs_scoped_enum = is_scoped_enum_type(rhs_ty, ast_ctx_.get());
+    if (lhs_scoped_enum || rhs_scoped_enum) {
+        if (lhs_scoped_enum &&
+            rhs_scoped_enum &&
+            same_unqualified_enum_type(lhs_ty, rhs_ty, ast_ctx_.get())) {
+            return build_strong();
+        }
+        return make_error("invalid operands to binary expression");
+    }
+
+    if (!is_arithmetic_adjacent(lhs_ty, ast_ctx_.get()) ||
+        !is_arithmetic_adjacent(rhs_ty, ast_ctx_.get())) {
+        return make_error("invalid operands to binary expression");
+    }
+
+    QualType common = usual_arithmetic_conversion_type(lhs_ty, rhs_ty);
+    if (!common) {
+        return make_error("invalid operands to binary expression");
+    }
+    lhs = cast_if_needed(std::move(lhs), common);
+    rhs = cast_if_needed(std::move(rhs), common);
+    refresh_types();
+
+    if (common->isFloatingPoint()) {
+        return build_partial();
+    }
+    return build_strong();
+}
 
 std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lhs, std::unique_ptr<Expr> rhs, BinOpTypes bop, SrcLoc loc) {
 
@@ -5544,6 +5848,11 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
     if (auto overloaded =
             try_cpp_binary_operator_overload(lhs, rhs, bop, loc)) {
         return overloaded;
+    }
+
+    if (bop == BinOpTypes::THREE_WAY_COMPARE) {
+        return collect_builtin_three_way_compare(
+            std::move(lhs), std::move(rhs), loc);
     }
 
     if (bop == BinOpTypes::ASSIGN) {
@@ -7083,6 +7392,10 @@ Collect::ValueCategory Collect::classify_value_category(Expr* expr) const {
         if (lang_opts_.is_cxx_mode() && is_assignment_binop(binary->bop)) {
             return ValueCategory::LValue;
         }
+        return ValueCategory::PRValue;
+    }
+
+    if (isa<CppBuiltinThreeWayCompareExpr>(expr)) {
         return ValueCategory::PRValue;
     }
 

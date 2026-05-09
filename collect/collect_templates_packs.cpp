@@ -724,6 +724,18 @@ bool collect_pack_expansion_shape_in_expr(
                        parameters,
                        shape_out);
         }
+        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+            const auto* compare =
+                static_cast<const CppBuiltinThreeWayCompareExpr*>(expr);
+            return collect_pack_expansion_shape_in_expr(
+                       compare->left.get(),
+                       parameters,
+                       shape_out) &&
+                   collect_pack_expansion_shape_in_expr(
+                       compare->right.get(),
+                       parameters,
+                       shape_out);
+        }
         case StmtKind::CompoundAssignOperation: {
             const auto* compound =
                 static_cast<const CompoundAssignOperation*>(expr);

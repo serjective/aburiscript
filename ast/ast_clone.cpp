@@ -1016,6 +1016,20 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
             binary->ctype = rewrite_type(binary->ctype, ctx);
             return true;
         }
+        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+            auto* compare =
+                static_cast<CppBuiltinThreeWayCompareExpr*>(expr.get());
+            if (compare->left &&
+                !rewrite_expr_tree(compare->left, ctx, error_out)) {
+                return false;
+            }
+            if (compare->right &&
+                !rewrite_expr_tree(compare->right, ctx, error_out)) {
+                return false;
+            }
+            compare->ctype = rewrite_type(compare->ctype, ctx);
+            return true;
+        }
         case StmtKind::CompoundAssignOperation: {
             auto* compound = static_cast<CompoundAssignOperation*>(expr.get());
             if (compound->left &&

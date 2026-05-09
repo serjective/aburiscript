@@ -1207,6 +1207,29 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
             result->ctype = binary->ctype;
             return result;
         }
+        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+            const auto* compare =
+                static_cast<const CppBuiltinThreeWayCompareExpr*>(expr);
+            auto cloned_lhs =
+                clone_expr_impl(compare->left.get(), ast_ctx, error_out);
+            auto cloned_rhs =
+                clone_expr_impl(compare->right.get(), ast_ctx, error_out);
+            if (!cloned_lhs || !cloned_rhs) {
+                return {};
+            }
+            auto result = std::make_unique<CppBuiltinThreeWayCompareExpr>(
+                std::move(cloned_lhs),
+                std::move(cloned_rhs),
+                compare->ctype,
+                compare->category,
+                compare->less_member,
+                compare->equivalent_member,
+                compare->greater_member,
+                compare->unordered_member,
+                compare->location);
+            assign_node_id(result.get(), ast_ctx);
+            return result;
+        }
         case StmtKind::ArraySubscriptExpr: {
             const auto* subscript = static_cast<const ArraySubscriptExpr*>(expr);
             auto cloned_array =

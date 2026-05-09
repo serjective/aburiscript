@@ -2171,6 +2171,185 @@ llvm::Value * ASTToLLVM::convert_binary_expr(Expr *expr) {
     error("convert_binary_expr(): invalid operator", expr->location); // Should not be reached if all BinOpTypes are handled
     return nullptr;
 }
+
+llvm::Value* ASTToLLVM::convert_cpp_builtin_three_way_compare_expr(
+    CppBuiltinThreeWayCompareExpr* expr) {
+    if (!expr || !expr->left || !expr->right) {
+        return nullptr;
+    }
+
+    llvm::Value* left = convert_expression(expr->left.get());
+    llvm::Value* right = convert_expression(expr->right.get());
+    if (!left || !right) {
+        error("convert_cpp_builtin_three_way_compare_expr(): missing operand",
+              expr->location);
+        return nullptr;
+    }
+
+    auto load_category_member =
+        [&](const std::shared_ptr<Symbol>& sym,
+            const char* name) -> llvm::Value* {
+        if (!sym) {
+            error(
+                std::string(
+                    "convert_cpp_builtin_three_way_compare_expr(): missing ") +
+                    name + " member",
+                expr->location);
+            return nullptr;
+        }
+        VarRef member_ref(sym, expr->location);
+        auto lvalue = get_lvalue(&member_ref);
+        if (!lvalue.address || !lvalue.type) {
+            error(
+                std::string(
+                    "convert_cpp_builtin_three_way_compare_expr(): failed to lower ") +
+                    name + " member",
+                expr->location);
+            return nullptr;
+        }
+        llvm::Type* value_type = convert_type(lvalue.type);
+        if (!value_type) {
+            error(
+                std::string(
+                    "convert_cpp_builtin_three_way_compare_expr(): failed to lower ") +
+                    name + " member type",
+                expr->location);
+            return nullptr;
+        }
+        return builder.CreateLoad(value_type, lvalue.address, name);
+    };
+
+    llvm::Value* less_value =
+        load_category_member(expr->less_member, "spaceship.less");
+    llvm::Value* equivalent_value =
+        load_category_member(expr->equivalent_member, "spaceship.equivalent");
+    llvm::Value* greater_value =
+        load_category_member(expr->greater_member, "spaceship.greater");
+    llvm::Value* unordered_value = nullptr;
+    if (expr->category == CppBuiltinThreeWayCompareCategory::Partial) {
+        unordered_value =
+            load_category_member(expr->unordered_member, "spaceship.unordered");
+    }
+    if (!less_value || !equivalent_value || !greater_value ||
+        (expr->category == CppBuiltinThreeWayCompareCategory::Partial &&
+         !unordered_value)) {
+        return nullptr;
+    }
+
+    auto result_type = less_value->getType();
+    auto* result_slot = builder.CreateAlloca(result_type, nullptr, "spaceship.result");
+
+    auto store_result = [&](llvm::Value* value) {
+        if (value->getType() != result_type) {
+            error(
+                "convert_cpp_builtin_three_way_compare_expr(): comparison category member type mismatch",
+                expr->location);
+            return;
+        }
+        builder.CreateStore(value, result_slot);
+    };
+
+    auto* function = builder.GetInsertBlock()
+        ? builder.GetInsertBlock()->getParent()
+        : nullptr;
+    if (!function) {
+        error(
+            "convert_cpp_builtin_three_way_compare_expr(): expression outside function",
+            expr->location);
+        return nullptr;
+    }
+
+    auto lhs_type = expr->left->get_type();
+    auto rhs_type = expr->right->get_type();
+    auto lhs_semantic = desugar_type(lhs_type, ast_ctx.get());
+    auto rhs_semantic = desugar_type(rhs_type, ast_ctx.get());
+    auto lhs_kind = lhs_semantic ? lhs_semantic->kind : TypeKind::Other;
+    auto rhs_kind = rhs_semantic ? rhs_semantic->kind : TypeKind::Other;
+    bool is_pointer =
+        lhs_kind == TypeKind::Pointer || rhs_kind == TypeKind::Pointer;
+    bool is_floating =
+        (lhs_semantic && lhs_semantic->isFloatingPoint()) ||
+        (rhs_semantic && rhs_semantic->isFloatingPoint());
+    bool is_unsigned =
+        (lhs_semantic && lhs_semantic->isUnsigned()) ||
+        (rhs_semantic && rhs_semantic->isUnsigned());
+
+    llvm::Value* less_cmp = nullptr;
+    llvm::Value* greater_cmp = nullptr;
+    llvm::Value* unordered_cmp = nullptr;
+    if (is_pointer) {
+        llvm::Type* intptr_ty = llvm::Type::getInt64Ty(*context);
+        left = builder.CreatePtrToInt(left, intptr_ty, "spaceship.lhs.ptrint");
+        right = builder.CreatePtrToInt(right, intptr_ty, "spaceship.rhs.ptrint");
+        less_cmp = builder.CreateICmpULT(left, right, "spaceship.ptr.less");
+        greater_cmp =
+            builder.CreateICmpUGT(left, right, "spaceship.ptr.greater");
+    } else if (is_floating) {
+        unordered_cmp =
+            builder.CreateFCmpUNO(left, right, "spaceship.unordered.cmp");
+        less_cmp = builder.CreateFCmpOLT(left, right, "spaceship.float.less");
+        greater_cmp =
+            builder.CreateFCmpOGT(left, right, "spaceship.float.greater");
+    } else {
+        if (is_unsigned) {
+            less_cmp =
+                builder.CreateICmpULT(left, right, "spaceship.int.less");
+            greater_cmp =
+                builder.CreateICmpUGT(left, right, "spaceship.int.greater");
+        } else {
+            less_cmp =
+                builder.CreateICmpSLT(left, right, "spaceship.int.less");
+            greater_cmp =
+                builder.CreateICmpSGT(left, right, "spaceship.int.greater");
+        }
+    }
+
+    llvm::BasicBlock* unordered_bb = unordered_cmp
+        ? llvm::BasicBlock::Create(*context, "spaceship.unordered", function)
+        : nullptr;
+    llvm::BasicBlock* less_check_bb =
+        llvm::BasicBlock::Create(*context, "spaceship.less.check", function);
+    llvm::BasicBlock* less_store_bb =
+        llvm::BasicBlock::Create(*context, "spaceship.less.store", function);
+    llvm::BasicBlock* greater_check_bb =
+        llvm::BasicBlock::Create(*context, "spaceship.greater.check", function);
+    llvm::BasicBlock* greater_store_bb =
+        llvm::BasicBlock::Create(*context, "spaceship.greater.store", function);
+    llvm::BasicBlock* equivalent_store_bb =
+        llvm::BasicBlock::Create(*context, "spaceship.equivalent.store", function);
+    llvm::BasicBlock* merge_bb =
+        llvm::BasicBlock::Create(*context, "spaceship.done", function);
+
+    if (unordered_cmp) {
+        builder.CreateCondBr(unordered_cmp, unordered_bb, less_check_bb);
+        builder.SetInsertPoint(unordered_bb);
+        store_result(unordered_value);
+        builder.CreateBr(merge_bb);
+    } else {
+        builder.CreateBr(less_check_bb);
+    }
+
+    builder.SetInsertPoint(less_check_bb);
+    builder.CreateCondBr(less_cmp, less_store_bb, greater_check_bb);
+
+    builder.SetInsertPoint(less_store_bb);
+    store_result(less_value);
+    builder.CreateBr(merge_bb);
+
+    builder.SetInsertPoint(greater_check_bb);
+    builder.CreateCondBr(greater_cmp, greater_store_bb, equivalent_store_bb);
+
+    builder.SetInsertPoint(greater_store_bb);
+    store_result(greater_value);
+    builder.CreateBr(merge_bb);
+
+    builder.SetInsertPoint(equivalent_store_bb);
+    store_result(equivalent_value);
+    builder.CreateBr(merge_bb);
+
+    builder.SetInsertPoint(merge_bb);
+    return builder.CreateLoad(result_type, result_slot, "spaceship.value");
+}
 llvm::Value* ASTToLLVM::convert_conditional_expr(CondExpr *expr) {
     if (!expr) return nullptr;
 

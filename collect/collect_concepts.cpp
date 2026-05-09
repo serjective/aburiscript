@@ -168,6 +168,18 @@ bool refresh_constraint_expr_satisfaction(
                        binary->right.get(),
                        loc);
         }
+        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+            auto* compare =
+                static_cast<CppBuiltinThreeWayCompareExpr*>(stripped);
+            return refresh_constraint_expr_satisfaction(
+                       collect,
+                       compare->left.get(),
+                       loc) &&
+                   refresh_constraint_expr_satisfaction(
+                       collect,
+                       compare->right.get(),
+                       loc);
+        }
         case StmtKind::CompoundAssignOperation: {
             auto* compound =
                 static_cast<CompoundAssignOperation*>(stripped);

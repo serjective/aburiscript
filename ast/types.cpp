@@ -452,6 +452,20 @@ bool expr_structurally_matches(const Expr* lhs, const Expr* rhs) {
                        lhs_binary->right.get(),
                        rhs_binary->right.get());
         }
+        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+            const auto* lhs_compare =
+                static_cast<const CppBuiltinThreeWayCompareExpr*>(lhs);
+            const auto* rhs_compare =
+                static_cast<const CppBuiltinThreeWayCompareExpr*>(rhs);
+            return lhs_compare->category == rhs_compare->category &&
+                   lhs_compare->ctype.equals_qualified(rhs_compare->ctype) &&
+                   expr_structurally_matches(
+                       lhs_compare->left.get(),
+                       rhs_compare->left.get()) &&
+                   expr_structurally_matches(
+                       lhs_compare->right.get(),
+                       rhs_compare->right.get());
+        }
         case StmtKind::CompoundAssignOperation: {
             const auto* lhs_binary =
                 static_cast<const CompoundAssignOperation*>(lhs);
@@ -662,6 +676,17 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
                    expr_depends_on_template_parameters_for_type(
                        binary->right.get(),
                        ast_ctx);
+        }
+        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+            const auto* compare =
+                static_cast<const CppBuiltinThreeWayCompareExpr*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                       compare->left.get(),
+                       ast_ctx) ||
+                   expr_depends_on_template_parameters_for_type(
+                       compare->right.get(),
+                       ast_ctx) ||
+                   type_depends_on_template_parameters(compare->ctype, ast_ctx);
         }
         case StmtKind::CompoundAssignOperation: {
             const auto* binary =

@@ -1628,6 +1628,9 @@ llvm::Value * ASTToLLVM::convert_expression(Expr *expr) {
             return convert_unary_expr(static_cast<UnaryOperation*>(expr));
         case StmtKind::BinaryOperation:
             return convert_binary_expr(static_cast<BinaryOperation*>(expr));
+        case StmtKind::CppBuiltinThreeWayCompareExpr:
+            return convert_cpp_builtin_three_way_compare_expr(
+                static_cast<CppBuiltinThreeWayCompareExpr*>(expr));
         case StmtKind::CompoundAssignOperation:
             return convert_compound_assignment(
                 static_cast<CompoundAssignOperation*>(expr));

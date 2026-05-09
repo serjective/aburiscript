@@ -232,6 +232,8 @@ public:
     LValueResult get_lvalue(Expr *expr);
 
     llvm::Value *convert_binary_expr(Expr *expr);
+    llvm::Value* convert_cpp_builtin_three_way_compare_expr(
+        CppBuiltinThreeWayCompareExpr* expr);
 
     llvm::Value* convert_expression(Expr * expr);
     llvm::Value* convert_init_list_rvalue_expression(InitListExpr* init_list,

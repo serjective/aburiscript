@@ -254,6 +254,18 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                        ast_ctx,
                        active_variable_symbols);
         }
+        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+            const auto* compare =
+                static_cast<const CppBuiltinThreeWayCompareExpr*>(stripped);
+            return expr_depends_on_template_parameters_impl(
+                       compare->left.get(),
+                       ast_ctx,
+                       active_variable_symbols) ||
+                   expr_depends_on_template_parameters_impl(
+                       compare->right.get(),
+                       ast_ctx,
+                       active_variable_symbols);
+        }
         case StmtKind::CompoundAssignOperation: {
             const auto* binary =
                 static_cast<const CompoundAssignOperation*>(stripped);

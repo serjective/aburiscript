@@ -184,6 +184,10 @@ void store_explicit_expr_type(Expr* candidate, QualType realized_type) {
             static_cast<BinaryOperation*>(candidate)->ctype =
                 realized_type;
             return;
+        case StmtKind::CppBuiltinThreeWayCompareExpr:
+            static_cast<CppBuiltinThreeWayCompareExpr*>(candidate)->ctype =
+                realized_type;
+            return;
         case StmtKind::CompoundAssignOperation:
             static_cast<CompoundAssignOperation*>(candidate)->ctype =
                 realized_type;
