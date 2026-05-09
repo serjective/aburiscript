@@ -83,8 +83,17 @@ bool stmt_contains_jump_target(Stmt* stmt) {
             }
             case StmtKind::IfStmt: {
                 auto* if_stmt = static_cast<IfStmt*>(current);
-                worklist.push_back(if_stmt->else_stmt.get());
-                worklist.push_back(if_stmt->then_stmt.get());
+                worklist.push_back(if_stmt->init_stmt.get());
+                if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
+                    if_stmt->constexpr_condition_value.has_value()) {
+                    worklist.push_back(
+                        (*if_stmt->constexpr_condition_value
+                             ? if_stmt->then_stmt
+                             : if_stmt->else_stmt).get());
+                } else {
+                    worklist.push_back(if_stmt->else_stmt.get());
+                    worklist.push_back(if_stmt->then_stmt.get());
+                }
                 break;
             }
             case StmtKind::WhileStmt:
@@ -136,6 +145,51 @@ void ASTToLLVM::convert_if_statement(IfStmt *stmt) {
     auto *ifStmt = dyn_cast<IfStmt>(stmt);
     if (!ifStmt) { error("unexpected subclass in convert_if_statement()", stmt->location); return; }
 
+    std::shared_ptr<Scope> prev_scope = current_scope;
+    bool entered_if_scope = ifStmt->scope || ifStmt->init_stmt;
+    if (entered_if_scope) {
+        current_scope = ifStmt->scope;
+        cleanup_stack.emplace_back();
+    }
+    auto leave_if_scope = [&]() {
+        if (!entered_if_scope) {
+            return;
+        }
+        if (!builder.GetInsertBlock()->getTerminator()) {
+            emit_cleanups_for_scope();
+        }
+        cleanup_stack.pop_back();
+        current_scope = prev_scope;
+    };
+
+    if (ifStmt->init_stmt) {
+        convert_statement(ifStmt->init_stmt.get());
+        if (builder.GetInsertBlock()->getTerminator()) {
+            leave_if_scope();
+            return;
+        }
+    }
+
+    if (ifStmt->statement_kind == IfStatementKind::Constexpr) {
+        std::optional<bool> condition_value = ifStmt->constexpr_condition_value;
+        if (!condition_value.has_value()) {
+            condition_value = try_fold_stmt_condition(ifStmt->condition.get());
+        }
+        if (!condition_value.has_value()) {
+            error("convert_if_statement(): constexpr if condition was not resolved",
+                  stmt->location);
+            leave_if_scope();
+            return;
+        }
+        if (*condition_value) {
+            convert_statement(ifStmt->then_stmt.get());
+        } else if (ifStmt->else_stmt) {
+            convert_statement(ifStmt->else_stmt.get());
+        }
+        leave_if_scope();
+        return;
+    }
+
     bool keep_cfg_for_jump_targets =
         stmt_contains_jump_target(ifStmt->then_stmt.get()) ||
         stmt_contains_jump_target(ifStmt->else_stmt.get());
@@ -159,12 +213,16 @@ void ASTToLLVM::convert_if_statement(IfStmt *stmt) {
             } else {
                 materialize_dead_branch(ifStmt->then_stmt.get());
             }
+            leave_if_scope();
             return;
         }
     }
 
     llvm::Value* condVal = convert_expression(ifStmt->condition.get());
-    if (!condVal) return;
+    if (!condVal) {
+        leave_if_scope();
+        return;
+    }
 
     condVal = emit_bool_conversion(condVal, "ifcond");
 
@@ -207,6 +265,7 @@ void ASTToLLVM::convert_if_statement(IfStmt *stmt) {
     // Emit merge block.
     function->insert(function->end(), mergeBB);
     builder.SetInsertPoint(mergeBB);
+    leave_if_scope();
 }
 
 void ASTToLLVM::convert_while_statement(WhileStmt *stmt) {

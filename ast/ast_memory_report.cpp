@@ -837,6 +837,7 @@ private:
             case StmtKind::IfStmt: {
                 auto* node = static_cast<const IfStmt*>(stmt);
                 record_stmt<IfStmt>(StmtKind::IfStmt);
+                visit_stmt(node->init_stmt.get());
                 visit_stmt(node->condition.get());
                 visit_stmt(node->then_stmt.get());
                 visit_stmt(node->else_stmt.get());

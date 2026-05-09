@@ -125,8 +125,17 @@ bool stmt_contains_jump_target(Stmt* stmt) {
             }
             case StmtKind::IfStmt: {
                 auto* if_stmt = static_cast<IfStmt*>(current);
-                worklist.push_back(if_stmt->else_stmt.get());
-                worklist.push_back(if_stmt->then_stmt.get());
+                worklist.push_back(if_stmt->init_stmt.get());
+                if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
+                    if_stmt->constexpr_condition_value.has_value()) {
+                    worklist.push_back(
+                        (*if_stmt->constexpr_condition_value
+                             ? if_stmt->then_stmt
+                             : if_stmt->else_stmt).get());
+                } else {
+                    worklist.push_back(if_stmt->else_stmt.get());
+                    worklist.push_back(if_stmt->then_stmt.get());
+                }
                 break;
             }
             case StmtKind::WhileStmt:
@@ -299,8 +308,18 @@ void ASTToLLVM::collect_label_cleanup_depths(Stmt* stmt, size_t depth) {
             continue;
         }
         if (auto* if_stmt = dyn_cast<IfStmt>(current_stmt)) {
-            worklist.emplace_back(if_stmt->else_stmt.get(), current_depth);
-            worklist.emplace_back(if_stmt->then_stmt.get(), current_depth);
+            worklist.emplace_back(if_stmt->init_stmt.get(), current_depth);
+            if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
+                if_stmt->constexpr_condition_value.has_value()) {
+                worklist.emplace_back(
+                    (*if_stmt->constexpr_condition_value
+                         ? if_stmt->then_stmt
+                         : if_stmt->else_stmt).get(),
+                    current_depth);
+            } else {
+                worklist.emplace_back(if_stmt->else_stmt.get(), current_depth);
+                worklist.emplace_back(if_stmt->then_stmt.get(), current_depth);
+            }
             continue;
         }
         if (auto* while_stmt = dyn_cast<WhileStmt>(current_stmt)) {
@@ -584,6 +603,17 @@ void ASTToLLVM::convert_statement_after_terminator(Stmt *stmt,
             return;
         case StmtKind::IfStmt: {
             auto* if_stmt = static_cast<IfStmt*>(stmt);
+            convert_statement_after_terminator(if_stmt->init_stmt.get(),
+                                               allow_case_labels);
+            if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
+                if_stmt->constexpr_condition_value.has_value()) {
+                convert_statement_after_terminator(
+                    (*if_stmt->constexpr_condition_value
+                         ? if_stmt->then_stmt
+                         : if_stmt->else_stmt).get(),
+                    allow_case_labels);
+                return;
+            }
             convert_statement_after_terminator(if_stmt->then_stmt.get(),
                                                allow_case_labels);
             if (if_stmt->else_stmt) {

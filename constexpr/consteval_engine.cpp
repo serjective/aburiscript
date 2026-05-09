@@ -3009,15 +3009,27 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
     }
 
     if (auto* if_stmt = dyn_cast<IfStmt>(stmt)) {
+        if (if_stmt->init_stmt) {
+            InterpExecResult init_result =
+                eval_interpreter_stmt(if_stmt->init_stmt.get(), mode, depth + 1);
+            if (init_result.kind != InterpExecResult::Kind::Continue) {
+                return init_result;
+            }
+        }
         bool condition_truthy = false;
-        ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
-        if (!eval_condition_truthiness(
-                if_stmt->condition.get(),
-                mode,
-                depth + 1,
-                condition_truthy,
-                condition_failure)) {
-            return make_interp_fail_result(std::move(condition_failure));
+        if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
+            if_stmt->constexpr_condition_value.has_value()) {
+            condition_truthy = *if_stmt->constexpr_condition_value;
+        } else {
+            ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
+            if (!eval_condition_truthiness(
+                    if_stmt->condition.get(),
+                    mode,
+                    depth + 1,
+                    condition_truthy,
+                    condition_failure)) {
+                return make_interp_fail_result(std::move(condition_failure));
+            }
         }
 
         if (condition_truthy) {

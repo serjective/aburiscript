@@ -1436,6 +1436,9 @@ bool clone_function_parameters_for_specialization(
         }
         return false;
     }
+    auto specialized_function_type =
+        std::make_shared<FunctionType>(*rebuilt_function_type);
+    rebuilt_function_type = specialized_function_type;
     rebuilt_function_type->parameters.clear();
     rebuilt_function_type->parameters.reserve(specialization->parameters.size());
     for (const auto& parameter_decl : specialization->parameters) {

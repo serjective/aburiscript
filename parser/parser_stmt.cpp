@@ -351,12 +351,226 @@ std::unique_ptr<Stmt> Parser::parse_stmt() {
     error("unsupported statement");
     return nullptr;
 }
+std::optional<size_t> Parser::find_cpp_if_init_semicolon() {
+    if (!is_cxx_mode_active()) {
+        return std::nullopt;
+    }
+
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int brace_depth = 0;
+    int conditional_depth = 0;
+    size_t offset = 0;
+    while (true) {
+        Token tok = peek_token_shortcut(offset);
+        if (tok.type == TokenType::Eof) {
+            return std::nullopt;
+        }
+        if (tok.type == TokenType::RIGHT_PAREN &&
+            paren_depth == 0 &&
+            bracket_depth == 0 &&
+            brace_depth == 0) {
+            return std::nullopt;
+        }
+
+        switch (tok.type) {
+            case TokenType::LEFT_PAREN:
+                ++paren_depth;
+                break;
+            case TokenType::RIGHT_PAREN:
+                if (paren_depth > 0) {
+                    --paren_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACKET:
+                ++bracket_depth;
+                break;
+            case TokenType::RIGHT_BRACKET:
+                if (bracket_depth > 0) {
+                    --bracket_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACE:
+                ++brace_depth;
+                break;
+            case TokenType::RIGHT_BRACE:
+                if (brace_depth > 0) {
+                    --brace_depth;
+                }
+                break;
+            case TokenType::QUESTION:
+                if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0) {
+                    ++conditional_depth;
+                }
+                break;
+            case TokenType::COLON:
+                if (peek_token_shortcut(offset + 1).type == TokenType::COLON) {
+                    ++offset;
+                    break;
+                }
+                if (paren_depth == 0 && bracket_depth == 0 &&
+                    brace_depth == 0 && conditional_depth > 0) {
+                    --conditional_depth;
+                }
+                break;
+            case TokenType::SEMICOLON:
+                if (paren_depth == 0 && bracket_depth == 0 &&
+                    brace_depth == 0 && conditional_depth == 0) {
+                    return offset;
+                }
+                break;
+            default:
+                break;
+        }
+        ++offset;
+    }
+}
+
 std::unique_ptr<Stmt> Parser::parse_if_stmt() {
     Token t = current_token();
     check_and_consume(TokenType::IF);
+    bool is_constexpr_if = false;
+    if (gentle_check(TokenType::CONSTEXPR_KW)) {
+        if (!is_cxx_mode_active()) {
+            error_custloc("'if constexpr' is only allowed in C++", current_token().loc);
+        }
+        is_constexpr_if = true;
+        advance();
+    }
     check_and_consume(TokenType::LEFT_PAREN);
+
+    auto entered_scope = is_cxx_mode_active()
+        ? collect_->collect_enter_scope(ScopeFlags::BlockScope)
+        : Collect::ScopeEnterResult{};
+    struct IfScopeGuard {
+        Parser* parser = nullptr;
+        bool active = false;
+        ~IfScopeGuard() {
+            if (active && parser && parser->collect_) {
+                parser->collect_->collect_leave_scope();
+            }
+        }
+    } if_scope_guard{this, is_cxx_mode_active()};
+
+    auto starts_with_record_qualified_id = [&]() -> bool {
+        if (!is_cxx_mode_active()) {
+            return false;
+        }
+        auto consume_scope_resolution = [&](size_t& offset) -> bool {
+            Token tok = peek_token_shortcut(offset);
+            if (tok.type == TokenType::SCOPE_RESOLUTION) {
+                ++offset;
+                return true;
+            }
+            if (tok.type == TokenType::COLON &&
+                peek_token_shortcut(offset + 1).type == TokenType::COLON) {
+                offset += 2;
+                return true;
+            }
+            return false;
+        };
+
+        size_t offset = 0;
+        bool has_global_qualifier = consume_scope_resolution(offset);
+        Token owner_tok = peek_token_shortcut(offset);
+        if (owner_tok.type != TokenType::IDENTIFIER) {
+            return false;
+        }
+        size_t sep_offset = offset + 1;
+        if (!consume_scope_resolution(sep_offset)) {
+            return false;
+        }
+        auto* owner_tag_decl = collect_->collect_lookup_tag_decl(
+            owner_tok.value, !has_global_qualifier);
+        return dyn_cast<ObjectDecl>(owner_tag_decl) != nullptr;
+    };
+
+    auto should_parse_if_init_as_declaration = [&]() -> bool {
+        if (gentle_check(TokenType::SEMICOLON) ||
+            !isTokenDeclarationSpec(current_token())) {
+            return false;
+        }
+        if (is_cxx_mode_active() &&
+            (current_token().type == TokenType::IDENTIFIER ||
+             current_token().type == TokenType::SCOPE_RESOLUTION ||
+             (current_token().type == TokenType::COLON &&
+              peek_token().type == TokenType::COLON))) {
+            if (starts_with_record_qualified_id()) {
+                return false;
+            }
+            if (starts_with_cpp_dependent_qualified_call_expression()) {
+                return false;
+            }
+            CxxStmtDisambiguation disambiguated =
+                classify_cxx_stmt_disambiguation();
+            return disambiguated == CxxStmtDisambiguation::Declaration;
+        }
+        return true;
+    };
+
+    auto parse_if_init_statement = [&]() -> std::unique_ptr<Stmt> {
+        if (should_parse_if_init_as_declaration()) {
+            auto decl = parse_declaration();
+            for (const auto& d : decl) {
+                if (isa<FuncDecl>(d.get())) {
+                    error("function declaration not allowed in if init-statement");
+                }
+            }
+            return collect_->collect_decl_statement(std::move(decl));
+        }
+        if (gentle_check(TokenType::SEMICOLON)) {
+            advance();
+            return nullptr;
+        }
+        auto init_loc = current_token().loc;
+        auto init_expr = parse_expression();
+        auto stmt = collect_->collect_expression_statement(
+            std::move(init_expr), init_loc);
+        check_and_consume(TokenType::SEMICOLON);
+        return stmt;
+    };
+
+    std::unique_ptr<Stmt> init_stmt = nullptr;
+    if (find_cpp_if_init_semicolon()) {
+        init_stmt = parse_if_init_statement();
+    }
+
     auto condition = parse_expression();
     check_and_consume(TokenType::RIGHT_PAREN);
+    auto condition_info = collect_->collect_if_condition(
+        std::move(condition),
+        is_constexpr_if ? IfStatementKind::Constexpr : IfStatementKind::Runtime,
+        t.loc);
+
+    auto branch_state = [&](bool then_branch) -> CppConstexprIfBranchState {
+        if (!is_constexpr_if) {
+            return CppConstexprIfBranchState::Active;
+        }
+        if (!condition_info.constexpr_value.has_value()) {
+            return CppConstexprIfBranchState::Deferred;
+        }
+        bool active = *condition_info.constexpr_value == then_branch;
+        return active ? CppConstexprIfBranchState::Active
+                      : CppConstexprIfBranchState::Discarded;
+    };
+    struct ConstexprIfBranchGuard {
+        Collect* collect = nullptr;
+        bool active = false;
+        ConstexprIfBranchGuard(Collect* collect,
+                               bool enabled,
+                               CppConstexprIfBranchState state)
+            : collect(collect), active(enabled) {
+            if (active && collect) {
+                collect->collect_enter_constexpr_if_branch(state);
+            }
+        }
+        ~ConstexprIfBranchGuard() {
+            if (active && collect) {
+                collect->collect_leave_constexpr_if_branch();
+            }
+        }
+    };
+
     // Warn on extraneous semicolon: if (x);
     if (gentle_check(TokenType::SEMICOLON) && !gentle_check(TokenType::Eof)) {
         Token semi = current_token();
@@ -367,15 +581,34 @@ std::unique_ptr<Stmt> Parser::parse_if_stmt() {
             diag_engine->report_warning("if statement has empty body; did you mean to remove the ';'?", semi.loc);
         }
     }
-    auto then_stmt = parse_stmt();
+    std::unique_ptr<Stmt> then_stmt;
+    {
+        ConstexprIfBranchGuard guard(
+            collect_.get(), is_constexpr_if, branch_state(true));
+        then_stmt = parse_stmt();
+    }
 
     std::unique_ptr<Stmt> else_stmt = nullptr;
     if (gentle_check_and_consume(TokenType::ELSE)) {
+        ConstexprIfBranchGuard guard(
+            collect_.get(), is_constexpr_if, branch_state(false));
         else_stmt = parse_stmt();
     }
 
-    return collect_->collect_if_statement(std::move(condition),
-        std::move(then_stmt), std::move(else_stmt), t.loc);
+    auto selection_scope = entered_scope.scope;
+    if_scope_guard.active = false;
+    if (is_cxx_mode_active()) {
+        collect_->collect_leave_scope();
+    }
+    return collect_->collect_if_statement(
+        std::move(init_stmt),
+        std::move(condition_info.condition),
+        std::move(then_stmt),
+        std::move(else_stmt),
+        is_constexpr_if ? IfStatementKind::Constexpr : IfStatementKind::Runtime,
+        std::move(selection_scope),
+        condition_info.constexpr_value,
+        t.loc);
 }
 std::unique_ptr<Stmt> Parser::parse_switch() {
     Token t = current_token();

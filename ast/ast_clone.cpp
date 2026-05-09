@@ -2,6 +2,7 @@
 
 #include "ast_context.h"
 #include "expr_clone.h"
+#include "../constexpr/consteval_compat.h"
 
 #include <type_traits>
 
@@ -1476,9 +1477,36 @@ bool rewrite_stmt_tree_in_place_impl(std::unique_ptr<Stmt>& stmt,
         }
         case StmtKind::IfStmt: {
             auto* if_stmt = static_cast<IfStmt*>(stmt.get());
-            return (!if_stmt->condition ||
-                    rewrite_expr_tree(if_stmt->condition, ctx, error_out)) &&
-                   (!if_stmt->then_stmt ||
+            if (if_stmt->init_stmt &&
+                !rewrite_stmt_tree_in_place_impl(
+                    if_stmt->init_stmt,
+                    ctx,
+                    error_out)) {
+                return false;
+            }
+            if (if_stmt->condition &&
+                !rewrite_expr_tree(if_stmt->condition, ctx, error_out)) {
+                return false;
+            }
+            if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
+                if_stmt->condition) {
+                ConstEvalResult eval = evaluate_with_consteval_compat(
+                    if_stmt->condition.get(),
+                    ConstEvalMode::cpp_core_constant_expression());
+                if (eval.status == ConstEvalStatus::Constant &&
+                    eval.int_value.has_value()) {
+                    if_stmt->constexpr_condition_value = *eval.int_value != 0;
+                    auto& selected_stmt = *if_stmt->constexpr_condition_value
+                        ? if_stmt->then_stmt
+                        : if_stmt->else_stmt;
+                    return !selected_stmt ||
+                           rewrite_stmt_tree_in_place_impl(
+                               selected_stmt,
+                               ctx,
+                               error_out);
+                }
+            }
+            return (!if_stmt->then_stmt ||
                     rewrite_stmt_tree_in_place_impl(
                         if_stmt->then_stmt,
                         ctx,
@@ -1736,11 +1764,14 @@ std::unique_ptr<Stmt> clone_stmt_impl(const Stmt* stmt,
         }
         case StmtKind::IfStmt: {
             const auto* if_stmt = static_cast<const IfStmt*>(stmt);
+            auto init_stmt = clone_stmt_impl(
+                if_stmt->init_stmt.get(), ctx, error_out);
             auto condition = clone_expr_with_substitution(
                 if_stmt->condition.get(), ctx, error_out);
             auto then_stmt = clone_stmt_impl(if_stmt->then_stmt.get(), ctx, error_out);
             auto else_stmt = clone_stmt_impl(if_stmt->else_stmt.get(), ctx, error_out);
-            if ((if_stmt->condition && !condition) ||
+            if ((if_stmt->init_stmt && !init_stmt) ||
+                (if_stmt->condition && !condition) ||
                 (if_stmt->then_stmt && !then_stmt) ||
                 (if_stmt->else_stmt && !else_stmt)) {
                 return nullptr;
@@ -1749,7 +1780,11 @@ std::unique_ptr<Stmt> clone_stmt_impl(const Stmt* stmt,
                 std::move(condition),
                 std::move(then_stmt),
                 std::move(else_stmt),
-                if_stmt->location);
+                if_stmt->location,
+                if_stmt->statement_kind,
+                std::move(init_stmt),
+                if_stmt->scope,
+                if_stmt->constexpr_condition_value);
             assign_node_id(result.get(), ctx.ast_ctx);
             return result;
         }

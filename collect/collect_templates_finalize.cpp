@@ -351,12 +351,66 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::IfStmt: {
             auto* if_stmt = static_cast<IfStmt*>(stmt.get());
+            if (!finalize_specialized_stmt_semantics(
+                    collect,
+                    if_stmt->init_stmt,
+                    expected_return_type,
+                    error_out)) {
+                return false;
+            }
             if (if_stmt->condition) {
                 strip_redundant_specialization_casts(if_stmt->condition);
-                if_stmt->condition = collect.collect_condition_expression(
+                auto condition_info = collect.collect_if_condition(
                     std::move(if_stmt->condition),
-                    if_stmt->location,
-                    "if");
+                    if_stmt->statement_kind,
+                    if_stmt->location);
+                if_stmt->condition = std::move(condition_info.condition);
+                if_stmt->constexpr_condition_value =
+                    condition_info.constexpr_value;
+            }
+            if (if_stmt->statement_kind == IfStatementKind::Constexpr) {
+                if (if_stmt->constexpr_condition_value.has_value()) {
+                    auto& selected_stmt = *if_stmt->constexpr_condition_value
+                        ? if_stmt->then_stmt
+                        : if_stmt->else_stmt;
+                    return finalize_specialized_stmt_semantics(
+                        collect,
+                        selected_stmt,
+                        expected_return_type,
+                        error_out);
+                }
+
+                struct BranchGuard {
+                    Collect& collect;
+                    explicit BranchGuard(Collect& collect) : collect(collect) {
+                        collect.collect_enter_constexpr_if_branch(
+                            CppConstexprIfBranchState::Deferred);
+                    }
+                    ~BranchGuard() {
+                        collect.collect_leave_constexpr_if_branch();
+                    }
+                };
+                {
+                    BranchGuard guard(collect);
+                    if (!finalize_specialized_stmt_semantics(
+                            collect,
+                            if_stmt->then_stmt,
+                            expected_return_type,
+                            error_out)) {
+                        return false;
+                    }
+                }
+                {
+                    BranchGuard guard(collect);
+                    if (!finalize_specialized_stmt_semantics(
+                            collect,
+                            if_stmt->else_stmt,
+                            expected_return_type,
+                            error_out)) {
+                        return false;
+                    }
+                }
+                return true;
             }
             if (!finalize_specialized_stmt_semantics(
                     collect,

@@ -450,6 +450,7 @@ void Collect::collect_start_translation_unit() {
     session_.func_state_.delayed_diagnostics.clear();
     session_.func_state_.unevaluated_depth = 0;
     session_.func_state_.unevaluated_context_stack.clear();
+    session_.func_state_.constexpr_if_branch_stack.clear();
     session_.func_state_.switch_context_stack.clear();
     session_.func_state_.labels_defined.clear();
     session_.func_state_.labels_referenced.clear();
@@ -905,6 +906,25 @@ void Collect::restore_current_function_definition_state(
 void Collect::reset_current_function_definition_state() {
 
     restore_current_function_definition_state(FunctionDefinitionState{});
+}
+
+CppConstexprIfBranchState Collect::current_constexpr_if_branch_state() const {
+    CppConstexprIfBranchState effective = CppConstexprIfBranchState::Active;
+    for (CppConstexprIfBranchState state :
+         session_.func_state_.constexpr_if_branch_stack) {
+        if (state == CppConstexprIfBranchState::Discarded) {
+            return CppConstexprIfBranchState::Discarded;
+        }
+        if (state == CppConstexprIfBranchState::Deferred) {
+            effective = CppConstexprIfBranchState::Deferred;
+        }
+    }
+    return effective;
+}
+
+bool Collect::current_constexpr_if_branch_suppresses_returns() const {
+    return current_constexpr_if_branch_state() !=
+           CppConstexprIfBranchState::Active;
 }
 
 void Collect::set_current_decl_context(std::shared_ptr<DeclContext> decl_context) {

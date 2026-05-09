@@ -2341,6 +2341,16 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
         return make_qualified_var_ref(nullptr);
     }
 
+    if (current_constexpr_if_branch_state() !=
+            CppConstexprIfBranchState::Active &&
+        dependent_lookup_qualifier_is_dependent(qualifier, ast_ctx_.get())) {
+        return collect_unresolved_lookup_expression(
+            name,
+            qualifier,
+            /*requires_template_keyword=*/false,
+            loc);
+    }
+
     QualType resolved_owner_type =
         finalize_deferred_semantic_type(qualifier.qualifier_type, loc);
     auto resolved_qualified_info = build_cpp_qualified_expr_info(

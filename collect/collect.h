@@ -51,6 +51,18 @@ struct CppRangeForDeclarationInfo {
     std::vector<std::unique_ptr<Decl>> side_decls;
 };
 
+struct CppIfConditionInfo {
+    std::unique_ptr<Expr> condition;
+    std::optional<bool> constexpr_value;
+    bool is_value_dependent = false;
+};
+
+enum class CppConstexprIfBranchState : uint8_t {
+    Active,
+    Discarded,
+    Deferred,
+};
+
 // Parser-facing semantic action surface.
 // This owns semantic lifecycle state and is the single AST node construction
 // entrypoint for parser reductions.
@@ -693,6 +705,22 @@ public:
                                                std::unique_ptr<Stmt> else_stmt,
                                                SrcLoc loc) const ;
 
+    CppIfConditionInfo collect_if_condition(std::unique_ptr<Expr> condition,
+                                            IfStatementKind statement_kind,
+                                            SrcLoc loc) const ;
+
+    std::unique_ptr<Stmt> collect_if_statement(std::unique_ptr<Stmt> init_stmt,
+                                               std::unique_ptr<Expr> condition,
+                                               std::unique_ptr<Stmt> then_stmt,
+                                               std::unique_ptr<Stmt> else_stmt,
+                                               IfStatementKind statement_kind,
+                                               std::shared_ptr<Scope> scope,
+                                               std::optional<bool> constexpr_condition_value,
+                                               SrcLoc loc) const ;
+
+    void collect_enter_constexpr_if_branch(CppConstexprIfBranchState state) ;
+    void collect_leave_constexpr_if_branch() ;
+
     std::unique_ptr<Expr> collect_switch_condition(std::unique_ptr<Expr> condition, SrcLoc loc) ;
 
     std::unique_ptr<Stmt> collect_switch_statement(std::unique_ptr<Expr> condition,
@@ -1284,6 +1312,7 @@ private:
         int unevaluated_depth = 0;
         int immediate_function_context_depth = 0;
         std::vector<std::string> unevaluated_context_stack;
+        std::vector<CppConstexprIfBranchState> constexpr_if_branch_stack;
 
         CppThisContext cpp_this_context() const {
             return CppThisContext{
@@ -2419,6 +2448,8 @@ private:
     FunctionDefinitionState capture_current_function_definition_state() const ;
     void restore_current_function_definition_state(FunctionDefinitionState state) ;
     void reset_current_function_definition_state() ;
+    CppConstexprIfBranchState current_constexpr_if_branch_state() const ;
+    bool current_constexpr_if_branch_suppresses_returns() const ;
 
     // --- Context (immutable) ---
     std::shared_ptr<ASTContext> ast_ctx_;

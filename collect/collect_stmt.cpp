@@ -296,15 +296,86 @@ std::unique_ptr<Stmt> Collect::collect_default_statement(std::unique_ptr<Stmt> s
 }
 
 
+CppIfConditionInfo Collect::collect_if_condition(std::unique_ptr<Expr> condition,
+                                                 IfStatementKind statement_kind,
+                                                 SrcLoc loc) const {
+    CppIfConditionInfo info;
+    info.condition = collect_condition_expression(std::move(condition), loc, "if");
+    if (statement_kind != IfStatementKind::Constexpr || !info.condition) {
+        return info;
+    }
+
+    QualType condition_type = info.condition->get_type();
+    info.is_value_dependent =
+        expression_depends_on_template_parameters(info.condition.get()) ||
+        (condition_type &&
+         type_depends_on_template_parameters(condition_type, ast_ctx_.get()));
+    if (info.is_value_dependent) {
+        return info;
+    }
+
+    ConstEvalResult eval = evaluate_with_consteval_compat(
+        info.condition.get(), ConstEvalMode::cpp_core_constant_expression());
+    if (eval.status != ConstEvalStatus::Constant ||
+        !eval.int_value.has_value()) {
+        report_error(
+            "constexpr if condition is not a constant expression",
+            loc);
+        return info;
+    }
+    info.constexpr_value = *eval.int_value != 0;
+    return info;
+}
+
 std::unique_ptr<Stmt> Collect::collect_if_statement(std::unique_ptr<Expr> condition, std::unique_ptr<Stmt> then_stmt, std::unique_ptr<Stmt> else_stmt, SrcLoc loc) const {
 
-    condition = collect_condition_expression(std::move(condition), loc, "if");
+    auto condition_info =
+        collect_if_condition(std::move(condition), IfStatementKind::Runtime, loc);
+    condition = std::move(condition_info.condition);
     if (auto* binop = dyn_cast<BinaryOperation>(condition.get())) {
         if (binop->bop == BinOpTypes::ASSIGN) {
             report_warning("using '=' in condition; did you mean '=='?", binop->location);
         }
     }
     return collect_make<IfStmt>(std::move(condition), std::move(then_stmt), std::move(else_stmt), loc);
+}
+
+std::unique_ptr<Stmt> Collect::collect_if_statement(
+    std::unique_ptr<Stmt> init_stmt,
+    std::unique_ptr<Expr> condition,
+    std::unique_ptr<Stmt> then_stmt,
+    std::unique_ptr<Stmt> else_stmt,
+    IfStatementKind statement_kind,
+    std::shared_ptr<Scope> scope,
+    std::optional<bool> constexpr_condition_value,
+    SrcLoc loc) const {
+
+    if (auto* binop = dyn_cast<BinaryOperation>(condition.get())) {
+        if (statement_kind == IfStatementKind::Runtime &&
+            binop->bop == BinOpTypes::ASSIGN) {
+            report_warning("using '=' in condition; did you mean '=='?", binop->location);
+        }
+    }
+    return collect_make<IfStmt>(
+        std::move(condition),
+        std::move(then_stmt),
+        std::move(else_stmt),
+        loc,
+        statement_kind,
+        std::move(init_stmt),
+        std::move(scope),
+        constexpr_condition_value);
+}
+
+void Collect::collect_enter_constexpr_if_branch(
+    CppConstexprIfBranchState state) {
+    session_.func_state_.constexpr_if_branch_stack.push_back(state);
+}
+
+void Collect::collect_leave_constexpr_if_branch() {
+    if (!session_.func_state_.constexpr_if_branch_stack.empty()) {
+        session_.func_state_.constexpr_if_branch_stack.pop_back();
+    }
 }
 
 
@@ -645,7 +716,10 @@ std::unique_ptr<Stmt> Collect::collect_labeled_statement(const std::string& name
 
 std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> expr, SrcLoc loc, QualType expected_return_type) {
 
-    if (session_.func_state_.in_function) {
+    bool suppress_return_for_constexpr_if =
+        current_constexpr_if_branch_suppresses_returns();
+    if (session_.func_state_.in_function &&
+        !suppress_return_for_constexpr_if) {
         session_.func_state_.current_function_has_return_statement = true;
     }
 
@@ -659,6 +733,23 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
     }
     if (session_.func_state_.current_function_has_cxx_auto_return_deduction &&
         session_.func_state_.current_function_cxx_auto_return_pattern) {
+        if (suppress_return_for_constexpr_if) {
+            if (current_constexpr_if_branch_state() ==
+                CppConstexprIfBranchState::Deferred) {
+                session_.func_state_.current_function_has_return_statement = true;
+                session_.func_state_
+                    .current_function_has_deferred_cxx_auto_return_deduction = true;
+                session_.func_state_.current_function_return_type =
+                    session_.func_state_.current_function_cxx_auto_return_pattern;
+                if (auto func_ty =
+                        session_.func_state_.current_function_type
+                            .as_shared<FunctionType>()) {
+                    func_ty->ret_type =
+                        session_.func_state_.current_function_return_type;
+                }
+            }
+            return collect_make<ReturnStmt>(std::move(expr), loc);
+        }
         bool deferred_template_dependent_return = false;
         auto deduce_auto_return_type = [&](const std::unique_ptr<Expr>& return_expr) -> QualType {
             QualType implicit_void(get_builtin_void());

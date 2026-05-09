@@ -338,6 +338,7 @@ private:
     std::unique_ptr<Stmt> parse_stmt_or_decl();
 
     std::unique_ptr<Stmt> parse_if_stmt();
+    std::optional<size_t> find_cpp_if_init_semicolon();
 
     std::unique_ptr<Stmt> parse_switch();
 

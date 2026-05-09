@@ -68,6 +68,11 @@ struct CppRecordDecl;
 struct TemplateDecl;
 enum class UnaryOpTypes : uint8_t;
 
+enum class IfStatementKind : uint8_t {
+    Runtime,
+    Constexpr,
+};
+
 // Discriminant for Stmt hierarchy (includes Expr via ValueStmt)
 enum class StmtKind : uint8_t {
     // --- Pure Stmt nodes ---
@@ -2275,14 +2280,25 @@ struct CppTryStmt: Stmt {
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::CppTryStmt; }
 };
 struct IfStmt: Stmt {
+    IfStatementKind statement_kind = IfStatementKind::Runtime;
+    std::unique_ptr<Stmt> init_stmt;
     std::unique_ptr<Expr> condition;
     std::unique_ptr<Stmt> then_stmt;
     std::unique_ptr<Stmt> else_stmt;
+    std::shared_ptr<Scope> scope;
+    std::optional<bool> constexpr_condition_value;
 
     IfStmt(std::unique_ptr<Expr> condition, std::unique_ptr<Stmt> then_stmt,
-        std::unique_ptr<Stmt> else_stmt = nullptr, SrcLoc loc = SrcLoc())
-        : Stmt(StmtKind::IfStmt, loc), condition(std::move(condition)),
-    then_stmt(std::move(then_stmt)), else_stmt(std::move(else_stmt)) {}
+        std::unique_ptr<Stmt> else_stmt = nullptr, SrcLoc loc = SrcLoc(),
+        IfStatementKind statement_kind = IfStatementKind::Runtime,
+        std::unique_ptr<Stmt> init_stmt = nullptr,
+        std::shared_ptr<Scope> scope = nullptr,
+        std::optional<bool> constexpr_condition_value = std::nullopt)
+        : Stmt(StmtKind::IfStmt, loc), statement_kind(statement_kind),
+          init_stmt(std::move(init_stmt)), condition(std::move(condition)),
+          then_stmt(std::move(then_stmt)), else_stmt(std::move(else_stmt)),
+          scope(std::move(scope)),
+          constexpr_condition_value(constexpr_condition_value) {}
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::IfStmt; }
 };

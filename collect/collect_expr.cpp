@@ -96,8 +96,18 @@ void collect_lambda_local_symbols_from_stmt(
         return;
     }
     if (auto* if_stmt = dyn_cast<const IfStmt>(stmt)) {
-        collect_lambda_local_symbols_from_stmt(if_stmt->then_stmt.get(), local_symbols);
-        collect_lambda_local_symbols_from_stmt(if_stmt->else_stmt.get(), local_symbols);
+        collect_lambda_local_symbols_from_stmt(if_stmt->init_stmt.get(), local_symbols);
+        if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
+            if_stmt->constexpr_condition_value.has_value()) {
+            collect_lambda_local_symbols_from_stmt(
+                (*if_stmt->constexpr_condition_value
+                     ? if_stmt->then_stmt
+                     : if_stmt->else_stmt).get(),
+                local_symbols);
+        } else {
+            collect_lambda_local_symbols_from_stmt(if_stmt->then_stmt.get(), local_symbols);
+            collect_lambda_local_symbols_from_stmt(if_stmt->else_stmt.get(), local_symbols);
+        }
         return;
     }
     if (auto* switch_stmt = dyn_cast<const SwitchStmt>(stmt)) {
@@ -238,21 +248,37 @@ void collect_lambda_referenced_symbols_from_stmt(
         return;
     }
     if (auto* if_stmt = dyn_cast<const IfStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_stmt(
+            if_stmt->init_stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
         collect_lambda_referenced_symbols_from_expr(
             if_stmt->condition.get(),
             referenced_symbols,
             seen_symbols,
             referenced_this);
-        collect_lambda_referenced_symbols_from_stmt(
-            if_stmt->then_stmt.get(),
-            referenced_symbols,
-            seen_symbols,
-            referenced_this);
-        collect_lambda_referenced_symbols_from_stmt(
-            if_stmt->else_stmt.get(),
-            referenced_symbols,
-            seen_symbols,
-            referenced_this);
+        if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
+            if_stmt->constexpr_condition_value.has_value()) {
+            collect_lambda_referenced_symbols_from_stmt(
+                (*if_stmt->constexpr_condition_value
+                     ? if_stmt->then_stmt
+                     : if_stmt->else_stmt).get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+        } else {
+            collect_lambda_referenced_symbols_from_stmt(
+                if_stmt->then_stmt.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+            collect_lambda_referenced_symbols_from_stmt(
+                if_stmt->else_stmt.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+        }
         return;
     }
     if (auto* switch_stmt = dyn_cast<const SwitchStmt>(stmt)) {
