@@ -3584,6 +3584,27 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
         }
     }
     bool is_file_scope = collect_->collect_is_file_scope();
+    QualType previous_record_lookup_type =
+        collect_ ? collect_->collect_current_cpp_record_lookup_type()
+                 : QualType();
+    struct StaticDataMemberInitializerContextGuard {
+        Collect* collect = nullptr;
+        QualType previous_type = nullptr;
+        ~StaticDataMemberInitializerContextGuard() {
+            if (collect) {
+                collect->collect_set_current_cpp_record_lookup_type(previous_type);
+            }
+        }
+    } static_data_member_initializer_context_guard{
+        collect_.get(),
+        previous_record_lookup_type
+    };
+    if (collect_ &&
+        qualified_declarator.owner_record_decl &&
+        qualified_declarator.owner_record_decl->get_record_type()) {
+        collect_->collect_set_current_cpp_record_lookup_type(
+            QualType(qualified_declarator.owner_record_decl->get_record_type()));
+    }
     std::unique_ptr<Expr> init_expr;
     bool is_copy_initialization = false;
     bool is_cxx_object_decl =

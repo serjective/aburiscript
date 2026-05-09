@@ -11,6 +11,26 @@
 using namespace collect_decl_internal;
 
 namespace {
+bool constructor_accessible_from_context(
+    const RecordSemanticState::Constructor& ctor,
+    const ObjectDecl* record_decl,
+    const ObjectDecl* access_context_decl) {
+    switch (ctor.declared_access) {
+        case RecordMemberAccess::Public:
+            return true;
+        case RecordMemberAccess::Private:
+            return collect_internal::can_access_private_member_in_context(
+                record_decl, access_context_decl);
+        case RecordMemberAccess::Protected:
+            return collect_internal::can_access_protected_member_in_context(
+                record_decl,
+                access_context_decl,
+                record_decl,
+                /*is_static_member=*/false);
+    }
+    return false;
+}
+
 QualType replace_auto_placeholder_qualtype(QualType pattern, QualType deduced) {
     if (!pattern) {
         return pattern;
@@ -411,6 +431,13 @@ Collect::evaluate_variable_constructor_candidate(
     eval.user_param_start = param_info.user_param_start;
     eval.max_user_param_count = param_info.max_user_param_count;
     eval.required_user_param_count = param_info.required_user_param_count;
+    const ObjectDecl* access_context_decl =
+        collect_internal::current_access_context_record_decl(
+            session_.func_state_.current_function_is_cpp_member,
+            session_.func_state_.current_function_cpp_this_type,
+            session_.func_state_.current_function_cpp_friend_access_type,
+            session_.current_cpp_record_lookup_type_,
+            ast_ctx_.get());
 
     if (ctor.is_implicit) {
         eval.is_synthesized_implicit_ctor = true;
@@ -435,7 +462,8 @@ Collect::evaluate_variable_constructor_candidate(
             }
         }
 
-        if (!cpp_access_allows_member(ctor.declared_access, false) ||
+        if (!constructor_accessible_from_context(
+                ctor, record_decl, access_context_decl) ||
             ctor.is_deleted ||
             (ctor_is_copy_initialization && ctor.is_explicit) ||
             ctor_args.size() < eval.required_user_param_count ||
@@ -467,7 +495,8 @@ Collect::evaluate_variable_constructor_candidate(
     if (!ctor.symbol ||
         ctor.is_deleted ||
         (ctor_is_copy_initialization && ctor.is_explicit) ||
-        !cpp_access_allows_member(ctor.declared_access, false) ||
+        !constructor_accessible_from_context(
+            ctor, record_decl, access_context_decl) ||
         ctor_args.size() < eval.required_user_param_count ||
         ctor_args.size() > eval.max_user_param_count) {
         return eval;
@@ -499,6 +528,20 @@ std::string Collect::describe_variable_constructor_candidate(
     const ObjectDecl* record_decl,
     QualType declared_type) const {
 
+    const ObjectDecl* access_context_decl =
+        collect_internal::current_access_context_record_decl(
+            session_.func_state_.current_function_is_cpp_member,
+            session_.func_state_.current_function_cpp_this_type,
+            session_.func_state_.current_function_cpp_friend_access_type,
+            session_.current_cpp_record_lookup_type_,
+            ast_ctx_.get());
+    auto constructor_is_accessible =
+        [&](const RecordSemanticState::Constructor* ctor) {
+            return ctor &&
+                   constructor_accessible_from_context(
+                       *ctor, record_decl, access_context_decl);
+        };
+
     if (eval.is_synthesized_implicit_ctor && !eval.ctor) {
         return "<invalid constructor>";
     }
@@ -511,7 +554,7 @@ std::string Collect::describe_variable_constructor_candidate(
         if (eval.ctor && eval.ctor->is_deleted) {
             os << " = delete";
         }
-        if (eval.ctor && eval.ctor->declared_access != RecordMemberAccess::Public) {
+        if (eval.ctor && !constructor_is_accessible(eval.ctor)) {
             os << " [not accessible]";
         }
         return os.str();
@@ -544,7 +587,7 @@ std::string Collect::describe_variable_constructor_candidate(
         if (eval.ctor && eval.ctor->is_deleted) {
             os << " = delete";
         }
-        if (eval.ctor && eval.ctor->declared_access != RecordMemberAccess::Public) {
+        if (eval.ctor && !constructor_is_accessible(eval.ctor)) {
             os << " [not accessible]";
         }
         return os.str();
@@ -582,7 +625,7 @@ std::string Collect::describe_variable_constructor_candidate(
     if (eval.ctor->is_deleted) {
         os << " = delete";
     }
-    if (eval.ctor->declared_access != RecordMemberAccess::Public) {
+    if (!constructor_is_accessible(eval.ctor)) {
         os << " [not accessible]";
     }
     return os.str();
