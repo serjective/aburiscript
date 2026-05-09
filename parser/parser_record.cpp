@@ -1799,24 +1799,7 @@ std::optional<std::vector<std::unique_ptr<Decl>>> Parser::try_parse_special_decl
 
     if (gentle_check(TokenType::STATIC_ASSERT)) {
         std::vector<std::unique_ptr<Decl>> ret_vec;
-        SrcLoc sa_loc = current_token().loc;
-        advance(); // consume _Static_assert
-        check_and_consume(TokenType::LEFT_PAREN);
-        auto condition = parse_conditional_expression();
-        std::string message;
-        bool has_message = false;
-        if (gentle_check_and_consume(TokenType::COMMA)) {
-            if (!gentle_check(TokenType::STRING_LITERAL)) {
-                error("expected string literal in _Static_assert");
-            }
-            message = current_token().value;
-            has_message = true;
-            advance();
-        }
-        check_and_consume(TokenType::RIGHT_PAREN);
-        check_and_consume(TokenType::SEMICOLON);
-        ret_vec.push_back(collect_->collect_static_assert_declaration(
-            std::move(condition), message, has_message, sa_loc));
+        ret_vec.push_back(parse_static_assert_declaration());
         return std::move(ret_vec);
     }
 
@@ -4246,24 +4229,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
 
     // C11/C23: _Static_assert is allowed inside struct/union declarations.
     if (gentle_check(TokenType::STATIC_ASSERT)) {
-        SrcLoc sa_loc = current_token().loc;
-        advance(); // consume _Static_assert
-        check_and_consume(TokenType::LEFT_PAREN);
-        auto condition = parse_conditional_expression();
-        std::string message;
-        bool has_message = false;
-        if (gentle_check_and_consume(TokenType::COMMA)) {
-            if (!gentle_check(TokenType::STRING_LITERAL)) {
-                error("expected string literal in _Static_assert");
-            }
-            message = current_token().value;
-            has_message = true;
-            advance();
-        }
-        check_and_consume(TokenType::RIGHT_PAREN);
-        check_and_consume(TokenType::SEMICOLON);
-        fields.push_back(collect_->collect_static_assert_declaration(
-            std::move(condition), message, has_message, sa_loc));
+        fields.push_back(parse_static_assert_declaration());
         return fields;
     }
 

@@ -190,6 +190,11 @@ std::unique_ptr<Decl> Collect::collect_static_assert_declaration(std::unique_ptr
         report_error("static assertion requires a constant expression", loc);
         return collect_make<NopDecl>(loc);
     }
+    if (current_constexpr_if_branch_state() !=
+        CppConstexprIfBranchState::Active) {
+        return collect_make<StaticAssertDecl>(
+            std::move(condition), std::move(message), has_message, loc);
+    }
     if (expression_depends_on_template_parameters(condition.get())) {
         return collect_make<StaticAssertDecl>(
             std::move(condition), std::move(message), has_message, loc);

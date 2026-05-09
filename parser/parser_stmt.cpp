@@ -114,6 +114,28 @@ std::unique_ptr<Stmt> Parser::parse_return() {
     }
     return collect_->collect_return_statement(std::move(expr), t.loc, expected_return);
 }
+
+std::unique_ptr<Decl> Parser::parse_static_assert_declaration() {
+    SrcLoc loc = current_token().loc;
+    check_and_consume(TokenType::STATIC_ASSERT);
+    check_and_consume(TokenType::LEFT_PAREN);
+    auto condition = parse_conditional_expression();
+    std::string message;
+    bool has_message = false;
+    if (gentle_check_and_consume(TokenType::COMMA)) {
+        if (!gentle_check(TokenType::STRING_LITERAL)) {
+            error("expected string literal in _Static_assert");
+        }
+        message = current_token().value;
+        has_message = true;
+        advance();
+    }
+    check_and_consume(TokenType::RIGHT_PAREN);
+    check_and_consume(TokenType::SEMICOLON);
+    return collect_->collect_static_assert_declaration(
+        std::move(condition), std::move(message), has_message, loc);
+}
+
 // aka block-item/6.8.2
 std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
     // Handle __extension__ as a no-op prefix in statement/decl context
@@ -144,6 +166,9 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
         declare_local_labels(labels, loc);
         // Return a null statement — __label__ has no runtime effect
         return collect_->collect_empty_statement(loc);
+    }
+    if (gentle_check(TokenType::STATIC_ASSERT)) {
+        return collect_->collect_decl_statement(parse_static_assert_declaration());
     }
     // When we see attributes, look ahead past them to determine if this is
     // a declaration or a statement with attributes (e.g. [[fallthrough]];)
@@ -290,6 +315,9 @@ std::unique_ptr<Stmt> Parser::parse_stmt() {
     }
     if (gentle_check(TokenType::ASM_KW)) {
         return parse_asm_stmt();
+    }
+    if (gentle_check(TokenType::STATIC_ASSERT)) {
+        return collect_->collect_decl_statement(parse_static_assert_declaration());
     }
     if (gentle_check(TokenType::LEFT_BRACE)) {
         return parse_compound_stmt();
