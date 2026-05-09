@@ -324,6 +324,74 @@ void Collect::validate_variable_declared_type(QualType& declared_type,
     }
 }
 
+std::vector<RecordSemanticState::Constructor>
+Collect::instantiate_constructor_template_candidates(
+    const RecordSemanticState& record_state,
+    const std::vector<Expr*>& ctor_args,
+    SrcLoc loc) {
+
+    std::vector<RecordSemanticState::Constructor> template_constructors;
+    if (record_state.method_templates.empty()) {
+        return template_constructors;
+    }
+
+    std::vector<Expr*> deduction_args;
+    deduction_args.reserve(ctor_args.size() + 1);
+    deduction_args.push_back(nullptr);
+    for (Expr* arg : ctor_args) {
+        deduction_args.push_back(arg);
+    }
+
+    for (const auto& method_template : record_state.method_templates) {
+        auto* function_template = method_template.decl;
+        if (!function_template) {
+            continue;
+        }
+        if (!dyn_cast<CppConstructorDecl>(function_template->function_decl())) {
+            continue;
+        }
+
+        std::vector<TemplateArgument> specialization_arguments;
+        std::shared_ptr<Symbol> probe_symbol = nullptr;
+        if (!probe_function_template_call_specialization(
+                function_template,
+                deduction_args,
+                loc,
+                probe_symbol,
+                nullptr,
+                &specialization_arguments)) {
+            continue;
+        }
+
+        std::shared_ptr<Symbol> specialization_symbol = nullptr;
+        auto* specialization_decl =
+            instantiate_function_template_specialization(
+                function_template,
+                specialization_arguments,
+                loc,
+                &specialization_symbol,
+                /*instantiate_definition=*/false);
+        auto* specialized_ctor =
+            dyn_cast<CppConstructorDecl>(specialization_decl);
+        if (!specialized_ctor || !specialization_symbol) {
+            continue;
+        }
+
+        RecordSemanticState::Constructor ctor;
+        ctor.name = specialized_ctor->name;
+        ctor.type = QualType(specialized_ctor->type);
+        ctor.declared_access = method_template.declared_access;
+        ctor.is_implicit = false;
+        ctor.is_explicit = specialized_ctor->is_explicit;
+        ctor.is_deleted = specialized_ctor->is_deleted;
+        ctor.decl = specialized_ctor;
+        ctor.symbol = std::move(specialization_symbol);
+        template_constructors.push_back(std::move(ctor));
+    }
+
+    return template_constructors;
+}
+
 Collect::ConstructorCandidateEval
 Collect::evaluate_variable_constructor_candidate(
     const RecordSemanticState::Constructor& ctor,
@@ -797,64 +865,16 @@ bool Collect::select_constructor_for_variable_initialization(
         return false;
     }
 
-    std::vector<RecordSemanticState::Constructor> template_constructors;
-    if (!record_state->method_templates.empty()) {
-        std::vector<Expr*> deduction_args;
-        deduction_args.reserve(ctor_args.size() + 1);
-        deduction_args.push_back(nullptr);
-        for (const auto& arg : ctor_args) {
-            deduction_args.push_back(arg.get());
-        }
-
-        for (const auto& method_template : record_state->method_templates) {
-            auto* function_template = method_template.decl;
-            if (!function_template) {
-                continue;
-            }
-            auto* pattern_ctor =
-                dyn_cast<CppConstructorDecl>(function_template->function_decl());
-            if (!pattern_ctor) {
-                continue;
-            }
-
-            std::vector<TemplateArgument> specialization_arguments;
-            std::shared_ptr<Symbol> probe_symbol = nullptr;
-            if (!probe_function_template_call_specialization(
-                    function_template,
-                    deduction_args,
-                    loc,
-                    probe_symbol,
-                    nullptr,
-                    &specialization_arguments)) {
-                continue;
-            }
-
-            std::shared_ptr<Symbol> specialization_symbol = nullptr;
-            auto* specialization_decl =
-                instantiate_function_template_specialization(
-                    function_template,
-                    specialization_arguments,
-                    loc,
-                    &specialization_symbol,
-                    /*instantiate_definition=*/false);
-            auto* specialized_ctor =
-                dyn_cast<CppConstructorDecl>(specialization_decl);
-            if (!specialized_ctor || !specialization_symbol) {
-                continue;
-            }
-
-            RecordSemanticState::Constructor ctor;
-            ctor.name = specialized_ctor->name;
-            ctor.type = QualType(specialized_ctor->type);
-            ctor.declared_access = method_template.declared_access;
-            ctor.is_implicit = false;
-            ctor.is_explicit = specialized_ctor->is_explicit;
-            ctor.is_deleted = specialized_ctor->is_deleted;
-            ctor.decl = specialized_ctor;
-            ctor.symbol = std::move(specialization_symbol);
-            template_constructors.push_back(std::move(ctor));
-        }
+    std::vector<Expr*> raw_ctor_args;
+    raw_ctor_args.reserve(ctor_args.size());
+    for (const auto& arg : ctor_args) {
+        raw_ctor_args.push_back(arg.get());
     }
+    std::vector<RecordSemanticState::Constructor> template_constructors =
+        instantiate_constructor_template_candidates(
+            *record_state,
+            raw_ctor_args,
+            loc);
 
     std::vector<ConstructorCandidateEval> evaluated;
     evaluated.reserve(

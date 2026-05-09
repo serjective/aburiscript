@@ -108,6 +108,8 @@ PrecLevel get_prec(TokenType tok) {
         case TokenType::LESS_THAN:
         case TokenType::LESS_EQUAL_THAN:
             return PrecLevel::RELATIONAL;
+        case TokenType::THREE_WAY_COMPARE:
+            return PrecLevel::THREE_WAY;
         case TokenType::EQUAL_TO:
         case TokenType::NOT_EQUAL:
             return PrecLevel::EQUALITY;

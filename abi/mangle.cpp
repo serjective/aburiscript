@@ -224,6 +224,7 @@ std::optional<std::string_view> itanium_operator_name_encoding(
         {">", "gt"},
         {"<=", "le"},
         {">=", "ge"},
+        {"<=>", "ss"},
         {"!", "nt"},
         {"~", "co"},
         {"++", "pp"},

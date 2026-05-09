@@ -1331,6 +1331,8 @@ std::string_view binary_operator_function_suffix(BinOpTypes bop) {
             return "<<";
         case BinOpTypes::SHIFT_RIGHT:
             return ">>";
+        case BinOpTypes::THREE_WAY_COMPARE:
+            return "<=>";
         case BinOpTypes::LESS_THAN:
             return "<";
         case BinOpTypes::LESS_EQUAL_THAN:

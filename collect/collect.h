@@ -1764,6 +1764,12 @@ private:
         SrcLoc loc,
         VariableInitializationSelection& selection) ;
 
+    std::vector<RecordSemanticState::Constructor>
+    instantiate_constructor_template_candidates(
+        const RecordSemanticState& record_state,
+        const std::vector<Expr*>& ctor_args,
+        SrcLoc loc) ;
+
     ConstructorCandidateEval evaluate_variable_constructor_candidate(
         const RecordSemanticState::Constructor& ctor,
         const ObjectDecl* record_decl,

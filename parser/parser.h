@@ -30,6 +30,7 @@ enum class PrecLevel {
     AND = 8, // &
     EQUALITY = 9, // ==, !=
     RELATIONAL = 10, // < <= > >=
+    THREE_WAY = 11, // <=>
     SHIFT, // << >>
     ADDSUB, // +, -
     MULTDIV, // *, /, %

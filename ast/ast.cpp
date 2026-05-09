@@ -310,6 +310,7 @@ BinOpTypes string2bop(std::string& c) {
     if (c == "||") return BinOpTypes::LOGICAL_OR;
     if (c == "<<") return BinOpTypes::SHIFT_LEFT;
     if (c == ">>") return BinOpTypes::SHIFT_RIGHT;
+    if (c == "<=>") return BinOpTypes::THREE_WAY_COMPARE;
     if (c == "<") return BinOpTypes::LESS_THAN;
     if (c == "<=") return BinOpTypes::LESS_EQUAL_THAN;
     if (c == ">=") return BinOpTypes::GREATER_EQUAL_THAN;

@@ -1996,6 +1996,7 @@ enum class BinOpTypes : uint8_t {
     LOGICAL_OR, // ||
     SHIFT_LEFT, // <<
     SHIFT_RIGHT, // >>
+    THREE_WAY_COMPARE, // <=>
     LESS_EQUAL_THAN, // <=
     LESS_THAN, // <
     GREATER_EQUAL_THAN, // >=

@@ -956,6 +956,10 @@ std::optional<Token> Lexer::next_token2() {
             }
             if (current_char() == '=') {
                 advance();
+                if (cxx_mode && current_char() == '>') {
+                    advance();
+                    return Token(TokenType::THREE_WAY_COMPARE, "<=>", start_loc);
+                }
                 return Token(TokenType::LESS_EQUAL_THAN, "<=", start_loc);
             }
             return Token(TokenType::LESS_THAN, "<", start_loc);
@@ -1358,6 +1362,7 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::RIGHT_SHIFT: return "'>>'";
         case TokenType::LESS_THAN: return "'<'";
         case TokenType::LESS_EQUAL_THAN: return "'<='";
+        case TokenType::THREE_WAY_COMPARE: return "'<=>'";
         case TokenType::GREATER_THAN: return "'>'";
         case TokenType::GREATER_EQUAL_THAN: return "'>='";
         case TokenType::EQUAL_TO: return "'=='";

@@ -1109,16 +1109,34 @@ Collect::select_cpp_conversion_constructor(Expr* arg,
     }
     const RecordSemanticState* record_state =
         record_semantics_cache_lookup(record_decl);
-    if (!record_state || record_state->constructors.empty()) {
+    if (!record_state ||
+        (record_state->constructors.empty() &&
+         record_state->method_templates.empty())) {
         return std::nullopt;
     }
 
     OverloadConversionMemoCache conversion_cache;
-    conversion_cache.reserve(record_state->constructors.size());
+    std::vector<Expr*> ctor_args{arg};
+    std::vector<RecordSemanticState::Constructor> template_constructors =
+        instantiate_constructor_template_candidates(
+            *record_state,
+            ctor_args,
+            arg ? arg->location : SrcLoc());
+    conversion_cache.reserve(
+        record_state->constructors.size() + template_constructors.size());
 
     OverloadCandidateSet candidate_set;
-    candidate_set.evaluated.reserve(record_state->constructors.size());
+    candidate_set.evaluated.reserve(
+        record_state->constructors.size() + template_constructors.size());
     for (const auto& ctor : record_state->constructors) {
+        candidate_set.evaluated.push_back(evaluate_conversion_constructor_candidate(
+            ctor,
+            arg,
+            target_object_type,
+            allow_explicit_constructors,
+            &conversion_cache));
+    }
+    for (const auto& ctor : template_constructors) {
         candidate_set.evaluated.push_back(evaluate_conversion_constructor_candidate(
             ctor,
             arg,
@@ -1214,6 +1232,7 @@ Collect::select_cpp_user_defined_conversion(
 
     OverloadConversionMemoCache conversion_cache;
     OverloadCandidateSet candidate_set;
+    std::vector<RecordSemanticState::Constructor> target_constructor_templates;
 
     if (source_record_decl) {
         auto conversion_methods =
@@ -1246,10 +1265,29 @@ Collect::select_cpp_user_defined_conversion(
             : nullptr;
         const RecordSemanticState* record_state =
             record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
-        if (record_state && !record_state->constructors.empty()) {
+        if (record_state &&
+            (!record_state->constructors.empty() ||
+             !record_state->method_templates.empty())) {
+            std::vector<Expr*> ctor_args{arg};
+            target_constructor_templates =
+                instantiate_constructor_template_candidates(
+                    *record_state,
+                    ctor_args,
+                    arg ? arg->location : SrcLoc());
             candidate_set.evaluated.reserve(
-                candidate_set.evaluated.size() + record_state->constructors.size());
+                candidate_set.evaluated.size() +
+                    record_state->constructors.size() +
+                    target_constructor_templates.size());
             for (const auto& ctor : record_state->constructors) {
+                candidate_set.evaluated.push_back(
+                    evaluate_conversion_constructor_candidate(
+                        ctor,
+                        arg,
+                        target_type,
+                        allow_explicit_constructors,
+                        &conversion_cache));
+            }
+            for (const auto& ctor : target_constructor_templates) {
                 candidate_set.evaluated.push_back(
                     evaluate_conversion_constructor_candidate(
                         ctor,
@@ -1473,7 +1511,9 @@ std::unique_ptr<Expr> Collect::build_cpp_selected_user_defined_conversion_expr(
             "unsupported user-defined conversion kind", loc);
     }
 
-    if (!conversion_match.constructor.ctor_symbol ||
+    std::shared_ptr<Symbol> ctor_symbol =
+        conversion_match.constructor.ctor_symbol;
+    if (!ctor_symbol ||
         !conversion_match.constructor.ctor_function_type) {
         report_error(
             "internal error: missing user-defined conversion constructor for '" +
@@ -1481,6 +1521,15 @@ std::unique_ptr<Expr> Collect::build_cpp_selected_user_defined_conversion_expr(
             loc);
         return collect_make<ErrorExpr>(
             "missing user-defined conversion constructor", loc);
+    }
+
+    note_specialization_use_for_symbol(ctor_symbol, loc);
+    if (auto completion_error =
+            complete_selected_function_template_specialization_symbol(
+                ctor_symbol,
+                loc,
+                "failed to instantiate selected conversion-constructor template specialization")) {
+        return completion_error;
     }
 
     std::vector<std::unique_ptr<Expr>> ctor_args;
@@ -1556,7 +1605,7 @@ std::unique_ptr<Expr> Collect::build_cpp_selected_user_defined_conversion_expr(
     }
 
     auto constructed = collect_make<CppConstructExpr>(
-        conversion_match.constructor.ctor_symbol,
+        ctor_symbol,
         std::move(converted_ctor_args),
         target_object_type,
         false,

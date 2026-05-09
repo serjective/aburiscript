@@ -210,6 +210,9 @@ bool parse_cpp_operator_function_name(DeclarationParser& decl_parser) {
             case TokenType::LESS_EQUAL_THAN:
                 op_suffix = "<=";
                 break;
+            case TokenType::THREE_WAY_COMPARE:
+                op_suffix = "<=>";
+                break;
             case TokenType::GREATER_EQUAL_THAN:
                 op_suffix = ">=";
                 break;

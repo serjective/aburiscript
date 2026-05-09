@@ -168,6 +168,7 @@ enum class TokenType {
     // Comparision
     LESS_THAN, // <
     LESS_EQUAL_THAN, // <=
+    THREE_WAY_COMPARE, // <=>
     GREATER_THAN, // >
     GREATER_EQUAL_THAN, // >=
     EQUAL_TO, // ==
