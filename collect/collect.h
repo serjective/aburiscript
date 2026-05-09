@@ -39,6 +39,18 @@ struct VariableDeclFlags {
     bool caller_tracks_symbol_definition = false;
 };
 
+struct CppRangeForDeclarationInfo {
+    QualType declared_type = nullptr;
+    std::string name;
+    StorageClass storage_class = StorageClass::NONE;
+    bool is_constexpr = false;
+    bool is_consteval = false;
+    bool is_thread_local = false;
+    bool is_block_byref = false;
+    SrcLoc loc;
+    std::vector<std::unique_ptr<Decl>> side_decls;
+};
+
 // Parser-facing semantic action surface.
 // This owns semantic lifecycle state and is the single AST node construction
 // entrypoint for parser reductions.
@@ -701,6 +713,14 @@ public:
                                                 std::unique_ptr<Stmt> body_stmt,
                                                 std::shared_ptr<Scope> scope,
                                                 SrcLoc loc) const ;
+
+    std::unique_ptr<CppRangeForStmt> collect_cpp_range_for_statement(
+        std::unique_ptr<Stmt> init_statement,
+        CppRangeForDeclarationInfo range_declaration,
+        std::unique_ptr<Expr> range_initializer,
+        std::unique_ptr<Stmt> body_stmt,
+        std::shared_ptr<Scope> scope,
+        SrcLoc loc) ;
 
     std::unique_ptr<Stmt> collect_goto_statement(const std::string& name, SrcLoc loc) ;
 

@@ -747,16 +747,41 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
         // Array subscript is equivalent to *(a + i)
         // But we want the address, so (a + i)
 
-        // Evaluate array (which decays to pointer)
-        llvm::Value* arrVal = convert_expression(subscript->array.get());
+        // Evaluate array (which decays to pointer), or use the bound address
+        // directly for references to arrays.
+        llvm::Value* arrVal = nullptr;
         llvm::Value* idxVal = convert_expression(subscript->index.get());
 
         // Get element type
+        QualType array_expr_type =
+            subscript->array ? subscript->array->get_type() : QualType();
         auto ptrType =
-            desugar_type(subscript->array->get_type(), ast_ctx.get())
-                .as_shared<PointerType>();
+            desugar_type(array_expr_type, ast_ctx.get()).as_shared<PointerType>();
+        if (ptrType) {
+            arrVal = convert_expression(subscript->array.get());
+        } else {
+            QualType referred_array_type =
+                desugar_type(remove_reference(array_expr_type, ast_ctx.get()),
+                             ast_ctx.get());
+            if (auto array_type = referred_array_type.as_shared<ArrayType>()) {
+                Expr* array_lvalue_expr = subscript->array.get();
+                if (auto* cast = dyn_cast<ImplicitCast>(array_lvalue_expr)) {
+                    if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE ||
+                        cast->kind == ImplicitCastTypes::ARRAY_TO_POINTER) {
+                        array_lvalue_expr = cast->expr.get();
+                    }
+                }
+                auto array_lvalue = get_lvalue(array_lvalue_expr);
+                arrVal = array_lvalue.address;
+                ptrType = std::make_shared<PointerType>(array_type->element_type);
+            }
+        }
         if (!ptrType) {
              error("get_lvalue(): Subscript on non-pointer type", expr->location);
+             return {};
+        }
+        if (!arrVal) {
+             error("get_lvalue(): failed to lower subscript base", expr->location);
              return {};
         }
 

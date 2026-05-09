@@ -685,6 +685,71 @@ bool resolve_location_from_address_value(const ConstAddressValue& address_value,
         location_out, address_value.byte_offset);
 }
 
+bool location_type_matches_desired(QualType location_type,
+                                   QualType desired_type) {
+    if (!location_type || !desired_type) {
+        return false;
+    }
+    QualType current = desugar_type(remove_reference(location_type));
+    QualType desired = desugar_type(remove_reference(desired_type));
+    return current && desired && current.equals_unqualified(desired);
+}
+
+bool specialize_location_to_value_type(InterpLocation& location,
+                                       QualType desired_type) {
+    if (!desired_type) {
+        return true;
+    }
+    if (location_type_matches_desired(location.value_type, desired_type)) {
+        return true;
+    }
+
+    QualType current_type = desugar_type(remove_reference(location.value_type));
+    if (auto array_type = current_type.as_shared<ArrayType>()) {
+        InterpLocation element_location = location;
+        if (append_array_index_to_location(element_location, 0) &&
+            specialize_location_to_value_type(element_location, desired_type)) {
+            location = std::move(element_location);
+            return true;
+        }
+    }
+
+    if (auto record_type = current_type.as_shared<ObjectType>()) {
+        const auto& fields = record_type->semantic_fields();
+        for (size_t field_index = 0; field_index < fields.size(); ++field_index) {
+            if (fields[field_index].offset != 0) {
+                continue;
+            }
+            InterpLocation field_location = location;
+            if (append_record_field_to_location(field_location, field_index) &&
+                specialize_location_to_value_type(field_location, desired_type)) {
+                location = std::move(field_location);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+bool resolve_location_from_address_value_as(const ConstAddressValue& address_value,
+                                            QualType desired_type,
+                                            InterpLocation& location_out) {
+    if (!resolve_location_from_address_value(address_value, location_out)) {
+        return false;
+    }
+    return specialize_location_to_value_type(location_out, desired_type);
+}
+
+QualType pointer_pointee_type_from_expr(Expr* expr) {
+    if (!expr || !expr->get_type()) {
+        return nullptr;
+    }
+    auto pointer_type =
+        desugar_type(remove_reference(expr->get_type())).as_shared<PointerType>();
+    return pointer_type ? pointer_type->pointed_type : QualType();
+}
+
 bool load_interpreter_root_symbol_value(const std::shared_ptr<Symbol>& sym,
                                         ConstEvalMode mode,
                                         size_t depth,
@@ -1302,6 +1367,17 @@ bool resolve_expr_location(Expr* expr,
     }
 
     if (auto* var_ref = dyn_cast<VarRef>(core)) {
+        if (var_ref->get_type() &&
+            canonical_type_kind(var_ref->get_type()) == TypeKind::Reference) {
+            ConstValue reference_value;
+            if (lookup_interpreter_local(var_ref, reference_value) &&
+                reference_value.kind == ConstValueKind::Address) {
+                return resolve_location_from_address_value_as(
+                    reference_value.address_value,
+                    remove_reference(var_ref->get_type()),
+                    location_out);
+            }
+        }
         std::shared_ptr<Symbol> bound_symbol = var_ref->symref;
         if (!bound_symbol && !var_ref->get_name().empty()) {
             bound_symbol = lookup_interpreter_named_symbol(var_ref->get_name());
@@ -1334,8 +1410,10 @@ bool resolve_expr_location(Expr* expr,
             if (base_value.status != ConstEvalStatus::Constant ||
                 !base_value.value.has_value() ||
                 base_value.value->kind != ConstValueKind::Address ||
-                !resolve_location_from_address_value(
-                    base_value.value->address_value, base_location)) {
+                !resolve_location_from_address_value_as(
+                    base_value.value->address_value,
+                    pointer_pointee_type_from_expr(member_expr->base.get()),
+                    base_location)) {
                 return false;
             }
         } else if (!resolve_expr_location(
@@ -1391,7 +1469,24 @@ bool resolve_expr_location(Expr* expr,
         ConstAddressValue indexed_address = base_value.value->address_value;
         indexed_address.byte_offset +=
             element_size * static_cast<int64_t>(index);
-        return resolve_location_from_address_value(indexed_address, location_out);
+        return resolve_location_from_address_value_as(
+            indexed_address, element_type, location_out);
+    }
+
+    if (auto* unary = dyn_cast<UnaryOperation>(core)) {
+        if (unary->uop == UnaryOpTypes::DEREFERENCE) {
+            ConstEvalResult pointer_value =
+                eval_expr(unary->exp.get(), mode, depth + 1);
+            if (pointer_value.status != ConstEvalStatus::Constant ||
+                !pointer_value.value.has_value() ||
+                pointer_value.value->kind != ConstValueKind::Address) {
+                return false;
+            }
+            return resolve_location_from_address_value_as(
+                pointer_value.value->address_value,
+                pointer_pointee_type_from_expr(unary->exp.get()),
+                location_out);
+        }
     }
 
     return false;
@@ -2009,8 +2104,10 @@ ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_
                 unary->location);
         }
         InterpLocation location;
-        if (!resolve_location_from_address_value(
-                pointer_result.value->address_value, location)) {
+        if (!resolve_location_from_address_value_as(
+                pointer_result.value->address_value,
+                pointer_pointee_type_from_expr(unary->exp.get()),
+                location)) {
             return make_not_evaluated(
                 ConstEvalDiagCode::UnsupportedExpression,
                 "dereference operand does not refer to interpreter-managed storage",
@@ -2045,6 +2142,44 @@ ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_
                 ConstEvalDiagCode::UnsupportedExpression,
                 "increment/decrement operand is not available in constexpr interpreter storage",
                 unary->location);
+        }
+
+        auto pointer_type =
+            desugar_type(remove_reference(location.value_type))
+                .as_shared<PointerType>();
+        if (pointer_type && current_value.kind == ConstValueKind::Address) {
+            if (!pointer_type->pointed_type) {
+                return make_not_evaluated(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "pointer increment requires a complete pointed-to type",
+                    unary->location);
+            }
+            int64_t element_size = pointer_type->pointed_type->getWidthBytes();
+            if (element_size <= 0) {
+                return make_not_evaluated(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "pointer increment requires a complete pointed-to type",
+                    unary->location);
+            }
+            ConstValue updated_value = current_value;
+            int64_t direction =
+                (unary->uop == UnaryOpTypes::INCREMENT_PREFIX ||
+                 unary->uop == UnaryOpTypes::INCREMENT_POSTFIX)
+                    ? 1
+                    : -1;
+            updated_value.address_value.byte_offset +=
+                direction * element_size;
+            if (!store_interpreter_location_value(location, updated_value)) {
+                return make_not_evaluated(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "pointer increment failed to update constexpr interpreter storage",
+                    unary->location);
+            }
+            bool is_postfix =
+                unary->uop == UnaryOpTypes::INCREMENT_POSTFIX ||
+                unary->uop == UnaryOpTypes::DECREMENT_POSTFIX;
+            return ConstEvalResult::constant(
+                is_postfix ? current_value : updated_value);
         }
 
         IntShape shape = infer_integer_shape(unary->exp->get_type());
@@ -2445,6 +2580,73 @@ ConstEvalResult eval_binary_expr(BinaryOperation* bin, ConstEvalMode mode, size_
         }
     }
 
+    auto pointer_arithmetic = [&](const ConstValue& pointer_value,
+                                  Expr* pointer_expr,
+                                  const ConstValue& index_value,
+                                  Expr* index_expr,
+                                  int direction)
+        -> std::optional<ConstEvalResult> {
+        if (pointer_value.kind != ConstValueKind::Address ||
+            !pointer_expr ||
+            !index_expr) {
+            return std::nullopt;
+        }
+        auto pointer_type =
+            desugar_type(remove_reference(pointer_expr->get_type()))
+                .as_shared<PointerType>();
+        if (!pointer_type || !pointer_type->pointed_type) {
+            return std::nullopt;
+        }
+        IntShape index_shape = infer_integer_shape(index_expr->get_type());
+        ConstIntValue index_int{};
+        if (!const_value_to_int(index_value, index_shape, index_int)) {
+            return std::nullopt;
+        }
+        int64_t index = index_shape.is_unsigned
+            ? static_cast<int64_t>(index_int.to_unsigned_u64())
+            : index_int.to_signed_i64();
+        int64_t element_size = pointer_type->pointed_type->getWidthBytes();
+        if (element_size <= 0) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "pointer arithmetic requires a complete pointed-to type",
+                bin->location);
+        }
+        ConstAddressValue adjusted = pointer_value.address_value;
+        adjusted.byte_offset +=
+            static_cast<int64_t>(direction) * index * element_size;
+        return ConstEvalResult::constant(
+            ConstValue::address(adjusted.symbol, adjusted.byte_offset));
+    };
+
+    if (bin->bop == BinOpTypes::ADD) {
+        if (auto result = pointer_arithmetic(
+                lhs_res.value.value(),
+                bin->left.get(),
+                rhs_res.value.value(),
+                bin->right.get(),
+                1)) {
+            return std::move(*result);
+        }
+        if (auto result = pointer_arithmetic(
+                rhs_res.value.value(),
+                bin->right.get(),
+                lhs_res.value.value(),
+                bin->left.get(),
+                1)) {
+            return std::move(*result);
+        }
+    } else if (bin->bop == BinOpTypes::SUB) {
+        if (auto result = pointer_arithmetic(
+                lhs_res.value.value(),
+                bin->left.get(),
+                rhs_res.value.value(),
+                bin->right.get(),
+                -1)) {
+            return std::move(*result);
+        }
+    }
+
     ConstIntValue lhs_int{};
     ConstIntValue rhs_int{};
     if (!const_value_to_int(lhs_res.value.value(), operand_shape, lhs_int) ||
@@ -2674,6 +2876,84 @@ ConstEvalResult eval_cast_expr(Expr* operand, QualType target_type,
 
 // ====== Interpreter statement execution ======
 
+InterpExecResult eval_interpreter_variable_decl(VariableDecl* variable_decl,
+                                                ConstEvalMode mode,
+                                                size_t depth) {
+    if (!variable_decl) {
+        return make_interp_continue_result();
+    }
+
+    if (variable_decl->type &&
+        canonical_type_kind(variable_decl->type) == TypeKind::Reference) {
+        if (!variable_decl->init) {
+            return make_interp_fail_result(make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constexpr interpreter reference declaration requires initializer",
+                variable_decl->location));
+        }
+        InterpLocation bound_location;
+        if (!resolve_expr_location(
+                variable_decl->init.get(),
+                mode,
+                depth + 1,
+                bound_location) ||
+            !bound_location.root_symbol) {
+            return make_interp_fail_result(make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constexpr interpreter could not bind local reference",
+                variable_decl->location));
+        }
+        ConstValue address_value = ConstValue::address(
+            bound_location.root_symbol,
+            bound_location.byte_offset);
+        if (!bind_interpreter_local(
+                variable_decl->sym,
+                variable_decl->name,
+                address_value)) {
+            return make_interp_fail_result(make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "constexpr interpreter failed to bind local reference",
+                variable_decl->location));
+        }
+        return make_interp_continue_result();
+    }
+
+    std::optional<ConstValue> initial_value;
+    if (variable_decl->init) {
+        ConstEvalResult init_result =
+            eval_expr(variable_decl->init.get(), mode, depth + 1);
+        if (init_result.status != ConstEvalStatus::Constant ||
+            !init_result.value.has_value()) {
+            return make_interp_fail_result(std::move(init_result));
+        }
+        initial_value = init_result.value.value();
+    } else {
+        initial_value = default_const_value_for_type(variable_decl->type);
+    }
+    if (!initial_value.has_value()) {
+        return make_interp_fail_result(make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter could not initialize local variable",
+            variable_decl->location));
+    }
+
+    auto casted = cast_const_value_to_type(initial_value.value(), variable_decl->type);
+    if (!casted.has_value()) {
+        return make_interp_fail_result(make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter local initialization cast failed",
+            variable_decl->location));
+    }
+
+    if (!bind_interpreter_local(variable_decl->sym, variable_decl->name, casted.value())) {
+        return make_interp_fail_result(make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter failed to bind local variable",
+            variable_decl->location));
+    }
+    return make_interp_continue_result();
+}
+
 InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t depth) {
     if (!stmt) {
         return make_interp_continue_result();
@@ -2719,37 +2999,10 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
                     "constexpr interpreter declaration support is currently limited to local variables",
                     decl->location));
             }
-
-            std::optional<ConstValue> initial_value;
-            if (variable_decl->init) {
-                ConstEvalResult init_result = eval_expr(variable_decl->init.get(), mode, depth + 1);
-                if (init_result.status != ConstEvalStatus::Constant || !init_result.value.has_value()) {
-                    return make_interp_fail_result(std::move(init_result));
-                }
-                initial_value = init_result.value.value();
-            } else {
-                initial_value = default_const_value_for_type(variable_decl->type);
-            }
-            if (!initial_value.has_value()) {
-                return make_interp_fail_result(make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "constexpr interpreter could not initialize local variable",
-                    variable_decl->location));
-            }
-
-            auto casted = cast_const_value_to_type(initial_value.value(), variable_decl->type);
-            if (!casted.has_value()) {
-                return make_interp_fail_result(make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "constexpr interpreter local initialization cast failed",
-                    variable_decl->location));
-            }
-
-            if (!bind_interpreter_local(variable_decl->sym, variable_decl->name, casted.value())) {
-                return make_interp_fail_result(make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "constexpr interpreter failed to bind local variable",
-                    variable_decl->location));
+            InterpExecResult decl_result =
+                eval_interpreter_variable_decl(variable_decl, mode, depth + 1);
+            if (decl_result.kind != InterpExecResult::Kind::Continue) {
+                return decl_result;
             }
         }
         return make_interp_continue_result();
@@ -2882,6 +3135,94 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
                     !action_result.value.has_value()) {
                     pop_interpreter_scope();
                     return make_interp_fail_result(std::move(action_result));
+                }
+            }
+        }
+    }
+
+    if (auto* range_for = dyn_cast<CppRangeForStmt>(stmt)) {
+        push_interpreter_scope();
+        if (range_for->init_statement) {
+            InterpExecResult init_result =
+                eval_interpreter_stmt(range_for->init_statement.get(), mode, depth + 1);
+            if (init_result.kind != InterpExecResult::Kind::Continue) {
+                pop_interpreter_scope();
+                return init_result;
+            }
+        }
+        for (const auto& decl : range_for->range_declaration_side_decls) {
+            if (auto* variable_decl = dyn_cast<VariableDecl>(decl.get())) {
+                InterpExecResult side_result =
+                    eval_interpreter_variable_decl(variable_decl, mode, depth + 1);
+                if (side_result.kind != InterpExecResult::Kind::Continue) {
+                    pop_interpreter_scope();
+                    return side_result;
+                }
+            }
+        }
+        for (Decl* decl : {range_for->range_variable.get(),
+                           range_for->begin_variable.get(),
+                           range_for->end_variable.get()}) {
+            auto* variable_decl = dyn_cast<VariableDecl>(decl);
+            if (!variable_decl) {
+                continue;
+            }
+            InterpExecResult hidden_result =
+                eval_interpreter_variable_decl(variable_decl, mode, depth + 1);
+            if (hidden_result.kind != InterpExecResult::Kind::Continue) {
+                pop_interpreter_scope();
+                return hidden_result;
+            }
+        }
+
+        while (true) {
+            bool condition_truthy = false;
+            ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
+            if (!eval_condition_truthiness(
+                    range_for->condition.get(),
+                    mode,
+                    depth + 1,
+                    condition_truthy,
+                    condition_failure)) {
+                pop_interpreter_scope();
+                return make_interp_fail_result(std::move(condition_failure));
+            }
+            if (!condition_truthy) {
+                pop_interpreter_scope();
+                return make_interp_continue_result();
+            }
+
+            push_interpreter_scope();
+            if (auto* loop_variable =
+                    dyn_cast<VariableDecl>(range_for->loop_variable.get())) {
+                InterpExecResult loop_var_result =
+                    eval_interpreter_variable_decl(loop_variable, mode, depth + 1);
+                if (loop_var_result.kind != InterpExecResult::Kind::Continue) {
+                    pop_interpreter_scope();
+                    pop_interpreter_scope();
+                    return loop_var_result;
+                }
+            }
+            InterpExecResult body_result =
+                eval_interpreter_stmt(range_for->body_stmt.get(), mode, depth + 1);
+            pop_interpreter_scope();
+            if (body_result.kind == InterpExecResult::Kind::Return ||
+                body_result.kind == InterpExecResult::Kind::Fail) {
+                pop_interpreter_scope();
+                return body_result;
+            }
+            if (body_result.kind == InterpExecResult::Kind::Break) {
+                pop_interpreter_scope();
+                return make_interp_continue_result();
+            }
+
+            if (range_for->increment) {
+                ConstEvalResult increment_result =
+                    eval_expr(range_for->increment.get(), mode, depth + 1);
+                if (increment_result.status != ConstEvalStatus::Constant ||
+                    !increment_result.value.has_value()) {
+                    pop_interpreter_scope();
+                    return make_interp_fail_result(std::move(increment_result));
                 }
             }
         }
@@ -3533,6 +3874,23 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
     if (auto* var_ref = dyn_cast<VarRef>(expr)) {
         ConstValue local_value;
         if (lookup_interpreter_local(var_ref, local_value)) {
+            if (var_ref->get_type() &&
+                canonical_type_kind(var_ref->get_type()) == TypeKind::Reference &&
+                local_value.kind == ConstValueKind::Address) {
+                InterpLocation location;
+                ConstValue referred_value;
+                if (resolve_location_from_address_value_as(
+                        local_value.address_value,
+                        remove_reference(var_ref->get_type()),
+                        location) &&
+                    load_interpreter_location_value(
+                        location,
+                        mode,
+                        depth + 1,
+                        referred_value)) {
+                    return ConstEvalResult::constant(referred_value);
+                }
+            }
             return ConstEvalResult::constant(local_value);
         }
         if (var_ref->symref && var_ref->symref->kind == SymbolKind::ENUM_CONSTANT) {
@@ -3788,6 +4146,18 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
                     mode,
                     depth,
                     false);
+            }
+        }
+        if (implicit_cast->kind == ImplicitCastTypes::ARRAY_TO_POINTER) {
+            InterpLocation location;
+            if (resolve_expr_location(
+                    implicit_cast->expr.get(),
+                    mode,
+                    depth + 1,
+                    location) &&
+                location.root_symbol) {
+                return ConstEvalResult::constant(
+                    ConstValue::address(location.root_symbol, location.byte_offset));
             }
         }
         return eval_cast_expr(implicit_cast->expr.get(), implicit_cast->get_type(),

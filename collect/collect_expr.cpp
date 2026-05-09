@@ -70,6 +70,12 @@ void collect_lambda_referenced_symbols_from_expr(
     std::unordered_set<const Symbol*>& seen_symbols,
     bool& referenced_this);
 
+void collect_lambda_referenced_symbols_from_decl(
+    const Decl* decl,
+    std::vector<std::shared_ptr<Symbol>>& referenced_symbols,
+    std::unordered_set<const Symbol*>& seen_symbols,
+    bool& referenced_this);
+
 void collect_lambda_local_symbols_from_stmt(
     const Stmt* stmt,
     std::unordered_set<const Symbol*>& local_symbols) {
@@ -109,6 +115,24 @@ void collect_lambda_local_symbols_from_stmt(
     if (auto* for_stmt = dyn_cast<const ForStmt>(stmt)) {
         collect_lambda_local_symbols_from_stmt(for_stmt->init.get(), local_symbols);
         collect_lambda_local_symbols_from_stmt(for_stmt->body_stmt.get(), local_symbols);
+        return;
+    }
+    if (auto* range_for = dyn_cast<const CppRangeForStmt>(stmt)) {
+        collect_lambda_local_symbols_from_stmt(
+            range_for->init_statement.get(), local_symbols);
+        for (const auto& decl : range_for->range_declaration_side_decls) {
+            collect_lambda_local_symbols_from_decl(decl.get(), local_symbols);
+        }
+        collect_lambda_local_symbols_from_decl(
+            range_for->range_variable.get(), local_symbols);
+        collect_lambda_local_symbols_from_decl(
+            range_for->begin_variable.get(), local_symbols);
+        collect_lambda_local_symbols_from_decl(
+            range_for->end_variable.get(), local_symbols);
+        collect_lambda_local_symbols_from_decl(
+            range_for->loop_variable.get(), local_symbols);
+        collect_lambda_local_symbols_from_stmt(
+            range_for->body_stmt.get(), local_symbols);
         return;
     }
     if (auto* labeled = dyn_cast<const LabeledStmt>(stmt)) {
@@ -152,6 +176,24 @@ void collect_lambda_local_symbols_from_decl(
         if (variable->sym) {
             local_symbols.insert(variable->sym.get());
         }
+        return;
+    }
+}
+
+void collect_lambda_referenced_symbols_from_decl(
+    const Decl* decl,
+    std::vector<std::shared_ptr<Symbol>>& referenced_symbols,
+    std::unordered_set<const Symbol*>& seen_symbols,
+    bool& referenced_this) {
+    if (!decl) {
+        return;
+    }
+    if (auto* variable = dyn_cast<const VariableDecl>(decl)) {
+        collect_lambda_referenced_symbols_from_expr(
+            variable->init.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
         return;
     }
 }
@@ -270,6 +312,56 @@ void collect_lambda_referenced_symbols_from_stmt(
             referenced_this);
         collect_lambda_referenced_symbols_from_stmt(
             for_stmt->body_stmt.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        return;
+    }
+    if (auto* range_for = dyn_cast<const CppRangeForStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_stmt(
+            range_for->init_statement.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        for (const auto& decl : range_for->range_declaration_side_decls) {
+            collect_lambda_referenced_symbols_from_decl(
+                decl.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
+        }
+        collect_lambda_referenced_symbols_from_decl(
+            range_for->range_variable.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_decl(
+            range_for->begin_variable.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_decl(
+            range_for->end_variable.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_decl(
+            range_for->loop_variable.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_expr(
+            range_for->condition.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_expr(
+            range_for->increment.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
+        collect_lambda_referenced_symbols_from_stmt(
+            range_for->body_stmt.get(),
             referenced_symbols,
             seen_symbols,
             referenced_this);

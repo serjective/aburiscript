@@ -3660,7 +3660,9 @@ std::unique_ptr<Expr> Collect::try_member_function_overload_call(
     std::shared_ptr<ObjectType> record_type = nullptr;
     if (member_callee->base) {
         auto base_type = member_callee->base->get_type();
-        auto semantic_base_type = desugar_type(base_type);
+        auto semantic_base_type =
+            desugar_type(remove_reference(base_type, ast_ctx_.get()),
+                         ast_ctx_.get());
         if (member_callee->isArrow) {
             auto ptr_type = semantic_base_type.as_shared<PointerType>();
             if (ptr_type) {

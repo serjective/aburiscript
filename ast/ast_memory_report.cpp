@@ -38,6 +38,7 @@ constexpr auto kAllStmtKinds = std::to_array<StmtKind>({
     StmtKind::WhileStmt,
     StmtKind::DoWhileStmt,
     StmtKind::ForStmt,
+    StmtKind::CppRangeForStmt,
     StmtKind::ContinueStmt,
     StmtKind::BreakStmt,
     StmtKind::EmptyStmt,
@@ -151,6 +152,7 @@ const char* stmt_kind_name(StmtKind kind) {
         case StmtKind::WhileStmt: return "WhileStmt";
         case StmtKind::DoWhileStmt: return "DoWhileStmt";
         case StmtKind::ForStmt: return "ForStmt";
+        case StmtKind::CppRangeForStmt: return "CppRangeForStmt";
         case StmtKind::ContinueStmt: return "ContinueStmt";
         case StmtKind::BreakStmt: return "BreakStmt";
         case StmtKind::EmptyStmt: return "EmptyStmt";
@@ -900,6 +902,22 @@ private:
                 visit_stmt(node->init.get());
                 visit_stmt(node->cond.get());
                 visit_stmt(node->action.get());
+                visit_stmt(node->body_stmt.get());
+                return;
+            }
+            case StmtKind::CppRangeForStmt: {
+                auto* node = static_cast<const CppRangeForStmt*>(stmt);
+                record_stmt<CppRangeForStmt>(StmtKind::CppRangeForStmt);
+                visit_stmt(node->init_statement.get());
+                for (const auto& decl : node->range_declaration_side_decls) {
+                    visit_decl(decl.get());
+                }
+                visit_decl(node->range_variable.get());
+                visit_decl(node->begin_variable.get());
+                visit_decl(node->end_variable.get());
+                visit_decl(node->loop_variable.get());
+                visit_stmt(node->condition.get());
+                visit_stmt(node->increment.get());
                 visit_stmt(node->body_stmt.get());
                 return;
             }

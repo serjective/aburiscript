@@ -1578,6 +1578,53 @@ bool rewrite_stmt_tree_in_place_impl(std::unique_ptr<Stmt>& stmt,
                         ctx,
                         error_out));
         }
+        case StmtKind::CppRangeForStmt: {
+            auto* range_for = static_cast<CppRangeForStmt*>(stmt.get());
+            return (!range_for->init_statement ||
+                    rewrite_stmt_tree_in_place_impl(
+                        range_for->init_statement,
+                        ctx,
+                        error_out)) &&
+                   rewrite_decl_vector(
+                       range_for->range_declaration_side_decls,
+                       ctx,
+                       error_out) &&
+                   (!range_for->range_variable ||
+                    rewrite_decl_tree_in_place_impl(
+                        range_for->range_variable,
+                        ctx,
+                        error_out)) &&
+                   (!range_for->begin_variable ||
+                    rewrite_decl_tree_in_place_impl(
+                        range_for->begin_variable,
+                        ctx,
+                        error_out)) &&
+                   (!range_for->end_variable ||
+                    rewrite_decl_tree_in_place_impl(
+                        range_for->end_variable,
+                        ctx,
+                        error_out)) &&
+                   (!range_for->loop_variable ||
+                    rewrite_decl_tree_in_place_impl(
+                        range_for->loop_variable,
+                        ctx,
+                        error_out)) &&
+                   (!range_for->condition ||
+                    rewrite_expr_tree(
+                        range_for->condition,
+                        ctx,
+                        error_out)) &&
+                   (!range_for->increment ||
+                    rewrite_expr_tree(
+                        range_for->increment,
+                        ctx,
+                        error_out)) &&
+                   (!range_for->body_stmt ||
+                    rewrite_stmt_tree_in_place_impl(
+                        range_for->body_stmt,
+                        ctx,
+                        error_out));
+        }
         case StmtKind::AsmStmt: {
             auto* asm_stmt = static_cast<AsmStmt*>(stmt.get());
             auto rewrite_operand_vec =
@@ -1850,6 +1897,66 @@ std::unique_ptr<Stmt> clone_stmt_impl(const Stmt* stmt,
                 std::move(body_stmt),
                 clone_scope(for_stmt->scope, ctx),
                 for_stmt->location);
+            assign_node_id(result.get(), ctx.ast_ctx);
+            return result;
+        }
+        case StmtKind::CppRangeForStmt: {
+            const auto* range_for = static_cast<const CppRangeForStmt*>(stmt);
+            auto init_statement =
+                clone_stmt_impl(range_for->init_statement.get(), ctx, error_out);
+            if (range_for->init_statement && !init_statement) {
+                return nullptr;
+            }
+
+            std::vector<std::unique_ptr<Decl>> side_decls;
+            side_decls.reserve(range_for->range_declaration_side_decls.size());
+            for (const auto& decl : range_for->range_declaration_side_decls) {
+                auto cloned_decl = clone_decl_impl(decl.get(), ctx, error_out);
+                if (decl && !cloned_decl) {
+                    return nullptr;
+                }
+                side_decls.push_back(std::move(cloned_decl));
+            }
+
+            auto range_variable =
+                clone_decl_impl(range_for->range_variable.get(), ctx, error_out);
+            auto begin_variable =
+                clone_decl_impl(range_for->begin_variable.get(), ctx, error_out);
+            auto end_variable =
+                clone_decl_impl(range_for->end_variable.get(), ctx, error_out);
+            auto loop_variable =
+                clone_decl_impl(range_for->loop_variable.get(), ctx, error_out);
+            if ((range_for->range_variable && !range_variable) ||
+                (range_for->begin_variable && !begin_variable) ||
+                (range_for->end_variable && !end_variable) ||
+                (range_for->loop_variable && !loop_variable)) {
+                return nullptr;
+            }
+
+            auto condition = clone_expr_with_substitution(
+                range_for->condition.get(), ctx, error_out);
+            auto increment = clone_expr_with_substitution(
+                range_for->increment.get(), ctx, error_out);
+            auto body_stmt =
+                clone_stmt_impl(range_for->body_stmt.get(), ctx, error_out);
+            if ((range_for->condition && !condition) ||
+                (range_for->increment && !increment) ||
+                (range_for->body_stmt && !body_stmt)) {
+                return nullptr;
+            }
+
+            auto result = std::make_unique<CppRangeForStmt>(
+                std::move(init_statement),
+                std::move(side_decls),
+                std::move(range_variable),
+                std::move(begin_variable),
+                std::move(end_variable),
+                std::move(loop_variable),
+                std::move(condition),
+                std::move(increment),
+                std::move(body_stmt),
+                clone_scope(range_for->scope, ctx),
+                range_for->location);
             assign_node_id(result.get(), ctx.ast_ctx);
             return result;
         }

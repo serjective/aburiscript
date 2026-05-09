@@ -99,6 +99,12 @@ bool stmt_contains_jump_target(Stmt* stmt) {
                 worklist.push_back(for_stmt->body_stmt.get());
                 break;
             }
+            case StmtKind::CppRangeForStmt: {
+                auto* range_for = static_cast<CppRangeForStmt*>(current);
+                worklist.push_back(range_for->init_statement.get());
+                worklist.push_back(range_for->body_stmt.get());
+                break;
+            }
             case StmtKind::SwitchStmt:
                 worklist.push_back(static_cast<SwitchStmt*>(current)->stmt.get());
                 break;
@@ -369,6 +375,110 @@ void ASTToLLVM::convert_for_statement(ForStmt *stmt) {
     builder.CreateBr(endBB);
 
     // End
+    function->insert(function->end(), endBB);
+    builder.SetInsertPoint(endBB);
+
+    cleanup_stack.pop_back();
+    condloop = prev_cond;
+    endloop = prev_end;
+    break_cleanup_depth = prev_break_depth;
+    continue_cleanup_depth = prev_continue_depth;
+    current_scope = prev_scope;
+}
+
+void ASTToLLVM::convert_cpp_range_for_statement(CppRangeForStmt *stmt) {
+    llvm::Function* function = builder.GetInsertBlock()->getParent();
+
+    llvm::BasicBlock* prev_cond = condloop;
+    llvm::BasicBlock* prev_end = endloop;
+    size_t prev_break_depth = break_cleanup_depth;
+    size_t prev_continue_depth = continue_cleanup_depth;
+    std::shared_ptr<Scope> prev_scope = current_scope;
+    current_scope = stmt->scope;
+    cleanup_stack.emplace_back();
+
+    llvm::BasicBlock* initBB = llvm::BasicBlock::Create(*context, "rangefor.init");
+    llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "rangefor.cond");
+    llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "rangefor.body");
+    llvm::BasicBlock* incrBB = llvm::BasicBlock::Create(*context, "rangefor.incr");
+    llvm::BasicBlock* cleanupBB = llvm::BasicBlock::Create(*context, "rangefor.cleanup");
+    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "rangefor.end");
+
+    condloop = incrBB;
+    endloop = endBB;
+    break_cleanup_depth = cleanup_stack.size() - 1;
+    continue_cleanup_depth = cleanup_stack.size();
+
+    builder.CreateBr(initBB);
+    function->insert(function->end(), initBB);
+    builder.SetInsertPoint(initBB);
+    if (stmt->init_statement) {
+        convert_statement(stmt->init_statement.get());
+    }
+    for (auto& decl : stmt->range_declaration_side_decls) {
+        convert_declaration(decl.get());
+    }
+    if (stmt->range_variable) {
+        convert_declaration(stmt->range_variable.get());
+    }
+    if (stmt->begin_variable) {
+        convert_declaration(stmt->begin_variable.get());
+    }
+    if (stmt->end_variable) {
+        convert_declaration(stmt->end_variable.get());
+    }
+    if (!builder.GetInsertBlock()->getTerminator()) {
+        builder.CreateBr(condBB);
+    } else {
+        error("convert_cpp_range_for_statement(): branching out of a range-for initializer",
+              stmt->location);
+        return;
+    }
+
+    function->insert(function->end(), condBB);
+    builder.SetInsertPoint(condBB);
+    llvm::Value* condVal = convert_expression(stmt->condition.get());
+    if (!condVal) {
+        error("convert_cpp_range_for_statement(): failed to get value for condition",
+              stmt->location);
+        return;
+    }
+    condVal = emit_bool_conversion(condVal, "rangeforcond");
+    builder.CreateCondBr(condVal, bodyBB, cleanupBB);
+
+    function->insert(function->end(), bodyBB);
+    builder.SetInsertPoint(bodyBB);
+    cleanup_stack.emplace_back();
+    if (stmt->loop_variable) {
+        convert_declaration(stmt->loop_variable.get());
+    }
+    if (stmt->body_stmt) {
+        convert_statement(stmt->body_stmt.get());
+    }
+    if (!builder.GetInsertBlock()->getTerminator()) {
+        emit_cleanups_for_scope();
+        builder.CreateBr(incrBB);
+    }
+    cleanup_stack.pop_back();
+
+    function->insert(function->end(), incrBB);
+    builder.SetInsertPoint(incrBB);
+    if (stmt->increment) {
+        convert_expression(stmt->increment.get());
+    }
+    if (!builder.GetInsertBlock()->getTerminator()) {
+        builder.CreateBr(condBB);
+    } else {
+        error("convert_cpp_range_for_statement(): branching in a range-for increment",
+              stmt->location);
+        return;
+    }
+
+    function->insert(function->end(), cleanupBB);
+    builder.SetInsertPoint(cleanupBB);
+    emit_cleanups_for_scope();
+    builder.CreateBr(endBB);
+
     function->insert(function->end(), endBB);
     builder.SetInsertPoint(endBB);
 

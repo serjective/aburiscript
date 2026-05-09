@@ -1,6 +1,8 @@
 #include "collect.h"
 #include "collect_internal.h"
+#include "../ast/expr_clone.h"
 #include "../helpers/auto_type_utils.h"
+#include <atomic>
 #include <cctype>
 
 using namespace collect_internal;
@@ -14,6 +16,26 @@ bool constraint_uses_memory_operand(const std::string& constraint) {
 const BlockExpr* returned_block_literal_expr(Expr* expr) {
     expr = Collect::strip_implicit_casts(expr);
     return dyn_cast<BlockExpr>(expr);
+}
+
+uint64_t next_cpp_range_for_id() {
+    static std::atomic<uint64_t> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+std::shared_ptr<Symbol> make_cpp_range_for_hidden_symbol(
+    uint64_t loop_id,
+    const std::string& suffix,
+    QualType type) {
+    std::string name =
+        "__aburi_range_for_" + std::to_string(loop_id) + "_" + suffix;
+    auto sym = std::make_shared<Symbol>(
+        name,
+        SymbolKind::VARIABLE,
+        std::move(type),
+        StorageClass::NONE);
+    sym->uid = name;
+    return sym;
 }
 
 bool is_same_type_object_prvalue_return(
@@ -346,6 +368,248 @@ std::unique_ptr<Stmt> Collect::collect_for_statement(std::unique_ptr<Stmt> init,
     return collect_make<ForStmt>(std::move(init),
         std::move(condition),
         std::move(action),
+        std::move(body_stmt),
+        std::move(scope),
+        loc);
+}
+
+std::unique_ptr<CppRangeForStmt> Collect::collect_cpp_range_for_statement(
+    std::unique_ptr<Stmt> init_statement,
+    CppRangeForDeclarationInfo range_declaration,
+    std::unique_ptr<Expr> range_initializer,
+    std::unique_ptr<Stmt> body_stmt,
+    std::shared_ptr<Scope> scope,
+    SrcLoc loc) {
+    auto fallback_int = QualType(ast_ctx_->type_ctx->get_builtin(BuiltinTypes::Int));
+    auto fallback_pointer =
+        QualType(std::make_shared<PointerType>(fallback_int));
+    auto var_ref = [&](const std::shared_ptr<Symbol>& sym) {
+        return collect_make<VarRef>(sym, loc);
+    };
+    auto expr_type_or_fallback = [&](const std::unique_ptr<Expr>& expr) {
+        if (expr && expr->get_type()) {
+            return expr->get_type();
+        }
+        return fallback_pointer;
+    };
+
+    if (range_declaration.name.empty()) {
+        report_error("range-for declaration requires a variable name", loc);
+    }
+    if (range_declaration.storage_class != StorageClass::NONE) {
+        report_error("range-for declaration cannot use a storage class specifier",
+                     range_declaration.loc);
+        range_declaration.storage_class = StorageClass::NONE;
+    }
+    if (range_declaration.is_consteval) {
+        report_error("'consteval' can only be applied to function declarations",
+                     range_declaration.loc);
+    }
+    if (range_declaration.is_thread_local) {
+        report_error("range-for declaration cannot be thread-local",
+                     range_declaration.loc);
+    }
+    if (range_declaration.is_block_byref) {
+        report_error("range-for declaration cannot use '__block'",
+                     range_declaration.loc);
+    }
+
+    if (!range_initializer || !range_initializer->get_type()) {
+        report_error("range-for initializer has no type", loc);
+        range_initializer =
+            collect_make<ErrorExpr>("invalid range-for initializer", loc);
+    }
+
+    QualType range_initializer_type =
+        range_initializer && range_initializer->get_type()
+            ? range_initializer->get_type()
+            : fallback_int;
+    ReferenceKind range_ref_kind =
+        classify_value_category(range_initializer.get()) == ValueCategory::LValue
+            ? ReferenceKind::LValue
+            : ReferenceKind::RValue;
+    QualType range_ref_type =
+        make_reference_type(range_initializer_type, range_ref_kind);
+
+    const uint64_t loop_id = next_cpp_range_for_id();
+    auto range_sym =
+        make_cpp_range_for_hidden_symbol(loop_id, "range", range_ref_type);
+    auto begin_sym =
+        make_cpp_range_for_hidden_symbol(loop_id, "begin", fallback_pointer);
+    auto end_sym =
+        make_cpp_range_for_hidden_symbol(loop_id, "end", fallback_pointer);
+
+    VariableDeclFlags hidden_flags;
+    auto range_variable = collect_variable_declaration(
+        range_ref_type,
+        range_sym->name,
+        std::move(range_initializer),
+        range_sym,
+        StorageClass::NONE,
+        hidden_flags,
+        loc);
+
+    std::unique_ptr<Expr> begin_expr;
+    std::unique_ptr<Expr> end_expr;
+    QualType range_object_type =
+        desugar_type(remove_reference(range_ref_type, ast_ctx_.get()),
+                     ast_ctx_.get());
+    auto array_type = range_object_type.as_shared<ArrayType>();
+    if (array_type) {
+        auto zero = collect_integer_literal(
+            "0",
+            ast_ctx_->type_ctx->get_builtin(BuiltinTypes::Int),
+            loc);
+        auto first_element =
+            collect_array_subscript(var_ref(range_sym), std::move(zero), loc);
+        begin_expr = collect_unary_operation(
+            UnaryOpTypes::ADDRESS_OF,
+            std::move(first_element),
+            loc);
+        begin_sym->type = expr_type_or_fallback(begin_expr);
+
+        std::unique_ptr<Expr> size_expr;
+        if (array_type->size_kind == ArraySizeKind::Constant &&
+            array_type->size.has_value()) {
+            size_expr = collect_integer_literal(
+                std::to_string(*array_type->size),
+                ast_ctx_->type_ctx->get_builtin(BuiltinTypes::Int),
+                loc);
+        } else if (array_type->size_kind == ArraySizeKind::Variable &&
+                   array_type->size_expr) {
+            std::string clone_error;
+            size_expr = clone_expr_tree(
+                array_type->size_expr.get(),
+                ast_ctx_.get(),
+                &clone_error);
+            if (!size_expr) {
+                report_error(
+                    "range-for failed to clone variable array bound: " +
+                        clone_error,
+                    loc);
+                size_expr = collect_make<ErrorExpr>(
+                    "invalid range-for array bound", loc);
+            }
+        } else {
+            report_error("range-for over incomplete array type is not allowed",
+                         loc);
+            size_expr =
+                collect_make<ErrorExpr>("invalid range-for array bound", loc);
+        }
+
+        end_expr = collect_binary_operation(
+            var_ref(begin_sym),
+            std::move(size_expr),
+            BinOpTypes::ADD,
+            loc);
+    } else if (auto record_type = range_object_type.as_shared<ObjectType>();
+               record_type &&
+               lookup_record_member_name(record_type.get(), "begin")
+                   .has_member_match() &&
+               lookup_record_member_name(record_type.get(), "end")
+                   .has_member_match()) {
+        auto begin_member = collect_member_expression(
+            var_ref(range_sym),
+            "begin",
+            false,
+            loc,
+            true);
+        begin_expr = collect_function_call(
+            std::move(begin_member),
+            std::vector<std::unique_ptr<Expr>>{},
+            loc);
+        begin_sym->type = expr_type_or_fallback(begin_expr);
+
+        auto end_member = collect_member_expression(
+            var_ref(range_sym),
+            "end",
+            false,
+            loc,
+            true);
+        end_expr = collect_function_call(
+            std::move(end_member),
+            std::vector<std::unique_ptr<Expr>>{},
+            loc);
+    } else {
+        std::vector<std::unique_ptr<Expr>> begin_args;
+        begin_args.push_back(var_ref(range_sym));
+        begin_expr = collect_function_call(
+            collect_make<VarRef>("begin", loc),
+            std::move(begin_args),
+            loc);
+        begin_sym->type = expr_type_or_fallback(begin_expr);
+
+        std::vector<std::unique_ptr<Expr>> end_args;
+        end_args.push_back(var_ref(range_sym));
+        end_expr = collect_function_call(
+            collect_make<VarRef>("end", loc),
+            std::move(end_args),
+            loc);
+    }
+
+    end_sym->type = expr_type_or_fallback(end_expr);
+    auto begin_variable = collect_variable_declaration(
+        begin_sym->type,
+        begin_sym->name,
+        std::move(begin_expr),
+        begin_sym,
+        StorageClass::NONE,
+        hidden_flags,
+        loc);
+    auto end_variable = collect_variable_declaration(
+        end_sym->type,
+        end_sym->name,
+        std::move(end_expr),
+        end_sym,
+        StorageClass::NONE,
+        hidden_flags,
+        loc);
+
+    auto condition = collect_binary_operation(
+        var_ref(begin_sym),
+        var_ref(end_sym),
+        BinOpTypes::NOT_EQUAL,
+        loc);
+    condition = collect_condition_expression(std::move(condition), loc, "range-for");
+
+    auto increment = collect_unary_operation(
+        UnaryOpTypes::INCREMENT_PREFIX,
+        var_ref(begin_sym),
+        loc);
+    increment = collect_apply_standard_conversions(
+        std::move(increment),
+        ExprUseContext::ExpressionStatement);
+
+    auto loop_sym = collect_declare_variable_symbol(
+        range_declaration.name,
+        range_declaration.declared_type,
+        range_declaration.storage_class,
+        range_declaration.is_constexpr,
+        range_declaration.loc);
+    auto loop_init = collect_unary_operation(
+        UnaryOpTypes::DEREFERENCE,
+        var_ref(begin_sym),
+        range_declaration.loc);
+    VariableDeclFlags loop_flags;
+    loop_flags.is_constexpr = range_declaration.is_constexpr;
+    auto loop_variable = collect_variable_declaration(
+        range_declaration.declared_type,
+        range_declaration.name,
+        std::move(loop_init),
+        loop_sym,
+        range_declaration.storage_class,
+        loop_flags,
+        range_declaration.loc);
+
+    return collect_make<CppRangeForStmt>(
+        std::move(init_statement),
+        std::move(range_declaration.side_decls),
+        std::move(range_variable),
+        std::move(begin_variable),
+        std::move(end_variable),
+        std::move(loop_variable),
+        std::move(condition),
+        std::move(increment),
         std::move(body_stmt),
         std::move(scope),
         loc);

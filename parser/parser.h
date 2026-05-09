@@ -350,6 +350,8 @@ private:
     std::unique_ptr<Stmt> parse_do_while_stmt();
 
     std::unique_ptr<Stmt> parse_for_stmt();
+    std::optional<size_t> find_cpp_range_for_colon_semicolon_count();
+    CppRangeForDeclarationInfo parse_cpp_range_for_declaration();
 
     std::unique_ptr<Stmt> parse_stmt();
     std::unique_ptr<Stmt> parse_asm_stmt();

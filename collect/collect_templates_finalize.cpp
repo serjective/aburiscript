@@ -450,6 +450,61 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
                 expected_return_type,
                 error_out);
         }
+        case StmtKind::CppRangeForStmt: {
+            auto* range_for = static_cast<CppRangeForStmt*>(stmt.get());
+            if (!finalize_specialized_stmt_semantics(
+                    collect,
+                    range_for->init_statement,
+                    expected_return_type,
+                    error_out)) {
+                return false;
+            }
+            for (auto& decl : range_for->range_declaration_side_decls) {
+                if (!finalize_specialized_decl_semantics(
+                        collect,
+                        decl,
+                        error_out)) {
+                    return false;
+                }
+            }
+            if (!finalize_specialized_decl_semantics(
+                    collect,
+                    range_for->range_variable,
+                    error_out) ||
+                !finalize_specialized_decl_semantics(
+                    collect,
+                    range_for->begin_variable,
+                    error_out) ||
+                !finalize_specialized_decl_semantics(
+                    collect,
+                    range_for->end_variable,
+                    error_out) ||
+                !finalize_specialized_decl_semantics(
+                    collect,
+                    range_for->loop_variable,
+                    error_out)) {
+                return false;
+            }
+            if (range_for->condition) {
+                strip_redundant_specialization_casts(range_for->condition);
+                range_for->condition = collect.collect_condition_expression(
+                    std::move(range_for->condition),
+                    range_for->location,
+                    "range-for");
+            }
+            if (range_for->increment) {
+                strip_redundant_specialization_casts(range_for->increment);
+                range_for->increment =
+                    collect.collect_apply_standard_conversions(
+                        std::move(range_for->increment),
+                        Collect::ExprUseContext::ExpressionStatement);
+            }
+            return finalize_specialized_stmt_semantics(
+                collect,
+                range_for->body_stmt,
+                expected_return_type,
+                error_out);
+        }
         case StmtKind::CaseStmt: {
             auto* case_stmt = static_cast<CaseStmt*>(stmt.get());
             if (case_stmt->const_expr) {

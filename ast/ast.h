@@ -85,6 +85,7 @@ enum class StmtKind : uint8_t {
     WhileStmt,
     DoWhileStmt,
     ForStmt,
+    CppRangeForStmt,
     ContinueStmt,
     BreakStmt,
     EmptyStmt,
@@ -2434,6 +2435,48 @@ struct ForStmt: Stmt {
     }
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::ForStmt; }
+};
+struct CppRangeForStmt: Stmt {
+    std::unique_ptr<Stmt> init_statement;
+    std::vector<std::unique_ptr<Decl>> range_declaration_side_decls;
+    // reference of range-initalizer
+    std::unique_ptr<Decl> range_variable;
+    std::unique_ptr<Decl> begin_variable;
+    std::unique_ptr<Decl> end_variable;
+    std::unique_ptr<Decl> loop_variable;
+    // lowered loop test
+    std::unique_ptr<Expr> condition;
+    // lowered loop step
+    std::unique_ptr<Expr> increment;
+    std::unique_ptr<Stmt> body_stmt;
+    std::shared_ptr<Scope> scope;
+
+    CppRangeForStmt(std::unique_ptr<Stmt> init_statement,
+                    std::vector<std::unique_ptr<Decl>> range_declaration_side_decls,
+                    std::unique_ptr<Decl> range_variable,
+                    std::unique_ptr<Decl> begin_variable,
+                    std::unique_ptr<Decl> end_variable,
+                    std::unique_ptr<Decl> loop_variable,
+                    std::unique_ptr<Expr> condition,
+                    std::unique_ptr<Expr> increment,
+                    std::unique_ptr<Stmt> body_stmt,
+                    std::shared_ptr<Scope> scope,
+                    SrcLoc loc = SrcLoc())
+        : Stmt(StmtKind::CppRangeForStmt, loc),
+          init_statement(std::move(init_statement)),
+          range_declaration_side_decls(std::move(range_declaration_side_decls)),
+          range_variable(std::move(range_variable)),
+          begin_variable(std::move(begin_variable)),
+          end_variable(std::move(end_variable)),
+          loop_variable(std::move(loop_variable)),
+          condition(std::move(condition)),
+          increment(std::move(increment)),
+          body_stmt(std::move(body_stmt)),
+          scope(std::move(scope)) {}
+
+    static bool classof(const Stmt *s) {
+        return s->get_kind() == StmtKind::CppRangeForStmt;
+    }
 };
 struct ContinueStmt: Stmt {
     ContinueStmt(SrcLoc loc = SrcLoc()) : Stmt(StmtKind::ContinueStmt, loc) {};

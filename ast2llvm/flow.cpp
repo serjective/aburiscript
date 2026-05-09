@@ -141,6 +141,12 @@ bool stmt_contains_jump_target(Stmt* stmt) {
                 worklist.push_back(for_stmt->body_stmt.get());
                 break;
             }
+            case StmtKind::CppRangeForStmt: {
+                auto* range_for = static_cast<CppRangeForStmt*>(current);
+                worklist.push_back(range_for->init_statement.get());
+                worklist.push_back(range_for->body_stmt.get());
+                break;
+            }
             case StmtKind::SwitchStmt:
                 worklist.push_back(static_cast<SwitchStmt*>(current)->stmt.get());
                 break;
@@ -309,6 +315,13 @@ void ASTToLLVM::collect_label_cleanup_depths(Stmt* stmt, size_t depth) {
             size_t for_depth = current_depth + 1;
             worklist.emplace_back(for_stmt->body_stmt.get(), for_depth);
             worklist.emplace_back(for_stmt->init.get(), for_depth);
+            continue;
+        }
+        if (auto* range_for = dyn_cast<CppRangeForStmt>(current_stmt)) {
+            size_t range_depth = current_depth + 1;
+            size_t body_depth = range_depth + 1;
+            worklist.emplace_back(range_for->body_stmt.get(), body_depth);
+            worklist.emplace_back(range_for->init_statement.get(), range_depth);
             continue;
         }
         if (auto* switch_stmt = dyn_cast<SwitchStmt>(current_stmt)) {
@@ -495,6 +508,9 @@ void ASTToLLVM::convert_statement(Stmt *stmt) {
         case StmtKind::ForStmt:
             convert_for_statement(static_cast<ForStmt*>(stmt));
             return;
+        case StmtKind::CppRangeForStmt:
+            convert_cpp_range_for_statement(static_cast<CppRangeForStmt*>(stmt));
+            return;
         case StmtKind::ContinueStmt:
             convert_continue_statement(static_cast<ContinueStmt*>(stmt));
             return;
@@ -593,6 +609,16 @@ void ASTToLLVM::convert_statement_after_terminator(Stmt *stmt,
                                                    allow_case_labels);
             }
             convert_statement_after_terminator(for_stmt->body_stmt.get(),
+                                               allow_case_labels);
+            return;
+        }
+        case StmtKind::CppRangeForStmt: {
+            auto* range_for = static_cast<CppRangeForStmt*>(stmt);
+            if (range_for->init_statement) {
+                convert_statement_after_terminator(range_for->init_statement.get(),
+                                                   allow_case_labels);
+            }
+            convert_statement_after_terminator(range_for->body_stmt.get(),
                                                allow_case_labels);
             return;
         }

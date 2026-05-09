@@ -414,6 +414,8 @@ public:
 
     void convert_for_statement(ForStmt *stmt);
 
+    void convert_cpp_range_for_statement(CppRangeForStmt *stmt);
+
     void convert_continue_statement(Stmt *stmt);
 
     void convert_break_statement(Stmt *stmt);

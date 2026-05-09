@@ -471,10 +471,133 @@ std::unique_ptr<Stmt> Parser::parse_do_while_stmt() {
     return collect_->collect_do_while_statement(std::move(condition),
                                          std::move(body_stmt), t.loc);
 }
+
+std::optional<size_t> Parser::find_cpp_range_for_colon_semicolon_count() {
+    if (!is_cxx_mode_active()) {
+        return std::nullopt;
+    }
+
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int brace_depth = 0;
+    int conditional_depth = 0;
+    size_t top_level_semicolons = 0;
+    size_t offset = 0;
+    while (true) {
+        Token tok = peek_token_shortcut(offset);
+        if (tok.type == TokenType::Eof) {
+            return std::nullopt;
+        }
+        if (tok.type == TokenType::RIGHT_PAREN &&
+            paren_depth == 0 &&
+            bracket_depth == 0 &&
+            brace_depth == 0) {
+            return std::nullopt;
+        }
+
+        switch (tok.type) {
+            case TokenType::LEFT_PAREN:
+                ++paren_depth;
+                break;
+            case TokenType::RIGHT_PAREN:
+                if (paren_depth > 0) {
+                    --paren_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACKET:
+                ++bracket_depth;
+                break;
+            case TokenType::RIGHT_BRACKET:
+                if (bracket_depth > 0) {
+                    --bracket_depth;
+                }
+                break;
+            case TokenType::LEFT_BRACE:
+                ++brace_depth;
+                break;
+            case TokenType::RIGHT_BRACE:
+                if (brace_depth > 0) {
+                    --brace_depth;
+                }
+                break;
+            case TokenType::QUESTION:
+                if (paren_depth == 0 && bracket_depth == 0 && brace_depth == 0) {
+                    ++conditional_depth;
+                }
+                break;
+            case TokenType::SEMICOLON:
+                if (paren_depth == 0 && bracket_depth == 0 &&
+                    brace_depth == 0 && conditional_depth == 0) {
+                    ++top_level_semicolons;
+                    if (top_level_semicolons > 1) {
+                        return std::nullopt;
+                    }
+                }
+                break;
+            case TokenType::SCOPE_RESOLUTION:
+                break;
+            case TokenType::COLON:
+                if (peek_token_shortcut(offset + 1).type == TokenType::COLON) {
+                    ++offset;
+                    break;
+                }
+                if (paren_depth == 0 && bracket_depth == 0 &&
+                    brace_depth == 0) {
+                    if (conditional_depth > 0) {
+                        --conditional_depth;
+                        break;
+                    }
+                    return top_level_semicolons;
+                }
+                break;
+            default:
+                break;
+        }
+        ++offset;
+    }
+}
+
+CppRangeForDeclarationInfo Parser::parse_cpp_range_for_declaration() {
+    Token start_tok = current_token();
+    DeclarationParser decl_parser(this);
+    std::vector<std::unique_ptr<Decl>> side_decls;
+    auto base_type = parse_declaration_head(start_tok, decl_parser, side_decls);
+    auto parsed_type = decl_parser.parse_declarator(base_type);
+    retain_type_specifier_decl_if_needed(decl_parser);
+    auto trailing_attrs = try_parse_attributes();
+    (void)trailing_attrs;
+
+    if (!parsed_type) {
+        error_custloc("expected declaration in range-for declaration",
+                      start_tok.loc);
+    }
+    if (decl_parser.name.empty()) {
+        error_custloc("range-for declaration requires a variable name",
+                      decl_parser.loc.isInvalid() ? start_tok.loc : decl_parser.loc);
+    }
+    if (canonical_type_kind(parsed_type, ast_ctx.get()) == TypeKind::Function) {
+        error_custloc("range-for declaration cannot declare a function",
+                      decl_parser.loc.isInvalid() ? start_tok.loc : decl_parser.loc);
+    }
+
+    CppRangeForDeclarationInfo info;
+    info.declared_type = QualType(parsed_type, decl_parser.qualifiers);
+    info.name = decl_parser.name;
+    info.storage_class = decl_parser.str_class;
+    info.is_constexpr = decl_parser.is_constexpr;
+    info.is_consteval = decl_parser.is_consteval;
+    info.is_thread_local = decl_parser.is_thread_local;
+    info.is_block_byref = decl_parser.is_block_byref;
+    info.loc = decl_parser.loc.isInvalid() ? start_tok.loc : decl_parser.loc;
+    info.side_decls = std::move(side_decls);
+    return info;
+}
+
 std::unique_ptr<Stmt> Parser::parse_for_stmt() {
     Token t = current_token();
     check_and_consume(TokenType::FOR);
     check_and_consume(TokenType::LEFT_PAREN);
+    const size_t for_header_begin_idx = get_token_idx();
     std::unique_ptr<Stmt> first_clause;
     std::unique_ptr<Expr> second_clause;
     std::unique_ptr<Expr> third_clause;
@@ -523,35 +646,51 @@ std::unique_ptr<Stmt> Parser::parse_for_stmt() {
     };
 
     auto recover_after_for_header_error = [&]() {
-        int nested_paren_depth = 0;
-        int header_semicolons_seen = 0;
+        set_token_idx(for_header_begin_idx);
+        int paren_depth = 0;
+        int bracket_depth = 0;
+        int brace_depth = 0;
         while (!gentle_check(TokenType::Eof)) {
             if (gentle_check(TokenType::LEFT_PAREN)) {
-                ++nested_paren_depth;
+                ++paren_depth;
                 advance();
                 continue;
             }
             if (gentle_check(TokenType::RIGHT_PAREN)) {
-                if (nested_paren_depth > 0) {
-                    --nested_paren_depth;
+                if (paren_depth > 0) {
+                    --paren_depth;
                     advance();
                     continue;
                 }
-                // Once both clause separators have been seen, this closes
-                // the for-header.
-                if (header_semicolons_seen >= 2) {
+                if (bracket_depth == 0 && brace_depth == 0) {
                     advance();
                     break;
+                }
+            }
+            if (gentle_check(TokenType::LEFT_BRACKET)) {
+                ++bracket_depth;
+                advance();
+                continue;
+            }
+            if (gentle_check(TokenType::RIGHT_BRACKET)) {
+                if (bracket_depth > 0) {
+                    --bracket_depth;
                 }
                 advance();
                 continue;
             }
-            if (gentle_check(TokenType::SEMICOLON) &&
-                nested_paren_depth == 0 &&
-                header_semicolons_seen < 2) {
-                ++header_semicolons_seen;
+            if (gentle_check(TokenType::LEFT_BRACE)) {
+                ++brace_depth;
                 advance();
                 continue;
+            }
+            if (gentle_check(TokenType::RIGHT_BRACE)) {
+                if (brace_depth > 0) {
+                    --brace_depth;
+                    advance();
+                    continue;
+                }
+                break;
             }
             advance();
         }
@@ -589,29 +728,87 @@ std::unique_ptr<Stmt> Parser::parse_for_stmt() {
             owner_tok.value, !has_global_qualifier);
         return dyn_cast<ObjectDecl>(owner_tag_decl) != nullptr;
     };
-    bool parse_init_as_declaration = false;
-    if (!gentle_check(TokenType::SEMICOLON) && isTokenDeclarationSpec(current_token())) {
+
+    auto should_parse_for_init_as_declaration = [&]() -> bool {
+        if (gentle_check(TokenType::SEMICOLON) ||
+            !isTokenDeclarationSpec(current_token())) {
+            return false;
+        }
         if (is_cxx_mode_active() &&
             (current_token().type == TokenType::IDENTIFIER ||
              current_token().type == TokenType::SCOPE_RESOLUTION ||
              (current_token().type == TokenType::COLON &&
               peek_token().type == TokenType::COLON))) {
             if (starts_with_record_qualified_id()) {
-                parse_init_as_declaration = false;
-            } else if (starts_with_cpp_dependent_qualified_call_expression()) {
-                parse_init_as_declaration = false;
-            } else {
-                CxxStmtDisambiguation disambiguated = classify_cxx_stmt_disambiguation();
-                parse_init_as_declaration =
-                    disambiguated == CxxStmtDisambiguation::Declaration;
+                return false;
             }
-        } else {
-            parse_init_as_declaration = true;
+            if (starts_with_cpp_dependent_qualified_call_expression()) {
+                return false;
+            }
+            CxxStmtDisambiguation disambiguated =
+                classify_cxx_stmt_disambiguation();
+            return disambiguated == CxxStmtDisambiguation::Declaration;
         }
-    }
+        return true;
+    };
+
+    auto parse_for_init_statement = [&]() -> std::unique_ptr<Stmt> {
+        if (should_parse_for_init_as_declaration()) {
+            auto decl = parse_declaration();
+            for (const auto& d : decl) {
+                if (isa<FuncDecl>(d.get())) {
+                    error("function declaration not allowed in for-loop init");
+                }
+            }
+            return collect_->collect_decl_statement(std::move(decl));
+        }
+        if (gentle_check(TokenType::SEMICOLON)) {
+            advance();
+            return nullptr;
+        }
+        auto first_expr = parse_expression();
+        auto stmt = collect_->collect_expression_statement(
+            std::move(first_expr), t.loc);
+        check_and_consume(TokenType::SEMICOLON);
+        return stmt;
+    };
 
     try {
-        if (parse_init_as_declaration) {
+        if (auto range_init_semicolons =
+                find_cpp_range_for_colon_semicolon_count()) {
+            if (*range_init_semicolons == 1) {
+                if (!lang_opts.is_cxx20_or_later()) {
+                    diag_engine->report_warning(
+                        "range-for init-statement is a C++20 extension",
+                        current_token().loc);
+                }
+                first_clause = parse_for_init_statement();
+            }
+
+            auto range_decl = parse_cpp_range_for_declaration();
+            check_and_consume(TokenType::COLON);
+            auto range_init = gentle_check(TokenType::LEFT_BRACE)
+                ? parse_init_list()
+                : parse_expression();
+            check_and_consume(TokenType::RIGHT_PAREN);
+
+            auto range_stmt = collect_->collect_cpp_range_for_statement(
+                std::move(first_clause),
+                std::move(range_decl),
+                std::move(range_init),
+                nullptr,
+                new_scope,
+                t.loc);
+
+            collect_->collect_enter_loop();
+            auto body_stmt = parse_stmt();
+            collect_->collect_leave_loop();
+            range_stmt->body_stmt = std::move(body_stmt);
+            collect_->collect_leave_scope();
+            return range_stmt;
+        }
+
+        if (should_parse_for_init_as_declaration()) {
             parse_for_init_as_declaration();
         } else {
             parse_for_init_as_expression();
