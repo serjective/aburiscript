@@ -813,7 +813,8 @@ void Collect::collect_set_current_cpp_record_lookup_type(QualType record_type) {
 
 bool Collect::with_function_definition_state(
     const FuncDecl* function_decl,
-    const std::function<bool()>& action) {
+    const std::function<bool()>& action,
+    QualType friend_access_type) {
     if (!action) {
         return false;
     }
@@ -832,6 +833,7 @@ bool Collect::with_function_definition_state(
 
     FunctionDefinitionState new_state;
     new_state.in_function = function_decl != nullptr;
+    new_state.current_function_cpp_friend_access_type = friend_access_type;
     if (function_decl) {
         new_state.current_function_name = function_decl->name;
         new_state.current_pretty_function_name = function_decl->name;

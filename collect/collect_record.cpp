@@ -1,6 +1,9 @@
 #include "collect.h"
+#include "collect_internal.h"
+#include "lookup_engine.h"
 
 #include "../ast/special_members.h"
+#include "../helpers/auto_type_utils.h"
 #include "../helpers/qualified_name_utils.h"
 
 #include <cstdint>
@@ -996,6 +999,432 @@ std::unique_ptr<Expr> build_generated_constructor_initializer_expr(
         make_source_expr(),
         type,
         loc);
+}
+
+bool is_defaulted_comparison_operator_name(const std::string& name) {
+    return name == "operator==" ||
+           name == "operator!=" ||
+           name == "operator<" ||
+           name == "operator<=" ||
+           name == "operator>" ||
+           name == "operator>=" ||
+           name == "operator<=>";
+}
+
+BinOpTypes defaulted_comparison_binop_from_name(const std::string& name) {
+    if (name == "operator==") return BinOpTypes::EQUAL;
+    if (name == "operator!=") return BinOpTypes::NOT_EQUAL;
+    if (name == "operator<") return BinOpTypes::LESS_THAN;
+    if (name == "operator<=") return BinOpTypes::LESS_EQUAL_THAN;
+    if (name == "operator>") return BinOpTypes::GREATER_THAN;
+    if (name == "operator>=") return BinOpTypes::GREATER_EQUAL_THAN;
+    if (name == "operator<=>") return BinOpTypes::THREE_WAY_COMPARE;
+    return BinOpTypes::UNKNOWN;
+}
+
+enum class DefaultedCompareCategoryRank : uint8_t {
+    Strong = 0,
+    Weak = 1,
+    Partial = 2,
+};
+
+struct DefaultedCompareCategory {
+    DefaultedCompareCategoryRank rank = DefaultedCompareCategoryRank::Strong;
+    std::string name;
+    QualType type;
+    std::shared_ptr<Symbol> less;
+    std::shared_ptr<Symbol> equivalent;
+    std::shared_ptr<Symbol> greater;
+};
+
+const char* defaulted_compare_category_name(
+    DefaultedCompareCategoryRank rank) {
+    switch (rank) {
+        case DefaultedCompareCategoryRank::Strong:
+            return "strong_ordering";
+        case DefaultedCompareCategoryRank::Weak:
+            return "weak_ordering";
+        case DefaultedCompareCategoryRank::Partial:
+            return "partial_ordering";
+    }
+    return "strong_ordering";
+}
+
+QualType lookup_compare_category_type_for_defaulted(
+    Collect& collect,
+    const std::string& category_name) {
+    auto current_context = collect.get_current_decl_context();
+    DeclContext* context = current_context ? current_context.get() : nullptr;
+    if (!context) {
+        auto scope = collect.collect_current_scope();
+        context = scope ? scope->associated_decl_context : nullptr;
+    }
+    if (!context) {
+        return QualType();
+    }
+
+    LookupEngine::QualifiedNameSpec spec;
+    spec.qualifiers = {"std"};
+    spec.terminal_name = category_name;
+
+    auto tag_lookup = LookupEngine::lookup_qualified_name(
+        spec,
+        context,
+        LookupNamespace::Tag);
+    if (tag_lookup.status == LookupEngine::QualifiedLookupStatus::Found &&
+        tag_lookup.binding &&
+        tag_lookup.binding->type) {
+        return tag_lookup.binding->type;
+    }
+
+    auto ordinary_lookup = LookupEngine::lookup_qualified_name(
+        spec,
+        context,
+        LookupNamespace::Ordinary,
+        LookupEngine::OrdinaryFilter::TypedefOnly);
+    if (ordinary_lookup.status ==
+            LookupEngine::QualifiedLookupStatus::Found &&
+        ordinary_lookup.symbol &&
+        ordinary_lookup.symbol->type) {
+        return ordinary_lookup.symbol->type;
+    }
+    if (ordinary_lookup.status ==
+            LookupEngine::QualifiedLookupStatus::Found &&
+        ordinary_lookup.binding &&
+        ordinary_lookup.binding->type) {
+        return ordinary_lookup.binding->type;
+    }
+    return QualType();
+}
+
+std::optional<DefaultedCompareCategory>
+lookup_compare_category_for_defaulted(
+    Collect& collect,
+    DefaultedCompareCategoryRank rank,
+    SrcLoc loc,
+    bool diagnose) {
+    (void)diagnose;
+    (void)loc;
+    const std::string category_name =
+        defaulted_compare_category_name(rank);
+
+    QualType category_type =
+        lookup_compare_category_type_for_defaulted(collect, category_name);
+    if (!category_type) {
+        return std::nullopt;
+    }
+    auto record_type =
+        desugar_type(category_type).as_shared<ObjectType>();
+    if (!record_type || record_type->isIncomplete()) {
+        return std::nullopt;
+    }
+
+    auto find_static_member =
+        [&](const std::string& member_name,
+            bool required = true) -> std::shared_ptr<Symbol> {
+        auto lookup =
+            collect_internal::lookup_record_member_name(
+                record_type.get(),
+                member_name);
+        if (lookup.static_data_matches == 1 &&
+            lookup.single_static_data_member &&
+            lookup.single_static_data_member->symbol) {
+            auto member = lookup.single_static_data_member->symbol;
+            QualType member_type =
+                collect_internal::remove_reference_and_desugar(member->type);
+            QualType canonical_category =
+                collect_internal::remove_reference_and_desugar(category_type);
+            if (member_type &&
+                canonical_category &&
+                !member_type.equals_unqualified(canonical_category)) {
+                return nullptr;
+            }
+            return member;
+        }
+        (void)required;
+        return nullptr;
+    };
+
+    DefaultedCompareCategory category;
+    category.rank = rank;
+    category.name = category_name;
+    category.type = category_type;
+    category.less = find_static_member("less");
+    category.greater = find_static_member("greater");
+    if (rank == DefaultedCompareCategoryRank::Strong) {
+        category.equivalent = find_static_member("equal", false);
+        if (!category.equivalent) {
+            category.equivalent = find_static_member("equivalent");
+        }
+    } else {
+        category.equivalent = find_static_member("equivalent");
+    }
+
+    if (!category.less || !category.equivalent || !category.greater) {
+        return std::nullopt;
+    }
+    return category;
+}
+
+std::optional<DefaultedCompareCategoryRank>
+classify_compare_category_for_defaulted(
+    Collect& collect,
+    QualType type,
+    SrcLoc loc) {
+    if (!type) {
+        return std::nullopt;
+    }
+    QualType canonical_type =
+        collect_internal::remove_reference_and_desugar(type);
+    for (auto rank : {
+             DefaultedCompareCategoryRank::Strong,
+             DefaultedCompareCategoryRank::Weak,
+             DefaultedCompareCategoryRank::Partial}) {
+        auto category =
+            lookup_compare_category_for_defaulted(collect, rank, loc, false);
+        if (!category || !category->type) {
+            continue;
+        }
+        QualType category_type =
+            collect_internal::remove_reference_and_desugar(category->type);
+        if (canonical_type &&
+            category_type &&
+            canonical_type.equals_unqualified(category_type)) {
+            return rank;
+        }
+    }
+    return std::nullopt;
+}
+
+bool type_is_reference_or_contains_unknown_array(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    if (!type) {
+        return true;
+    }
+    QualType canonical = desugar_type(type, ast_ctx);
+    if (!canonical) {
+        return true;
+    }
+    if (canonical.as_shared<ReferenceType>()) {
+        return true;
+    }
+    if (auto array_type = canonical.as_shared<ArrayType>()) {
+        if (array_type->size_kind != ArraySizeKind::Constant ||
+            !array_type->size.has_value()) {
+            return true;
+        }
+        return type_is_reference_or_contains_unknown_array(
+            array_type->element_type,
+            ast_ctx);
+    }
+    return false;
+}
+
+bool emit_defaulted_equality_statements_for_type(
+    Collect& collect,
+    const ASTContext* ast_ctx,
+    const std::shared_ptr<CType>& bool_type,
+    const std::shared_ptr<CType>& ulong_type,
+    QualType type,
+    const std::function<std::unique_ptr<Expr>()>& make_lhs,
+    const std::function<std::unique_ptr<Expr>()>& make_rhs,
+    QualType return_type,
+    std::vector<std::unique_ptr<Stmt>>& statements_out,
+    SrcLoc loc) {
+    if (!type || !make_lhs || !make_rhs) {
+        return false;
+    }
+    if (auto array_type =
+            desugar_type(type, ast_ctx).as_shared<ArrayType>()) {
+        if (array_type->size_kind != ArraySizeKind::Constant ||
+            !array_type->size.has_value()) {
+            return false;
+        }
+        for (size_t idx = 0; idx < *array_type->size; ++idx) {
+            auto lhs_builder = [&collect, &make_lhs, &ulong_type, idx, loc]() {
+                auto index_expr = collect.collect_integer_literal(
+                    std::to_string(idx),
+                    ulong_type,
+                    loc);
+                return collect.collect_array_subscript(
+                    make_lhs(),
+                    std::move(index_expr),
+                    loc);
+            };
+            auto rhs_builder = [&collect, &make_rhs, &ulong_type, idx, loc]() {
+                auto index_expr = collect.collect_integer_literal(
+                    std::to_string(idx),
+                    ulong_type,
+                    loc);
+                return collect.collect_array_subscript(
+                    make_rhs(),
+                    std::move(index_expr),
+                    loc);
+            };
+            if (!emit_defaulted_equality_statements_for_type(
+                    collect,
+                    ast_ctx,
+                    bool_type,
+                    ulong_type,
+                    array_type->element_type,
+                    lhs_builder,
+                    rhs_builder,
+                    return_type,
+                    statements_out,
+                    loc)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    auto equality = collect.collect_binary_operation(
+        make_lhs(),
+        make_rhs(),
+        BinOpTypes::EQUAL,
+        loc);
+    if (!equality || isa<ErrorExpr>(equality.get())) {
+        return false;
+    }
+    auto failed = collect.collect_unary_operation(
+        UnaryOpTypes::LOGICAL_NOT,
+        std::move(equality),
+        loc);
+    if (!failed || isa<ErrorExpr>(failed.get())) {
+        return false;
+    }
+    auto false_expr =
+        collect.collect_integer_literal("0", bool_type, loc);
+    auto return_false = collect.collect_return_statement(
+        std::move(false_expr),
+        loc,
+        return_type);
+    if (!return_false) {
+        return false;
+    }
+    std::vector<std::unique_ptr<Stmt>> then_statements;
+    then_statements.push_back(std::move(return_false));
+    auto then_stmt = collect.collect_compound_statement(
+        std::move(then_statements),
+        nullptr,
+        loc);
+    statements_out.push_back(
+        collect.collect_if_statement(
+            std::move(failed),
+            std::move(then_stmt),
+            nullptr,
+            loc));
+    return true;
+}
+
+struct DefaultedThreeWayStep {
+    std::unique_ptr<Stmt> decl_stmt;
+    std::shared_ptr<Symbol> temp_symbol;
+    QualType temp_type;
+    DefaultedCompareCategoryRank category_rank =
+        DefaultedCompareCategoryRank::Strong;
+};
+
+bool collect_defaulted_three_way_steps_for_type(
+    Collect& collect,
+    const ASTContext* ast_ctx,
+    const std::shared_ptr<CType>& ulong_type,
+    QualType type,
+    const std::function<std::unique_ptr<Expr>()>& make_lhs,
+    const std::function<std::unique_ptr<Expr>()>& make_rhs,
+    std::vector<DefaultedThreeWayStep>& steps_out,
+    size_t& temp_index,
+    SrcLoc loc) {
+    if (!type || !make_lhs || !make_rhs) {
+        return false;
+    }
+    if (auto array_type =
+            desugar_type(type, ast_ctx).as_shared<ArrayType>()) {
+        if (array_type->size_kind != ArraySizeKind::Constant ||
+            !array_type->size.has_value()) {
+            return false;
+        }
+        for (size_t idx = 0; idx < *array_type->size; ++idx) {
+            auto lhs_builder = [&collect, &make_lhs, &ulong_type, idx, loc]() {
+                auto index_expr = collect.collect_integer_literal(
+                    std::to_string(idx),
+                    ulong_type,
+                    loc);
+                return collect.collect_array_subscript(
+                    make_lhs(),
+                    std::move(index_expr),
+                    loc);
+            };
+            auto rhs_builder = [&collect, &make_rhs, &ulong_type, idx, loc]() {
+                auto index_expr = collect.collect_integer_literal(
+                    std::to_string(idx),
+                    ulong_type,
+                    loc);
+                return collect.collect_array_subscript(
+                    make_rhs(),
+                    std::move(index_expr),
+                    loc);
+            };
+            if (!collect_defaulted_three_way_steps_for_type(
+                    collect,
+                    ast_ctx,
+                    ulong_type,
+                    array_type->element_type,
+                    lhs_builder,
+                    rhs_builder,
+                    steps_out,
+                    temp_index,
+                    loc)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    auto compare = collect.collect_binary_operation(
+        make_lhs(),
+        make_rhs(),
+        BinOpTypes::THREE_WAY_COMPARE,
+        loc);
+    if (!compare || isa<ErrorExpr>(compare.get())) {
+        return false;
+    }
+    QualType compare_type = compare->get_type();
+    auto category_rank =
+        classify_compare_category_for_defaulted(collect, compare_type, loc);
+    if (!category_rank.has_value()) {
+        return false;
+    }
+
+    std::string temp_name =
+        "__defaulted_cmp_" + std::to_string(temp_index++);
+    auto temp_symbol = std::make_shared<Symbol>(
+        temp_name,
+        SymbolKind::VARIABLE,
+        compare_type,
+        StorageClass::NONE);
+    temp_symbol->uid = temp_name;
+    auto temp_decl = collect.collect_variable_declaration(
+        compare_type,
+        temp_name,
+        std::move(compare),
+        temp_symbol,
+        StorageClass::NONE,
+        VariableDeclFlags{},
+        loc);
+    if (!temp_decl) {
+        return false;
+    }
+    DefaultedThreeWayStep step;
+    step.decl_stmt = collect.collect_decl_statement(
+        std::move(temp_decl),
+        loc);
+    step.temp_symbol = std::move(temp_symbol);
+    step.temp_type = compare_type;
+    step.category_rank = *category_rank;
+    steps_out.push_back(std::move(step));
+    return true;
 }
 
 } // namespace
@@ -2436,6 +2865,144 @@ void Collect::collect_record_synthesize_implicit_members(
         ctx.methods.push_back(std::move(method));
     };
 
+    auto synthesize_implicit_equality_for_defaulted_spaceship =
+        [&]() {
+        bool has_member_defaulted_spaceship = false;
+        bool has_declared_equality = false;
+        RecordMemberAccess equality_access = RecordMemberAccess::Public;
+
+        for (const auto& method : ctx.methods) {
+            if (method.name == "operator==") {
+                has_declared_equality = true;
+            }
+            if (method.name == "operator<=>" &&
+                method.is_defaulted &&
+                !method.is_static) {
+                has_member_defaulted_spaceship = true;
+                equality_access = method.declared_access;
+            }
+        }
+        for (const auto& friend_function : ctx.friend_functions) {
+            if (friend_function.name == "operator==") {
+                has_declared_equality = true;
+                break;
+            }
+        }
+        if (!has_member_defaulted_spaceship || has_declared_equality) {
+            return;
+        }
+
+        auto method_type = std::make_shared<FunctionType>();
+        method_type->ret_type = QualType(get_builtin_bool());
+        method_type->is_variadic = false;
+        method_type->has_prototype = true;
+
+        QualType const_owner = owner_type.with_const();
+        QualType this_param_type(
+            std::make_shared<PointerType>(const_owner));
+        QualType rhs_param_type(std::make_shared<ReferenceType>(
+            const_owner,
+            ReferenceKind::LValue));
+        method_type->parameters.push_back(this_param_type);
+        method_type->parameters.push_back(rhs_param_type);
+
+        std::vector<std::unique_ptr<Decl>> parameters;
+        parameters.push_back(collect_make<ParamDecl>(
+            this_param_type,
+            "__this",
+            std::make_shared<Symbol>(
+                "__this",
+                SymbolKind::VARIABLE,
+                this_param_type,
+                StorageClass::NONE),
+            StorageClass::NONE,
+            ctx.loc));
+        parameters.push_back(collect_make<ParamDecl>(
+            rhs_param_type,
+            "__rhs",
+            std::make_shared<Symbol>(
+                "__rhs",
+                SymbolKind::VARIABLE,
+                rhs_param_type,
+                StorageClass::NONE),
+            StorageClass::NONE,
+            ctx.loc));
+
+        auto method_decl = collect_make<CppMethodDecl>(ctx.loc);
+        method_decl->name = "operator==";
+        method_decl->type = method_type;
+        method_decl->parameters = std::move(parameters);
+        method_decl->storage_class = StorageClass::NONE;
+        method_decl->is_inline = true;
+        method_decl->is_deleted = false;
+        method_decl->is_defaulted = true;
+        method_decl->set_language_linkage(LanguageLinkage::CXX);
+
+        std::string method_prefix = ctx.tag;
+        ensure_namespace_qualifier_prefix(method_prefix);
+        set_func_decl_cxx_qualifier_prefix(method_decl.get(), method_prefix);
+        set_func_decl_owner_record_type(method_decl.get(), owner_type);
+
+        auto method_sym = mutable_self->collect_declare_function_symbol(
+            method_decl->name,
+            QualType(method_decl->type),
+            method_decl->storage_class,
+            method_decl->is_constexpr,
+            method_decl->is_consteval,
+            method_decl->is_inline,
+            true,
+            ctx.loc,
+            method_decl->get_language_linkage(),
+            true,
+            method_decl->is_deleted,
+            method_decl->is_defaulted);
+        if (method_sym) {
+            set_symbol_cxx_qualifier_prefix(method_sym.get(), method_prefix);
+            set_symbol_owner_record_type(method_sym.get(), owner_type);
+            method_sym->function_definition = method_decl.get();
+        }
+
+        if (ast_ctx_) {
+            CppMemberDeclInfo member_info;
+            member_info.declared_access =
+                static_cast<uint8_t>(
+                    equality_access == RecordMemberAccess::Private
+                        ? CppAccessSpecifier::Private
+                        : equality_access == RecordMemberAccess::Protected
+                              ? CppAccessSpecifier::Protected
+                              : CppAccessSpecifier::Public);
+            member_info.is_method = true;
+            member_info.is_static = false;
+            member_info.is_constructor = false;
+            member_info.is_destructor = false;
+            ast_ctx_->set_cpp_member_decl_info(method_decl->node_id, member_info);
+        }
+
+        auto* retained_method_decl = static_cast<CppMethodDecl*>(
+            retain_synthesized_decl(std::move(method_decl)));
+
+        RecordSemanticState::Method method;
+        method.name = "operator==";
+        method.type = QualType(method_type);
+        method.declared_access = equality_access;
+        method.is_implicit = true;
+        method.is_static = false;
+        method.is_deleted = false;
+        method.is_defaulted = true;
+        method.is_explicit = false;
+        method.is_virtual = false;
+        method.is_override = false;
+        method.is_final = false;
+        method.is_pure = false;
+        method.is_conversion_function = false;
+        method.conversion_target_type = nullptr;
+        method.decl = retained_method_decl;
+        method.symbol = std::move(method_sym);
+        ctx.methods.push_back(std::move(method));
+    };
+
+    synthesize_implicit_equality_for_defaulted_spaceship();
+
     if (!ctx.semantic_state.definition_data.has_user_declared_constructor) {
         bool implicit_default_ctor_deleted = false;
 
@@ -2814,6 +3381,11 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
                        ctx.semantic_decl,
                        owner_state)) {
             materialized = true;
+        } else if (collect_materialize_defaulted_comparison_body(
+                       method_decl,
+                       ctx.semantic_decl,
+                       owner_state)) {
+            materialized = true;
         }
         if (!materialized) {
             continue;
@@ -2834,6 +3406,41 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
             cached_method.is_deleted = method_decl->is_deleted;
             if (method.symbol) {
                 cached_method.symbol = method.symbol;
+            }
+            break;
+        }
+        publish_owner_state();
+    }
+
+    for (auto& friend_function : ctx.friend_functions) {
+        auto* function_decl =
+            const_cast<FuncDecl*>(friend_function.function_decl);
+        if (!function_decl || !function_decl->is_defaulted) {
+            continue;
+        }
+
+        const auto* friend_decl = friend_function.decl;
+        if (!collect_materialize_defaulted_comparison_body(
+                function_decl,
+                friend_decl,
+                ctx.semantic_decl,
+                owner_state)) {
+            continue;
+        }
+
+        if (friend_function.symbol) {
+            friend_function.symbol->is_deleted = function_decl->is_deleted;
+            friend_function.symbol->is_defined =
+                function_decl->body != nullptr || function_decl->is_deleted;
+            friend_function.symbol->function_definition = function_decl;
+        }
+
+        for (auto& cached_friend : owner_state.friend_functions) {
+            if (cached_friend.function_decl != function_decl) {
+                continue;
+            }
+            if (friend_function.symbol) {
+                cached_friend.symbol = friend_function.symbol;
             }
             break;
         }
@@ -3453,6 +4060,558 @@ bool Collect::collect_materialize_defaulted_move_assignment_body(
         owner_record_decl,
         owner_state,
         true);
+}
+
+bool Collect::collect_materialize_defaulted_comparison_body(
+    FuncDecl* function_decl,
+    const FriendDecl* friend_decl,
+    const ObjectDecl* owner_record_decl,
+    const RecordSemanticState& owner_state) {
+    if (!function_decl || !owner_record_decl || !function_decl->is_defaulted ||
+        !is_defaulted_comparison_operator_name(function_decl->name)) {
+        return false;
+    }
+    if (function_decl->body || function_decl->is_deleted) {
+        return true;
+    }
+
+    auto function_type = QualType(function_decl->type).as_shared<FunctionType>();
+    if (!function_type) {
+        return false;
+    }
+
+    BinOpTypes comparison_op =
+        defaulted_comparison_binop_from_name(function_decl->name);
+    QualType return_type = function_type->ret_type;
+    QualType owner_type(owner_record_decl->get_record_type());
+    bool is_member = isa<CppMethodDecl>(function_decl);
+    const size_t lhs_param_index = is_member ? 0 : 0;
+    const size_t rhs_param_index = is_member ? 1 : 1;
+    auto* lhs_param = function_decl->parameters.size() > lhs_param_index
+        ? dyn_cast<ParamDecl>(function_decl->parameters[lhs_param_index].get())
+        : nullptr;
+    auto* rhs_param = function_decl->parameters.size() > rhs_param_index
+        ? dyn_cast<ParamDecl>(function_decl->parameters[rhs_param_index].get())
+        : nullptr;
+    if ((is_member && !rhs_param) || (!is_member && (!lhs_param || !rhs_param))) {
+        function_decl->is_deleted = true;
+        function_decl->body.reset();
+        return true;
+    }
+
+    auto mark_deleted = [&]() {
+        function_decl->is_deleted = true;
+        function_decl->body.reset();
+    };
+
+    if (owner_record_decl->get_record_type() &&
+        owner_record_decl->get_record_type()->is_union) {
+        mark_deleted();
+        return true;
+    }
+    if (!owner_state.is_incomplete) {
+        for (const auto& base : owner_state.bases) {
+            if (!find_direct_base_assignment_offset(owner_state, base).has_value()) {
+                mark_deleted();
+                return true;
+            }
+        }
+        for (const auto& field : owner_state.fields) {
+            if (field.is_base_subobject || field.is_virtual_base_storage) {
+                continue;
+            }
+            if (field.name.empty() ||
+                type_is_reference_or_contains_unknown_array(
+                    field.type,
+                    ast_ctx_.get())) {
+                mark_deleted();
+                return true;
+            }
+        }
+    }
+
+    std::vector<std::unique_ptr<Stmt>> body_statements;
+    auto bool_type = get_builtin_bool();
+    auto char_type = get_builtin_char();
+    auto ulong_type = get_builtin_ulong();
+    bool build_ok = with_function_definition_state(
+        function_decl,
+        [&]() {
+            auto make_member_this_expr = [&]() -> std::unique_ptr<Expr> {
+                uint8_t pointee_quals = QUAL_NONE;
+                if (!function_type->parameters.empty()) {
+                    if (auto this_ptr =
+                            function_type->parameters.front()
+                                .as_shared<PointerType>()) {
+                        pointee_quals =
+                            this_ptr->pointed_type.get_qualifiers();
+                    }
+                }
+                QualType qualified_owner(
+                    owner_type.get_shared(),
+                    static_cast<uint8_t>(
+                        owner_type.get_qualifiers() | pointee_quals));
+                QualType this_type(
+                    std::make_shared<PointerType>(qualified_owner));
+                return collect_make<CppThisExpr>(
+                    this_type,
+                    function_decl->location);
+            };
+
+            auto make_member_this_deref = [&]() -> std::unique_ptr<Expr> {
+                auto this_expr = make_member_this_expr();
+                if (!this_expr) {
+                    return nullptr;
+                }
+                return collect_unary_operation(
+                    UnaryOpTypes::DEREFERENCE,
+                    std::move(this_expr),
+                    function_decl->location);
+            };
+
+            auto make_lhs_ref = [&]() -> std::unique_ptr<Expr> {
+                if (is_member) {
+                    return make_member_this_deref();
+                }
+                return make_param_reference_expr(
+                    *this,
+                    lhs_param,
+                    "__lhs",
+                    function_decl->location);
+            };
+            auto make_rhs_ref = [&]() -> std::unique_ptr<Expr> {
+                return make_param_reference_expr(
+                    *this,
+                    rhs_param,
+                    "__rhs",
+                    function_decl->location);
+            };
+            auto make_lhs_pointer = [&]() -> std::unique_ptr<Expr> {
+                if (is_member) {
+                    return make_member_this_expr();
+                }
+                auto lhs_ref = make_lhs_ref();
+                if (!lhs_ref) {
+                    return nullptr;
+                }
+                return collect_unary_operation(
+                    UnaryOpTypes::ADDRESS_OF,
+                    std::move(lhs_ref),
+                    function_decl->location);
+            };
+            auto make_rhs_pointer = [&]() -> std::unique_ptr<Expr> {
+                auto rhs_ref = make_rhs_ref();
+                if (!rhs_ref) {
+                    return nullptr;
+                }
+                return collect_unary_operation(
+                    UnaryOpTypes::ADDRESS_OF,
+                    std::move(rhs_ref),
+                    function_decl->location);
+            };
+
+            auto emit_equality_subobjects = [&]() -> bool {
+                for (const auto& base : owner_state.bases) {
+                    auto maybe_offset =
+                        find_direct_base_assignment_offset(owner_state, base);
+                    if (!maybe_offset.has_value()) {
+                        return false;
+                    }
+                    auto lhs_builder =
+                        [this,
+                         &make_lhs_pointer,
+                         function_decl,
+                         char_type,
+                         ulong_type,
+                         base_type = base.type,
+                         offset = *maybe_offset]() {
+                        return make_base_subobject_expr(
+                            *this,
+                            ast_ctx_.get(),
+                            char_type,
+                            ulong_type,
+                            make_lhs_pointer(),
+                            base_type,
+                            offset,
+                            function_decl->location);
+                    };
+                    auto rhs_builder =
+                        [this,
+                         &make_rhs_pointer,
+                         function_decl,
+                         char_type,
+                         ulong_type,
+                         base_type = base.type,
+                         offset = *maybe_offset]() {
+                        return make_base_subobject_expr(
+                            *this,
+                            ast_ctx_.get(),
+                            char_type,
+                            ulong_type,
+                            make_rhs_pointer(),
+                            base_type,
+                            offset,
+                            function_decl->location);
+                    };
+                    if (!emit_defaulted_equality_statements_for_type(
+                            *this,
+                            ast_ctx_.get(),
+                            bool_type,
+                            ulong_type,
+                            base.type,
+                            lhs_builder,
+                            rhs_builder,
+                            return_type,
+                            body_statements,
+                            function_decl->location)) {
+                        return false;
+                    }
+                }
+                for (const auto& field : owner_state.fields) {
+                    if (field.is_base_subobject ||
+                        field.is_virtual_base_storage) {
+                        continue;
+                    }
+                    if (field.name.empty()) {
+                        return false;
+                    }
+                    auto lhs_builder =
+                        [this, &make_lhs_ref, function_decl, field_name = field.name]() {
+                        return collect_member_expression(
+                            make_lhs_ref(),
+                            field_name,
+                            false,
+                            function_decl->location);
+                    };
+                    auto rhs_builder =
+                        [this, &make_rhs_ref, function_decl, field_name = field.name]() {
+                        return collect_member_expression(
+                            make_rhs_ref(),
+                            field_name,
+                            false,
+                            function_decl->location);
+                    };
+                    if (!emit_defaulted_equality_statements_for_type(
+                            *this,
+                            ast_ctx_.get(),
+                            bool_type,
+                            ulong_type,
+                            field.type,
+                            lhs_builder,
+                            rhs_builder,
+                            return_type,
+                            body_statements,
+                            function_decl->location)) {
+                        return false;
+                    }
+                }
+                auto true_expr =
+                    collect_integer_literal("1", bool_type, function_decl->location);
+                auto return_true = collect_return_statement(
+                    std::move(true_expr),
+                    function_decl->location,
+                    return_type);
+                if (!return_true) {
+                    return false;
+                }
+                body_statements.push_back(std::move(return_true));
+                return true;
+            };
+
+            auto make_secondary_return = [&]() -> bool {
+                std::unique_ptr<Expr> result;
+                if (comparison_op == BinOpTypes::NOT_EQUAL) {
+                    auto equality = collect_binary_operation(
+                        make_lhs_ref(),
+                        make_rhs_ref(),
+                        BinOpTypes::EQUAL,
+                        function_decl->location);
+                    if (!equality || isa<ErrorExpr>(equality.get())) {
+                        return false;
+                    }
+                    result = collect_unary_operation(
+                        UnaryOpTypes::LOGICAL_NOT,
+                        std::move(equality),
+                        function_decl->location);
+                } else {
+                    auto three_way = collect_binary_operation(
+                        make_lhs_ref(),
+                        make_rhs_ref(),
+                        BinOpTypes::THREE_WAY_COMPARE,
+                        function_decl->location);
+                    if (!three_way || isa<ErrorExpr>(three_way.get())) {
+                        return false;
+                    }
+                    auto zero = collect_integer_literal(
+                        "0",
+                        get_builtin_int(),
+                        function_decl->location);
+                    result = collect_binary_operation(
+                        std::move(three_way),
+                        std::move(zero),
+                        comparison_op,
+                        function_decl->location);
+                }
+                if (!result || isa<ErrorExpr>(result.get())) {
+                    return false;
+                }
+                auto return_stmt = collect_return_statement(
+                    std::move(result),
+                    function_decl->location,
+                    return_type);
+                if (!return_stmt) {
+                    return false;
+                }
+                body_statements.push_back(std::move(return_stmt));
+                return true;
+            };
+
+            auto emit_three_way_subobjects = [&]() -> bool {
+                std::vector<DefaultedThreeWayStep> steps;
+                size_t temp_index = 0;
+                for (const auto& base : owner_state.bases) {
+                    auto maybe_offset =
+                        find_direct_base_assignment_offset(owner_state, base);
+                    if (!maybe_offset.has_value()) {
+                        return false;
+                    }
+                    auto lhs_builder =
+                        [this,
+                         &make_lhs_pointer,
+                         function_decl,
+                         char_type,
+                         ulong_type,
+                         base_type = base.type,
+                         offset = *maybe_offset]() {
+                        return make_base_subobject_expr(
+                            *this,
+                            ast_ctx_.get(),
+                            char_type,
+                            ulong_type,
+                            make_lhs_pointer(),
+                            base_type,
+                            offset,
+                            function_decl->location);
+                    };
+                    auto rhs_builder =
+                        [this,
+                         &make_rhs_pointer,
+                         function_decl,
+                         char_type,
+                         ulong_type,
+                         base_type = base.type,
+                         offset = *maybe_offset]() {
+                        return make_base_subobject_expr(
+                            *this,
+                            ast_ctx_.get(),
+                            char_type,
+                            ulong_type,
+                            make_rhs_pointer(),
+                            base_type,
+                            offset,
+                            function_decl->location);
+                    };
+                    if (!collect_defaulted_three_way_steps_for_type(
+                            *this,
+                            ast_ctx_.get(),
+                            ulong_type,
+                            base.type,
+                            lhs_builder,
+                            rhs_builder,
+                            steps,
+                            temp_index,
+                            function_decl->location)) {
+                        return false;
+                    }
+                }
+                for (const auto& field : owner_state.fields) {
+                    if (field.is_base_subobject ||
+                        field.is_virtual_base_storage) {
+                        continue;
+                    }
+                    if (field.name.empty()) {
+                        return false;
+                    }
+                    auto lhs_builder =
+                        [this, &make_lhs_ref, function_decl, field_name = field.name]() {
+                        return collect_member_expression(
+                            make_lhs_ref(),
+                            field_name,
+                            false,
+                            function_decl->location);
+                    };
+                    auto rhs_builder =
+                        [this, &make_rhs_ref, function_decl, field_name = field.name]() {
+                        return collect_member_expression(
+                            make_rhs_ref(),
+                            field_name,
+                            false,
+                            function_decl->location);
+                    };
+                    if (!collect_defaulted_three_way_steps_for_type(
+                            *this,
+                            ast_ctx_.get(),
+                            ulong_type,
+                            field.type,
+                            lhs_builder,
+                            rhs_builder,
+                            steps,
+                            temp_index,
+                            function_decl->location)) {
+                        return false;
+                    }
+                }
+
+                bool has_auto_return =
+                    return_type &&
+                    auto_type_utils::has_cxx_auto_type(return_type.get_shared());
+                DefaultedCompareCategoryRank result_rank =
+                    DefaultedCompareCategoryRank::Strong;
+                if (has_auto_return) {
+                    for (const auto& step : steps) {
+                        if (static_cast<uint8_t>(step.category_rank) >
+                            static_cast<uint8_t>(result_rank)) {
+                            result_rank = step.category_rank;
+                        }
+                    }
+                } else {
+                    auto declared_rank =
+                        classify_compare_category_for_defaulted(
+                            *this,
+                            return_type,
+                            function_decl->location);
+                    if (!declared_rank.has_value()) {
+                        report_error(
+                            "defaulted 'operator<=>' requires an auto or comparison-category return type",
+                            function_decl->location);
+                        return false;
+                    }
+                    result_rank = *declared_rank;
+                }
+
+                auto result_category =
+                    lookup_compare_category_for_defaulted(
+                        *this,
+                        result_rank,
+                        function_decl->location,
+                        true);
+                if (!result_category) {
+                    report_error(
+                        "defaulted 'operator<=>' requires 'std::" +
+                            std::string(defaulted_compare_category_name(
+                                result_rank)) +
+                            "'; include <compare>",
+                        function_decl->location);
+                    return false;
+                }
+                QualType result_type = result_category->type;
+
+                auto make_temp_ref = [&](const DefaultedThreeWayStep& step)
+                    -> std::unique_ptr<Expr> {
+                    return collect_make<VarRef>(
+                        step.temp_symbol,
+                        function_decl->location);
+                };
+
+                for (auto& step : steps) {
+                    if (!step.decl_stmt || !step.temp_symbol) {
+                        return false;
+                    }
+                    body_statements.push_back(std::move(step.decl_stmt));
+
+                    auto zero = collect_integer_literal(
+                        "0",
+                        get_builtin_int(),
+                        function_decl->location);
+                    auto nonzero = collect_binary_operation(
+                        make_temp_ref(step),
+                        std::move(zero),
+                        BinOpTypes::NOT_EQUAL,
+                        function_decl->location);
+                    if (!nonzero || isa<ErrorExpr>(nonzero.get())) {
+                        return false;
+                    }
+
+                    auto return_expr = make_temp_ref(step);
+                    if (!step.temp_type.equals_unqualified(result_type)) {
+                        return_expr = collect_explicit_cast(
+                            std::move(return_expr),
+                            result_type,
+                            function_decl->location);
+                    }
+                    if (!return_expr || isa<ErrorExpr>(return_expr.get())) {
+                        return false;
+                    }
+                    auto return_stmt = collect_return_statement(
+                        std::move(return_expr),
+                        function_decl->location,
+                        result_type);
+                    if (!return_stmt) {
+                        return false;
+                    }
+                    std::vector<std::unique_ptr<Stmt>> then_statements;
+                    then_statements.push_back(std::move(return_stmt));
+                    auto then_stmt = collect_compound_statement(
+                        std::move(then_statements),
+                        nullptr,
+                        function_decl->location);
+                    body_statements.push_back(
+                        collect_if_statement(
+                            std::move(nonzero),
+                            std::move(then_stmt),
+                            nullptr,
+                            function_decl->location));
+                }
+
+                auto equivalent_expr = collect_make<VarRef>(
+                    result_category->equivalent,
+                    function_decl->location);
+                auto final_return = collect_return_statement(
+                    std::move(equivalent_expr),
+                    function_decl->location,
+                    result_type);
+                if (!final_return) {
+                    return false;
+                }
+                body_statements.push_back(std::move(final_return));
+                return true;
+            };
+
+            if (comparison_op == BinOpTypes::EQUAL) {
+                return emit_equality_subobjects();
+            }
+            if (comparison_op == BinOpTypes::THREE_WAY_COMPARE) {
+                return emit_three_way_subobjects();
+            }
+            return make_secondary_return();
+        },
+        friend_decl && friend_decl->granting_record_type
+            ? friend_decl->granting_record_type
+            : QualType(owner_record_decl->get_record_type()));
+
+    if (!build_ok) {
+        mark_deleted();
+        return true;
+    }
+
+    auto body_stmt = collect_compound_statement(
+        std::move(body_statements),
+        function_decl->scope,
+        function_decl->location);
+    function_decl->body = std::unique_ptr<CompoundStmt>(
+        dyn_cast<CompoundStmt>(body_stmt.release()));
+    return function_decl->body != nullptr;
+}
+
+bool Collect::collect_materialize_defaulted_comparison_body(
+    CppMethodDecl* method_decl,
+    const ObjectDecl* owner_record_decl,
+    const RecordSemanticState& owner_state) {
+    return collect_materialize_defaulted_comparison_body(
+        static_cast<FuncDecl*>(method_decl),
+        nullptr,
+        owner_record_decl,
+        owner_state);
 }
 
 void Collect::collect_record_resolve_virtual_dispatch(

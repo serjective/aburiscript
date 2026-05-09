@@ -232,7 +232,8 @@ public:
 
     bool with_function_definition_state(
         const FuncDecl* function_decl,
-        const std::function<bool()>& action) ;
+        const std::function<bool()>& action,
+        QualType friend_access_type = QualType()) ;
 
     bool resolve_dependent_expr_after_substitution(
         std::unique_ptr<Expr>& expr,
@@ -1187,6 +1188,15 @@ public:
         const RecordSemanticState& owner_state);
     bool collect_materialize_defaulted_move_assignment_body(
         CppMethodDecl* method_decl,
+        const ObjectDecl* owner_record_decl,
+        const RecordSemanticState& owner_state);
+    bool collect_materialize_defaulted_comparison_body(
+        CppMethodDecl* method_decl,
+        const ObjectDecl* owner_record_decl,
+        const RecordSemanticState& owner_state);
+    bool collect_materialize_defaulted_comparison_body(
+        FuncDecl* function_decl,
+        const FriendDecl* friend_decl,
         const ObjectDecl* owner_record_decl,
         const RecordSemanticState& owner_state);
     void collect_record_resolve_virtual_dispatch(

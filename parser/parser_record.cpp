@@ -88,6 +88,149 @@ bool is_defaultable_special_member_method(
     return canonical_parameter.equals_unqualified(canonical_owner);
 }
 
+bool is_defaulted_comparison_operator_name(const std::string& name) {
+    return name == "operator==" ||
+           name == "operator!=" ||
+           name == "operator<" ||
+           name == "operator<=" ||
+           name == "operator>" ||
+           name == "operator>=" ||
+           name == "operator<=>";
+}
+
+bool is_defaulted_secondary_comparison_operator_name(const std::string& name) {
+    return name == "operator!=" ||
+           name == "operator<" ||
+           name == "operator<=" ||
+           name == "operator>" ||
+           name == "operator>=";
+}
+
+bool defaulted_comparison_parameter_matches_owner(
+    QualType parameter_type,
+    QualType owner_type,
+    const ASTContext* ast_ctx) {
+    if (!parameter_type || !owner_type || !ast_ctx) {
+        return false;
+    }
+    QualType canonical_parameter =
+        remove_reference(parameter_type, ast_ctx).without_qualifiers();
+    QualType canonical_owner =
+        remove_reference(owner_type, ast_ctx).without_qualifiers();
+    return canonical_parameter.equals_unqualified(canonical_owner);
+}
+
+bool defaulted_comparison_return_type_is_valid(
+    const std::string& name,
+    QualType return_type,
+    const ASTContext* ast_ctx) {
+    if (!return_type || !ast_ctx) {
+        return false;
+    }
+    QualType canonical_return = desugar_type(return_type, ast_ctx);
+    auto auto_return = canonical_return.as_shared<AutoType>();
+    if (name == "operator<=>") {
+        return auto_return || !return_type->isVoid();
+    }
+    if (auto_return) {
+        return false;
+    }
+    if (is_defaulted_secondary_comparison_operator_name(name) ||
+        name == "operator==") {
+        auto builtin = canonical_return.as_shared<BuiltinType>();
+        return builtin && builtin->builtin_kind == BuiltinTypes::Bool;
+    }
+    return false;
+}
+
+bool is_defaultable_comparison_method(
+    const CppMethodDecl* method_decl,
+    QualType owner_type,
+    const ASTContext* ast_ctx) {
+    if (!method_decl || !owner_type || !ast_ctx ||
+        !is_defaulted_comparison_operator_name(method_decl->name) ||
+        method_decl->storage_class == StorageClass::STATIC) {
+        return false;
+    }
+    auto function_type = QualType(method_decl->type).as_shared<FunctionType>();
+    if (!function_type ||
+        !defaulted_comparison_return_type_is_valid(
+            method_decl->name,
+            function_type->ret_type,
+            ast_ctx)) {
+        return false;
+    }
+    size_t user_param_start = 0;
+    if (!method_decl->parameters.empty()) {
+        auto* first_param =
+            dyn_cast<ParamDecl>(method_decl->parameters.front().get());
+        if (first_param && first_param->get_name() == "this") {
+            user_param_start = 1;
+        }
+    }
+    if (method_decl->parameters.size() != user_param_start + 1 ||
+        function_type->parameters.size() != method_decl->parameters.size()) {
+        return false;
+    }
+    if (user_param_start != 0) {
+        auto this_param =
+            function_type->parameters.front().as_shared<PointerType>();
+        if (!this_param ||
+            !defaulted_comparison_parameter_matches_owner(
+                this_param->pointed_type,
+                owner_type,
+                ast_ctx)) {
+            return false;
+        }
+    }
+    auto* parameter_decl =
+        dyn_cast<ParamDecl>(method_decl->parameters[user_param_start].get());
+    return parameter_decl &&
+           defaulted_comparison_parameter_matches_owner(
+               parameter_decl->type,
+               owner_type,
+               ast_ctx);
+}
+
+bool is_defaultable_comparison_function(
+    const FuncDecl* function_decl,
+    QualType owner_type,
+    const ASTContext* ast_ctx) {
+    if (!function_decl || !owner_type || !ast_ctx ||
+        !is_defaulted_comparison_operator_name(function_decl->name)) {
+        return false;
+    }
+    auto function_type = QualType(function_decl->type).as_shared<FunctionType>();
+    if (!function_type ||
+        function_type->parameters.size() != 2 ||
+        function_decl->parameters.size() != 2 ||
+        !defaulted_comparison_return_type_is_valid(
+            function_decl->name,
+            function_type->ret_type,
+            ast_ctx)) {
+        return false;
+    }
+    for (const auto& parameter : function_decl->parameters) {
+        auto* parameter_decl = dyn_cast<ParamDecl>(parameter.get());
+        if (!parameter_decl ||
+            !defaulted_comparison_parameter_matches_owner(
+                parameter_decl->type,
+                owner_type,
+                ast_ctx)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool is_defaultable_method(
+    const CppMethodDecl* method_decl,
+    QualType owner_type,
+    const ASTContext* ast_ctx) {
+    return is_defaultable_special_member_method(method_decl, owner_type, ast_ctx) ||
+           is_defaultable_comparison_method(method_decl, owner_type, ast_ctx);
+}
+
 std::shared_ptr<CType> choose_default_enum_underlying(
     TypeContext* type_ctx, int64_t min_value, int64_t max_value, bool prefer_smallest_width = false) {
     if (!type_ctx) {
@@ -3147,12 +3290,12 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         }
 
         if (out_of_line_method->is_defaulted &&
-            !is_defaultable_special_member_method(
+            !is_defaultable_method(
                 out_of_line_method.get(),
                 QualType(qualified_declarator.owner_record_decl->get_record_type()),
                 ast_ctx.get())) {
             error_custloc(
-                "only copy and move assignment operators may be defaulted here",
+                "only comparison operators and copy/move assignment operators may be defaulted here",
                     qualified_declarator.loc);
         }
 
@@ -4351,6 +4494,16 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     CppFriendKind::Function,
                     t.loc);
                 auto* friend_function_ptr = friend_decl->function_decl();
+                if (friend_function_ptr &&
+                    friend_function_ptr->is_defaulted &&
+                    !is_defaultable_comparison_function(
+                        friend_function_ptr,
+                        granting_record_type,
+                        ast_ctx.get())) {
+                    error_custloc(
+                        "only comparison friend functions may be defaulted here",
+                        friend_function_ptr->location);
+                }
 
                 bool friend_has_inline_body = false;
                 if (gentle_check(TokenType::LEFT_BRACE) ||
@@ -4858,12 +5011,12 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 }
             }
             if (cpp_method->is_defaulted &&
-                !is_defaultable_special_member_method(
+                !is_defaultable_method(
                     cpp_method.get(),
                     defaulted_method_owner_type,
                     ast_ctx.get())) {
                 error_custloc(
-                    "only copy and move assignment operators may be defaulted here",
+                    "only comparison operators and copy/move assignment operators may be defaulted here",
                     cpp_method->location);
             }
 

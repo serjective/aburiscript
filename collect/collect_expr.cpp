@@ -5850,6 +5850,50 @@ std::unique_ptr<Expr> Collect::collect_binary_operation(std::unique_ptr<Expr> lh
         return overloaded;
     }
 
+    auto is_cpp_class_operand = [&](QualType type) {
+        QualType canonical = remove_reference(type, ast_ctx_.get());
+        return canonical_type_kind(canonical, ast_ctx_.get()) ==
+            TypeKind::Object;
+    };
+    bool has_cpp_class_operand =
+        lang_opts_.is_cxx_mode() &&
+        ((lhs && is_cpp_class_operand(lhs->get_type())) ||
+         (rhs && is_cpp_class_operand(rhs->get_type())));
+    if (has_cpp_class_operand && bop == BinOpTypes::NOT_EQUAL) {
+        auto equality = collect_binary_operation(
+            std::move(lhs),
+            std::move(rhs),
+            BinOpTypes::EQUAL,
+            loc);
+        if (!equality) {
+            return nullptr;
+        }
+        return collect_unary_operation(
+            UnaryOpTypes::LOGICAL_NOT,
+            std::move(equality),
+            loc);
+    }
+    if (has_cpp_class_operand &&
+        (bop == BinOpTypes::LESS_THAN ||
+         bop == BinOpTypes::LESS_EQUAL_THAN ||
+         bop == BinOpTypes::GREATER_THAN ||
+         bop == BinOpTypes::GREATER_EQUAL_THAN)) {
+        auto three_way = collect_binary_operation(
+            std::move(lhs),
+            std::move(rhs),
+            BinOpTypes::THREE_WAY_COMPARE,
+            loc);
+        if (!three_way) {
+            return nullptr;
+        }
+        auto zero = collect_integer_literal("0", get_builtin_int(), loc);
+        return collect_binary_operation(
+            std::move(three_way),
+            std::move(zero),
+            bop,
+            loc);
+    }
+
     if (bop == BinOpTypes::THREE_WAY_COMPARE) {
         return collect_builtin_three_way_compare(
             std::move(lhs), std::move(rhs), loc);
