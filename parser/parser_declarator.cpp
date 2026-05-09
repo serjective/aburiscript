@@ -1403,9 +1403,123 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                 size_t lparen_token_idx = mgnt->get_token_idx();
                 mgnt->advance(); // consume '('
 
+                auto finish_as_direct_initializer_suffix = [&]() {
+                    mgnt->set_token_idx(lparen_token_idx);
+                    if (new_type == nullptr) {
+                        if (over_arch == nullptr) {
+                            new_type = old_type;
+                        } else {
+                            new_type = replace_placeholder(over_arch, old_type);
+                            over_arch = nullptr;
+                        }
+                    } else {
+                        if (old_type || !is_conversion_function) {
+                            new_type = replace_placeholder(new_type, old_type);
+                        }
+                    }
+                };
+
+                auto cxx_parameter_clause_parses = [&]() -> bool {
+                    Parser::RevertingTentativeParsingAction tentative(*pars);
+                    try {
+                        pars->collect_->collect_enter_scope(
+                            ScopeFlags::PrototypeScope);
+                        struct ProbeParamScopeGuard {
+                            Parser* parser;
+                            ~ProbeParamScopeGuard() {
+                                parser->collect_->collect_leave_scope();
+                            }
+                        } param_scope_guard{pars};
+
+                        if (mgnt->gentle_check_and_consume(TokenType::RIGHT_PAREN)) {
+                            return true;
+                        }
+
+                        bool saw_default_argument = false;
+                        while (true) {
+                            if (mgnt->gentle_check_and_consume(TokenType::ELLIPSIS)) {
+                                return mgnt->gentle_check_and_consume(
+                                    TokenType::RIGHT_PAREN);
+                            }
+
+                            auto dp = std::make_unique<DeclarationParser>(
+                                this->pars);
+                            dp->in_function_parameter = true;
+                            auto ctype = dp->parse_declaration();
+                            if (ctype == nullptr) {
+                                return false;
+                            }
+
+                            bool has_default_argument = false;
+                            if (mgnt->gentle_check(TokenType::ASSIGN)) {
+                                mgnt->advance(); // '='
+                                auto default_argument =
+                                    pars->parse_assignment_expression();
+                                if (!default_argument) {
+                                    return false;
+                                }
+                                has_default_argument = true;
+                            }
+
+                            if (has_default_argument) {
+                                saw_default_argument = true;
+                            } else if (saw_default_argument) {
+                                return false;
+                            }
+
+                            while (is_gnu_attribute_token(mgnt->current_token())) {
+                                pars->try_parse_attributes();
+                            }
+                            if (mgnt->gentle_check_and_consume(TokenType::COMMA)) {
+                                continue;
+                            }
+                            if (mgnt->gentle_check_and_consume(
+                                    TokenType::RIGHT_PAREN)) {
+                                return true;
+                            }
+                            return false;
+                        }
+                    } catch (const ParseError&) {
+                        return false;
+                    } catch (const FatalErrorLimitReached&) {
+                        throw;
+                    }
+                };
+
+                auto cxx_direct_initializer_clause_parses = [&]() -> bool {
+                    Parser::RevertingTentativeParsingAction tentative(*pars);
+                    try {
+                        if (mgnt->gentle_check_and_consume(TokenType::RIGHT_PAREN)) {
+                            return true;
+                        }
+
+                        while (true) {
+                            auto expr =
+                                pars
+                                    ->parse_assignment_expression_with_optional_pack_expansion();
+                            if (!expr) {
+                                return false;
+                            }
+                            if (mgnt->gentle_check_and_consume(TokenType::COMMA)) {
+                                if (mgnt->gentle_check(TokenType::RIGHT_PAREN)) {
+                                    return false;
+                                }
+                                continue;
+                            }
+                            return mgnt->gentle_check_and_consume(
+                                TokenType::RIGHT_PAREN);
+                        }
+                    } catch (const ParseError&) {
+                        return false;
+                    } catch (const FatalErrorLimitReached&) {
+                        throw;
+                    }
+                };
+
                 // C++ declaration disambiguation:
-                // if this suffix cannot start a parameter-declaration-clause,
-                // treat it as a direct-initializer and leave it for parser.cpp.
+                // if this suffix cannot parse as a parameter-declaration-clause,
+                // but can parse as an initializer expression list, leave it for
+                // object direct-initialization.
                 if (pars->is_cxx_mode_active() &&
                     !in_function_parameter &&
                     !name.empty()) {
@@ -1413,20 +1527,10 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                         mgnt->gentle_check(TokenType::RIGHT_PAREN) ||
                         mgnt->gentle_check(TokenType::ELLIPSIS) ||
                         pars->isTokenDeclarationSpec(mgnt->current_token());
-                    if (!looks_like_parameter_clause) {
-                        mgnt->set_token_idx(lparen_token_idx);
-                        if (new_type == nullptr) {
-                            if (over_arch == nullptr) {
-                                new_type = old_type;
-                            } else {
-                                new_type = replace_placeholder(over_arch, old_type);
-                                over_arch = nullptr;
-                            }
-                        } else {
-                            if (old_type || !is_conversion_function) {
-                                new_type = replace_placeholder(new_type, old_type);
-                            }
-                        }
+                    if (!looks_like_parameter_clause ||
+                        (!cxx_parameter_clause_parses() &&
+                         cxx_direct_initializer_clause_parses())) {
+                        finish_as_direct_initializer_suffix();
                         break;
                     }
                 }
