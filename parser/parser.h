@@ -630,6 +630,7 @@ private:
     TPResult try_parse_cpp_qualified_id();
     TPResult try_parse_cpp_qualified_declarator();
     CxxStmtDisambiguation classify_cxx_stmt_disambiguation();
+    bool starts_with_expression_only_cpp_function_style_cast_statement();
 
     // Attribute parsing
     std::vector<ParsedAttribute> try_parse_attributes();

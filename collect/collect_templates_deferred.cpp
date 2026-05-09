@@ -349,6 +349,28 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
             }
             return false;
         }
+        case StmtKind::CppValueInitExpr:
+            return type_depends_on_template_parameters(
+                static_cast<const CppValueInitExpr*>(stripped)->ctype,
+                ast_ctx);
+        case StmtKind::CppFunctionStyleCastExpr: {
+            const auto* cast =
+                static_cast<const CppFunctionStyleCastExpr*>(stripped);
+            if (type_depends_on_template_parameters(
+                    cast->target_type,
+                    ast_ctx)) {
+                return true;
+            }
+            for (const auto& arg : cast->args) {
+                if (expr_depends_on_template_parameters_impl(
+                        arg.get(),
+                        ast_ctx,
+                        active_variable_symbols)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         case StmtKind::MemberExpr:
             return expr_depends_on_template_parameters_impl(
                 static_cast<const MemberExpr*>(stripped)->base.get(),

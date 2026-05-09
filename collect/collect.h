@@ -578,6 +578,13 @@ public:
                                                 QualType target_type,
                                                 SrcLoc loc) ;
 
+    std::unique_ptr<Expr> collect_cpp_value_init_expression(QualType target_type,
+                                                            SrcLoc loc) const ;
+    std::unique_ptr<Expr> collect_cpp_function_style_cast(
+        QualType target_type,
+        std::vector<std::unique_ptr<Expr>> args,
+        SrcLoc loc) ;
+
     std::unique_ptr<Expr> collect_cpp_named_cast(CppNamedCastKind cast_kind,
                                                  std::unique_ptr<Expr> expr,
                                                  QualType target_type,

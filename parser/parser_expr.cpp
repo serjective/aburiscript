@@ -1742,21 +1742,22 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
                 parse_decl.str_class == StorageClass::NONE &&
                 gentle_check(TokenType::LEFT_PAREN)) {
                 QualType target_type(parsed_type, parse_decl.qualifiers);
-                if (canonical_type_kind(target_type, ast_ctx.get()) !=
-                    TypeKind::Object) {
-                    retain_type_specifier_decl_if_needed(parse_decl);
-                    advance(); // consume '('
-                    if (!gentle_check(TokenType::RIGHT_PAREN)) {
-                        TemplateArgumentGroupGuard group_guard(*this);
-                        auto expr = parse_expression();
-                        check_and_consume(TokenType::RIGHT_PAREN);
-                        tentative.commit();
-                        return collect_->collect_explicit_cast(
-                            std::move(expr),
-                            target_type,
-                            tok.loc);
-                    }
+                retain_type_specifier_decl_if_needed(parse_decl);
+                advance(); // consume '('
+                std::vector<std::unique_ptr<Expr>> args;
+                if (!gentle_check(TokenType::RIGHT_PAREN)) {
+                    TemplateArgumentGroupGuard group_guard(*this);
+                    do {
+                        auto arg = parse_call_argument_expression();
+                        args.push_back(std::move(arg));
+                    } while (gentle_check_and_consume(TokenType::COMMA));
                 }
+                check_and_consume(TokenType::RIGHT_PAREN);
+                tentative.commit();
+                return collect_->collect_cpp_function_style_cast(
+                    target_type,
+                    std::move(args),
+                    tok.loc);
             }
         } catch (const ParseError&) {
         } catch (const FatalErrorLimitReached&) {

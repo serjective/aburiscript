@@ -169,6 +169,14 @@ void store_explicit_expr_type(Expr* candidate, QualType realized_type) {
             static_cast<CppConstructExpr*>(candidate)->ctype =
                 realized_type;
             return;
+        case StmtKind::CppValueInitExpr:
+            static_cast<CppValueInitExpr*>(candidate)->ctype =
+                realized_type;
+            return;
+        case StmtKind::CppFunctionStyleCastExpr:
+            static_cast<CppFunctionStyleCastExpr*>(candidate)->target_type =
+                realized_type;
+            return;
         case StmtKind::CondExpr:
             static_cast<CondExpr*>(candidate)->type = realized_type;
             return;
@@ -2508,6 +2516,68 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 error_out)) {
             return false;
         }
+        return true;
+    }
+    if (auto* value_init = dyn_cast<CppValueInitExpr>(expr.get())) {
+        if (value_init->ctype &&
+            contains_deferred_semantic_type(value_init->ctype.get_shared())) {
+            QualType realized_type =
+                try_realize_deferred_semantic_type(value_init->ctype);
+            if (realized_type) {
+                value_init->ctype = realized_type;
+            }
+        }
+        return true;
+    }
+    if (auto* function_style_cast =
+            dyn_cast<CppFunctionStyleCastExpr>(expr.get())) {
+        if (function_style_cast->target_type &&
+            contains_deferred_semantic_type(
+                function_style_cast->target_type.get_shared())) {
+            QualType realized_type =
+                try_realize_deferred_semantic_type(
+                    function_style_cast->target_type);
+            if (realized_type) {
+                function_style_cast->target_type = realized_type;
+            }
+        }
+        for (auto& arg : function_style_cast->args) {
+            if (arg &&
+                !resolve_dependent_expr_after_substitution(
+                    arg,
+                    implicit_this_type,
+                    error_out)) {
+                return false;
+            }
+        }
+        if (type_depends_on_template_parameters(
+                function_style_cast->target_type,
+                ast_ctx_.get())) {
+            return true;
+        }
+        for (const auto& arg : function_style_cast->args) {
+            if (arg &&
+                (expression_depends_on_template_parameters(arg.get()) ||
+                 type_depends_on_template_parameters(
+                     arg->get_type(),
+                     ast_ctx_.get()))) {
+                return true;
+            }
+        }
+        auto owned_cast = std::unique_ptr<CppFunctionStyleCastExpr>(
+            static_cast<CppFunctionStyleCastExpr*>(expr.release()));
+        auto rewritten = collect_cpp_function_style_cast(
+            owned_cast->target_type,
+            std::move(owned_cast->args),
+            owned_cast->location);
+        if (!rewritten) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to resolve function-style cast after substitution";
+            }
+            return false;
+        }
+        expr = std::move(rewritten);
         return true;
     }
     if (auto* cond = dyn_cast<CondExpr>(expr.get())) {

@@ -258,6 +258,20 @@ bool refresh_constraint_expr_satisfaction(
             }
             return true;
         }
+        case StmtKind::CppValueInitExpr:
+            return true;
+        case StmtKind::CppFunctionStyleCastExpr: {
+            auto* cast = static_cast<CppFunctionStyleCastExpr*>(stripped);
+            for (const auto& arg : cast->args) {
+                if (!refresh_constraint_expr_satisfaction(
+                        collect,
+                        arg.get(),
+                        loc)) {
+                    return false;
+                }
+            }
+            return true;
+        }
         case StmtKind::MemberExpr:
             return refresh_constraint_expr_satisfaction(
                 collect,

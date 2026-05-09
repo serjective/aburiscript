@@ -64,6 +64,9 @@ constexpr auto kAllStmtKinds = std::to_array<StmtKind>({
     StmtKind::FoldExpr,
     StmtKind::CppMemberCallExpr,
     StmtKind::CppConstructExpr,
+    StmtKind::CppValueInitExpr,
+    StmtKind::CppFunctionStyleCastExpr,
+    StmtKind::CppImmediateInvocationExpr,
     StmtKind::CondExpr,
     StmtKind::UnaryOperation,
     StmtKind::BinaryOperation,
@@ -180,6 +183,9 @@ const char* stmt_kind_name(StmtKind kind) {
         case StmtKind::FoldExpr: return "FoldExpr";
         case StmtKind::CppMemberCallExpr: return "CppMemberCallExpr";
         case StmtKind::CppConstructExpr: return "CppConstructExpr";
+        case StmtKind::CppValueInitExpr: return "CppValueInitExpr";
+        case StmtKind::CppFunctionStyleCastExpr:
+            return "CppFunctionStyleCastExpr";
         case StmtKind::CppImmediateInvocationExpr:
             return "CppImmediateInvocationExpr";
         case StmtKind::CondExpr: return "CondExpr";
@@ -1100,6 +1106,20 @@ private:
                 auto* node = static_cast<const CppConstructExpr*>(stmt);
                 record_stmt<CppConstructExpr>(StmtKind::CppConstructExpr);
                 visit_symbol(node->ctor_sym);
+                ast_vector_backing_bytes_ += vector_backing_bytes(node->args);
+                for (const auto& arg : node->args) {
+                    visit_stmt(arg.get());
+                }
+                return;
+            }
+            case StmtKind::CppValueInitExpr:
+                record_stmt<CppValueInitExpr>(StmtKind::CppValueInitExpr);
+                return;
+            case StmtKind::CppFunctionStyleCastExpr: {
+                auto* node =
+                    static_cast<const CppFunctionStyleCastExpr*>(stmt);
+                record_stmt<CppFunctionStyleCastExpr>(
+                    StmtKind::CppFunctionStyleCastExpr);
                 ast_vector_backing_bytes_ += vector_backing_bytes(node->args);
                 for (const auto& arg : node->args) {
                     visit_stmt(arg.get());

@@ -560,6 +560,30 @@ bool collect_pack_expansion_shape_in_expr(
             }
             return true;
         }
+        case StmtKind::CppValueInitExpr:
+            return collect_pack_expansion_shape_in_type(
+                static_cast<const CppValueInitExpr*>(expr)->ctype,
+                parameters,
+                shape_out);
+        case StmtKind::CppFunctionStyleCastExpr: {
+            const auto* cast =
+                static_cast<const CppFunctionStyleCastExpr*>(expr);
+            if (!collect_pack_expansion_shape_in_type(
+                    cast->target_type,
+                    parameters,
+                    shape_out)) {
+                return false;
+            }
+            for (const auto& argument : cast->args) {
+                if (!collect_pack_expansion_shape_in_expr(
+                        argument.get(),
+                        parameters,
+                        shape_out)) {
+                    return false;
+                }
+            }
+            return true;
+        }
         case StmtKind::CppThrowExpr: {
             const auto* throw_expr = static_cast<const CppThrowExpr*>(expr);
             return collect_pack_expansion_shape_in_expr(

@@ -598,6 +598,18 @@ bool cpp_expression_is_known_noexcept(
         }
         return cpp_type_is_nothrow_destructible(construct->ctype, ast_ctx);
     }
+    if (dyn_cast<CppValueInitExpr>(stripped)) {
+        return true;
+    }
+    if (auto* function_style_cast =
+            dyn_cast<CppFunctionStyleCastExpr>(stripped)) {
+        for (const auto& arg : function_style_cast->args) {
+            if (!cpp_subexpression_is_known_noexcept(arg.get(), ast_ctx)) {
+                return false;
+            }
+        }
+        return true;
+    }
     if (auto* pseudo_dtor = dyn_cast<CppPseudoDestructorExpr>(stripped)) {
         if (pseudo_dtor->destructor_sym &&
             function_type_is_non_throwing(

@@ -643,6 +643,10 @@ llvm::Value* ASTToLLVM::lower_complex_cast(ImplicitCast *expr) {
 }
 
 llvm::Value* ASTToLLVM::convert_explicit_cast(ExplicitCast *expr) {
+    if (!expr->expr) {
+        error("convert_explicit_cast(): cast expression missing operand", expr->location);
+        return nullptr;
+    }
     if (canonical_type_kind(expr->ctype, ast_ctx.get()) == TypeKind::Reference) {
         auto ref_type =
             desugar_type(expr->ctype, ast_ctx.get()).as_shared<ReferenceType>();

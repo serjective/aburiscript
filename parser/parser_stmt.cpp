@@ -23,6 +23,162 @@ struct LocalLabelScopeGuard {
     }
 };
 
+bool can_start_cxx_function_style_cast_statement(TokenType token_type) {
+    switch (token_type) {
+        case TokenType::IDENTIFIER:
+        case TokenType::VOID:
+        case TokenType::CHAR:
+        case TokenType::SHORT:
+        case TokenType::INT:
+        case TokenType::LONG:
+        case TokenType::FLOAT:
+        case TokenType::DOUBLE:
+        case TokenType::SIGNED:
+        case TokenType::UNSIGNED:
+        case TokenType::BOOL:
+        case TokenType::WCHAR_T:
+        case TokenType::CHAR16_T:
+        case TokenType::CHAR32_T:
+        case TokenType::INT128:
+        case TokenType::UINT128_T:
+        case TokenType::CONST:
+        case TokenType::VOLATILE:
+        case TokenType::TYPENAME:
+        case TokenType::DECLTYPE_KW:
+        case TokenType::TYPEOF_KW:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool is_cxx_function_style_builtin_type_token(TokenType token_type) {
+    switch (token_type) {
+        case TokenType::VOID:
+        case TokenType::CHAR:
+        case TokenType::SHORT:
+        case TokenType::INT:
+        case TokenType::LONG:
+        case TokenType::FLOAT:
+        case TokenType::DOUBLE:
+        case TokenType::SIGNED:
+        case TokenType::UNSIGNED:
+        case TokenType::BOOL:
+        case TokenType::WCHAR_T:
+        case TokenType::CHAR16_T:
+        case TokenType::CHAR32_T:
+        case TokenType::INT128:
+        case TokenType::UINT128_T:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool is_cxx_function_style_type_qualifier(TokenType token_type) {
+    switch (token_type) {
+        case TokenType::CONST:
+        case TokenType::VOLATILE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool can_start_cxx_parenthesized_declarator(TokenType token_type) {
+    switch (token_type) {
+        case TokenType::IDENTIFIER:
+        case TokenType::MULTIPLY:
+        case TokenType::BITWISE_AND:
+        case TokenType::LOGICAL_AND:
+        case TokenType::LEFT_PAREN:
+        case TokenType::SCOPE_RESOLUTION:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool is_cxx_expression_only_in_parenthesized_declarator(TokenType token_type) {
+    switch (token_type) {
+        case TokenType::INTEGER_CONST:
+        case TokenType::UNSIGNED_INTEGER_CONST:
+        case TokenType::LONG_CONST:
+        case TokenType::UNSIGNED_LONG_CONST:
+        case TokenType::LONG_LONG_CONST:
+        case TokenType::UNSIGNED_LONG_LONG_CONST:
+        case TokenType::FLOAT_CONST:
+        case TokenType::DOUBLE_CONST:
+        case TokenType::LONG_DOUBLE_CONST:
+        case TokenType::CHAR_LITERAL:
+        case TokenType::STRING_LITERAL:
+        case TokenType::TRUE_KW:
+        case TokenType::FALSE_KW:
+        case TokenType::NULLPTR_KW:
+        case TokenType::THIS_KW:
+        case TokenType::SIZEOF:
+        case TokenType::ALIGNOF:
+        case TokenType::NEW:
+        case TokenType::DELETE:
+        case TokenType::THROW_KW:
+        case TokenType::INCREMENT:
+        case TokenType::DECREMENT:
+        case TokenType::PLUS:
+        case TokenType::NEGATE:
+        case TokenType::LOGICAL_NOT:
+        case TokenType::BITWISE_NOT:
+        case TokenType::DIVIDE:
+        case TokenType::MODULO:
+        case TokenType::BITWISE_OR:
+        case TokenType::BITWISE_XOR:
+        case TokenType::LOGICAL_OR:
+        case TokenType::LEFT_SHIFT:
+        case TokenType::RIGHT_SHIFT:
+        case TokenType::LESS_THAN:
+        case TokenType::LESS_EQUAL_THAN:
+        case TokenType::GREATER_THAN:
+        case TokenType::GREATER_EQUAL_THAN:
+        case TokenType::THREE_WAY_COMPARE:
+        case TokenType::EQUAL_TO:
+        case TokenType::NOT_EQUAL:
+        case TokenType::QUESTION:
+        case TokenType::ASSIGN:
+        case TokenType::ASSIGN_MUL:
+        case TokenType::ASSIGN_DIV:
+        case TokenType::ASSIGN_MOD:
+        case TokenType::ASSIGN_ADD:
+        case TokenType::ASSIGN_SUB:
+        case TokenType::ASSIGN_LSHIFT:
+        case TokenType::ASSIGN_RSHIFT:
+        case TokenType::ASSIGN_AND:
+        case TokenType::ASSIGN_XOR:
+        case TokenType::ASSIGN_OR:
+        case TokenType::DOT:
+        case TokenType::ARROW:
+        case TokenType::DOT_STAR:
+        case TokenType::ARROW_STAR:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool can_follow_cxx_parenthesized_declarator(TokenType token_type) {
+    switch (token_type) {
+        case TokenType::SEMICOLON:
+        case TokenType::COMMA:
+        case TokenType::ASSIGN:
+        case TokenType::LEFT_BRACE:
+        case TokenType::LEFT_BRACKET:
+        case TokenType::LEFT_PAREN:
+        case TokenType::ATTRIBUTE_KW:
+        case TokenType::ASM_KW:
+            return true;
+        default:
+            return false;
+    }
+}
+
 } // namespace
 
 std::string Parser::resolve_local_label_name(const std::string& name) const {
@@ -48,6 +204,276 @@ void Parser::declare_local_labels(const std::vector<std::string>& labels, SrcLoc
         std::string mangled = "__aburi_local_label_" + std::to_string(++local_label_unique_id_) + "_" + label;
         scope_map.emplace(label, std::move(mangled));
     }
+}
+
+bool Parser::starts_with_expression_only_cpp_function_style_cast_statement() {
+    auto consume_scope_resolution = [&](size_t& offset) -> bool {
+        Token tok = peek_token_shortcut(offset);
+        if (tok.type == TokenType::SCOPE_RESOLUTION) {
+            ++offset;
+            return true;
+        }
+        if (tok.type == TokenType::COLON &&
+            peek_token_shortcut(offset + 1).type == TokenType::COLON) {
+            offset += 2;
+            return true;
+        }
+        return false;
+    };
+
+    auto skip_balanced_tokens =
+        [&](size_t& offset, TokenType open_tok, TokenType close_tok) -> bool {
+        if (peek_token_shortcut(offset).type != open_tok) {
+            return false;
+        }
+        int depth = 0;
+        while (peek_token_shortcut(offset).type != TokenType::Eof) {
+            TokenType tok_type = peek_token_shortcut(offset).type;
+            if (tok_type == open_tok) {
+                ++depth;
+            } else if (tok_type == close_tok) {
+                --depth;
+                ++offset;
+                return depth == 0;
+            }
+            ++offset;
+        }
+        return false;
+    };
+
+    auto skip_template_argument_list = [&](size_t& offset) -> bool {
+        if (peek_token_shortcut(offset).type != TokenType::LESS_THAN) {
+            return true;
+        }
+        int depth = 0;
+        while (peek_token_shortcut(offset).type != TokenType::Eof) {
+            TokenType tok_type = peek_token_shortcut(offset).type;
+            if (tok_type == TokenType::LEFT_PAREN) {
+                if (!skip_balanced_tokens(
+                        offset,
+                        TokenType::LEFT_PAREN,
+                        TokenType::RIGHT_PAREN)) {
+                    return false;
+                }
+                continue;
+            }
+            if (tok_type == TokenType::LEFT_BRACKET) {
+                if (!skip_balanced_tokens(
+                        offset,
+                        TokenType::LEFT_BRACKET,
+                        TokenType::RIGHT_BRACKET)) {
+                    return false;
+                }
+                continue;
+            }
+            if (tok_type == TokenType::LEFT_BRACE) {
+                if (!skip_balanced_tokens(
+                        offset,
+                        TokenType::LEFT_BRACE,
+                        TokenType::RIGHT_BRACE)) {
+                    return false;
+                }
+                continue;
+            }
+            if (tok_type == TokenType::LESS_THAN) {
+                ++depth;
+                ++offset;
+                continue;
+            }
+            if (tok_type == TokenType::GREATER_THAN) {
+                --depth;
+                ++offset;
+                return depth == 0;
+            }
+            if (tok_type == TokenType::RIGHT_SHIFT) {
+                depth -= 2;
+                ++offset;
+                return depth <= 0;
+            }
+            ++offset;
+        }
+        return false;
+    };
+
+    auto consume_qualified_type_name = [&](size_t& offset) -> bool {
+        consume_scope_resolution(offset);
+        if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER) {
+            return false;
+        }
+        ++offset;
+        if (!skip_template_argument_list(offset)) {
+            return false;
+        }
+        while (consume_scope_resolution(offset)) {
+            if (peek_token_shortcut(offset).type == TokenType::TEMPLATE) {
+                ++offset;
+            }
+            if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER) {
+                return false;
+            }
+            ++offset;
+            if (!skip_template_argument_list(offset)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    auto consume_decltype_or_typeof = [&](size_t& offset) -> bool {
+        TokenType tok_type = peek_token_shortcut(offset).type;
+        if (tok_type != TokenType::DECLTYPE_KW &&
+            tok_type != TokenType::TYPEOF_KW) {
+            return false;
+        }
+        ++offset;
+        return skip_balanced_tokens(
+            offset,
+            TokenType::LEFT_PAREN,
+            TokenType::RIGHT_PAREN);
+    };
+
+    auto find_function_style_cast_lparen = [&]() -> std::optional<size_t> {
+        if (!can_start_cxx_function_style_cast_statement(
+                current_token().type)) {
+            return std::nullopt;
+        }
+        size_t offset = 0;
+        while (is_cxx_function_style_type_qualifier(
+            peek_token_shortcut(offset).type)) {
+            ++offset;
+        }
+        if (peek_token_shortcut(offset).type == TokenType::TYPENAME) {
+            ++offset;
+            if (!consume_qualified_type_name(offset)) {
+                return std::nullopt;
+            }
+        } else if (peek_token_shortcut(offset).type == TokenType::DECLTYPE_KW ||
+                   peek_token_shortcut(offset).type == TokenType::TYPEOF_KW) {
+            if (!consume_decltype_or_typeof(offset)) {
+                return std::nullopt;
+            }
+        } else if (is_cxx_function_style_builtin_type_token(
+                       peek_token_shortcut(offset).type)) {
+            do {
+                ++offset;
+            } while (is_cxx_function_style_builtin_type_token(
+                         peek_token_shortcut(offset).type) ||
+                     is_cxx_function_style_type_qualifier(
+                         peek_token_shortcut(offset).type));
+        } else if (!consume_qualified_type_name(offset)) {
+            return std::nullopt;
+        }
+        while (is_cxx_function_style_type_qualifier(
+            peek_token_shortcut(offset).type)) {
+            ++offset;
+        }
+        if (peek_token_shortcut(offset).type != TokenType::LEFT_PAREN) {
+            return std::nullopt;
+        }
+        return offset;
+    };
+
+    auto find_matching_paren =
+        [&](size_t open_offset) -> std::optional<size_t> {
+        size_t offset = open_offset;
+        if (peek_token_shortcut(offset).type != TokenType::LEFT_PAREN) {
+            return std::nullopt;
+        }
+        int depth = 0;
+        while (peek_token_shortcut(offset).type != TokenType::Eof) {
+            TokenType tok_type = peek_token_shortcut(offset).type;
+            if (tok_type == TokenType::LEFT_PAREN) {
+                ++depth;
+            } else if (tok_type == TokenType::RIGHT_PAREN) {
+                --depth;
+                if (depth == 0) {
+                    return offset;
+                }
+            }
+            ++offset;
+        }
+        return std::nullopt;
+    };
+
+    auto cast_parentheses_force_expression =
+        [&](size_t open_offset, size_t close_offset) -> bool {
+        if (close_offset == open_offset + 1) {
+            return true;
+        }
+        TokenType first_type = peek_token_shortcut(open_offset + 1).type;
+        if (!can_start_cxx_parenthesized_declarator(first_type)) {
+            return true;
+        }
+
+        int paren_depth = 0;
+        int bracket_depth = 0;
+        int brace_depth = 0;
+        for (size_t offset = open_offset + 1;
+             offset < close_offset;
+             ++offset) {
+            TokenType tok_type = peek_token_shortcut(offset).type;
+            if (tok_type == TokenType::LEFT_PAREN) {
+                ++paren_depth;
+                continue;
+            }
+            if (tok_type == TokenType::RIGHT_PAREN) {
+                if (paren_depth > 0) {
+                    --paren_depth;
+                }
+                continue;
+            }
+            if (tok_type == TokenType::LEFT_BRACKET) {
+                ++bracket_depth;
+                continue;
+            }
+            if (tok_type == TokenType::RIGHT_BRACKET) {
+                if (bracket_depth > 0) {
+                    --bracket_depth;
+                }
+                continue;
+            }
+            if (tok_type == TokenType::LEFT_BRACE) {
+                ++brace_depth;
+                continue;
+            }
+            if (tok_type == TokenType::RIGHT_BRACE) {
+                if (brace_depth > 0) {
+                    --brace_depth;
+                }
+                continue;
+            }
+            if (paren_depth != 0 || bracket_depth != 0 || brace_depth != 0) {
+                continue;
+            }
+            if ((tok_type == TokenType::MULTIPLY ||
+                 tok_type == TokenType::BITWISE_AND ||
+                 tok_type == TokenType::LOGICAL_AND) &&
+                offset != open_offset + 1 &&
+                peek_token_shortcut(offset - 1).type !=
+                    TokenType::SCOPE_RESOLUTION) {
+                return true;
+            }
+            if (tok_type == TokenType::COMMA ||
+                is_cxx_expression_only_in_parenthesized_declarator(tok_type)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto lparen_offset = find_function_style_cast_lparen();
+    if (!lparen_offset) {
+        return false;
+    }
+    auto close_offset = find_matching_paren(*lparen_offset);
+    if (!close_offset) {
+        return false;
+    }
+    if (cast_parentheses_force_expression(*lparen_offset, *close_offset)) {
+        return true;
+    }
+    return !can_follow_cxx_parenthesized_declarator(
+        peek_token_shortcut(*close_offset + 1).type);
 }
 
 std::unique_ptr<Stmt> Parser::parse_goto() {
@@ -219,6 +645,9 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
                     return parse_stmt();
                 }
             }
+            if (starts_with_expression_only_cpp_function_style_cast_statement()) {
+                return parse_stmt();
+            }
             auto decl = parse_declaration();
             return collect_->collect_decl_statement(std::move(decl));
         }
@@ -343,7 +772,9 @@ std::unique_ptr<Stmt> Parser::parse_stmt() {
     || gentle_check(TokenType::LOGICAL_NOT) || gentle_check(TokenType::BITWISE_NOT)
     || gentle_check(TokenType::PLUS) || gentle_check(TokenType::NEGATE)
     || gentle_check(TokenType::LOGICAL_AND)
-    || gentle_check(TokenType::NEW) || gentle_check(TokenType::DELETE)) {
+    || gentle_check(TokenType::NEW) || gentle_check(TokenType::DELETE)
+    || (is_cxx_mode_active() &&
+        can_start_cxx_function_style_cast_statement(current_token().type))) {
         auto exp = parse_expression();
         check_and_consume(TokenType::SEMICOLON);
         return collect_->collect_expression_statement(std::move(exp), t.loc);

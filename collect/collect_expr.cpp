@@ -534,6 +534,20 @@ void collect_lambda_referenced_symbols_from_expr(
             }
             return;
         }
+        case StmtKind::CppValueInitExpr:
+            return;
+        case StmtKind::CppFunctionStyleCastExpr: {
+            const auto* cast =
+                static_cast<const CppFunctionStyleCastExpr*>(expr);
+            for (const auto& arg : cast->args) {
+                collect_lambda_referenced_symbols_from_expr(
+                    arg.get(),
+                    referenced_symbols,
+                    seen_symbols,
+                    referenced_this);
+            }
+            return;
+        }
         case StmtKind::CppThrowExpr: {
             const auto* throw_expr = static_cast<const CppThrowExpr*>(expr);
             collect_lambda_referenced_symbols_from_expr(
@@ -4091,6 +4105,105 @@ std::unique_ptr<Expr> Collect::collect_explicit_cast(std::unique_ptr<Expr> expr,
         }
     }
     return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_cpp_value_init_expression(
+    QualType target_type,
+    SrcLoc loc) const {
+    return collect_make<CppValueInitExpr>(target_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_cpp_function_style_cast(
+    QualType target_type,
+    std::vector<std::unique_ptr<Expr>> args,
+    SrcLoc loc) {
+    if (!target_type) {
+        report_error("function-style cast requires a valid target type", loc);
+        return collect_make<ErrorExpr>("invalid function-style cast type", loc);
+    }
+
+    if (contains_deferred_semantic_type(target_type.get_shared())) {
+        target_type = resolve_typeof_types(target_type, loc);
+    }
+
+    bool is_dependent =
+        type_depends_on_template_parameters(target_type, ast_ctx_.get());
+    for (const auto& arg : args) {
+        if (!arg) {
+            continue;
+        }
+        if (expression_depends_on_template_parameters(arg.get()) ||
+            type_depends_on_template_parameters(arg->get_type(), ast_ctx_.get())) {
+            is_dependent = true;
+            break;
+        }
+    }
+    if (is_dependent) {
+        return collect_make<CppFunctionStyleCastExpr>(
+            target_type,
+            std::move(args),
+            loc);
+    }
+
+    auto target_kind = canonical_type_kind(target_type, ast_ctx_.get());
+    if (target_type->isVoid()) {
+        if (args.empty()) {
+            return collect_cpp_value_init_expression(target_type, loc);
+        }
+        if (args.size() == 1) {
+            return collect_explicit_cast(std::move(args.front()), target_type, loc);
+        }
+        report_error("function-style cast to void requires zero or one argument", loc);
+        return collect_make<ErrorExpr>("invalid void function-style cast", loc);
+    }
+
+    if (target_kind == TypeKind::Reference) {
+        if (args.empty()) {
+            report_error("reference type cannot be value-initialized", loc);
+            return collect_make<ErrorExpr>("invalid reference value-initialization", loc);
+        }
+        if (args.size() == 1) {
+            return collect_explicit_cast(std::move(args.front()), target_type, loc);
+        }
+        report_error("function-style cast to reference type requires a single argument", loc);
+        return collect_make<ErrorExpr>("invalid reference function-style cast", loc);
+    }
+
+    if (target_kind == TypeKind::Object) {
+        auto initialized = collect_member_initializer_expression(
+            std::move(args),
+            target_type,
+            false,
+            loc,
+            false);
+        if (auto* init_list = dyn_cast<InitListExpr>(initialized.get());
+            init_list && init_list->elements.empty()) {
+            return collect_cpp_value_init_expression(target_type, loc);
+        }
+        return initialized;
+    }
+
+    if (target_kind == TypeKind::Array) {
+        if (args.empty()) {
+            return collect_cpp_value_init_expression(target_type, loc);
+        }
+        report_error("function-style cast to array type requires an empty initializer", loc);
+        return collect_make<ErrorExpr>("invalid array function-style cast", loc);
+    }
+
+    if (target_kind == TypeKind::Function) {
+        report_error("function type cannot be value-initialized or cast with functional notation", loc);
+        return collect_make<ErrorExpr>("invalid function-style cast target", loc);
+    }
+
+    if (args.empty()) {
+        return collect_cpp_value_init_expression(target_type, loc);
+    }
+    if (args.size() == 1) {
+        return collect_explicit_cast(std::move(args.front()), target_type, loc);
+    }
+    report_error("function-style cast to non-class type requires zero or one argument", loc);
+    return collect_make<ErrorExpr>("invalid function-style cast", loc);
 }
 
 std::unique_ptr<Expr> Collect::named_cast_error(

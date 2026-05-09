@@ -1316,6 +1316,24 @@ llvm::Value* ASTToLLVM::convert_cpp_construct_temporary_expression(
     return load;
 }
 
+llvm::Value* ASTToLLVM::convert_cpp_value_init_expr(CppValueInitExpr* expr) {
+    if (!expr || !expr->ctype) {
+        error("convert_expression(): invalid CppValueInitExpr type",
+              expr ? expr->location : SrcLoc());
+        return nullptr;
+    }
+    if (expr->ctype->isVoid()) {
+        return nullptr;
+    }
+    llvm::Type* llvm_type = convert_type(expr->ctype.get_shared());
+    if (!llvm_type || llvm_type->isVoidTy()) {
+        error("convert_expression(): failed to lower value-initialized type",
+              expr->location);
+        return nullptr;
+    }
+    return llvm::Constant::getNullValue(llvm_type);
+}
+
 llvm::Value* ASTToLLVM::convert_block_expression(BlockExpr* expr) {
     if (!expr || !expr->semantic_info.literal_record()) {
         error("convert_block_expression(): missing block semantic record",
@@ -1599,6 +1617,13 @@ llvm::Value * ASTToLLVM::convert_expression(Expr *expr) {
         case StmtKind::CppConstructExpr:
             return convert_cpp_construct_temporary_expression(
                 static_cast<CppConstructExpr*>(expr), expr->location);
+        case StmtKind::CppValueInitExpr:
+            return convert_cpp_value_init_expr(
+                static_cast<CppValueInitExpr*>(expr));
+        case StmtKind::CppFunctionStyleCastExpr:
+            error("convert_expression(): unresolved function-style cast",
+                  expr->location);
+            return nullptr;
         case StmtKind::CppImmediateInvocationExpr: {
             auto* immediate =
                 static_cast<CppImmediateInvocationExpr*>(expr);

@@ -381,6 +381,25 @@ bool expr_structurally_matches(const Expr* lhs, const Expr* rhs) {
                        lhs_construct->args,
                        rhs_construct->args);
         }
+        case StmtKind::CppValueInitExpr: {
+            const auto* lhs_value_init =
+                static_cast<const CppValueInitExpr*>(lhs);
+            const auto* rhs_value_init =
+                static_cast<const CppValueInitExpr*>(rhs);
+            return lhs_value_init->ctype.equals_qualified(
+                rhs_value_init->ctype);
+        }
+        case StmtKind::CppFunctionStyleCastExpr: {
+            const auto* lhs_cast =
+                static_cast<const CppFunctionStyleCastExpr*>(lhs);
+            const auto* rhs_cast =
+                static_cast<const CppFunctionStyleCastExpr*>(rhs);
+            return lhs_cast->target_type.equals_qualified(
+                       rhs_cast->target_type) &&
+                   expr_vector_structurally_matches(
+                       lhs_cast->args,
+                       rhs_cast->args);
+        }
         case StmtKind::CppImmediateInvocationExpr: {
             const auto* lhs_immediate =
                 static_cast<const CppImmediateInvocationExpr*>(lhs);
@@ -631,6 +650,42 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
             return expr_depends_on_template_parameters_for_type(
                 call->lowered_call.get(),
                 ast_ctx);
+        }
+        case StmtKind::CppConstructExpr: {
+            const auto* construct =
+                static_cast<const CppConstructExpr*>(expr);
+            if (type_depends_on_template_parameters(construct->ctype, ast_ctx)) {
+                return true;
+            }
+            for (const auto& arg : construct->args) {
+                if (expr_depends_on_template_parameters_for_type(
+                        arg.get(),
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case StmtKind::CppValueInitExpr:
+            return type_depends_on_template_parameters(
+                static_cast<const CppValueInitExpr*>(expr)->ctype,
+                ast_ctx);
+        case StmtKind::CppFunctionStyleCastExpr: {
+            const auto* cast =
+                static_cast<const CppFunctionStyleCastExpr*>(expr);
+            if (type_depends_on_template_parameters(
+                    cast->target_type,
+                    ast_ctx)) {
+                return true;
+            }
+            for (const auto& arg : cast->args) {
+                if (expr_depends_on_template_parameters_for_type(
+                        arg.get(),
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
         }
         case StmtKind::CppImmediateInvocationExpr: {
             const auto* immediate =

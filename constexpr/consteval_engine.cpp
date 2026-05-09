@@ -3775,6 +3775,27 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
         return ConstEvalResult::constant(immediate->value);
     }
 
+    if (auto* value_init = dyn_cast<CppValueInitExpr>(expr)) {
+        if (!value_init->ctype || value_init->ctype->isVoid()) {
+            return ConstEvalResult::constant(ConstValue::invalid());
+        }
+        auto value = default_const_value_for_type(value_init->ctype);
+        if (!value.has_value()) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "value-initialized expression is not a supported constant expression",
+                expr->location);
+        }
+        return ConstEvalResult::constant(*value);
+    }
+
+    if (dyn_cast<CppFunctionStyleCastExpr>(expr)) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "unresolved function-style cast is not a constant expression",
+            expr->location);
+    }
+
     if (auto* init_list = dyn_cast<InitListExpr>(expr)) {
         if ((is_cpp_core_constant_expression_mode(mode) ||
              is_cpp_non_type_template_argument_mode(mode)) &&

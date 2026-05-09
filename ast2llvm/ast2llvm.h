@@ -470,6 +470,7 @@ public:
     llvm::Value* emit_member_pointer_dispatch(FuncCall *expr,
                                               MemberPointerAccessExpr *member_ptr_callee);
 
+    llvm::Value* convert_cpp_value_init_expr(CppValueInitExpr* expr);
     llvm::Value *convert_explicit_cast(ExplicitCast *expr);
 
     llvm::Value* cast_llvm_type(llvm::Value* val, llvm::Type* destType, bool isUnsigned);

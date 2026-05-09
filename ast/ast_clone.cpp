@@ -805,6 +805,19 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
             construct->ctype = rewrite_type(construct->ctype, ctx);
             return true;
         }
+        case StmtKind::CppValueInitExpr: {
+            auto* value_init = static_cast<CppValueInitExpr*>(expr.get());
+            value_init->ctype = rewrite_type(value_init->ctype, ctx);
+            return true;
+        }
+        case StmtKind::CppFunctionStyleCastExpr: {
+            auto* cast = static_cast<CppFunctionStyleCastExpr*>(expr.get());
+            if (!rewrite_expr_vector(cast->args, ctx, error_out)) {
+                return false;
+            }
+            cast->target_type = rewrite_type(cast->target_type, ctx);
+            return true;
+        }
         case StmtKind::CppImmediateInvocationExpr: {
             auto* immediate =
                 static_cast<CppImmediateInvocationExpr*>(expr.get());

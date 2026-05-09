@@ -731,6 +731,29 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
             assign_node_id(result.get(), ast_ctx);
             return result;
         }
+        case StmtKind::CppValueInitExpr: {
+            const auto* value_init = static_cast<const CppValueInitExpr*>(expr);
+            auto result = std::make_unique<CppValueInitExpr>(
+                value_init->ctype,
+                value_init->location);
+            assign_node_id(result.get(), ast_ctx);
+            return result;
+        }
+        case StmtKind::CppFunctionStyleCastExpr: {
+            const auto* cast =
+                static_cast<const CppFunctionStyleCastExpr*>(expr);
+            auto cloned_args =
+                clone_expr_vector_impl(cast->args, ast_ctx, error_out);
+            if (cast->args.size() != cloned_args.size()) {
+                return {};
+            }
+            auto result = std::make_unique<CppFunctionStyleCastExpr>(
+                cast->target_type,
+                std::move(cloned_args),
+                cast->location);
+            assign_node_id(result.get(), ast_ctx);
+            return result;
+        }
         case StmtKind::CppImmediateInvocationExpr: {
             const auto* immediate =
                 static_cast<const CppImmediateInvocationExpr*>(expr);

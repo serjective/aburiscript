@@ -469,19 +469,38 @@ QualType Collect::substitute_template_type_with_bindings(
                             !type_depends_on_template_parameters(
                                 replacement->type,
                                 ast_ctx_.get())) {
-                            if (!dependent_call->args.empty()) {
-                                if (error_out && error_out->empty()) {
-                                    *error_out =
-                                        "substituted type value-initializer arguments are not supported";
-                                }
-                                return false;
-                            }
-                            candidate = collect_make<CppConstructExpr>(
-                                nullptr,
-                                std::vector<std::unique_ptr<Expr>>(),
+                            candidate = collect_cpp_function_style_cast(
                                 replacement->type,
-                                false,
+                                std::move(dependent_call->args),
                                 dependent_call->location);
+                            return candidate != nullptr;
+                        }
+                    }
+                    if (auto* function_style_cast =
+                            dyn_cast<CppFunctionStyleCastExpr>(
+                                candidate.get())) {
+                        bool still_dependent =
+                            type_depends_on_template_parameters(
+                                function_style_cast->target_type,
+                                ast_ctx_.get());
+                        for (const auto& arg : function_style_cast->args) {
+                            if (!arg) {
+                                continue;
+                            }
+                            if (expression_depends_on_template_parameters(
+                                    arg.get()) ||
+                                type_depends_on_template_parameters(
+                                    arg->get_type(),
+                                    ast_ctx_.get())) {
+                                still_dependent = true;
+                                break;
+                            }
+                        }
+                        if (!still_dependent) {
+                            candidate = collect_cpp_function_style_cast(
+                                function_style_cast->target_type,
+                                std::move(function_style_cast->args),
+                                function_style_cast->location);
                             return true;
                         }
                     }
@@ -658,6 +677,17 @@ QualType Collect::substitute_template_type_with_bindings(
                             }
                             return;
                         }
+                        case StmtKind::CppFunctionStyleCastExpr: {
+                            auto* cast =
+                                static_cast<CppFunctionStyleCastExpr*>(
+                                    candidate);
+                            for (const auto& arg : cast->args) {
+                                self(self, arg.get());
+                            }
+                            return;
+                        }
+                        case StmtKind::CppValueInitExpr:
+                            return;
                         case StmtKind::ImplicitCast: {
                             auto* cast = static_cast<ImplicitCast*>(candidate);
                             self(self, cast->expr.get());

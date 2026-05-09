@@ -119,6 +119,8 @@ enum class StmtKind : uint8_t {
     FoldExpr,
     CppMemberCallExpr,
     CppConstructExpr,
+    CppValueInitExpr,
+    CppFunctionStyleCastExpr,
     CppImmediateInvocationExpr,
     CondExpr,
     UnaryOperation,
@@ -1453,6 +1455,39 @@ struct CppConstructExpr: Expr {
 
     static bool classof(const Stmt *s) {
         return s->get_kind() == StmtKind::CppConstructExpr;
+    }
+};
+struct CppValueInitExpr: Expr {
+    QualType ctype;
+
+    CppValueInitExpr(QualType ctype, SrcLoc loc = SrcLoc())
+        : Expr(StmtKind::CppValueInitExpr, loc), ctype(std::move(ctype)) {}
+
+    QualType get_type() override {
+        return ctype;
+    }
+
+    static bool classof(const Stmt *s) {
+        return s->get_kind() == StmtKind::CppValueInitExpr;
+    }
+};
+struct CppFunctionStyleCastExpr: Expr {
+    QualType target_type;
+    std::vector<std::unique_ptr<Expr>> args;
+
+    CppFunctionStyleCastExpr(QualType target_type,
+                             std::vector<std::unique_ptr<Expr>> args,
+                             SrcLoc loc = SrcLoc())
+        : Expr(StmtKind::CppFunctionStyleCastExpr, loc),
+          target_type(std::move(target_type)),
+          args(std::move(args)) {}
+
+    QualType get_type() override {
+        return target_type;
+    }
+
+    static bool classof(const Stmt *s) {
+        return s->get_kind() == StmtKind::CppFunctionStyleCastExpr;
     }
 };
 struct CppImmediateInvocationExpr: Expr {
