@@ -976,6 +976,7 @@ const ObjectDecl* record_decl_from_record_type(const ObjectType* record_type) {
 const ObjectDecl* current_access_context_record_decl(
     bool current_function_is_cpp_member,
     QualType current_function_cpp_this_type,
+    QualType current_function_cpp_friend_access_type,
     QualType current_cpp_record_lookup_type,
     const ASTContext* ast_ctx) {
     auto lookup_record =
@@ -995,6 +996,13 @@ const ObjectDecl* current_access_context_record_decl(
                 record_decl_from_record_type(current_record.get())) {
             return current_decl;
         }
+    }
+    auto friend_access_record =
+        desugar_type(current_function_cpp_friend_access_type, ast_ctx)
+            .as_shared<ObjectType>();
+    if (const ObjectDecl* friend_access_decl =
+            record_decl_from_record_type(friend_access_record.get())) {
+        return friend_access_decl;
     }
     return nullptr;
 }

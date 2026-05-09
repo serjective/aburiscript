@@ -3441,8 +3441,12 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             final_sym->is_constexpr = true;
             final_sym->is_inline = true;
         }
+        if (final_sym) {
+            final_sym->is_hidden_friend = false;
+        }
         if (is_definition && func_decl_check) {
             if (predecl_sym) {
+                predecl_sym->is_hidden_friend = false;
                 predecl_sym->function_definition = func_decl_check;
             }
             if (final_sym) {
@@ -4047,6 +4051,9 @@ std::unique_ptr<Decl> Parser::parse_parameter_declaration() {
     if (decl_parser.is_constexpr) {
         error("'constexpr' is not valid for function parameter declarations");
     }
+    if (decl_parser.is_friend) {
+        error("'friend' is not valid for function parameter declarations");
+    }
     if (decl_parser.explicit_specifier.is_present) {
         error("'explicit' is not valid for function parameter declarations");
     }
@@ -4240,6 +4247,184 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 callable_decl->set_deferred_inline_body_token_range(
                     body_begin_token_idx, body_end_token_idx);
             };
+
+            if (decl_parser.is_friend) {
+                if (declaration_leading_virtual) {
+                    error("'virtual' is not allowed on friend declarations");
+                }
+                if (member_explicit_specifier.is_present) {
+                    error("'explicit' is not allowed on friend declarations");
+                }
+                if (decl_parser.trailing_function_cv_qualifiers != QUAL_NONE ||
+                    decl_parser.trailing_function_ref_qualifier != 0) {
+                    error("non-member function cannot have cv/ref qualifier");
+                }
+                validate_cpp_operator_function_declaration(
+                    decl_parser.name,
+                    false,
+                    false,
+                    t.loc);
+
+                auto friend_function = collect_->collect_function_declaration(
+                    decl_parser.name,
+                    field_type,
+                    StorageClass::NONE,
+                    decl_parser.is_inline,
+                    decl_parser.asm_label,
+                    t.loc,
+                    current_decl_language_linkage());
+                friend_function->parameters =
+                    build_member_param_decls(decl_parser.func_args,
+                                             friend_function->type);
+                friend_function->is_constexpr = decl_parser.is_constexpr;
+                friend_function->is_consteval = decl_parser.is_consteval;
+                if (friend_function->is_consteval) {
+                    friend_function->is_constexpr = true;
+                    friend_function->is_inline = true;
+                }
+                friend_function->trailing_requires_clause =
+                    std::move(decl_parser.trailing_requires_clause);
+                friend_function->explicit_specialization_arguments =
+                    decl_parser.explicit_specialization_arguments;
+                friend_function->has_explicit_specialization_argument_list =
+                    decl_parser.has_explicit_specialization_argument_list;
+
+                if (gentle_check(TokenType::ASSIGN)) {
+                    SrcLoc suffix_loc = current_token().loc;
+                    advance();
+                    if (gentle_check(TokenType::DELETE)) {
+                        friend_function->is_deleted = true;
+                        advance();
+                    } else if (gentle_check(TokenType::DEFAULT)) {
+                        friend_function->is_defaulted = true;
+                        advance();
+                    } else {
+                        fail_cpp_unsupported("function declaration suffix",
+                                             suffix_loc);
+                    }
+                }
+
+                QualType granting_record_type = nullptr;
+                if (!cxx_record_parse_stack_.empty()) {
+                    const auto& record_frame = cxx_record_parse_stack_.back();
+                    if (record_frame.semantic_owner &&
+                        record_frame.semantic_owner->get_record_type()) {
+                        granting_record_type =
+                            QualType(record_frame.semantic_owner->get_record_type());
+                    }
+                    if (!granting_record_type && !record_frame.name.empty()) {
+                        auto owner_type = dyn_cast_shared<ObjectType>(
+                            collect_->collect_lookup_tag_type(
+                                record_frame.name,
+                                true));
+                        if (owner_type) {
+                            granting_record_type = QualType(owner_type);
+                        }
+                    }
+                }
+
+                auto friend_decl = make_ast<FriendDecl>(
+                    *ast_ctx,
+                    std::move(friend_function),
+                    granting_record_type,
+                    CppFriendKind::Function,
+                    t.loc);
+                auto* friend_function_ptr = friend_decl->function_decl();
+
+                bool friend_has_inline_body = false;
+                if (gentle_check(TokenType::LEFT_BRACE) ||
+                    gentle_check(TokenType::TRY_KW)) {
+                    friend_has_inline_body = true;
+                    if (friend_function_ptr) {
+                        friend_function_ptr->is_inline = true;
+                    }
+                    capture_deferred_inline_body_tokens(
+                        friend_decl.get(),
+                        "expected '}' to close friend function body");
+                }
+
+                if (friend_function_ptr) {
+                    auto nearest_namespace_scope = [&]() {
+                        auto scope = collect_->collect_current_scope();
+                        while (scope &&
+                               !scope_flags_contains(
+                                   scope->flags,
+                                   ScopeFlags::FileScope) &&
+                               !scope_flags_contains(
+                                   scope->flags,
+                                   ScopeFlags::NamespaceScope)) {
+                            scope = scope->parent;
+                        }
+                        return scope ? scope : collect_->collect_current_scope();
+                    };
+                    auto friend_scope = nearest_namespace_scope();
+                    bool has_visible_matching_namespace_decl = false;
+                    for (const auto& candidate :
+                         LookupEngine::lookup_unqualified_function_candidates(
+                             friend_function_ptr->name,
+                             friend_scope,
+                             false)) {
+                        if (candidate &&
+                            candidate->type.equals_unqualified(
+                                QualType(friend_function_ptr->type))) {
+                            has_visible_matching_namespace_decl = true;
+                            break;
+                        }
+                    }
+                    bool is_definition =
+                        friend_function_ptr->is_deleted ||
+                        friend_function_ptr->is_defaulted ||
+                        friend_decl->has_deferred_inline_body();
+                    auto friend_sym = collect_->collect_declare_function_symbol(
+                        friend_scope,
+                        ast_ctx ? ast_ctx->global_tracker : nullptr,
+                        friend_function_ptr->name,
+                        QualType(friend_function_ptr->type),
+                        StorageClass::NONE,
+                        friend_function_ptr->is_constexpr,
+                        friend_function_ptr->is_consteval,
+                        friend_function_ptr->is_inline,
+                        is_definition,
+                        friend_function_ptr->location,
+                        friend_function_ptr->get_language_linkage(),
+                        false,
+                        friend_function_ptr->is_deleted,
+                        friend_function_ptr->is_defaulted);
+                    if (friend_sym) {
+                        if (is_definition) {
+                            friend_sym->function_definition =
+                                friend_function_ptr;
+                        }
+                        friend_sym->is_hidden_friend =
+                            !has_visible_matching_namespace_decl;
+                        register_function_default_arguments(
+                            friend_sym,
+                            friend_function_ptr,
+                            friend_function_ptr->location);
+                        merge_function_asm_label(
+                            decl_parser,
+                            friend_sym,
+                            friend_function_ptr->location);
+                    }
+                    friend_decl->function_symbol = std::move(friend_sym);
+                    ast_ctx->append_attrs(friend_function_ptr->node_id,
+                                          std::move(decl_parser.leading_attrs));
+                    ast_ctx->append_attrs(friend_function_ptr->node_id,
+                                          std::move(field_attrs_before_colon));
+                }
+                fields.push_back(std::move(friend_decl));
+
+                if (friend_has_inline_body) {
+                    return fields;
+                }
+
+                if (gentle_check(TokenType::COMMA)) {
+                    advance();
+                    continue;
+                }
+                check_and_consume(TokenType::SEMICOLON);
+                break;
+            }
 
             if (member_explicit &&
                 !is_constructor_member &&
@@ -5662,6 +5847,9 @@ bool Parser::isTokenDeclarationSpec(Token s) {
         return is_cxx_mode_active();
     }
     if (s.type == TokenType::TYPENAME) {
+        return is_cxx_mode_active();
+    }
+    if (s.type == TokenType::FRIEND_KW) {
         return is_cxx_mode_active();
     }
     if (s.type == TokenType::EXPLICIT_KW) {

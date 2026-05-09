@@ -4401,11 +4401,15 @@ std::unique_ptr<Expr> Collect::select_cpp_allocation_like_function(
             saw_member_match = true;
         }
 
-        const ObjectDecl* access_context_decl = nullptr;
-        if (lang_opts_.is_cxx_mode() && session_.func_state_.current_function_is_cpp_member) {
-            access_context_decl =
-                current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
-        }
+        const ObjectDecl* access_context_decl =
+            lang_opts_.is_cxx_mode()
+                ? current_access_context_record_decl(
+                      session_.func_state_.current_function_is_cpp_member,
+                      session_.func_state_.current_function_cpp_this_type,
+                      session_.func_state_.current_function_cpp_friend_access_type,
+                      session_.current_cpp_record_lookup_type_,
+                      ast_ctx_.get())
+                : nullptr;
 
         for (const auto& member_match : member_candidates) {
             const auto* method = member_match.method;
@@ -5289,6 +5293,12 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
                 op_name,
                 OverloadImplicitObjectArgKind::Regular,
                 overload_candidates);
+            std::vector<Expr*> adl_args{expr.get()};
+            append_adl_friend_overload_candidates(
+                op_name,
+                OverloadImplicitObjectArgKind::Regular,
+                adl_args,
+                overload_candidates);
             append_unqualified_function_template_overload_candidates(
                 op_name,
                 expr.get(),
@@ -6108,6 +6118,12 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
     probe_args.push_back(rhs.get());
     append_unqualified_overload_candidates(
         op_name, OverloadImplicitObjectArgKind::Regular, overload_candidates);
+    std::vector<Expr*> adl_args{lhs.get(), rhs.get()};
+    append_adl_friend_overload_candidates(
+        op_name,
+        OverloadImplicitObjectArgKind::Regular,
+        adl_args,
+        overload_candidates);
     append_unqualified_function_template_overload_candidates(
         op_name,
         lhs.get(),

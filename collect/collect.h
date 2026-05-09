@@ -1116,6 +1116,7 @@ private:
         std::vector<RecordSemanticState::StaticDataMember> static_data_members;
         std::vector<RecordSemanticState::NestedType> nested_types;
         std::vector<RecordSemanticState::NestedTemplate> nested_templates;
+        std::vector<RecordSemanticState::FriendFunction> friend_functions;
         std::vector<RecordSemanticState::EnumeratorMember> enumerator_members;
         std::unordered_set<std::string> seen_static_data_member_names;
         std::vector<RecordSemanticState::Constructor> constructors;
@@ -1228,6 +1229,8 @@ private:
         bool current_function_is_cpp_member = false;
         bool current_function_is_static_cpp_member = false;
         QualType current_function_cpp_this_type = nullptr;
+        // When in a friended function, this defines the function's friend class
+        QualType current_function_cpp_friend_access_type = nullptr;
         int loop_depth = 0;
         int switch_depth = 0;
         std::vector<SwitchContext> switch_context_stack;
@@ -1244,7 +1247,8 @@ private:
             return CppThisContext{
                 current_function_is_cpp_member,
                 current_function_is_static_cpp_member,
-                current_function_cpp_this_type
+                current_function_cpp_this_type,
+                current_function_cpp_friend_access_type
             };
         }
     };
@@ -2140,6 +2144,11 @@ private:
     void append_unqualified_overload_candidates(
         std::string_view function_name,
         OverloadImplicitObjectArgKind implicit_arg_kind,
+        std::vector<OverloadCallCandidate>& candidates_out) ;
+    void append_adl_friend_overload_candidates(
+        std::string_view function_name,
+        OverloadImplicitObjectArgKind implicit_arg_kind,
+        const std::vector<Expr*>& associated_args,
         std::vector<OverloadCallCandidate>& candidates_out) ;
 
     void append_unqualified_function_template_overload_candidates(

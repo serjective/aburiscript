@@ -458,6 +458,7 @@ void Collect::collect_start_translation_unit() {
     session_.func_state_.current_function_is_cpp_member = false;
     session_.func_state_.current_function_is_static_cpp_member = false;
     session_.func_state_.current_function_cpp_this_type = nullptr;
+    session_.func_state_.current_function_cpp_friend_access_type = nullptr;
     session_.current_cpp_record_lookup_type_ = nullptr;
     session_.tentative_snapshots_.clear();
     session_.function_definition_stack_.clear();
@@ -561,6 +562,8 @@ void Collect::collect_start_function_definition(const std::string& name,
     session_.func_state_.current_function_is_static_cpp_member =
         cpp_this_context.is_static_member_function;
     session_.func_state_.current_function_cpp_this_type = cpp_this_context.this_type;
+    session_.func_state_.current_function_cpp_friend_access_type =
+        cpp_this_context.friend_access_type;
     if (auto func_ty = function_type.as_shared<FunctionType>()) {
         session_.func_state_.current_function_return_type = func_ty->ret_type;
         if (session_.func_state_.current_function_return_type &&
@@ -792,7 +795,8 @@ CppThisContext Collect::collect_current_cpp_this_context() const {
     return CppThisContext{
         session_.func_state_.current_function_is_cpp_member,
         session_.func_state_.current_function_is_static_cpp_member,
-        session_.func_state_.current_function_cpp_this_type
+        session_.func_state_.current_function_cpp_this_type,
+        session_.func_state_.current_function_cpp_friend_access_type
     };
 }
 

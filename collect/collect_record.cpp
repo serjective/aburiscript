@@ -1111,6 +1111,7 @@ public:
             ctx.static_data_members.reserve(record_.members.size());
             ctx.nested_types.reserve(record_.members.size());
             ctx.nested_templates.reserve(record_.members.size());
+            ctx.friend_functions.reserve(record_.members.size());
             ctx.enumerator_members.reserve(record_.members.size());
             ctx.seen_static_data_member_names.reserve(record_.members.size());
             ctx.constructors.reserve(record_.members.size());
@@ -1614,6 +1615,19 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                     enumerator_member.symbol = constant->sym;
                     ctx.enumerator_members.push_back(std::move(enumerator_member));
                 }
+            }
+            continue;
+        }
+
+        if (const auto* friend_decl = dyn_cast<FriendDecl>(member.get())) {
+            if (const auto* function_decl = friend_decl->function_decl()) {
+                RecordSemanticState::FriendFunction friend_function;
+                friend_function.name = function_decl->name;
+                friend_function.type = QualType(function_decl->type);
+                friend_function.decl = friend_decl;
+                friend_function.function_decl = function_decl;
+                friend_function.symbol = friend_decl->function_symbol;
+                ctx.friend_functions.push_back(std::move(friend_function));
             }
             continue;
         }
@@ -2726,6 +2740,7 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
     owner_state.static_data_members = ctx.static_data_members;
     owner_state.nested_types = ctx.nested_types;
     owner_state.nested_templates = ctx.nested_templates;
+    owner_state.friend_functions = ctx.friend_functions;
     owner_state.enumerator_members = ctx.enumerator_members;
     owner_state.constructors = ctx.constructors;
     owner_state.destructors = ctx.destructors;
@@ -4062,6 +4077,7 @@ void Collect::collect_record_publish_semantics(
     ctx.semantic_state.static_data_members = std::move(ctx.static_data_members);
     ctx.semantic_state.nested_types = std::move(ctx.nested_types);
     ctx.semantic_state.nested_templates = std::move(ctx.nested_templates);
+    ctx.semantic_state.friend_functions = std::move(ctx.friend_functions);
     ctx.semantic_state.enumerator_members = std::move(ctx.enumerator_members);
     ctx.semantic_state.constructors = std::move(ctx.constructors);
     ctx.semantic_state.destructors = std::move(ctx.destructors);

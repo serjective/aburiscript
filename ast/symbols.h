@@ -83,6 +83,8 @@ struct Symbol {
     uint8_t is_consteval : 1;
     uint8_t is_deleted : 1;
     uint8_t is_defaulted : 1;
+    // in-class friend with no external declaration
+    uint8_t is_hidden_friend : 1;
     uint8_t is_deprecated : 1;
     uint8_t is_block_byref : 1;
     uint8_t language_linkage : 2;
@@ -112,6 +114,7 @@ struct Symbol {
           is_consteval(false),
           is_deleted(false),
           is_defaulted(false),
+          is_hidden_friend(false),
           is_deprecated(false),
           is_block_byref(false),
           language_linkage(static_cast<uint8_t>(LanguageLinkage::None)),
@@ -132,6 +135,7 @@ struct Symbol {
           is_consteval(false),
           is_deleted(false),
           is_defaulted(false),
+          is_hidden_friend(false),
           is_deprecated(false),
           is_block_byref(false),
           language_linkage(static_cast<uint8_t>(LanguageLinkage::None)),

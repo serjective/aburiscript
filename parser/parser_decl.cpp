@@ -80,6 +80,7 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
 
     bool in_class_member_context =
         is_cxx_mode_active() &&
+        !decl_parser->is_friend &&
         !cxx_record_parse_stack_.empty() &&
         cxx_record_parse_stack_.back().kind != CppRecordKind::Union;
     bool is_static_member =

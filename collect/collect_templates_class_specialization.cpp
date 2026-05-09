@@ -364,6 +364,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                            const TemplateParameterDecl*> parameter_rebinds;
         std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_remap;
     };
+    struct PendingFunctionBodyClone {
+        const FuncDecl* pattern_func = nullptr;
+        FuncDecl* specialized_func = nullptr;
+        bool use_implicit_this = true;
+    };
 
     Collect& collect;
     const ClassTemplateDecl* class_template = nullptr;
@@ -406,11 +411,12 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     std::vector<RecordSemanticState::StaticDataMember> static_data_members;
     std::vector<RecordSemanticState::NestedType> nested_types;
     std::vector<RecordSemanticState::NestedTemplate> nested_templates;
+    std::vector<RecordSemanticState::FriendFunction> friend_functions;
     std::vector<RecordSemanticState::EnumeratorMember> enumerator_members;
     std::unordered_map<const FuncDecl*, std::shared_ptr<Symbol>>
         specialized_member_symbols;
     std::vector<PendingMethodTemplateClone> pending_method_template_clones;
-    std::vector<std::pair<const FuncDecl*, FuncDecl*>> pending_body_clones;
+    std::vector<PendingFunctionBodyClone> pending_body_clones;
     std::vector<std::pair<const CppConstructorDecl*, CppConstructorDecl*>>
         pending_ctor_init_clones;
     RecordSemanticState semantic_state;
@@ -1358,6 +1364,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         static_data_members.clear();
         nested_types.clear();
         nested_templates.clear();
+        friend_functions.clear();
         enumerator_members.clear();
         specialized_member_symbols.clear();
         pending_method_template_clones.clear();
@@ -1372,6 +1379,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         static_data_members.reserve(pattern->members.size());
         nested_types.reserve(pattern->members.size());
         nested_templates.reserve(pattern->members.size());
+        friend_functions.reserve(pattern->members.size());
         enumerator_members.reserve(pattern->members.size());
         specialized_member_symbols.reserve(pattern->members.size());
         pending_method_template_clones.reserve(pattern->members.size());
@@ -1415,6 +1423,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         provisional_state.static_data_members = static_data_members;
         provisional_state.nested_types = nested_types;
         provisional_state.nested_templates = nested_templates;
+        provisional_state.friend_functions = friend_functions;
         provisional_state.enumerator_members = enumerator_members;
         collect.query_publish_record_semantics(entry->specialization_decl.get(),
                                                std::move(provisional_state));
@@ -1490,6 +1499,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         }
         if (auto* alias_template_decl = dyn_cast<AliasTemplateDecl>(member)) {
             return handle_alias_template_member(alias_template_decl, declared_access);
+        }
+        if (auto* friend_decl = dyn_cast<FriendDecl>(member)) {
+            return handle_friend_member(friend_decl);
         }
         if (auto* method_template_decl = dyn_cast<FunctionTemplateDecl>(member)) {
             return handle_method_template_member(
@@ -2406,6 +2418,103 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return true;
     }
 
+    bool handle_friend_member(const FriendDecl* friend_decl) {
+        auto* function_decl = friend_decl ? friend_decl->function_decl() : nullptr;
+        if (!friend_decl || !function_decl) {
+            return fail_instantiation(
+                "class template friend declaration specialization for this friend kind is not supported yet",
+                friend_decl ? friend_decl->location : loc);
+        }
+
+        auto rewritten_type =
+            clone_pass.rewrite_type(QualType(function_decl->type));
+        auto canonical_type =
+            desugar_type(rewritten_type, ast_ctx()).as_shared<FunctionType>();
+        if (!canonical_type) {
+            return fail_instantiation(
+                "internal error: class template friend specialization did not produce a function type",
+                function_decl->location);
+        }
+
+        auto cloned_function = collect.collect_make<FuncDecl>();
+        cloned_function->location = function_decl->location;
+        cloned_function->name = function_decl->name;
+        cloned_function->type = canonical_type;
+        cloned_function->storage_class = StorageClass::NONE;
+        cloned_function->is_inline = function_decl->is_inline;
+        cloned_function->is_constexpr = function_decl->is_constexpr;
+        cloned_function->is_consteval = function_decl->is_consteval;
+        cloned_function->is_deleted = function_decl->is_deleted;
+        cloned_function->is_defaulted = function_decl->is_defaulted;
+        cloned_function->set_language_linkage(function_decl->get_language_linkage());
+        if (function_decl->asm_label) {
+            cloned_function->set_asm_label(*function_decl->asm_label);
+        }
+
+        std::shared_ptr<Symbol> cloned_symbol =
+            friend_decl->function_symbol
+                ? clone_symbol_shallow_for_specialization(
+                      friend_decl->function_symbol,
+                      QualType(canonical_type))
+                : std::make_shared<Symbol>(
+                      function_decl->name,
+                      SymbolKind::FUNCTION,
+                      QualType(canonical_type),
+                      StorageClass::NONE,
+                      VariableLinkage::EXTERNAL,
+                      cloned_function->is_inline != 0);
+        cloned_symbol->name = function_decl->name;
+        cloned_symbol->is_inline = cloned_function->is_inline;
+        cloned_symbol->is_constexpr = cloned_function->is_constexpr;
+        cloned_symbol->is_consteval = cloned_function->is_consteval;
+        cloned_symbol->is_deleted = cloned_function->is_deleted;
+        cloned_symbol->is_defaulted = cloned_function->is_defaulted;
+        cloned_symbol->is_hidden_friend = true;
+        cloned_symbol->type = QualType(canonical_type);
+        cloned_symbol->function_definition =
+            function_decl_defines_entity(cloned_function.get())
+                ? cloned_function.get()
+                : nullptr;
+        cloned_symbol->set_language_linkage(function_decl->get_language_linkage());
+        collect.collect_add_global_symbol(cloned_symbol);
+        if (friend_decl->function_symbol) {
+            clone_pass.context().symbol_remap.emplace(
+                friend_decl->function_symbol.get(),
+                cloned_symbol);
+        }
+
+        auto cloned_friend = collect.collect_make<FriendDecl>(
+            std::move(cloned_function),
+            owner_type,
+            friend_decl->get_friend_kind(),
+            friend_decl->location);
+        cloned_friend->function_symbol = cloned_symbol;
+        auto* cloned_function_ptr = cloned_friend->function_decl();
+        if (!cloned_function_ptr) {
+            return fail_instantiation(
+                "internal error: class template friend clone lost its function target",
+                friend_decl->location);
+        }
+
+        RecordSemanticState::FriendFunction semantic_friend;
+        semantic_friend.name = cloned_function_ptr->name;
+        semantic_friend.type = QualType(canonical_type);
+        semantic_friend.decl = cloned_friend.get();
+        semantic_friend.function_decl = cloned_function_ptr;
+        semantic_friend.symbol = cloned_symbol;
+        friend_functions.push_back(std::move(semantic_friend));
+        semantic_state.friend_functions = friend_functions;
+
+        specialized_member_symbols.emplace(cloned_function_ptr, cloned_symbol);
+        entry->map_specialized_member_to_primary_member(
+            cloned_function_ptr,
+            function_decl);
+        pending_body_clones.push_back(
+            PendingFunctionBodyClone{function_decl, cloned_function_ptr, false});
+        entry->member_decls.push_back(std::move(cloned_friend));
+        return true;
+    }
+
     bool handle_method_member(
         const CppMethodDecl* method_decl,
         RecordMemberAccess declared_access) {
@@ -2557,7 +2666,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_decl.get(),
             method_decl);
 
-        pending_body_clones.emplace_back(method_decl, cloned_decl.get());
+        pending_body_clones.push_back(
+            PendingFunctionBodyClone{method_decl, cloned_decl.get(), true});
         entry->member_decls.push_back(std::move(cloned_decl));
         return true;
     }
@@ -2645,7 +2755,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_decl.get(),
             ctor_decl);
 
-        pending_body_clones.emplace_back(ctor_decl, cloned_decl.get());
+        pending_body_clones.push_back(
+            PendingFunctionBodyClone{ctor_decl, cloned_decl.get(), true});
         pending_ctor_init_clones.emplace_back(ctor_decl, cloned_decl.get());
         entry->member_decls.push_back(std::move(cloned_decl));
         return true;
@@ -2728,7 +2839,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_decl.get(),
             dtor_decl);
 
-        pending_body_clones.emplace_back(dtor_decl, cloned_decl.get());
+        pending_body_clones.push_back(
+            PendingFunctionBodyClone{dtor_decl, cloned_decl.get(), true});
         entry->member_decls.push_back(std::move(cloned_decl));
         return true;
     }
@@ -3150,6 +3262,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         ctx.static_data_members = std::move(static_data_members);
         ctx.nested_types = std::move(nested_types);
         ctx.nested_templates = std::move(nested_templates);
+        ctx.friend_functions = std::move(friend_functions);
         ctx.enumerator_members = std::move(enumerator_members);
         ctx.semantic_state = semantic_state;
         collect.collect_record_compute_layout(ctx);
@@ -3623,10 +3736,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     }
 
     bool clone_pending_member_bodies() {
-        for (const auto& [pattern_func, specialized_func] : pending_body_clones) {
+        for (const auto& pending_body_clone : pending_body_clones) {
+            const FuncDecl* pattern_func = pending_body_clone.pattern_func;
+            FuncDecl* specialized_func = pending_body_clone.specialized_func;
             QualType specialized_this_type =
-                template_sema_internal::implicit_this_type_for_specialized_function(
-                    specialized_func);
+                pending_body_clone.use_implicit_this
+                    ? template_sema_internal::implicit_this_type_for_specialized_function(
+                          specialized_func)
+                    : QualType();
             auto member_resolution_pass =
                 clone_pass_builder.build_dependent_resolution_pass(
                     clone_pass,
@@ -3733,6 +3850,16 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                         dtor.type = QualType(specialized_func->type);
                         if (!specialized_symbol) {
                             specialized_symbol = dtor.symbol;
+                        }
+                        break;
+                    }
+                }
+            } else {
+                for (auto& friend_function : semantic_state.friend_functions) {
+                    if (friend_function.function_decl == specialized_func) {
+                        friend_function.type = QualType(specialized_func->type);
+                        if (!specialized_symbol) {
+                            specialized_symbol = friend_function.symbol;
                         }
                         break;
                     }

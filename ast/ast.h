@@ -175,6 +175,7 @@ enum class DeclKind : uint8_t {
     CppMethodDecl,
     CppConstructorDecl,
     CppDestructorDecl,
+    FriendDecl,
     VariableDecl,
     ParamDecl,
     FieldDecl,
@@ -204,6 +205,12 @@ enum class CppAccessSpecifier : uint8_t {
     Public,
     Protected,
     Private,
+};
+
+enum class CppFriendKind : uint8_t {
+    Function,
+    Type,
+    Unknown,
 };
 
 struct Stmt {
@@ -342,6 +349,7 @@ struct CppThisContext {
     bool is_member_function = false;
     bool is_static_member_function = false;
     QualType this_type = nullptr;
+    QualType friend_access_type = nullptr;
 };
 
 struct CppLambdaCapture {
@@ -870,6 +878,65 @@ inline bool function_decl_defines_entity(const FuncDecl* decl) {
     }
     return false;
 }
+
+struct FriendDecl : Decl {
+    std::unique_ptr<Decl> target_decl;
+    QualType granting_record_type;
+    std::shared_ptr<Symbol> function_symbol;
+    uint8_t friend_kind : 3;
+    uint8_t has_deferred_inline_body_tokens : 1;
+    size_t deferred_inline_body_begin_token_idx;
+    size_t deferred_inline_body_end_token_idx;
+
+    FriendDecl(std::unique_ptr<Decl> target_decl,
+               QualType granting_record_type,
+               CppFriendKind friend_kind = CppFriendKind::Unknown,
+               SrcLoc loc = SrcLoc())
+        : Decl(DeclKind::FriendDecl, loc),
+          target_decl(std::move(target_decl)),
+          granting_record_type(std::move(granting_record_type)),
+          friend_kind(static_cast<uint8_t>(friend_kind)),
+          has_deferred_inline_body_tokens(false),
+          deferred_inline_body_begin_token_idx(0),
+          deferred_inline_body_end_token_idx(0) {}
+
+    CppFriendKind get_friend_kind() const {
+        return static_cast<CppFriendKind>(friend_kind);
+    }
+
+    Decl* target() { return target_decl.get(); }
+    const Decl* target() const { return target_decl.get(); }
+
+    FuncDecl* function_decl() {
+        return dyn_cast<FuncDecl>(target_decl.get());
+    }
+
+    const FuncDecl* function_decl() const {
+        return dyn_cast<const FuncDecl>(target_decl.get());
+    }
+
+    bool has_deferred_inline_body() const {
+        return has_deferred_inline_body_tokens != 0 &&
+            deferred_inline_body_end_token_idx > deferred_inline_body_begin_token_idx;
+    }
+
+    void set_deferred_inline_body_token_range(size_t begin_token_idx,
+                                              size_t end_token_idx) {
+        has_deferred_inline_body_tokens = 1;
+        deferred_inline_body_begin_token_idx = begin_token_idx;
+        deferred_inline_body_end_token_idx = end_token_idx;
+    }
+
+    void clear_deferred_inline_body_token_range() {
+        has_deferred_inline_body_tokens = 0;
+        deferred_inline_body_begin_token_idx = 0;
+        deferred_inline_body_end_token_idx = 0;
+    }
+
+    static bool classof(const Decl *d) {
+        return d->get_kind() == DeclKind::FriendDecl;
+    }
+};
 
 struct FunctionTemplateSpecializationInfo;
 struct VariableTemplateSpecializationInfo;

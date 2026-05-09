@@ -385,6 +385,93 @@ void Parser::build_cpp_record_parse_deferred_bodies(
             false,
             [](CppDestructorDecl*) {});
     };
+    auto parse_deferred_inline_friend_body =
+        [&](FriendDecl* friend_decl) {
+        auto* function_decl =
+            friend_decl ? friend_decl->function_decl() : nullptr;
+        if (!friend_decl || !function_decl ||
+            !friend_decl->has_deferred_inline_body() ||
+            function_decl->body) {
+            return;
+        }
+
+        DeferredInlineParserState saved_state =
+            capture_deferred_inline_parser_state();
+        seen_stmt_labels.clear();
+        stmt_labels.clear();
+        local_label_scopes_.clear();
+        local_label_unique_id_ = 0;
+
+        auto entered_scope = collect_->collect_enter_scope(ScopeFlags::FunctionScope);
+        auto function_scope = entered_scope.scope;
+
+        QualType previous_record_lookup_type =
+            collect_->collect_current_cpp_record_lookup_type();
+        collect_->collect_set_current_cpp_record_lookup_type(QualType(nullptr));
+
+        Collect::CppThisContext cpp_this_context;
+        cpp_this_context.friend_access_type =
+            friend_decl->granting_record_type
+                ? friend_decl->granting_record_type
+                : (ctx.record_type ? QualType(ctx.record_type) : QualType(nullptr));
+
+        func_type = function_decl->type;
+        current_language_linkage_ = LanguageLinkage::None;
+        collect_->collect_start_function_definition(
+            function_decl->name,
+            QualType(function_decl->type),
+            cpp_this_context);
+        Collect::ImmediateFunctionContextScope immediate_function_context_guard(
+            collect_.get(), function_decl->is_consteval != 0);
+
+        for (auto& param_decl_base : function_decl->parameters) {
+            auto* param_decl = dyn_cast<ParamDecl>(param_decl_base.get());
+            if (!param_decl || !param_decl->has_name()) {
+                continue;
+            }
+            param_decl->sym = collect_->collect_declare_variable_symbol(
+                param_decl->get_name(),
+                param_decl->type,
+                param_decl->storage_class,
+                false,
+                false,
+                param_decl->location);
+        }
+
+        try {
+            set_token_idx(friend_decl->deferred_inline_body_begin_token_idx);
+            if (gentle_check(TokenType::TRY_KW)) {
+                auto try_stmt = parse_cpp_try_statement(
+                    function_scope,
+                    false);
+                SrcLoc body_loc = try_stmt ? try_stmt->location : SrcLoc();
+                std::vector<std::unique_ptr<Stmt>> stmts;
+                stmts.push_back(std::move(try_stmt));
+                function_decl->body = collect_->collect_compound_statement(
+                    std::move(stmts), function_scope, body_loc);
+            } else {
+                function_decl->body = parse_compound_stmt(function_scope);
+            }
+            function_decl->scope = function_scope;
+            function_decl->stmt_labels.insert(
+                stmt_labels.begin(), stmt_labels.end());
+            set_token_idx(friend_decl->deferred_inline_body_end_token_idx);
+            friend_decl->clear_deferred_inline_body_token_range();
+            collect_->collect_leave_scope();
+            collect_->collect_finish_function_definition(function_scope);
+            collect_->collect_set_current_cpp_record_lookup_type(
+                previous_record_lookup_type);
+        } catch (...) {
+            collect_->collect_abort_function_definition();
+            collect_->collect_leave_scope();
+            collect_->collect_set_current_cpp_record_lookup_type(
+                previous_record_lookup_type);
+            restore_deferred_inline_parser_state(std::move(saved_state));
+            throw;
+        }
+
+        restore_deferred_inline_parser_state(std::move(saved_state));
+    };
     auto parse_deferred_inline_method_template_body =
         [&](FunctionTemplateDecl* method_template) {
         auto* templated_function =
@@ -488,5 +575,12 @@ void Parser::build_cpp_record_parse_deferred_bodies(
             continue;
         }
         parse_deferred_inline_destructor_body(dtor_decl);
+    }
+    for (const auto& member : ctx.record.members) {
+        auto* friend_decl = dyn_cast<FriendDecl>(member.get());
+        if (!friend_decl) {
+            continue;
+        }
+        parse_deferred_inline_friend_body(friend_decl);
     }
 }

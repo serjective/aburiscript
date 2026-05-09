@@ -29,6 +29,8 @@ struct TypedefDecl;
 struct CppMethodDecl;
 struct CppConstructorDecl;
 struct CppDestructorDecl;
+struct FriendDecl;
+struct FuncDecl;
 struct VariableDecl;
 struct FunctionType;
 struct CppBaseSpecifier;
@@ -1522,6 +1524,14 @@ struct RecordSemanticState {
         const TemplateDecl* decl = nullptr;
     };
 
+    struct FriendFunction {
+        std::string name;
+        QualType type;
+        const FriendDecl* decl = nullptr;
+        const FuncDecl* function_decl = nullptr;
+        std::shared_ptr<Symbol> symbol = nullptr;
+    };
+
     struct Constructor {
         std::string name;
         QualType type;
@@ -1590,6 +1600,7 @@ struct RecordSemanticState {
     std::vector<StaticDataMember> static_data_members;
     std::vector<NestedType> nested_types;
     std::vector<NestedTemplate> nested_templates;
+    std::vector<FriendFunction> friend_functions;
     std::vector<EnumeratorMember> enumerator_members;
     std::vector<Constructor> constructors;
     std::vector<Destructor> destructors;

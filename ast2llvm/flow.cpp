@@ -1968,6 +1968,13 @@ void ASTToLLVM::convert_declaration(Decl *decl) {
         case DeclKind::CppDestructorDecl:
             convert_function_declaration(static_cast<FuncDecl*>(decl));
             return;
+        case DeclKind::FriendDecl: {
+            auto* friend_decl = static_cast<FriendDecl*>(decl);
+            if (auto* function_decl = friend_decl->function_decl()) {
+                convert_function_declaration(function_decl);
+            }
+            return;
+        }
         case DeclKind::VariableDecl:
             convert_variable_declaration(static_cast<VariableDecl*>(decl));
             return;
@@ -1981,6 +1988,12 @@ void ASTToLLVM::convert_declaration(Decl *decl) {
                     case DeclKind::CppConstructorDecl:
                     case DeclKind::CppDestructorDecl:
                         convert_function_declaration(static_cast<FuncDecl*>(member.get()));
+                        break;
+                    case DeclKind::FriendDecl:
+                        if (auto* friend_function =
+                                static_cast<FriendDecl*>(member.get())->function_decl()) {
+                            convert_function_declaration(friend_function);
+                        }
                         break;
                     default:
                         break;

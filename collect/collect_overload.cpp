@@ -5,7 +5,9 @@
 #include "lookup_engine.h"
 #include <cstdlib>
 #include <cstdint>
+#include <functional>
 #include <iostream>
+#include <unordered_set>
 
 using namespace collect_internal;
 
@@ -335,6 +337,7 @@ std::unique_ptr<Expr> Collect::append_member_overload_candidates(
             ? current_access_context_record_decl(
                   session_.func_state_.current_function_is_cpp_member,
                   session_.func_state_.current_function_cpp_this_type,
+                  session_.func_state_.current_function_cpp_friend_access_type,
                   session_.current_cpp_record_lookup_type_,
                   ast_ctx_.get())
             : nullptr;
@@ -417,6 +420,7 @@ std::unique_ptr<Expr> Collect::append_member_template_overload_candidates(
             ? current_access_context_record_decl(
                   session_.func_state_.current_function_is_cpp_member,
                   session_.func_state_.current_function_cpp_this_type,
+                  session_.func_state_.current_function_cpp_friend_access_type,
                   session_.current_cpp_record_lookup_type_,
                   ast_ctx_.get())
             : nullptr;
@@ -532,6 +536,82 @@ void Collect::append_unqualified_overload_candidates(
         call_candidate.symbol = fn_sym;
         call_candidate.implicit_object_arg_kind = implicit_arg_kind;
         candidates_out.push_back(std::move(call_candidate));
+    }
+}
+
+void Collect::append_adl_friend_overload_candidates(
+    std::string_view function_name,
+    OverloadImplicitObjectArgKind implicit_arg_kind,
+    const std::vector<Expr*>& associated_args,
+    std::vector<OverloadCallCandidate>& candidates_out) {
+
+    if (!lang_opts_.is_cxx_mode()) {
+        return;
+    }
+
+    std::unordered_set<const ObjectDecl*> associated_records;
+    std::vector<const ObjectDecl*> ordered_records;
+    auto append_associated_record = [&](const ObjectDecl* record_decl) {
+        record_decl = canonical_record_decl(record_decl);
+        if (!record_decl || associated_records.contains(record_decl)) {
+            return;
+        }
+        associated_records.insert(record_decl);
+        ordered_records.push_back(record_decl);
+    };
+    std::function<void(QualType)> collect_associated_records =
+        [&](QualType type) {
+        if (!type) {
+            return;
+        }
+        QualType semantic_type =
+            remove_reference_and_desugar(type, ast_ctx_.get());
+        if (auto object_type = semantic_type.as_shared<ObjectType>()) {
+            append_associated_record(
+                dyn_cast<ObjectDecl>(object_type->get_decl()));
+            return;
+        }
+        if (auto pointer_type =
+                desugar_type(semantic_type, ast_ctx_.get())
+                    .as_shared<PointerType>()) {
+            collect_associated_records(pointer_type->pointed_type);
+        }
+    };
+    for (auto* arg : associated_args) {
+        if (!arg) {
+            continue;
+        }
+        collect_associated_records(arg->get_type());
+    }
+    if (ordered_records.empty()) {
+        return;
+    }
+
+    std::unordered_set<const Symbol*> existing_symbols;
+    for (const auto& candidate : candidates_out) {
+        if (candidate.symbol) {
+            existing_symbols.insert(candidate.symbol.get());
+        }
+    }
+    for (const auto* record_decl : ordered_records) {
+        const auto* state =
+            record_semantics_cache_lookup(record_decl, ast_ctx_.get());
+        if (!state) {
+            continue;
+        }
+        for (const auto& friend_function : state->friend_functions) {
+            if (friend_function.name != function_name ||
+                !friend_function.symbol ||
+                friend_function.symbol->kind != SymbolKind::FUNCTION ||
+                existing_symbols.contains(friend_function.symbol.get())) {
+                continue;
+            }
+            OverloadCallCandidate call_candidate;
+            call_candidate.symbol = friend_function.symbol;
+            call_candidate.implicit_object_arg_kind = implicit_arg_kind;
+            candidates_out.push_back(std::move(call_candidate));
+            existing_symbols.insert(friend_function.symbol.get());
+        }
     }
 }
 

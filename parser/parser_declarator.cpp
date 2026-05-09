@@ -419,6 +419,16 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     }
                     tally.consteval_count++;
                     break;
+                case TokenType::FRIEND_KW:
+                    if (!pars->is_cxx_mode_active()) {
+                        parsing = false;
+                        continue;
+                    }
+                    if (is_friend) {
+                        error_custloc("duplicate 'friend' specifier", t.loc);
+                    }
+                    is_friend = true;
+                    break;
                 case TokenType::EXPLICIT_KW:
                     if (!pars->is_cxx_mode_active()) {
                         parsing = false;

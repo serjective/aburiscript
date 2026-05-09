@@ -120,6 +120,7 @@ constexpr auto kAllDeclKinds = std::to_array<DeclKind>({
     DeclKind::CppMethodDecl,
     DeclKind::CppConstructorDecl,
     DeclKind::CppDestructorDecl,
+    DeclKind::FriendDecl,
     DeclKind::VariableDecl,
     DeclKind::ParamDecl,
     DeclKind::FieldDecl,
@@ -239,6 +240,7 @@ const char* decl_kind_name(DeclKind kind) {
         case DeclKind::CppMethodDecl: return "CppMethodDecl";
         case DeclKind::CppConstructorDecl: return "CppConstructorDecl";
         case DeclKind::CppDestructorDecl: return "CppDestructorDecl";
+        case DeclKind::FriendDecl: return "FriendDecl";
         case DeclKind::VariableDecl: return "VariableDecl";
         case DeclKind::ParamDecl: return "ParamDecl";
         case DeclKind::FieldDecl: return "FieldDecl";
@@ -677,6 +679,13 @@ private:
                     visit_decl(param.get());
                 }
                 visit_stmt(node->body.get());
+                return;
+            }
+            case DeclKind::FriendDecl: {
+                auto* node = static_cast<const FriendDecl*>(decl);
+                record_decl<FriendDecl>(DeclKind::FriendDecl);
+                visit_decl(node->target_decl.get());
+                visit_symbol(node->function_symbol);
                 return;
             }
             case DeclKind::VariableDecl: {

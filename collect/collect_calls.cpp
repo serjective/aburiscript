@@ -572,11 +572,13 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
         const std::string& callee_name = callee_ref->get_name();
         std::string display_name =
             format_explicit_template_callee_name(qualified_info, callee_name);
-        const ObjectDecl* access_context_decl = nullptr;
-        if (session_.func_state_.current_function_is_cpp_member) {
-            access_context_decl =
-                current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
-        }
+        const ObjectDecl* access_context_decl =
+            current_access_context_record_decl(
+                session_.func_state_.current_function_is_cpp_member,
+                session_.func_state_.current_function_cpp_this_type,
+                session_.func_state_.current_function_cpp_friend_access_type,
+                session_.current_cpp_record_lookup_type_,
+                ast_ctx_.get());
 
         std::vector<OverloadCallCandidate> overload_candidates;
         bool saw_private_member = false;
@@ -734,6 +736,31 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
                   callee_name,
                   session_.current_scope_,
                   current_decl_context);
+    if (!qualified_info) {
+        std::vector<OverloadCallCandidate> adl_friend_candidates;
+        append_adl_friend_overload_candidates(
+            callee_name,
+            OverloadImplicitObjectArgKind::None,
+            raw_call_args,
+            adl_friend_candidates);
+        function_candidates.reserve(
+            function_candidates.size() + adl_friend_candidates.size());
+        for (auto& candidate : adl_friend_candidates) {
+            if (!candidate.symbol) {
+                continue;
+            }
+            bool duplicate = false;
+            for (const auto& existing : function_candidates) {
+                if (existing == candidate.symbol) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                function_candidates.push_back(std::move(candidate.symbol));
+            }
+        }
+    }
 
     QualType named_type = nullptr;
     if (!qualified_info) {
@@ -1316,11 +1343,13 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
         }
 
         const ObjectDecl* object_record_decl = record_decl_from_record_type(record_type.get());
-        const ObjectDecl* access_context_decl = nullptr;
-        if (session_.func_state_.current_function_is_cpp_member) {
-            access_context_decl =
-                current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
-        }
+        const ObjectDecl* access_context_decl =
+            current_access_context_record_decl(
+                session_.func_state_.current_function_is_cpp_member,
+                session_.func_state_.current_function_cpp_this_type,
+                session_.func_state_.current_function_cpp_friend_access_type,
+                session_.current_cpp_record_lookup_type_,
+                ast_ctx_.get());
 
         std::vector<OverloadCallCandidate> overload_candidates;
         overload_candidates.reserve(method_templates.size());
@@ -1558,11 +1587,13 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
         const std::string& callee_name = callee_ref->get_name();
         std::string display_name =
             format_explicit_template_callee_name(qualified_info, callee_name);
-        const ObjectDecl* access_context_decl = nullptr;
-        if (session_.func_state_.current_function_is_cpp_member) {
-            access_context_decl =
-                current_record_decl_from_this_type(session_.func_state_.current_function_cpp_this_type);
-        }
+        const ObjectDecl* access_context_decl =
+            current_access_context_record_decl(
+                session_.func_state_.current_function_is_cpp_member,
+                session_.func_state_.current_function_cpp_this_type,
+                session_.func_state_.current_function_cpp_friend_access_type,
+                session_.current_cpp_record_lookup_type_,
+                ast_ctx_.get());
 
         auto method_templates =
             find_record_method_templates(qualified_owner_type.get(), callee_name);

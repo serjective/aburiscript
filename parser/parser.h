@@ -764,6 +764,7 @@ struct DeclarationParser {
     bool is_block_byref = false;
     bool is_constexpr = false;
     bool is_consteval = false;
+    bool is_friend = false;
     CppExplicitSpecifier explicit_specifier;
     std::unique_ptr<Expr> trailing_requires_clause = nullptr;
     uint8_t qualifiers = QUAL_NONE; // outermost type qualifiers (for the variable itself)

@@ -586,6 +586,7 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
         current_access_context_record_decl(
             session_.func_state_.current_function_is_cpp_member,
             session_.func_state_.current_function_cpp_this_type,
+            session_.func_state_.current_function_cpp_friend_access_type,
             session_.current_cpp_record_lookup_type_,
             ast_ctx_.get());
     bool is_current_instantiation =
@@ -643,6 +644,7 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
             ? current_access_context_record_decl(
                   session_.func_state_.current_function_is_cpp_member,
                   session_.func_state_.current_function_cpp_this_type,
+                  session_.func_state_.current_function_cpp_friend_access_type,
                   session_.current_cpp_record_lookup_type_,
                   ast_ctx_.get())
             : nullptr;

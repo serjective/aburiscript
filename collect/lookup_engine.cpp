@@ -482,6 +482,9 @@ void append_unique_function_candidate(
     if (!candidate || candidate->kind != SymbolKind::FUNCTION) {
         return;
     }
+    if (candidate->is_hidden_friend) {
+        return;
+    }
     for (const auto& existing : candidates) {
         if (existing == candidate) {
             return;

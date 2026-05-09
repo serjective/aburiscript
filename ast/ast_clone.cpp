@@ -1926,6 +1926,7 @@ std::shared_ptr<Symbol> clone_symbol_shallow(const std::shared_ptr<Symbol>& sym,
     cloned->is_consteval = sym->is_consteval;
     cloned->is_deleted = sym->is_deleted;
     cloned->is_defaulted = sym->is_defaulted;
+    cloned->is_hidden_friend = sym->is_hidden_friend;
     cloned->had_non_inline_declaration = sym->had_non_inline_declaration;
     cloned->is_block_byref = sym->is_block_byref;
     cloned->is_deprecated = sym->is_deprecated;
