@@ -388,5 +388,29 @@ Parser::CxxStmtDisambiguation Parser::classify_cxx_stmt_disambiguation() {
     }
     // C++ [stmt.ambig]: if a statement can be parsed as either declaration
     // or expression-statement, it is interpreted as a declaration.
-    return CxxStmtDisambiguation::Declaration;
+    auto start_idx = tok_mgnt.get_token_idx();
+    auto split_state = tok_mgnt.get_split_token_state();
+    tentative_syntax_probe::Config probe_cfg{
+        .cxx_mode = true,
+        .blocks_enabled = type_ctx && type_ctx->target &&
+            darwin_blocks::blocks_enabled_for_langopts(
+                lang_opts, *type_ctx->target)
+    };
+    auto syntax_result =
+        tentative_syntax_probe::probe_cxx_statement_disambiguation(
+            tok_mgnt, probe_cfg);
+    tok_mgnt.set_token_idx(start_idx);
+    tok_mgnt.set_split_token_state(split_state);
+
+    switch (syntax_result) {
+        case tentative_syntax_probe::CxxStatementDisambiguation::Declaration:
+            return CxxStmtDisambiguation::Declaration;
+        case tentative_syntax_probe::CxxStatementDisambiguation::Expression:
+            return CxxStmtDisambiguation::Expression;
+        case tentative_syntax_probe::CxxStatementDisambiguation::Ambiguous:
+            return CxxStmtDisambiguation::Ambiguous;
+        case tentative_syntax_probe::CxxStatementDisambiguation::Invalid:
+            return CxxStmtDisambiguation::Invalid;
+    }
+    return CxxStmtDisambiguation::Invalid;
 }
