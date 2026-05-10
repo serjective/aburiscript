@@ -52,6 +52,23 @@ bool fixed_enum_value_fits_underlying(
     return value >= minv && value <= maxv;
 }
 
+bool can_parse_cxx_object_initializer_syntax(QualType declared_type) {
+    if (!declared_type) {
+        return false;
+    }
+    auto placeholder_specialization =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_typedefs(declared_type).get_shared());
+    if (placeholder_specialization &&
+        placeholder_specialization->is_class_template_placeholder) {
+        return true;
+    }
+    if (type_depends_on_template_parameters(declared_type)) {
+        return true;
+    }
+    return canonical_type_kind(declared_type) == TypeKind::Object;
+}
+
 bool is_defaultable_special_member_method(
     const CppMethodDecl* method_decl,
     QualType owner_type,
@@ -3741,18 +3758,9 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
     }
     std::unique_ptr<Expr> init_expr;
     bool is_copy_initialization = false;
-    auto placeholder_specialization =
-        declared_type
-            ? dyn_cast_shared<TemplateSpecializationType>(
-                  desugar_typedefs(declared_type).get_shared())
-            : nullptr;
-    bool is_class_template_placeholder =
-        placeholder_specialization &&
-        placeholder_specialization->is_class_template_placeholder;
     bool is_cxx_object_decl =
         is_cxx_mode_active() &&
-        (is_class_template_placeholder ||
-         canonical_type_kind(declared_type) == TypeKind::Object);
+        can_parse_cxx_object_initializer_syntax(declared_type);
     if (gentle_check_and_consume(TokenType::ASSIGN)) {
         is_copy_initialization = true;
         if (gentle_check(TokenType::LEFT_BRACE)) {
@@ -5203,7 +5211,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 bool is_copy_initialization = false;
                 bool is_cxx_object_decl =
                     is_cxx_mode_active() &&
-                    canonical_type_kind(static_member_type) == TypeKind::Object;
+                    can_parse_cxx_object_initializer_syntax(static_member_type);
                 if (gentle_check_and_consume(TokenType::ASSIGN)) {
                     is_copy_initialization = true;
                     if (gentle_check(TokenType::LEFT_BRACE)) {

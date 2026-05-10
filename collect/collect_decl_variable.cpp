@@ -632,7 +632,7 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         }
     }
 
-    if (is_constexpr && init) {
+    if (is_constexpr && init && !defer_initializer_semantics) {
         std::string constexpr_failure;
         SrcLoc constexpr_failure_loc = loc;
         ConstEvalMode constexpr_mode = lang_opts_.is_cxx_mode()
