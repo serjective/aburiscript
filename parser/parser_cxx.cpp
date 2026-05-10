@@ -94,6 +94,202 @@ bool Parser::is_cpp_operator_function_name(std::string_view name) const {
     return name.rfind("operator", 0) == 0;
 }
 
+std::optional<std::string>
+Parser::try_parse_cpp_overloadable_operator_function_id_name_after_operator_keyword() {
+    auto make_operator_name = [](std::string_view suffix) {
+        return std::string("operator") + std::string(suffix);
+    };
+
+    auto consume_paired_operator =
+        [&](TokenType open_tok,
+            TokenType close_tok,
+            std::string_view suffix) -> std::optional<std::string> {
+        if (!gentle_check(open_tok) || peek_token().type != close_tok) {
+            return std::nullopt;
+        }
+        advance();
+        advance();
+        return make_operator_name(suffix);
+    };
+
+    if (auto name = consume_paired_operator(
+            TokenType::LEFT_PAREN,
+            TokenType::RIGHT_PAREN,
+            "()")) {
+        return name;
+    }
+    if (auto name = consume_paired_operator(
+            TokenType::LEFT_BRACKET,
+            TokenType::RIGHT_BRACKET,
+            "[]")) {
+        return name;
+    }
+
+    if (gentle_check(TokenType::NEW)) {
+        advance(); // consume 'new'
+        if (auto name = consume_paired_operator(
+                TokenType::LEFT_BRACKET,
+                TokenType::RIGHT_BRACKET,
+                "new[]")) {
+            return name;
+        }
+        return make_operator_name("new");
+    }
+    if (gentle_check(TokenType::DELETE)) {
+        advance(); // consume 'delete'
+        if (auto name = consume_paired_operator(
+                TokenType::LEFT_BRACKET,
+                TokenType::RIGHT_BRACKET,
+                "delete[]")) {
+            return name;
+        }
+        return make_operator_name("delete");
+    }
+
+    std::string_view suffix;
+    switch (current_token().type) {
+        case TokenType::INCREMENT:
+            suffix = "++";
+            break;
+        case TokenType::DECREMENT:
+            suffix = "--";
+            break;
+        case TokenType::PLUS:
+            suffix = "+";
+            break;
+        case TokenType::NEGATE:
+            suffix = "-";
+            break;
+        case TokenType::MULTIPLY:
+            suffix = "*";
+            break;
+        case TokenType::DIVIDE:
+            suffix = "/";
+            break;
+        case TokenType::MODULO:
+            suffix = "%";
+            break;
+        case TokenType::BITWISE_AND:
+            suffix = "&";
+            break;
+        case TokenType::BITWISE_OR:
+            suffix = "|";
+            break;
+        case TokenType::BITWISE_XOR:
+            suffix = "^";
+            break;
+        case TokenType::BITWISE_NOT:
+            suffix = "~";
+            break;
+        case TokenType::LOGICAL_NOT:
+            suffix = "!";
+            break;
+        case TokenType::ASSIGN:
+            suffix = "=";
+            break;
+        case TokenType::LESS_THAN:
+            suffix = "<";
+            break;
+        case TokenType::GREATER_THAN:
+            suffix = ">";
+            break;
+        case TokenType::ASSIGN_ADD:
+            suffix = "+=";
+            break;
+        case TokenType::ASSIGN_SUB:
+            suffix = "-=";
+            break;
+        case TokenType::ASSIGN_MUL:
+            suffix = "*=";
+            break;
+        case TokenType::ASSIGN_DIV:
+            suffix = "/=";
+            break;
+        case TokenType::ASSIGN_MOD:
+            suffix = "%=";
+            break;
+        case TokenType::ASSIGN_AND:
+            suffix = "&=";
+            break;
+        case TokenType::ASSIGN_OR:
+            suffix = "|=";
+            break;
+        case TokenType::ASSIGN_XOR:
+            suffix = "^=";
+            break;
+        case TokenType::LEFT_SHIFT:
+            suffix = "<<";
+            break;
+        case TokenType::RIGHT_SHIFT:
+            suffix = ">>";
+            break;
+        case TokenType::ASSIGN_LSHIFT:
+            suffix = "<<=";
+            break;
+        case TokenType::ASSIGN_RSHIFT:
+            suffix = ">>=";
+            break;
+        case TokenType::EQUAL_TO:
+            suffix = "==";
+            break;
+        case TokenType::NOT_EQUAL:
+            suffix = "!=";
+            break;
+        case TokenType::LESS_EQUAL_THAN:
+            suffix = "<=";
+            break;
+        case TokenType::THREE_WAY_COMPARE:
+            suffix = "<=>";
+            break;
+        case TokenType::GREATER_EQUAL_THAN:
+            suffix = ">=";
+            break;
+        case TokenType::LOGICAL_AND:
+            suffix = "&&";
+            break;
+        case TokenType::LOGICAL_OR:
+            suffix = "||";
+            break;
+        case TokenType::COMMA:
+            suffix = ",";
+            break;
+        case TokenType::ARROW:
+            suffix = "->";
+            break;
+        case TokenType::ARROW_STAR:
+            suffix = "->*";
+            break;
+        default:
+            break;
+    }
+
+    if (!suffix.empty()) {
+        advance();
+        return make_operator_name(suffix);
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::string> Parser::try_parse_cpp_operator_function_id_name() {
+    if (!is_cxx_mode_active() || !gentle_check(TokenType::OPERATOR_KW)) {
+        return std::nullopt;
+    }
+
+    Token operator_kw_tok = current_token();
+    advance(); // consume 'operator'
+
+    if (auto name =
+            try_parse_cpp_overloadable_operator_function_id_name_after_operator_keyword()) {
+        return name;
+    }
+
+    error_custloc(
+        "expected overloaded operator name after 'operator'",
+        operator_kw_tok.loc);
+    return std::nullopt;
+}
+
 bool Parser::is_cpp_member_only_operator_name(std::string_view name) const {
     return name == "operator=" ||
            name == "operator[]" ||

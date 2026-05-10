@@ -2150,6 +2150,37 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             return analyze_cpp_member_access_base(base_type, is_arrow)
                 .requires_template_keyword();
         };
+    struct ParsedMemberAccessName {
+        std::string name;
+        SrcLoc loc;
+    };
+    auto parse_member_access_name =
+        [&](std::string_view access_operator) -> ParsedMemberAccessName {
+            if (is_cxx_mode_active() &&
+                gentle_check(TokenType::OPERATOR_KW)) {
+                SrcLoc member_loc = current_token().loc;
+                auto operator_name = try_parse_cpp_operator_function_id_name();
+                if (!operator_name) {
+                    error(
+                        "Expected member name after '" +
+                        std::string(access_operator) + "'");
+                }
+                return ParsedMemberAccessName{
+                    std::move(*operator_name),
+                    member_loc};
+            }
+
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error(
+                    "Expected member name after '" +
+                    std::string(access_operator) + "'");
+            }
+            ParsedMemberAccessName parsed{
+                current_token().value,
+                current_token().loc};
+            advance();
+            return parsed;
+        };
     while (true) {
         SrcLoc loc = expr->location;
         if (is_cxx_mode_active() &&
@@ -2237,30 +2268,27 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             // Member access: expr.member
             QualType base_type = expr ? expr->get_type() : QualType();
             bool saw_template_keyword = gentle_check_and_consume(TokenType::TEMPLATE);
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error("Expected member name after '.'");
-            }
-            std::string member_name = current_token().value;
-            SrcLoc member_loc = current_token().loc;
-            advance();
+            auto member_name = parse_member_access_name(".");
             if (saw_template_keyword) {
                 if (!gentle_check(TokenType::LESS_THAN)) {
                     error_custloc(
                         "expected template-id after 'template' keyword",
-                        member_loc);
+                        member_name.loc);
                 }
             }
             if (!saw_template_keyword &&
                 gentle_check(TokenType::LESS_THAN) &&
                 base_requires_template_keyword(base_type, false)) {
-                diagnose_missing_cpp_template_keyword(member_name, member_loc);
+                diagnose_missing_cpp_template_keyword(
+                    member_name.name,
+                    member_name.loc);
             }
             bool allow_overloaded_method_set =
                 gentle_check(TokenType::LEFT_PAREN) ||
                 gentle_check(TokenType::LESS_THAN);
             expr = collect_->collect_member_expression(
                 std::move(expr),
-                member_name,
+                member_name.name,
                 false,
                 loc,
                 allow_overloaded_method_set,
@@ -2278,30 +2306,27 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             // Pointer member access: ptr->member
             QualType base_type = expr ? expr->get_type() : QualType();
             bool saw_template_keyword = gentle_check_and_consume(TokenType::TEMPLATE);
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error("Expected member name after '->'");
-            }
-            std::string member_name = current_token().value;
-            SrcLoc member_loc = current_token().loc;
-            advance();
+            auto member_name = parse_member_access_name("->");
             if (saw_template_keyword) {
                 if (!gentle_check(TokenType::LESS_THAN)) {
                     error_custloc(
                         "expected template-id after 'template' keyword",
-                        member_loc);
+                        member_name.loc);
                 }
             }
             if (!saw_template_keyword &&
                 gentle_check(TokenType::LESS_THAN) &&
                 base_requires_template_keyword(base_type, true)) {
-                diagnose_missing_cpp_template_keyword(member_name, member_loc);
+                diagnose_missing_cpp_template_keyword(
+                    member_name.name,
+                    member_name.loc);
             }
             bool allow_overloaded_method_set =
                 gentle_check(TokenType::LEFT_PAREN) ||
                 gentle_check(TokenType::LESS_THAN);
             expr = collect_->collect_member_expression(
                 std::move(expr),
-                member_name,
+                member_name.name,
                 true,
                 loc,
                 allow_overloaded_method_set,

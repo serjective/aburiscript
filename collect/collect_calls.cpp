@@ -1322,7 +1322,8 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
         QualType member_base_type = nullptr;
         if (member_callee->base) {
             member_base_type = member_callee->base->get_type();
-            auto semantic_base_type = desugar_type(member_base_type);
+            auto semantic_base_type =
+                remove_reference_and_desugar(member_base_type, ast_ctx_.get());
             if (member_callee->isArrow) {
                 auto ptr_type = semantic_base_type.as_shared<PointerType>();
                 if (ptr_type) {

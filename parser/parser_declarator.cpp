@@ -11,8 +11,7 @@ bool parse_cpp_operator_function_name(DeclarationParser& decl_parser) {
     Token operator_kw_tok = mgnt->current_token();
     mgnt->advance(); // consume 'operator'
 
-    auto set_operator_name = [&](std::string op_suffix) {
-        std::string op_name = "operator" + op_suffix;
+    auto set_operator_name = [&](std::string op_name) {
         if (decl_parser.name.empty()) {
             decl_parser.name = std::move(op_name);
             decl_parser.loc = operator_kw_tok.loc;
@@ -78,168 +77,11 @@ bool parse_cpp_operator_function_name(DeclarationParser& decl_parser) {
         return true;
     };
 
-    auto consume_paired_operator = [&](TokenType open_tok,
-                                       TokenType close_tok,
-                                       std::string_view op_suffix) -> bool {
-        if (!mgnt->gentle_check(open_tok) ||
-            mgnt->peek_token().type != close_tok) {
-            return false;
-        }
-        mgnt->advance();
-        mgnt->advance();
-        set_operator_name(std::string(op_suffix));
-        return true;
-    };
-
-    if (consume_paired_operator(TokenType::LEFT_PAREN,
-                                TokenType::RIGHT_PAREN,
-                                "()")) {
-        // Parsed operator().
-    } else if (consume_paired_operator(TokenType::LEFT_BRACKET,
-                                       TokenType::RIGHT_BRACKET,
-                                       "[]")) {
-        // Parsed operator[].
-    } else if (mgnt->gentle_check(TokenType::NEW)) {
-        mgnt->advance(); // consume 'new'
-        if (consume_paired_operator(TokenType::LEFT_BRACKET,
-                                    TokenType::RIGHT_BRACKET,
-                                    "new[]")) {
-            // Parsed operator new[].
-        } else {
-            set_operator_name("new");
-        }
-    } else if (mgnt->gentle_check(TokenType::DELETE)) {
-        mgnt->advance(); // consume 'delete'
-        if (consume_paired_operator(TokenType::LEFT_BRACKET,
-                                    TokenType::RIGHT_BRACKET,
-                                    "delete[]")) {
-            // Parsed operator delete[].
-        } else {
-            set_operator_name("delete");
-        }
+    if (auto operator_name =
+            pars->try_parse_cpp_overloadable_operator_function_id_name_after_operator_keyword()) {
+        set_operator_name(std::move(*operator_name));
     } else {
-        std::string op_suffix;
-        switch (mgnt->current_token().type) {
-            case TokenType::INCREMENT:
-                op_suffix = "++";
-                break;
-            case TokenType::DECREMENT:
-                op_suffix = "--";
-                break;
-            case TokenType::PLUS:
-                op_suffix = "+";
-                break;
-            case TokenType::NEGATE:
-                op_suffix = "-";
-                break;
-            case TokenType::MULTIPLY:
-                op_suffix = "*";
-                break;
-            case TokenType::DIVIDE:
-                op_suffix = "/";
-                break;
-            case TokenType::MODULO:
-                op_suffix = "%";
-                break;
-            case TokenType::BITWISE_AND:
-                op_suffix = "&";
-                break;
-            case TokenType::BITWISE_OR:
-                op_suffix = "|";
-                break;
-            case TokenType::BITWISE_XOR:
-                op_suffix = "^";
-                break;
-            case TokenType::BITWISE_NOT:
-                op_suffix = "~";
-                break;
-            case TokenType::LOGICAL_NOT:
-                op_suffix = "!";
-                break;
-            case TokenType::ASSIGN:
-                op_suffix = "=";
-                break;
-            case TokenType::LESS_THAN:
-                op_suffix = "<";
-                break;
-            case TokenType::GREATER_THAN:
-                op_suffix = ">";
-                break;
-            case TokenType::ASSIGN_ADD:
-                op_suffix = "+=";
-                break;
-            case TokenType::ASSIGN_SUB:
-                op_suffix = "-=";
-                break;
-            case TokenType::ASSIGN_MUL:
-                op_suffix = "*=";
-                break;
-            case TokenType::ASSIGN_DIV:
-                op_suffix = "/=";
-                break;
-            case TokenType::ASSIGN_MOD:
-                op_suffix = "%=";
-                break;
-            case TokenType::ASSIGN_AND:
-                op_suffix = "&=";
-                break;
-            case TokenType::ASSIGN_OR:
-                op_suffix = "|=";
-                break;
-            case TokenType::ASSIGN_XOR:
-                op_suffix = "^=";
-                break;
-            case TokenType::LEFT_SHIFT:
-                op_suffix = "<<";
-                break;
-            case TokenType::RIGHT_SHIFT:
-                op_suffix = ">>";
-                break;
-            case TokenType::ASSIGN_LSHIFT:
-                op_suffix = "<<=";
-                break;
-            case TokenType::ASSIGN_RSHIFT:
-                op_suffix = ">>=";
-                break;
-            case TokenType::EQUAL_TO:
-                op_suffix = "==";
-                break;
-            case TokenType::NOT_EQUAL:
-                op_suffix = "!=";
-                break;
-            case TokenType::LESS_EQUAL_THAN:
-                op_suffix = "<=";
-                break;
-            case TokenType::THREE_WAY_COMPARE:
-                op_suffix = "<=>";
-                break;
-            case TokenType::GREATER_EQUAL_THAN:
-                op_suffix = ">=";
-                break;
-            case TokenType::LOGICAL_AND:
-                op_suffix = "&&";
-                break;
-            case TokenType::LOGICAL_OR:
-                op_suffix = "||";
-                break;
-            case TokenType::COMMA:
-                op_suffix = ",";
-                break;
-            case TokenType::ARROW:
-                op_suffix = "->";
-                break;
-            case TokenType::ARROW_STAR:
-                op_suffix = "->*";
-                break;
-            default:
-                break;
-        }
-        if (!op_suffix.empty()) {
-            mgnt->advance();
-            set_operator_name(std::move(op_suffix));
-        } else {
-            return parse_conversion_function_name();
-        }
+        return parse_conversion_function_name();
     }
 
     return true;

@@ -580,6 +580,7 @@ private:
     std::string make_cpp_unsupported_message(std::string_view feature) const;
     void fail_cpp_unsupported(std::string_view feature, SrcLoc loc);
     bool is_cpp_operator_function_name(std::string_view name) const;
+    std::optional<std::string> try_parse_cpp_operator_function_id_name();
     bool is_cpp_member_only_operator_name(std::string_view name) const;
     void validate_cpp_operator_function_declaration(std::string_view name,
                                                     bool in_class_member_context,
@@ -677,6 +678,8 @@ public:
     }
 
     std::unique_ptr<Decl> parse();
+    std::optional<std::string>
+    try_parse_cpp_overloadable_operator_function_id_name_after_operator_keyword();
     std::unique_ptr<Expr> parse_expression();
     // also const expression
     std::unique_ptr<Expr> parse_conditional_expression();
