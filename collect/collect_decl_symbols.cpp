@@ -25,6 +25,106 @@ bool is_class_template_placeholder_type(QualType type) {
     return specialization && specialization->is_class_template_placeholder;
 }
 
+bool same_member_owner_type(QualType lhs,
+                            QualType rhs,
+                            const ASTContext* ast_ctx) {
+    if (!lhs || !rhs) {
+        return !lhs && !rhs;
+    }
+    return desugar_type(lhs, ast_ctx).equals_unqualified(
+        desugar_type(rhs, ast_ctx));
+}
+
+bool symbol_matches_function_declaration_owner(
+    const std::shared_ptr<Symbol>& symbol,
+    bool is_cpp_member_function,
+    QualType cpp_member_owner_type,
+    const ASTContext* ast_ctx) {
+    if (!symbol) {
+        return false;
+    }
+
+    QualType symbol_owner_type = get_symbol_owner_record_type(symbol.get());
+    if (!is_cpp_member_function) {
+        return !symbol_owner_type;
+    }
+    if (!cpp_member_owner_type) {
+        return static_cast<bool>(symbol_owner_type);
+    }
+    return same_member_owner_type(
+        symbol_owner_type,
+        cpp_member_owner_type,
+        ast_ctx);
+}
+
+void append_owner_matched_function_candidate(
+    std::vector<std::shared_ptr<Symbol>>& out,
+    const std::shared_ptr<Symbol>& symbol,
+    bool is_cpp_member_function,
+    QualType cpp_member_owner_type,
+    const ASTContext* ast_ctx) {
+
+    if (!symbol || symbol->kind != SymbolKind::FUNCTION) {
+        return;
+    }
+    if (!symbol_matches_function_declaration_owner(
+            symbol,
+            is_cpp_member_function,
+            cpp_member_owner_type,
+            ast_ctx)) {
+        return;
+    }
+    for (const auto& existing : out) {
+        if (existing == symbol) {
+            return;
+        }
+    }
+    out.push_back(symbol);
+}
+
+bool decl_binding_name_matches(const DeclBinding& binding,
+                               const std::string& name) {
+    if (binding.name == name) {
+        return true;
+    }
+    return binding.interned_name && *binding.interned_name == name;
+}
+
+std::vector<std::shared_ptr<Symbol>> collect_owner_matched_function_candidates(
+    const DeclContext* context,
+    const std::string& name,
+    bool is_cpp_member_function,
+    QualType cpp_member_owner_type,
+    const ASTContext* ast_ctx) {
+
+    std::vector<std::shared_ptr<Symbol>> candidates;
+    if (!context) {
+        return candidates;
+    }
+
+    for (const auto& binding : context->declarations()) {
+        if (binding.lookup_namespace != LookupNamespace::Ordinary ||
+            !decl_binding_name_matches(binding, name)) {
+            continue;
+        }
+        append_owner_matched_function_candidate(
+            candidates,
+            binding.symbol,
+            is_cpp_member_function,
+            cpp_member_owner_type,
+            ast_ctx);
+        for (const auto& overload_candidate : binding.overload_candidates) {
+            append_owner_matched_function_candidate(
+                candidates,
+                overload_candidate,
+                is_cpp_member_function,
+                cpp_member_owner_type,
+                ast_ctx);
+        }
+    }
+    return candidates;
+}
+
 } // namespace
 
 std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, SrcLoc loc, LanguageLinkage language_linkage, bool skip_template_parameter_scopes) {
@@ -312,7 +412,9 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
     std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name,
     QualType type, StorageClass storage_class, bool is_constexpr, bool is_consteval,
     bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage,
-    bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
+    bool is_cpp_member_function, bool is_deleted, bool is_defaulted,
+    QualType cpp_member_owner_type,
+    std::optional<std::string> cpp_member_qualifier_prefix) {
 
     if (!scope || name.empty()) {
         return nullptr;
@@ -399,10 +501,35 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
             report_error("function cannot return a function type", loc);
         }
     }
+    auto decl_context = resolve_scope_decl_context(decl_scope);
+    auto owner_matched_function_candidates =
+        collect_owner_matched_function_candidates(
+            decl_context.get(),
+            name,
+            is_cpp_member_function,
+            cpp_member_owner_type,
+            ast_ctx_.get());
     auto existing = lookup_ordinary_symbol(decl_scope, name, false);
+    if (existing &&
+        !symbol_matches_function_declaration_owner(
+            existing,
+            is_cpp_member_function,
+            cpp_member_owner_type,
+            ast_ctx_.get())) {
+        existing = nullptr;
+    }
+    if (!existing && !owner_matched_function_candidates.empty()) {
+        existing = owner_matched_function_candidates.front();
+    }
     if (!existing && !is_file_scope && !is_cpp_member_function) {
         auto parent_visible = lookup_ordinary_symbol(decl_scope, name, true);
-        if (parent_visible && parent_visible->kind == SymbolKind::FUNCTION) {
+        if (parent_visible &&
+            parent_visible->kind == SymbolKind::FUNCTION &&
+            symbol_matches_function_declaration_owner(
+                parent_visible,
+                is_cpp_member_function,
+                cpp_member_owner_type,
+                ast_ctx_.get())) {
             existing = parent_visible;
         }
     }
@@ -419,13 +546,23 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
 
         bool same_type = function_types_match(existing);
         if (lang_opts_.is_cxx_mode() && !same_type) {
-            auto cands = LookupEngine::lookup_unqualified_function_candidates(
-                name, decl_scope, false);
+            auto cands = owner_matched_function_candidates;
+            if (cands.empty()) {
+                for (const auto& cand :
+                     LookupEngine::lookup_unqualified_function_candidates(
+                         name,
+                         decl_scope,
+                         false)) {
+                    append_owner_matched_function_candidate(
+                        cands,
+                        cand,
+                        is_cpp_member_function,
+                        cpp_member_owner_type,
+                        ast_ctx_.get());
+                }
+            }
             std::shared_ptr<Symbol> signature_match = nullptr;
             for (const auto& cand : cands) {
-                if (!cand || cand->kind != SymbolKind::FUNCTION) {
-                    continue;
-                }
                 if (!function_types_match(cand)) {
                     if (!signature_match &&
                         function_signatures_match_ignoring_return_type(cand->type, type)) {
@@ -448,7 +585,21 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         }
 
         if (existing) {
-            if (auto ns_prefix = namespace_prefix_for_scope(decl_scope)) {
+            if (is_cpp_member_function) {
+                if (cpp_member_owner_type &&
+                    !get_symbol_owner_record_type(existing.get())) {
+                    set_symbol_owner_record_type(
+                        existing.get(),
+                        cpp_member_owner_type);
+                }
+                if (cpp_member_qualifier_prefix &&
+                    !cpp_member_qualifier_prefix->empty() &&
+                    !get_symbol_cxx_qualifier_prefix(existing.get())) {
+                    set_symbol_cxx_qualifier_prefix(
+                        existing.get(),
+                        *cpp_member_qualifier_prefix);
+                }
+            } else if (auto ns_prefix = namespace_prefix_for_scope(decl_scope)) {
                 if (!get_symbol_cxx_qualifier_prefix(existing.get())) {
                     set_symbol_cxx_qualifier_prefix(existing.get(), *ns_prefix);
                 }
@@ -525,7 +676,17 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         : VariableLinkage::EXTERNAL;
     auto sym = std::make_shared<Symbol>(name, SymbolKind::FUNCTION, std::move(type), storage_class,
         linkage, is_inline);
-    if (auto ns_prefix = namespace_prefix_for_scope(decl_scope)) {
+    if (is_cpp_member_function) {
+        if (cpp_member_owner_type) {
+            set_symbol_owner_record_type(sym.get(), cpp_member_owner_type);
+        }
+        if (cpp_member_qualifier_prefix &&
+            !cpp_member_qualifier_prefix->empty()) {
+            set_symbol_cxx_qualifier_prefix(
+                sym.get(),
+                *cpp_member_qualifier_prefix);
+        }
+    } else if (auto ns_prefix = namespace_prefix_for_scope(decl_scope)) {
         set_symbol_cxx_qualifier_prefix(sym.get(), *ns_prefix);
     }
     sym->is_defined = is_definition;
@@ -546,7 +707,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix) {
 
     return collect_declare_function_symbol(
         std::move(scope),
@@ -562,11 +723,13 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         language_linkage,
         is_cpp_member_function,
         is_deleted,
-        is_defaulted);
+        is_defaulted,
+        cpp_member_owner_type,
+        cpp_member_qualifier_prefix);
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix) {
 
     return collect_declare_function_symbol(
         session_.current_scope_,
@@ -582,10 +745,12 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::stri
         language_linkage,
         is_cpp_member_function,
         is_deleted,
-        is_defaulted);
+        is_defaulted,
+        cpp_member_owner_type,
+        cpp_member_qualifier_prefix);
 }
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_consteval, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_consteval, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix) {
 
     return collect_declare_function_symbol(
         session_.current_scope_,
@@ -601,10 +766,12 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::stri
         language_linkage,
         is_cpp_member_function,
         is_deleted,
-        is_defaulted);
+        is_defaulted,
+        cpp_member_owner_type,
+        cpp_member_qualifier_prefix);
 }
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix) {
 
     return collect_declare_function_symbol(
         std::move(scope),
@@ -619,10 +786,12 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         language_linkage,
         is_cpp_member_function,
         is_deleted,
-        is_defaulted);
+        is_defaulted,
+        cpp_member_owner_type,
+        cpp_member_qualifier_prefix);
 }
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix) {
 
     return collect_declare_function_symbol(
         name,
@@ -635,7 +804,9 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::stri
         language_linkage,
         is_cpp_member_function,
         is_deleted,
-        is_defaulted);
+        is_defaulted,
+        cpp_member_owner_type,
+        cpp_member_qualifier_prefix);
 }
 
 

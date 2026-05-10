@@ -2103,7 +2103,11 @@ bool Collect::finalize_cpp_lambda_semantics(
             synthesized_method->body != nullptr,
             synthesized_method->location,
             synthesized_method->get_language_linkage(),
-            true);
+            true,
+            false,
+            false,
+            lambda.semantic_info.closure_type(),
+            lambda.closure_name());
         if (synthesized_symbol) {
             set_symbol_cxx_qualifier_prefix(
                 synthesized_symbol.get(),

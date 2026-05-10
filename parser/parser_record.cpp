@@ -1064,7 +1064,9 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 ctor_decl->get_language_linkage(),
                 true,
                 ctor_decl->is_deleted,
-                ctor_decl->is_defaulted);
+                ctor_decl->is_defaulted,
+                QualType(record_type),
+                ctor_prefix);
             if (ctor_sym) {
                 set_symbol_owner_record_type(ctor_sym.get(), QualType(record_type));
                 if (!ctor_prefix.empty()) {
@@ -1119,7 +1121,9 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 dtor_decl->get_language_linkage(),
                 true,
                 dtor_decl->is_deleted,
-                dtor_decl->is_defaulted);
+                dtor_decl->is_defaulted,
+                QualType(record_type),
+                dtor_prefix);
             if (dtor_sym) {
                 set_symbol_owner_record_type(dtor_sym.get(), QualType(record_type));
                 if (!dtor_prefix.empty()) {
@@ -1223,7 +1227,9 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 method_decl->get_language_linkage(),
                 true,
                 method_decl->is_deleted,
-                method_decl->is_defaulted);
+                method_decl->is_defaulted,
+                QualType(record_type),
+                method_prefix);
             if (method_sym) {
                 set_symbol_owner_record_type(method_sym.get(), QualType(record_type));
                 if (!method_prefix.empty()) {

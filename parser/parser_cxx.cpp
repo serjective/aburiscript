@@ -6804,7 +6804,9 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     method_decl->get_language_linkage(),
                     true,
                     method_decl->is_deleted,
-                    method_decl->is_defaulted);
+                    method_decl->is_defaulted,
+                    semantic_owner_record_type,
+                    qualifier_prefix);
                 collect_->collect_record_register_function_default_arguments(
                     method_sym,
                     method_decl,

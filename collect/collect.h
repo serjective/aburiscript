@@ -909,7 +909,9 @@ public:
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
                                                             bool is_cpp_member_function = false,
                                                             bool is_deleted = false,
-                                                            bool is_defaulted = false) ;
+                                                            bool is_defaulted = false,
+                                                            QualType cpp_member_owner_type = QualType(),
+                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(std::shared_ptr<Scope> scope,
                                                             std::shared_ptr<GlobalIdentTracker> global_scope,
@@ -923,7 +925,9 @@ public:
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
                                                             bool is_cpp_member_function = false,
                                                             bool is_deleted = false,
-                                                            bool is_defaulted = false) ;
+                                                            bool is_defaulted = false,
+                                                            QualType cpp_member_owner_type = QualType(),
+                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(std::shared_ptr<Scope> scope,
                                                             std::shared_ptr<GlobalIdentTracker> global_scope,
@@ -936,7 +940,9 @@ public:
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
                                                             bool is_cpp_member_function = false,
                                                             bool is_deleted = false,
-                                                            bool is_defaulted = false) ;
+                                                            bool is_defaulted = false,
+                                                            QualType cpp_member_owner_type = QualType(),
+                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(const std::string& name,
                                                             QualType type,
@@ -949,7 +955,9 @@ public:
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
                                                             bool is_cpp_member_function = false,
                                                             bool is_deleted = false,
-                                                            bool is_defaulted = false) ;
+                                                            bool is_defaulted = false,
+                                                            QualType cpp_member_owner_type = QualType(),
+                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(const std::string& name,
                                                             QualType type,
@@ -961,7 +969,9 @@ public:
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
                                                             bool is_cpp_member_function = false,
                                                             bool is_deleted = false,
-                                                            bool is_defaulted = false) ;
+                                                            bool is_defaulted = false,
+                                                            QualType cpp_member_owner_type = QualType(),
+                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(const std::string& name,
                                                             QualType type,
@@ -972,7 +982,9 @@ public:
                                                             LanguageLinkage language_linkage = LanguageLinkage::None,
                                                             bool is_cpp_member_function = false,
                                                             bool is_deleted = false,
-                                                            bool is_defaulted = false) ;
+                                                            bool is_defaulted = false,
+                                                            QualType cpp_member_owner_type = QualType(),
+                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt) ;
 
     std::shared_ptr<Symbol> collect_declare_typedef_symbol(std::shared_ptr<Scope> scope,
                                                            std::shared_ptr<GlobalIdentTracker> global_scope,

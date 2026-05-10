@@ -2388,7 +2388,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 ctor_decl->get_language_linkage(),
                 true,
                 ctor_decl->is_deleted,
-                ctor_decl->is_defaulted);
+                ctor_decl->is_defaulted,
+                QualType(ctx.record_type),
+                ctor_prefix);
             collect_record_register_function_default_arguments(
                 ctor_sym,
                 ctor_decl,
@@ -2494,7 +2496,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 dtor_decl->get_language_linkage(),
                 true,
                 dtor_decl->is_deleted,
-                dtor_decl->is_defaulted);
+                dtor_decl->is_defaulted,
+                QualType(ctx.record_type),
+                dtor_prefix);
             if (dtor_sym) {
                 set_symbol_cxx_qualifier_prefix(dtor_sym.get(), dtor_prefix);
                 set_symbol_owner_record_type(
@@ -2648,7 +2652,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             method_decl->get_language_linkage(),
             true,
             method_decl->is_deleted,
-            method_decl->is_defaulted);
+            method_decl->is_defaulted,
+            QualType(ctx.record_type),
+            method_prefix);
         collect_record_register_function_default_arguments(
             method_sym,
             method_decl,
@@ -2824,7 +2830,9 @@ void Collect::collect_record_synthesize_implicit_members(
                 ctor_decl->get_language_linkage(),
                 true,
                 ctor_decl->is_deleted,
-                ctor_decl->is_defaulted);
+                ctor_decl->is_defaulted,
+                owner_type,
+                ctor_prefix);
         if (ctor_sym) {
             set_symbol_cxx_qualifier_prefix(ctor_sym.get(), ctor_prefix);
             set_symbol_owner_record_type(ctor_sym.get(), owner_type);
@@ -2933,7 +2941,9 @@ void Collect::collect_record_synthesize_implicit_members(
             method_decl->get_language_linkage(),
             true,
             method_decl->is_deleted,
-            method_decl->is_defaulted);
+            method_decl->is_defaulted,
+            owner_type,
+            method_prefix);
         if (method_sym) {
             set_symbol_cxx_qualifier_prefix(method_sym.get(), method_prefix);
             set_symbol_owner_record_type(method_sym.get(), owner_type);
@@ -3066,7 +3076,9 @@ void Collect::collect_record_synthesize_implicit_members(
             method_decl->get_language_linkage(),
             true,
             method_decl->is_deleted,
-            method_decl->is_defaulted);
+            method_decl->is_defaulted,
+            owner_type,
+            method_prefix);
         if (method_sym) {
             set_symbol_cxx_qualifier_prefix(method_sym.get(), method_prefix);
             set_symbol_owner_record_type(method_sym.get(), owner_type);
