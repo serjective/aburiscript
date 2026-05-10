@@ -1054,6 +1054,15 @@ std::unique_ptr<Expr> Collect::collect_function_call(
             }
         }
         if (callee_is_dependent || any_arg_is_dependent) {
+            if (auto typed_dependent_call =
+                    try_collect_typed_dependent_function_template_call(
+                        callee,
+                        {},
+                        false,
+                        args,
+                        loc)) {
+                return typed_dependent_call;
+            }
             return collect_dependent_call_expression(
                 std::move(callee),
                 std::move(args),
@@ -1118,6 +1127,225 @@ std::unique_ptr<Expr> Collect::collect_dependent_call_expression(
         std::move(args),
         dependent_call_type,
         /*known_function_type=*/QualType(nullptr),
+        loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_typed_dependent_call_expression(
+    std::unique_ptr<Expr> callee,
+    std::vector<std::unique_ptr<Expr>> args,
+    QualType known_function_type,
+    SrcLoc loc) {
+    QualType result_type(std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
+    if (auto function_type =
+            desugar_type(known_function_type, ast_ctx_.get())
+                .as_shared<FunctionType>()) {
+        result_type = function_type->ret_type;
+    }
+    return collect_make<DependentCallExpr>(
+        std::move(callee),
+        std::move(args),
+        result_type,
+        known_function_type,
+        loc);
+}
+
+std::unique_ptr<Expr>
+Collect::try_collect_typed_dependent_function_template_call(
+    std::unique_ptr<Expr>& callee,
+    const std::vector<TemplateArgument>& explicit_template_args,
+    bool has_explicit_template_args,
+    std::vector<std::unique_ptr<Expr>>& args,
+    SrcLoc loc) {
+    if (in_unevaluated_context()) {
+        return nullptr;
+    }
+
+    auto* callee_ref = dyn_cast<VarRef>(strip_implicit_casts(callee.get()));
+    if (!callee_ref) {
+        return nullptr;
+    }
+
+    const auto* qualified_info = callee_ref->get_cpp_qualified_info();
+    const std::string& callee_name = callee_ref->get_name();
+    auto template_candidates =
+        qualified_info
+            ? lookup_qualified_function_templates(
+                  callee_name,
+                  *qualified_info,
+                  get_current_decl_context().get())
+            : lookup_unqualified_function_templates(
+                  callee_name,
+                  session_.current_scope_,
+                  session_.current_decl_context_);
+    if (template_candidates.empty()) {
+        return nullptr;
+    }
+
+    std::vector<Expr*> raw_args;
+    raw_args.reserve(args.size());
+    for (const auto& arg : args) {
+        raw_args.push_back(arg.get());
+    }
+
+    std::vector<OverloadCallCandidate> overload_candidates;
+    overload_candidates.reserve(template_candidates.size());
+    for (const auto* function_template : template_candidates) {
+        const auto* pattern =
+            function_template ? function_template->function_decl() : nullptr;
+        if (!pattern) {
+            continue;
+        }
+        TemplateArgumentBindings explicit_bindings;
+        const TemplateArgumentBindings* initial_bindings = nullptr;
+        if (has_explicit_template_args) {
+            std::string binding_error;
+            if (!bind_explicit_template_arguments_prefix_to_parameters(
+                    function_template->parameters,
+                    explicit_template_args,
+                    explicit_bindings,
+                    &binding_error)) {
+                continue;
+            }
+            initial_bindings = &explicit_bindings;
+        }
+
+        std::vector<TemplateArgument> specialization_arguments;
+        std::shared_ptr<FunctionType> function_type = nullptr;
+        auto try_build_function_type = [&]() -> bool {
+            if (!deduce_function_template_call_arguments(
+                    function_template,
+                    raw_args,
+                    specialization_arguments,
+                    initial_bindings)) {
+                return false;
+            }
+            if (!are_template_constraints_satisfied(
+                    function_template,
+                    specialization_arguments,
+                    loc)) {
+                return false;
+            }
+            QualType substituted_type = substitute_template_type(
+                QualType(pattern->type),
+                function_template->parameters,
+                specialization_arguments,
+                loc);
+            if (contains_deferred_semantic_type(substituted_type.get_shared())) {
+                QualType realized_type =
+                    try_realize_deferred_semantic_type(substituted_type);
+                if (realized_type) {
+                    substituted_type = realized_type;
+                }
+            }
+            function_type =
+                desugar_type(substituted_type, ast_ctx_.get())
+                    .as_shared<FunctionType>();
+            return function_type != nullptr;
+        };
+
+        bool built_function_type = false;
+        if (diag_engine_) {
+            auto checkpoint = diag_engine_->checkpoint();
+            built_function_type = try_build_function_type();
+            bool reported_diagnostic =
+                diag_engine_->error_count > checkpoint.error_count ||
+                diag_engine_->diagnostics.size() > checkpoint.diagnostics_size;
+            diag_engine_->restore(checkpoint);
+            if (reported_diagnostic) {
+                built_function_type = false;
+            }
+        } else {
+            built_function_type = try_build_function_type();
+        }
+        if (!built_function_type || !function_type) {
+            continue;
+        }
+
+        auto specialization_symbol = std::make_shared<Symbol>(
+            pattern->name,
+            SymbolKind::FUNCTION,
+            QualType(function_type),
+            pattern->storage_class,
+            pattern->storage_class == StorageClass::STATIC
+                ? VariableLinkage::INTERNAL
+                : VariableLinkage::EXTERNAL,
+            pattern->is_inline != 0);
+        specialization_symbol->function_definition = pattern;
+        specialization_symbol->is_constexpr = pattern->is_constexpr;
+        specialization_symbol->is_consteval = pattern->is_consteval;
+        specialization_symbol->is_deleted = pattern->is_deleted;
+        specialization_symbol->is_defaulted = pattern->is_defaulted;
+
+        OverloadCallCandidate candidate;
+        candidate.symbol = std::move(specialization_symbol);
+        overload_candidates.push_back(std::move(candidate));
+    }
+    if (overload_candidates.empty()) {
+        return nullptr;
+    }
+
+    std::shared_ptr<Symbol> selected_symbol = nullptr;
+    if (overload_candidates.size() == 1) {
+        selected_symbol = overload_candidates.front().symbol;
+    } else if (diag_engine_) {
+        auto checkpoint = diag_engine_->checkpoint();
+        OverloadImplicitObjectArgKind selected_implicit_object_arg_kind =
+            OverloadImplicitObjectArgKind::None;
+        auto selection_error = select_overload_candidate(
+            format_explicit_template_callee_name(qualified_info, callee_name),
+            overload_candidates,
+            args,
+            nullptr,
+            loc,
+            selected_symbol,
+            selected_implicit_object_arg_kind);
+        bool selection_reported_diagnostic =
+            diag_engine_->error_count > checkpoint.error_count ||
+            diag_engine_->diagnostics.size() > checkpoint.diagnostics_size;
+        diag_engine_->restore(checkpoint);
+        if (selection_error || selection_reported_diagnostic || !selected_symbol) {
+            return nullptr;
+        }
+    } else {
+        OverloadImplicitObjectArgKind selected_implicit_object_arg_kind =
+            OverloadImplicitObjectArgKind::None;
+        if (select_overload_candidate(
+                format_explicit_template_callee_name(qualified_info, callee_name),
+                overload_candidates,
+                args,
+                nullptr,
+                loc,
+                selected_symbol,
+                selected_implicit_object_arg_kind) ||
+            !selected_symbol) {
+            return nullptr;
+        }
+    }
+
+    QualType known_function_type = selected_symbol->type;
+    if (!known_function_type) {
+        return nullptr;
+    }
+
+    std::optional<std::vector<TemplateArgument>> explicit_arguments;
+    if (has_explicit_template_args) {
+        explicit_arguments = explicit_template_args;
+    }
+    auto unresolved_lookup = collect_make<UnresolvedLookupExpr>(
+        callee_name,
+        build_dependent_lookup_qualifier(qualified_info),
+        std::move(explicit_arguments),
+        /*requires_template_keyword=*/false,
+        /*is_dependent=*/true,
+        known_function_type,
+        callee_ref->location,
+        session_.current_scope_,
+        session_.current_decl_context_);
+
+    return collect_typed_dependent_call_expression(
+        std::move(unresolved_lookup),
+        std::move(args),
+        known_function_type,
         loc);
 }
 
@@ -1287,6 +1515,15 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
     if (explicit_args_are_dependent ||
         callee_is_dependent ||
         any_arg_is_dependent) {
+        if (auto typed_dependent_call =
+                try_collect_typed_dependent_function_template_call(
+                    callee,
+                    explicit_template_args,
+                    true,
+                    args,
+                    loc)) {
+            return typed_dependent_call;
+        }
         return build_dependent_explicit_template_call(
             std::move(callee),
             std::move(explicit_template_args),

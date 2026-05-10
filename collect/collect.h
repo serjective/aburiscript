@@ -1671,6 +1671,28 @@ private:
         SrcLoc loc,
         DeferredTypeResolutionMode mode) ;
 
+    QualType try_synthesize_dependent_member_type(
+        QualType base_type,
+        bool is_arrow,
+        const std::string& member_name,
+        SrcLoc loc) ;
+
+    std::unique_ptr<Expr> collect_typed_dependent_call_expression(
+        std::unique_ptr<Expr> callee,
+        std::vector<std::unique_ptr<Expr>> args,
+        QualType known_function_type,
+        SrcLoc loc) ;
+
+    std::unique_ptr<Expr> try_collect_typed_dependent_function_template_call(
+        std::unique_ptr<Expr>& callee,
+        const std::vector<TemplateArgument>& explicit_template_args,
+        bool has_explicit_template_args,
+        std::vector<std::unique_ptr<Expr>>& args,
+        SrcLoc loc) ;
+
+    bool should_defer_cpp_conversion_check(const Expr* expr,
+                                           QualType target_type) const ;
+
     ObjectDecl* try_instantiate_class_template_specialization(
         const ClassTemplateDecl* class_template,
         const std::vector<TemplateArgument>& arguments,

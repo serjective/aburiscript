@@ -180,6 +180,28 @@ std::unique_ptr<Stmt> Collect::collect_continue_statement(SrcLoc loc) const {
     return collect_make<ContinueStmt>(loc);
 }
 
+bool Collect::should_defer_cpp_conversion_check(const Expr* expr,
+                                                QualType target_type) const {
+    if (!lang_opts_.is_cxx_mode() || !expr) {
+        return false;
+    }
+
+    auto* mutable_expr = const_cast<Expr*>(expr);
+    QualType expr_type = mutable_expr->get_type();
+    return !expr_type ||
+           expression_depends_on_template_parameters(expr) ||
+           type_depends_on_template_parameters(target_type, ast_ctx_.get()) ||
+           type_depends_on_template_parameters(expr_type, ast_ctx_.get()) ||
+           (target_type &&
+            contains_deferred_semantic_type(target_type.get_shared())) ||
+           (expr_type &&
+            contains_deferred_semantic_type(expr_type.get_shared())) ||
+           (target_type &&
+            auto_type_utils::has_cxx_auto_type(target_type.get_shared())) ||
+           (expr_type &&
+            auto_type_utils::has_cxx_auto_type(expr_type.get_shared()));
+}
+
 
 std::unique_ptr<Stmt> Collect::collect_case_statement(std::unique_ptr<Expr> const_expr, std::unique_ptr<Expr> range_end, std::unique_ptr<Stmt> stmt, SrcLoc loc) {
 
@@ -909,6 +931,14 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
         return collect_make<ReturnStmt>(nullptr, loc);
     }
 
+    if (isa<InitListExpr>(expr.get())) {
+        expr = process_initializer_for_type(std::move(expr), return_type, loc);
+    }
+
+    if (should_defer_cpp_conversion_check(expr.get(), return_type)) {
+        return collect_make<ReturnStmt>(std::move(expr), loc);
+    }
+
     if (canonical_type_kind(return_type, ast_ctx_.get()) == TypeKind::Reference) {
         auto seq = build_cpp_overload_conversion_sequence(expr.get(), return_type);
         if (!seq.viable) {
@@ -923,10 +953,6 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
         }
         expr = collect_make<ImplicitCast>(std::move(expr), return_type);
         return collect_make<ReturnStmt>(std::move(expr), loc);
-    }
-
-    if (isa<InitListExpr>(expr.get())) {
-        expr = process_initializer_for_type(std::move(expr), return_type, loc);
     }
 
     if (lang_opts_.is_cxx_mode() &&
@@ -975,14 +1001,7 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
     if (lang_opts_.is_cxx_mode() && expr) {
         auto expr_type = expr->get_type();
         bool skip_conversion_check =
-            !expr_type ||
-            expression_depends_on_template_parameters(expr.get()) ||
-            type_depends_on_template_parameters(return_type, ast_ctx_.get()) ||
-            type_depends_on_template_parameters(expr_type, ast_ctx_.get()) ||
-            contains_deferred_semantic_type(return_type.get_shared()) ||
-            contains_deferred_semantic_type(expr_type.get_shared()) ||
-            auto_type_utils::has_cxx_auto_type(return_type.get_shared()) ||
-            auto_type_utils::has_cxx_auto_type(expr_type.get_shared());
+            should_defer_cpp_conversion_check(expr.get(), return_type);
         if (!skip_conversion_check) {
             auto seq = build_cpp_overload_conversion_sequence(expr.get(), return_type);
             if (!seq.viable) {

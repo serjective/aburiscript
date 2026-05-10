@@ -21,6 +21,141 @@ bool record_has_dependent_bases(const ObjectDecl* record_decl) {
 }
 } // namespace
 
+QualType Collect::try_synthesize_dependent_member_type(
+    QualType base_type,
+    bool is_arrow,
+    const std::string& member_name,
+    SrcLoc loc) {
+    if (!base_type) {
+        return QualType(nullptr);
+    }
+
+    QualType object_type =
+        desugar_type(remove_reference(base_type, ast_ctx_.get()), ast_ctx_.get());
+    if (is_arrow) {
+        auto ptr_type = object_type.as_shared<PointerType>();
+        object_type = ptr_type
+            ? desugar_type(
+                  remove_reference(ptr_type->pointed_type, ast_ctx_.get()),
+                  ast_ctx_.get())
+            : QualType(nullptr);
+    }
+    if (!object_type) {
+        return QualType(nullptr);
+    }
+
+    std::shared_ptr<ObjectType> lookup_record_type =
+        desugar_type(object_type, ast_ctx_.get()).as_shared<ObjectType>();
+    const ClassTemplateDecl* class_template = nullptr;
+    const TemplateSpecializationType* specialization = nullptr;
+
+    if (!lookup_record_type) {
+        auto specialization_type =
+            dyn_cast_shared<TemplateSpecializationType>(
+                desugar_typedefs(object_type).get_shared());
+        if (!specialization_type) {
+            return QualType(nullptr);
+        }
+        class_template =
+            dyn_cast<ClassTemplateDecl>(specialization_type->primary_template);
+        if (!class_template) {
+            return QualType(nullptr);
+        }
+        const ObjectDecl* pattern_decl = class_template->pattern_semantic_decl();
+        if (!pattern_decl) {
+            return QualType(nullptr);
+        }
+        lookup_record_type = pattern_decl->get_record_type();
+        specialization = specialization_type.get();
+    }
+    if (!lookup_record_type) {
+        return QualType(nullptr);
+    }
+
+    FieldLookupResult lookup;
+    std::vector<uint32_t> path;
+    find_field_recursive(lookup_record_type.get(), member_name, path, 0, lookup);
+    if (lookup.matches == 0 || lookup.field == nullptr) {
+        return QualType(nullptr);
+    }
+    if (lookup.matches > 1) {
+        report_error("member '" + member_name + "' is ambiguous", loc);
+        return QualType(nullptr);
+    }
+
+    const ObjectDecl* object_record_decl =
+        record_decl_from_record_type(lookup_record_type.get());
+    const ObjectDecl* access_context_decl =
+        current_access_context_record_decl(
+            session_.func_state_.current_function_is_cpp_member,
+            session_.func_state_.current_function_cpp_this_type,
+            session_.func_state_.current_function_cpp_friend_access_type,
+            session_.current_cpp_record_lookup_type_,
+            ast_ctx_.get());
+    auto current_scope_matches_owner =
+        [&](const ObjectDecl* owner_decl) {
+            auto current_record_scope =
+                desugar_type(session_.current_cpp_record_lookup_type_, ast_ctx_.get())
+                    .as_shared<ObjectType>();
+            const ObjectDecl* scope_decl =
+                record_decl_from_record_type(current_record_scope.get());
+            if (!owner_decl || !scope_decl) {
+                return false;
+            }
+            owner_decl = canonical_record_decl(owner_decl);
+            scope_decl = canonical_record_decl(scope_decl);
+            return owner_decl == scope_decl || owner_decl->tag == scope_decl->tag;
+        };
+
+    if (lookup.field->declared_access == RecordMemberAccess::Protected &&
+        !can_access_protected_member_in_context(
+            lookup.owner_record_decl,
+            access_context_decl,
+            object_record_decl,
+            false) &&
+        !current_scope_matches_owner(lookup.owner_record_decl)) {
+        report_error(
+            "member '" + member_name + "' is protected within this context",
+            loc);
+        return QualType(nullptr);
+    }
+    if (lookup.field->declared_access == RecordMemberAccess::Private &&
+        !can_access_private_member_in_context(
+            lookup.owner_record_decl, access_context_decl) &&
+        !current_scope_matches_owner(lookup.owner_record_decl)) {
+        report_error(
+            "member '" + member_name + "' is private within this context",
+            loc);
+        return QualType(nullptr);
+    }
+
+    QualType member_type = lookup.field->type;
+    if (class_template && specialization) {
+        member_type = partially_substitute_template_type(
+            member_type,
+            class_template->parameters,
+            specialization->arguments,
+            loc);
+    }
+
+    uint8_t base_quals = QUAL_NONE;
+    if (is_arrow) {
+        auto ptr_type =
+            remove_reference_and_desugar(base_type, ast_ctx_.get())
+                .as_shared<PointerType>();
+        if (ptr_type) {
+            base_quals = ptr_type->pointed_type.get_qualifiers();
+        }
+    } else {
+        base_quals =
+            remove_reference(base_type, ast_ctx_.get()).get_qualifiers();
+    }
+    if (base_quals != QUAL_NONE && member_type) {
+        member_type = member_type.with_qualifiers(base_quals);
+    }
+    return member_type;
+}
+
 std::unique_ptr<Expr> Collect::collect_array_subscript(std::unique_ptr<Expr> array, std::unique_ptr<Expr> index, SrcLoc loc) {
 
     if (lang_opts_.is_cxx_mode()) {
@@ -603,10 +738,18 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
 
     if (lang_opts_.is_cxx_mode() &&
         (dependent_base_expr || dependent_base_type || names_dependent_base)) {
+        QualType dependent_member_type =
+            names_dependent_base
+                ? QualType(nullptr)
+                : try_synthesize_dependent_member_type(
+                      base_type,
+                      is_arrow,
+                      member_name,
+                      loc);
         auto unresolved_member = collect_make<UnresolvedMemberExpr>(
             std::move(member->base),
             member_name,
-            /*member_type=*/QualType(nullptr),
+            dependent_member_type,
             std::nullopt,
             is_arrow,
             is_current_instantiation,
