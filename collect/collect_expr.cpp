@@ -1994,6 +1994,10 @@ bool Collect::finalize_cpp_lambda_semantics(
         true,
         lambda.location);
     synthesized_method->type = call_operator_type.get_shared();
+    synthesized_method->is_constexpr =
+        lambda.is_constexpr || lambda.is_consteval ||
+        lang_opts_.is_cxx17_or_later();
+    synthesized_method->is_consteval = lambda.is_consteval;
     synthesized_method->scope =
         synthesized_method->body
             ? dyn_cast<CompoundStmt>(synthesized_method->body.get())->scope
@@ -2576,6 +2580,8 @@ std::unique_ptr<Expr> Collect::collect_cpp_lambda_expression(
     QualType explicit_return_type,
     bool has_parameter_clause,
     bool is_mutable,
+    bool is_constexpr,
+    bool is_consteval,
     bool has_noexcept,
     bool has_trailing_return,
     bool is_generic,
@@ -2593,6 +2599,8 @@ std::unique_ptr<Expr> Collect::collect_cpp_lambda_expression(
         std::move(explicit_return_type),
         has_parameter_clause,
         is_mutable,
+        is_constexpr,
+        is_consteval,
         has_noexcept,
         has_trailing_return,
         is_generic,

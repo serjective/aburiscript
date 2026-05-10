@@ -268,6 +268,8 @@ bool Parser::is_lambda_declarator_parameter_clause_ahead() {
     Token after = peek_token_shortcut(offset);
     if (after.type == TokenType::LEFT_BRACE ||
         after.type == TokenType::NOEXCEPT_KW ||
+        after.type == TokenType::CONSTEXPR_KW ||
+        after.type == TokenType::CONSTEVAL_KW ||
         after.type == TokenType::ARROW ||
         after.type == TokenType::REQUIRES_KW) {
         return true;
@@ -1149,6 +1151,8 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
 
     bool has_parameter_clause = false;
     bool is_mutable = false;
+    bool is_constexpr = false;
+    bool is_consteval = false;
     bool has_trailing_return = false;
     bool is_generic = false;
     bool has_auto_template_parameters = false;
@@ -1353,10 +1357,55 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
             lambda_function_type->parameters.push_back(param_decl->type);
         }
 
-        if (gentle_check(TokenType::IDENTIFIER) &&
-            current_token().value == "mutable") {
-            is_mutable = true;
-            advance();
+        while (true) {
+            if (gentle_check(TokenType::IDENTIFIER) &&
+                current_token().value == "mutable") {
+                if (is_mutable) {
+                    error_custloc(
+                        "duplicate 'mutable' in lambda declarator",
+                        current_token().loc);
+                }
+                is_mutable = true;
+                advance();
+                continue;
+            }
+            if (gentle_check(TokenType::CONSTEXPR_KW)) {
+                if (!lang_opts.is_cxx17_or_later()) {
+                    error_custloc(
+                        "lambda 'constexpr' specifier requires C++17",
+                        current_token().loc);
+                }
+                if (is_constexpr) {
+                    error_custloc(
+                        "duplicate 'constexpr' in lambda declarator",
+                        current_token().loc);
+                }
+                is_constexpr = true;
+                advance();
+                continue;
+            }
+            if (gentle_check(TokenType::CONSTEVAL_KW)) {
+                if (!lang_opts.is_cxx20_or_later()) {
+                    error_custloc(
+                        "lambda 'consteval' specifier requires C++20",
+                        current_token().loc);
+                }
+                if (is_consteval) {
+                    error_custloc(
+                        "duplicate 'consteval' in lambda declarator",
+                        current_token().loc);
+                }
+                is_consteval = true;
+                advance();
+                continue;
+            }
+            break;
+        }
+
+        if (is_constexpr && is_consteval) {
+            error_custloc(
+                "'constexpr' cannot be combined with 'consteval' on a lambda",
+                lambda_loc);
         }
 
         if (gentle_check(TokenType::NOEXCEPT_KW)) {
@@ -1454,6 +1503,8 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
             call_operator_type->ret_type,
             has_parameter_clause,
             is_mutable,
+            is_constexpr,
+            is_consteval,
             lambda_function_type->has_explicit_exception_spec,
             has_trailing_return,
             is_generic,

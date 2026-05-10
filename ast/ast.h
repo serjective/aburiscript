@@ -1735,6 +1735,8 @@ struct CppLambdaExpr : Expr {
     QualType explicit_return_type;
     uint8_t has_parameter_clause : 1;
     uint8_t is_mutable : 1;
+    uint8_t is_constexpr : 1;
+    uint8_t is_consteval : 1;
     uint8_t has_noexcept : 1;
     uint8_t has_trailing_return : 1;
     uint8_t is_generic : 1;
@@ -1751,6 +1753,8 @@ struct CppLambdaExpr : Expr {
                   QualType explicit_return_type,
                   bool has_parameter_clause,
                   bool is_mutable,
+                  bool is_constexpr,
+                  bool is_consteval,
                   bool has_noexcept,
                   bool has_trailing_return,
                   bool is_generic,
@@ -1769,6 +1773,8 @@ struct CppLambdaExpr : Expr {
           explicit_return_type(std::move(explicit_return_type)),
           has_parameter_clause(has_parameter_clause),
           is_mutable(is_mutable),
+          is_constexpr(is_constexpr),
+          is_consteval(is_consteval),
           has_noexcept(has_noexcept),
           has_trailing_return(has_trailing_return),
           is_generic(is_generic) {}

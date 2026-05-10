@@ -467,6 +467,8 @@ public:
         QualType explicit_return_type,
         bool has_parameter_clause,
         bool is_mutable,
+        bool is_constexpr,
+        bool is_consteval,
         bool has_noexcept,
         bool has_trailing_return,
         bool is_generic,

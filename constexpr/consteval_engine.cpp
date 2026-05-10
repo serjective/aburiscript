@@ -387,18 +387,20 @@ bool assign_interpreter_symbol_value(const Symbol* sym, const ConstValue& value)
     if (!g_interpreter_session || g_interpreter_session->frames.empty() || !sym) {
         return false;
     }
-    auto& current_frame = g_interpreter_session->frames.back();
-    for (auto scope_it = current_frame.scopes.rbegin();
-         scope_it != current_frame.scopes.rend(); ++scope_it) {
-        auto sym_it = scope_it->symbol_values.find(sym);
-        if (sym_it != scope_it->symbol_values.end()) {
-            sym_it->second = value;
-            for (auto& [name, named_sym] : scope_it->named_symbols) {
-                if (named_sym && named_sym.get() == sym) {
-                    scope_it->named_values[name] = value;
+    for (auto frame_it = g_interpreter_session->frames.rbegin();
+         frame_it != g_interpreter_session->frames.rend(); ++frame_it) {
+        for (auto scope_it = frame_it->scopes.rbegin();
+             scope_it != frame_it->scopes.rend(); ++scope_it) {
+            auto sym_it = scope_it->symbol_values.find(sym);
+            if (sym_it != scope_it->symbol_values.end()) {
+                sym_it->second = value;
+                for (auto& [name, named_sym] : scope_it->named_symbols) {
+                    if (named_sym && named_sym.get() == sym) {
+                        scope_it->named_values[name] = value;
+                    }
                 }
+                return true;
             }
-            return true;
         }
     }
     return false;
@@ -1413,6 +1415,25 @@ bool resolve_expr_location(Expr* expr,
         if (!append_member_expr_path_to_location(base_location, member_expr)) {
             return false;
         }
+        if (canonical_type_kind(base_location.value_type) ==
+                TypeKind::Reference) {
+            ConstValue reference_value;
+            InterpLocation referred_location;
+            if (!load_interpreter_location_value(
+                    base_location,
+                    mode,
+                    depth + 1,
+                    reference_value) ||
+                reference_value.kind != ConstValueKind::Address ||
+                !resolve_location_from_address_value_as(
+                    reference_value.address_value,
+                    remove_reference(base_location.value_type),
+                    referred_location)) {
+                return false;
+            }
+            location_out = std::move(referred_location);
+            return true;
+        }
         location_out = std::move(base_location);
         return true;
     }
@@ -1594,6 +1615,33 @@ ConstEvalResult eval_expr_as_typed_const_value(Expr* expr,
             expr ? expr->location : SrcLoc());
     }
 
+    QualType reference_target = remove_reference(target_type);
+    if (reference_target && canonical_type_kind(target_type) == TypeKind::Reference) {
+        InterpLocation location;
+        if (resolve_expr_location(expr, mode, depth + 1, location) &&
+            location.root_symbol) {
+            return ConstEvalResult::constant(
+                ConstValue::address(location.root_symbol, location.byte_offset));
+        }
+
+        ConstEvalResult temporary_value = eval_expr(expr, mode, depth + 1);
+        if (temporary_value.status != ConstEvalStatus::Constant ||
+            !temporary_value.value.has_value()) {
+            return temporary_value;
+        }
+        std::shared_ptr<Symbol> temporary_symbol;
+        if (!materialize_interpreter_temporary(
+                reference_target,
+                *temporary_value.value,
+                temporary_symbol)) {
+            return make_not_evaluated(
+                ConstEvalDiagCode::UnsupportedExpression,
+                "reference constant initializer could not materialize a temporary",
+                expr->location);
+        }
+        return ConstEvalResult::constant(ConstValue::address(temporary_symbol));
+    }
+
     target_type = desugar_type(target_type);
     Expr* stripped = strip_noop_implicit_casts(expr);
     if ((target_type->kind == TypeKind::Object ||
@@ -1618,6 +1666,34 @@ ConstEvalResult eval_expr_as_typed_const_value(Expr* expr,
             expr->location);
     }
     return ConstEvalResult::constant(*casted);
+}
+
+ConstEvalResult eval_cpp_lambda_expr(CppLambdaExpr* lambda,
+                                     ConstEvalMode mode,
+                                     size_t depth) {
+    if (!lambda || !lambda->get_type()) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "lambda expression is missing a closure object type",
+            lambda ? lambda->location : SrcLoc());
+    }
+
+    if (lambda->semantic_info.closure_initializer) {
+        return eval_expr_as_typed_const_value(
+            lambda->semantic_info.closure_initializer.get(),
+            lambda->get_type(),
+            mode,
+            depth + 1);
+    }
+
+    auto value = default_const_value_for_type(lambda->get_type());
+    if (!value.has_value()) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "lambda closure object is not supported in constant evaluation",
+            lambda->location);
+    }
+    return ConstEvalResult::constant(*value);
 }
 
 const VariableDecl* find_constant_evaluable_variable_definition(
@@ -3496,6 +3572,33 @@ ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size
 
     for (size_t i = 0; i < required_param_count; ++i) {
         const ParamDecl* param = params[i];
+        if (canonical_type_kind(param->type) == TypeKind::Reference) {
+            InterpLocation argument_location;
+            if (!resolve_expr_location(
+                    call->args[i].get(),
+                    mode,
+                    depth + 1,
+                    argument_location) ||
+                !argument_location.root_symbol) {
+                return make_not_evaluated(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "constexpr interpreter failed to bind reference parameter",
+                    call->location);
+            }
+            ConstValue reference_value = ConstValue::address(
+                argument_location.root_symbol,
+                argument_location.byte_offset);
+            if (!bind_interpreter_local(
+                    param->sym,
+                    param->get_name(),
+                    reference_value)) {
+                return make_not_evaluated(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "constexpr interpreter failed to bind reference parameter",
+                    call->location);
+            }
+            continue;
+        }
         auto casted = cast_const_value_to_type(argument_values[i], param->type);
         if (!casted.has_value()) {
             return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
@@ -3886,6 +3989,10 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
         return eval_requires_expr(requires_expr, mode, depth + 1);
     }
 
+    if (auto* lambda_expr = dyn_cast<CppLambdaExpr>(expr)) {
+        return eval_cpp_lambda_expr(lambda_expr, mode, depth + 1);
+    }
+
     if (isa<CppThisExpr>(expr)) {
         ConstValue this_value;
         if (lookup_interpreter_named_value("this", this_value)) {
@@ -3984,6 +4091,24 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
             ConstValue member_value;
             if (load_interpreter_location_value(
                     member_location, mode, depth + 1, member_value)) {
+                QualType referred_type = remove_reference(member_location.value_type);
+                if (canonical_type_kind(member_location.value_type) ==
+                        TypeKind::Reference &&
+                    member_value.kind == ConstValueKind::Address) {
+                    InterpLocation referred_location;
+                    ConstValue referred_value;
+                    if (resolve_location_from_address_value_as(
+                            member_value.address_value,
+                            referred_type,
+                            referred_location) &&
+                        load_interpreter_location_value(
+                            referred_location,
+                            mode,
+                            depth + 1,
+                            referred_value)) {
+                        return ConstEvalResult::constant(referred_value);
+                    }
+                }
                 return ConstEvalResult::constant(member_value);
             }
         }
@@ -3998,6 +4123,23 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
             ConstValue member_value;
             if (traverse_member_expr_value(
                     *base_result.value, member_expr, member_value)) {
+                if (canonical_type_kind(member_expr->get_type()) ==
+                        TypeKind::Reference &&
+                    member_value.kind == ConstValueKind::Address) {
+                    InterpLocation referred_location;
+                    ConstValue referred_value;
+                    if (resolve_location_from_address_value_as(
+                            member_value.address_value,
+                            remove_reference(member_expr->get_type()),
+                            referred_location) &&
+                        load_interpreter_location_value(
+                            referred_location,
+                            mode,
+                            depth + 1,
+                            referred_value)) {
+                        return ConstEvalResult::constant(referred_value);
+                    }
+                }
                 return ConstEvalResult::constant(member_value);
             }
         }

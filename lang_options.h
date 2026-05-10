@@ -129,6 +129,17 @@ struct LangOptions {
         return standard == "c++20" || standard == "gnu++20";
     }
 
+    bool is_cxx17_or_later() const {
+        if (!is_cxx_mode()) {
+            return false;
+        }
+        if (standard.empty()) {
+            return false;
+        }
+        return standard == "c++17" || standard == "gnu++17" ||
+               standard == "c++20" || standard == "gnu++20";
+    }
+
     bool is_c_mode() const {
         if (language_mode == LanguageMode::C) {
             return true;
