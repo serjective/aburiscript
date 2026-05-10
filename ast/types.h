@@ -1153,15 +1153,18 @@ struct TemplateSpecializationType : CType {
     const Decl* primary_template = nullptr;
     std::vector<TemplateArgument> arguments;
     bool is_dependent = false;
+    bool is_class_template_placeholder = false;
     explicit TemplateSpecializationType(std::string template_name,
                                         const Decl* primary_template,
                                         std::vector<TemplateArgument> arguments,
-                                        bool is_dependent = false)
+                                        bool is_dependent = false,
+                                        bool is_class_template_placeholder = false)
         : CType(TypeKind::TemplateSpecialization),
           template_name(std::move(template_name)),
           primary_template(primary_template),
           arguments(std::move(arguments)),
-          is_dependent(is_dependent) {}
+          is_dependent(is_dependent),
+          is_class_template_placeholder(is_class_template_placeholder) {}
 
     bool isIncomplete() const override {
         auto resolved =
@@ -1194,6 +1197,9 @@ struct TemplateSpecializationType : CType {
 
     std::string to_string() const override {
         std::string out = template_name;
+        if (is_class_template_placeholder) {
+            return out;
+        }
         out += "<";
         for (size_t idx = 0; idx < arguments.size(); ++idx) {
             if (idx > 0) {

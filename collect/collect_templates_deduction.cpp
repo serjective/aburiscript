@@ -1431,6 +1431,328 @@ bool Collect::deduce_function_template_call_arguments(
     return true;
 }
 
+bool Collect::resolve_class_template_argument_deduction(
+    const ClassTemplateDecl* class_template,
+    const std::vector<Expr*>& init_args,
+    bool,
+    bool is_copy_initialization,
+    SrcLoc loc,
+    QualType& deduced_type_out) {
+    deduced_type_out = QualType();
+    if (!class_template) {
+        return false;
+    }
+
+    struct DeductionGuideCandidateEval {
+        const CppDeductionGuideDecl* guide = nullptr;
+        QualType deduced_type = nullptr;
+        std::shared_ptr<FunctionType> function_type = nullptr;
+        std::vector<ImplicitConversionSequence> conversions;
+        bool viable = false;
+    };
+
+    auto exact_match_subrank =
+        [](const ImplicitConversionSequence& seq) -> int {
+        if (seq.exact_subrank >= 0) {
+            return seq.exact_subrank;
+        }
+        switch (seq.kind) {
+            case ConversionSequenceKind::Identity:
+                return 0;
+            case ConversionSequenceKind::Qualification:
+                return 1;
+            default:
+                return 2;
+        }
+    };
+
+    auto is_better_candidate =
+        [&](const DeductionGuideCandidateEval& lhs,
+            const DeductionGuideCandidateEval& rhs) -> bool {
+        bool strictly_better = false;
+        size_t compare_count =
+            std::min(lhs.conversions.size(), rhs.conversions.size());
+        for (size_t idx = 0; idx < compare_count; ++idx) {
+            int lhs_rank = static_cast<int>(lhs.conversions[idx].rank);
+            int rhs_rank = static_cast<int>(rhs.conversions[idx].rank);
+            if (lhs_rank > rhs_rank) {
+                return false;
+            }
+            if (lhs_rank < rhs_rank) {
+                strictly_better = true;
+                continue;
+            }
+            if (lhs.conversions[idx].rank == ConversionSequenceRank::ExactMatch) {
+                int lhs_subrank = exact_match_subrank(lhs.conversions[idx]);
+                int rhs_subrank = exact_match_subrank(rhs.conversions[idx]);
+                if (lhs_subrank > rhs_subrank) {
+                    return false;
+                }
+                if (lhs_subrank < rhs_subrank) {
+                    strictly_better = true;
+                }
+            }
+        }
+        return strictly_better;
+    };
+
+    auto select_best_candidate =
+        [&](const std::vector<DeductionGuideCandidateEval>& evaluated,
+            const std::vector<size_t>& viable_indices) -> std::optional<size_t> {
+        std::optional<size_t> best_index;
+        for (size_t idx : viable_indices) {
+            bool better_than_all = true;
+            for (size_t other : viable_indices) {
+                if (idx == other) {
+                    continue;
+                }
+                if (!is_better_candidate(evaluated[idx], evaluated[other])) {
+                    better_than_all = false;
+                    break;
+                }
+            }
+            if (!better_than_all) {
+                continue;
+            }
+            if (best_index.has_value()) {
+                return std::nullopt;
+            }
+            best_index = idx;
+        }
+        return best_index;
+    };
+
+    auto deduce_guide_arguments =
+        [&](const CppDeductionGuideDecl* guide,
+            TemplateArgumentBindings& bindings_out) -> bool {
+        if (!guide ||
+            !guide->function_type ||
+            guide->guide_parameters.size() !=
+                guide->function_type->parameters.size()) {
+            return false;
+        }
+
+        bindings_out = TemplateArgumentBindings(guide->parameters.size());
+        std::optional<size_t> pack_param_index;
+        for (size_t idx = 0; idx < guide->guide_parameters.size(); ++idx) {
+            auto* param_decl =
+                dyn_cast<ParamDecl>(guide->guide_parameters[idx].get());
+            if (!param_decl || !param_decl->is_parameter_pack) {
+                continue;
+            }
+            if (pack_param_index.has_value()) {
+                return false;
+            }
+            pack_param_index = idx;
+        }
+
+        auto deduce_one_parameter =
+            [&](size_t param_index, size_t arg_index) -> bool {
+            if (param_index >= guide->guide_parameters.size() ||
+                arg_index >= init_args.size()) {
+                return false;
+            }
+            auto* param_decl =
+                dyn_cast<ParamDecl>(guide->guide_parameters[param_index].get());
+            Expr* init_arg = init_args[arg_index];
+            if (!param_decl || !init_arg || !init_arg->get_type()) {
+                return false;
+            }
+
+            QualType pattern_type = param_decl->type;
+            QualType argument_type = init_arg->get_type();
+            ValueCategory argument_category = classify_value_category(init_arg);
+            auto canonical_pattern = desugar_typedefs(pattern_type);
+            bool is_reference_parameter =
+                canonical_pattern &&
+                isa<ReferenceType>(canonical_pattern.get_shared().get());
+            if (!is_reference_parameter) {
+                pattern_type = strip_top_level_qualifiers(pattern_type);
+                argument_type = remove_reference(argument_type);
+                argument_type = decay_parameter_type(argument_type);
+                argument_type = strip_top_level_qualifiers(argument_type);
+            }
+
+            return deduce_function_template_argument_types(
+                pattern_type,
+                argument_type,
+                guide->parameters,
+                bindings_out,
+                argument_category == ValueCategory::LValue);
+        };
+
+        if (!pack_param_index.has_value()) {
+            if (guide->guide_parameters.size() != init_args.size()) {
+                return false;
+            }
+            for (size_t idx = 0; idx < init_args.size(); ++idx) {
+                if (!deduce_one_parameter(idx, idx)) {
+                    return false;
+                }
+            }
+        } else {
+            size_t leading_count = *pack_param_index;
+            size_t trailing_count =
+                guide->guide_parameters.size() - *pack_param_index - 1;
+            if (init_args.size() < leading_count + trailing_count) {
+                return false;
+            }
+            for (size_t idx = 0; idx < leading_count; ++idx) {
+                if (!deduce_one_parameter(idx, idx)) {
+                    return false;
+                }
+            }
+            size_t pack_arg_count =
+                init_args.size() - leading_count - trailing_count;
+            for (size_t idx = 0; idx < pack_arg_count; ++idx) {
+                if (!deduce_one_parameter(
+                        *pack_param_index,
+                        leading_count + idx)) {
+                    return false;
+                }
+            }
+            for (size_t idx = 0; idx < trailing_count; ++idx) {
+                size_t param_index = *pack_param_index + 1 + idx;
+                size_t arg_index = leading_count + pack_arg_count + idx;
+                if (!deduce_one_parameter(param_index, arg_index)) {
+                    return false;
+                }
+            }
+        }
+
+        std::string default_error;
+        if (!complete_template_argument_bindings_with_substituted_defaults(
+                guide,
+                bindings_out,
+                guide->location,
+                &default_error)) {
+            return false;
+        }
+        return are_template_constraints_satisfied_with_bindings(
+            guide,
+            bindings_out,
+            loc);
+    };
+
+    std::vector<DeductionGuideCandidateEval> evaluated;
+    for (const auto* guide : class_template->deduction_guides()) {
+        DeductionGuideCandidateEval eval;
+        eval.guide = guide;
+        if (!guide ||
+            (is_copy_initialization &&
+             guide->explicit_specifier.is_present &&
+             guide->explicit_specifier.effective_value)) {
+            evaluated.push_back(std::move(eval));
+            continue;
+        }
+
+        TemplateArgumentBindings bindings;
+        if (!deduce_guide_arguments(guide, bindings)) {
+            evaluated.push_back(std::move(eval));
+            continue;
+        }
+
+        QualType substituted_return =
+            substitute_template_type_with_bindings(
+                guide->return_type(),
+                guide->parameters,
+                bindings,
+                loc);
+        substituted_return =
+            collect_try_realize_deferred_semantic_type(substituted_return);
+        auto return_specialization =
+            dyn_cast_shared<TemplateSpecializationType>(
+                desugar_typedefs(substituted_return).get_shared());
+        auto* return_primary_template =
+            return_specialization
+                ? dyn_cast<ClassTemplateDecl>(
+                      const_cast<Decl*>(return_specialization->primary_template))
+                : nullptr;
+        if (const auto* canonical_return_template =
+                get_template_decl_canonical_decl(return_primary_template)) {
+            return_primary_template =
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<TemplateDecl*>(canonical_return_template));
+        }
+        if (!return_specialization ||
+            return_specialization->is_class_template_placeholder ||
+            return_primary_template != class_template) {
+            evaluated.push_back(std::move(eval));
+            continue;
+        }
+
+        auto* specialization_decl =
+            instantiate_class_template_specialization(
+                class_template,
+                return_specialization->arguments,
+                loc);
+        if (!specialization_decl || !specialization_decl->get_record_type()) {
+            evaluated.push_back(std::move(eval));
+            continue;
+        }
+
+        eval.function_type =
+            desugar_type(
+                substitute_template_type_with_bindings(
+                    QualType(guide->function_type),
+                    guide->parameters,
+                    bindings,
+                    loc),
+                ast_ctx_.get())
+                .as_shared<FunctionType>();
+        if (!eval.function_type ||
+            eval.function_type->parameters.size() != init_args.size()) {
+            evaluated.push_back(std::move(eval));
+            continue;
+        }
+
+        eval.viable = true;
+        eval.conversions.reserve(init_args.size());
+        for (size_t idx = 0; idx < init_args.size(); ++idx) {
+            QualType param_type =
+                decay_parameter_type(eval.function_type->parameters[idx]);
+            auto seq = build_cpp_overload_conversion_sequence(
+                init_args[idx],
+                param_type);
+            eval.conversions.push_back(seq);
+            if (!seq.viable) {
+                eval.viable = false;
+                break;
+            }
+        }
+        if (eval.viable) {
+            eval.deduced_type = QualType(specialization_decl->get_record_type());
+        }
+        evaluated.push_back(std::move(eval));
+    }
+
+    std::vector<size_t> viable_indices;
+    for (size_t idx = 0; idx < evaluated.size(); ++idx) {
+        if (evaluated[idx].viable) {
+            viable_indices.push_back(idx);
+        }
+    }
+    if (viable_indices.empty()) {
+        report_error(
+            "no viable deduction guide for class template '" +
+                class_template->record_decl()->name + "'",
+            loc);
+        return false;
+    }
+
+    auto best_index = select_best_candidate(evaluated, viable_indices);
+    if (!best_index.has_value()) {
+        report_error(
+            "class template argument deduction for '" +
+                class_template->record_decl()->name + "' is ambiguous",
+            loc);
+        return false;
+    }
+
+    deduced_type_out = evaluated[*best_index].deduced_type;
+    return static_cast<bool>(deduced_type_out);
+}
+
 bool Collect::deduce_function_template_specialization_arguments(
     const FunctionTemplateDecl* function_template,
     QualType specialized_function_type,

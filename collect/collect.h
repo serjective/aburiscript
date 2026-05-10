@@ -1720,6 +1720,14 @@ private:
         std::vector<TemplateArgument>& deduced_arguments_out,
         const TemplateArgumentBindings* initial_bindings = nullptr) ;
 
+    bool resolve_class_template_argument_deduction(
+        const ClassTemplateDecl* class_template,
+        const std::vector<Expr*>& init_args,
+        bool is_list_initialization,
+        bool is_copy_initialization,
+        SrcLoc loc,
+        QualType& deduced_type_out) ;
+
     bool probe_function_template_call_specialization(
         const FunctionTemplateDecl* function_template,
         const std::vector<Expr*>& call_args,

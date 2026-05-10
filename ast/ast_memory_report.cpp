@@ -117,6 +117,7 @@ constexpr auto kAllDeclKinds = std::to_array<DeclKind>({
     DeclKind::FunctionTemplateDecl,
     DeclKind::VariableTemplateDecl,
     DeclKind::ClassTemplateDecl,
+    DeclKind::CppDeductionGuideDecl,
     DeclKind::ConceptDecl,
     DeclKind::VariableTemplatePartialSpecializationDecl,
     DeclKind::ClassTemplatePartialSpecializationDecl,
@@ -240,6 +241,7 @@ const char* decl_kind_name(DeclKind kind) {
         case DeclKind::FunctionTemplateDecl: return "FunctionTemplateDecl";
         case DeclKind::VariableTemplateDecl: return "VariableTemplateDecl";
         case DeclKind::ClassTemplateDecl: return "ClassTemplateDecl";
+        case DeclKind::CppDeductionGuideDecl: return "CppDeductionGuideDecl";
         case DeclKind::ConceptDecl: return "ConceptDecl";
         case DeclKind::VariableTemplatePartialSpecializationDecl:
             return "VariableTemplatePartialSpecializationDecl";
@@ -569,6 +571,23 @@ private:
                     visit_decl(param.get());
                 }
                 visit_decl(node->templated_decl.get());
+                return;
+            }
+            case DeclKind::CppDeductionGuideDecl: {
+                auto* node = static_cast<const CppDeductionGuideDecl*>(decl);
+                record_decl<CppDeductionGuideDecl>(
+                    DeclKind::CppDeductionGuideDecl);
+                ast_vector_backing_bytes_ += vector_backing_bytes(node->parameters);
+                for (const auto& param : node->parameters) {
+                    visit_decl(param.get());
+                }
+                ast_vector_backing_bytes_ +=
+                    vector_backing_bytes(node->guide_parameters);
+                for (const auto& param : node->guide_parameters) {
+                    visit_decl(param.get());
+                }
+                visit_stmt(node->associated_constraint.get());
+                visit_stmt(node->explicit_specifier.condition.get());
                 return;
             }
             case DeclKind::ConceptDecl: {

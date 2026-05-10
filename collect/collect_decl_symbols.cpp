@@ -13,16 +13,34 @@
 
 using namespace collect_decl_internal;
 
+namespace {
+
+bool is_class_template_placeholder_type(QualType type) {
+    if (!type) {
+        return false;
+    }
+    auto specialization =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_typedefs(type).get_shared());
+    return specialization && specialization->is_class_template_placeholder;
+}
+
+} // namespace
+
 std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, SrcLoc loc, LanguageLinkage language_linkage, bool skip_template_parameter_scopes) {
 
     if (!scope || name.empty()) {
         return nullptr;
     }
     materialize_tentative_snapshot_if_needed();
-    if (contains_deferred_semantic_type(type.get_shared())) {
+    bool is_class_template_placeholder = is_class_template_placeholder_type(type);
+    if (!is_class_template_placeholder &&
+        contains_deferred_semantic_type(type.get_shared())) {
         type = resolve_typeof_types(type, loc);
     }
-    type = desugar_type(type, ast_ctx_.get());
+    if (!is_class_template_placeholder) {
+        type = desugar_type(type, ast_ctx_.get());
+    }
     if (is_constexpr && type) {
         type = type.with_const();
     }

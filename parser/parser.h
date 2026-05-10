@@ -507,6 +507,11 @@ private:
         Token template_tok,
         bool member_template_declaration,
         bool angle_brackets_already_consumed = false);
+    bool is_cpp_deduction_guide_declaration_start();
+    std::unique_ptr<CppDeductionGuideDecl> parse_cpp_deduction_guide_declaration(
+        TemplateParameterList template_parameters = {},
+        std::unique_ptr<Expr> leading_requires_clause = nullptr,
+        SrcLoc template_loc = SrcLoc());
     TemplateParameterList parse_cpp_template_parameter_list(uint32_t depth);
     std::unique_ptr<Expr> parse_cpp_constraint_expression();
     std::unique_ptr<Expr> parse_cpp_constraint_logical_or_expression();

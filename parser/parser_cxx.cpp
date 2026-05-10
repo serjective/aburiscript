@@ -1160,17 +1160,69 @@ Parser::try_parse_cpp_named_type_specifier() {
                         continue;
                     }
 
+                    if (is_last_component &&
+                        !is_in_template_pattern_context() &&
+                        lang_opts.is_cxx17_or_later()) {
+                        const Decl* primary_template =
+                            lookup_type_template_in_scope(
+                                lookup_scope,
+                                allow_enclosing_lookup,
+                                component.name);
+                        const auto* class_template =
+                            dyn_cast<ClassTemplateDecl>(
+                                primary_template);
+                        if (class_template) {
+                            resolved_type =
+                                QualType(std::make_shared<TemplateSpecializationType>(
+                                    qualified_name_utils::format_cpp_qualified_name(
+                                        has_global_qualifier,
+                                        resolved_prefix,
+                                        component.name),
+                                    class_template,
+                                    std::vector<TemplateArgument>{},
+                                    false,
+                                    true));
+                        }
+                    }
+
                     std::shared_ptr<Symbol> typedef_symbol = nullptr;
-                    resolved_type = lookup_type_in_scope(
-                        lookup_scope,
-                        allow_enclosing_lookup,
-                        component.name,
-                        &typedef_symbol);
+                    if (!resolved_type) {
+                        resolved_type = lookup_type_in_scope(
+                            lookup_scope,
+                            allow_enclosing_lookup,
+                            component.name,
+                            &typedef_symbol);
+                    }
                     if (!resolved_type && current_record_lookup_type) {
                         resolved_type =
                             collect_->collect_lookup_record_nested_type(
                                 current_record_lookup_type,
                                 component.name);
+                    }
+                    if (!resolved_type &&
+                        is_last_component &&
+                        !is_in_template_pattern_context() &&
+                        lang_opts.is_cxx17_or_later()) {
+                        const Decl* primary_template =
+                            lookup_type_template_in_scope(
+                                lookup_scope,
+                                allow_enclosing_lookup,
+                                component.name);
+                        const auto* class_template =
+                            dyn_cast<ClassTemplateDecl>(
+                                primary_template);
+                        if (class_template) {
+                            resolved_type =
+                                QualType(std::make_shared<TemplateSpecializationType>(
+                                    qualified_name_utils::format_cpp_qualified_name(
+                                        has_global_qualifier,
+                                        resolved_prefix,
+                                        component.name),
+                                    class_template,
+                                    std::vector<TemplateArgument>{},
+                                    false,
+                                    true));
+                        }
                     }
                     if (!resolved_type) {
                         restore();
@@ -2800,6 +2852,190 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
     return parameters;
 }
 
+bool Parser::is_cpp_deduction_guide_declaration_start() {
+    if (!is_cxx_mode_active() || is_parsing_cpp_record_body()) {
+        return false;
+    }
+
+    auto skip_balanced_tokens =
+        [&](size_t& offset, TokenType open_tok, TokenType close_tok) -> bool {
+        if (peek_token_shortcut(offset).type != open_tok) {
+            return false;
+        }
+        int depth = 0;
+        while (peek_token_shortcut(offset).type != TokenType::Eof) {
+            TokenType tok = peek_token_shortcut(offset).type;
+            if (tok == open_tok) {
+                ++depth;
+            } else if (tok == close_tok) {
+                --depth;
+                if (depth == 0) {
+                    ++offset;
+                    return true;
+                }
+            }
+            ++offset;
+        }
+        return false;
+    };
+
+    size_t offset = 0;
+    if (peek_token_shortcut(offset).type == TokenType::EXPLICIT_KW) {
+        ++offset;
+        if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN &&
+            !skip_balanced_tokens(
+                offset,
+                TokenType::LEFT_PAREN,
+                TokenType::RIGHT_PAREN)) {
+            return false;
+        }
+    }
+
+    if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER ||
+        peek_token_shortcut(offset + 1).type != TokenType::LEFT_PAREN) {
+        return false;
+    }
+    offset += 1;
+    if (!skip_balanced_tokens(
+            offset,
+            TokenType::LEFT_PAREN,
+            TokenType::RIGHT_PAREN)) {
+        return false;
+    }
+    return peek_token_shortcut(offset).type == TokenType::ARROW;
+}
+
+std::unique_ptr<CppDeductionGuideDecl>
+Parser::parse_cpp_deduction_guide_declaration(
+    TemplateParameterList template_parameters,
+    std::unique_ptr<Expr> leading_requires_clause,
+    SrcLoc template_loc) {
+    SrcLoc guide_loc = current_token().loc;
+    if (!lang_opts.is_cxx17_or_later()) {
+        error_custloc(
+            "class template argument deduction guides require C++17",
+            guide_loc);
+    }
+
+    CppExplicitSpecifier explicit_specifier =
+        parse_cpp_optional_explicit_specifier();
+    Token guide_name_tok = current_token();
+    check_and_consume(TokenType::IDENTIFIER);
+
+    std::shared_ptr<Scope> lookup_scope = collect_->collect_current_scope();
+    while (lookup_scope &&
+           scope_flags_contains(
+               lookup_scope->flags,
+               ScopeFlags::TemplateParameterScope)) {
+        lookup_scope = lookup_scope->parent;
+    }
+    const DeclBinding* template_binding =
+        LookupEngine::lookup_unqualified_template_binding(
+            guide_name_tok.value,
+            lookup_scope ? lookup_scope : collect_->collect_current_scope(),
+            true,
+            LookupNamespace::Tag);
+    const Decl* primary_template_decl = nullptr;
+    if (template_binding) {
+        primary_template_decl = template_binding->template_decl;
+        if (!primary_template_decl &&
+            template_binding->template_overload_candidates.size() == 1) {
+            primary_template_decl =
+                template_binding->template_overload_candidates.front();
+        }
+    }
+    auto* primary_class_template =
+        dyn_cast<ClassTemplateDecl>(
+            const_cast<Decl*>(primary_template_decl));
+    if (!primary_class_template) {
+        error_custloc(
+            "deduction guide requires a prior class template '" +
+                guide_name_tok.value + "'",
+            guide_name_tok.loc);
+    }
+    if (const auto* canonical_template =
+            get_template_decl_canonical_decl(primary_class_template)) {
+        primary_class_template =
+            const_cast<ClassTemplateDecl*>(
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<TemplateDecl*>(canonical_template)));
+    }
+    if (!primary_class_template) {
+        error_custloc(
+            "deduction guide primary template is not a class template",
+            guide_name_tok.loc);
+    }
+
+    std::vector<std::unique_ptr<Decl>> guide_parameters;
+    auto function_type = std::make_shared<FunctionType>();
+    function_type->has_prototype = true;
+
+    check_and_consume(TokenType::LEFT_PAREN);
+    if (!gentle_check(TokenType::RIGHT_PAREN)) {
+        while (true) {
+            auto parameter = parse_parameter_declaration();
+            auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
+            if (!param_decl) {
+                error_custloc(
+                    "internal error: deduction guide parameter did not produce ParamDecl",
+                    guide_name_tok.loc);
+            }
+            function_type->parameters.push_back(param_decl->type);
+            guide_parameters.push_back(std::move(parameter));
+            if (!gentle_check_and_consume(TokenType::COMMA)) {
+                break;
+            }
+        }
+    }
+    check_and_consume(TokenType::RIGHT_PAREN);
+    check_and_consume(TokenType::ARROW);
+
+    auto return_type_specifier = try_parse_cpp_named_type_specifier();
+    if (!return_type_specifier.has_value() || !return_type_specifier->type) {
+        error_custloc(
+            "deduction guide requires a class-template-id return type",
+            current_token().loc);
+    }
+    function_type->ret_type = return_type_specifier->type;
+    auto return_specialization =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_typedefs(function_type->ret_type).get_shared());
+    auto* return_primary_template =
+        return_specialization
+            ? dyn_cast<ClassTemplateDecl>(
+                  const_cast<Decl*>(return_specialization->primary_template))
+            : nullptr;
+    if (const auto* canonical_return_template =
+            get_template_decl_canonical_decl(return_primary_template)) {
+        return_primary_template =
+            dyn_cast<ClassTemplateDecl>(
+                const_cast<TemplateDecl*>(canonical_return_template));
+    }
+    if (!return_specialization ||
+        return_specialization->is_class_template_placeholder ||
+        return_primary_template != primary_class_template) {
+        error_custloc(
+            "deduction guide return type must name '" +
+                guide_name_tok.value + "' with explicit template arguments",
+            guide_name_tok.loc);
+    }
+    check_and_consume(TokenType::SEMICOLON);
+
+    auto guide = make_ast<CppDeductionGuideDecl>(
+        *ast_ctx,
+        std::move(template_parameters),
+        guide_name_tok.value,
+        primary_class_template,
+        std::move(guide_parameters),
+        std::move(function_type),
+        template_loc.isInvalid() ? guide_loc : template_loc);
+    guide->associated_constraint = std::move(leading_requires_clause);
+    guide->explicit_specifier = std::move(explicit_specifier);
+    set_template_decl_canonical_decl(guide.get(), guide.get());
+    primary_class_template->add_deduction_guide(guide.get());
+    return guide;
+}
+
 std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     Token template_tok = current_token();
     bool member_template_declaration = is_parsing_cpp_record_body();
@@ -2857,6 +3093,14 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
             template_tok,
             member_template_declaration,
             true);
+    }
+    if (is_cpp_deduction_guide_declaration_start()) {
+        std::vector<std::unique_ptr<Decl>> ret_vec;
+        ret_vec.push_back(parse_cpp_deduction_guide_declaration(
+            std::move(parameters),
+            std::move(leading_requires_clause),
+            template_tok.loc));
+        return ret_vec;
     }
 
     // Class-template pattern parsing needs temporary template-parameter scope

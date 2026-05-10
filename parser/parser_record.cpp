@@ -1827,6 +1827,11 @@ std::optional<std::vector<std::unique_ptr<Decl>>> Parser::try_parse_special_decl
     if (is_cxx_mode_active() && gentle_check(TokenType::TEMPLATE)) {
         return parse_cpp_template_declaration();
     }
+    if (is_cxx_mode_active() && is_cpp_deduction_guide_declaration_start()) {
+        std::vector<std::unique_ptr<Decl>> ret_vec;
+        ret_vec.push_back(parse_cpp_deduction_guide_declaration());
+        return std::move(ret_vec);
+    }
     if (is_cxx_mode_active()) {
         if (is_cpp_out_of_line_constructor_declaration_start()) {
             return parse_cpp_out_of_line_constructor_definition();
@@ -3736,9 +3741,18 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
     }
     std::unique_ptr<Expr> init_expr;
     bool is_copy_initialization = false;
+    auto placeholder_specialization =
+        declared_type
+            ? dyn_cast_shared<TemplateSpecializationType>(
+                  desugar_typedefs(declared_type).get_shared())
+            : nullptr;
+    bool is_class_template_placeholder =
+        placeholder_specialization &&
+        placeholder_specialization->is_class_template_placeholder;
     bool is_cxx_object_decl =
         is_cxx_mode_active() &&
-        canonical_type_kind(declared_type) == TypeKind::Object;
+        (is_class_template_placeholder ||
+         canonical_type_kind(declared_type) == TypeKind::Object);
     if (gentle_check_and_consume(TokenType::ASSIGN)) {
         is_copy_initialization = true;
         if (gentle_check(TokenType::LEFT_BRACE)) {

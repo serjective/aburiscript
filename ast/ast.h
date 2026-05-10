@@ -177,6 +177,7 @@ enum class DeclKind : uint8_t {
     FunctionTemplateDecl,
     VariableTemplateDecl,
     ClassTemplateDecl,
+    CppDeductionGuideDecl,
     ConceptDecl,
     VariableTemplatePartialSpecializationDecl,
     ClassTemplatePartialSpecializationDecl,
@@ -3072,6 +3073,39 @@ struct FunctionTemplateDecl : TemplateDecl {
     }
 };
 
+struct ClassTemplateDecl;
+
+struct CppDeductionGuideDecl : TemplateDecl {
+    std::string name;
+    const ClassTemplateDecl* primary_template = nullptr;
+    std::vector<std::unique_ptr<Decl>> guide_parameters;
+    std::shared_ptr<FunctionType> function_type;
+    CppExplicitSpecifier explicit_specifier;
+
+    CppDeductionGuideDecl(TemplateParameterList parameters,
+                          std::string name,
+                          const ClassTemplateDecl* primary_template,
+                          std::vector<std::unique_ptr<Decl>> guide_parameters,
+                          std::shared_ptr<FunctionType> function_type,
+                          SrcLoc loc = SrcLoc())
+        : TemplateDecl(DeclKind::CppDeductionGuideDecl,
+                       std::move(parameters),
+                       nullptr,
+                       loc),
+          name(std::move(name)),
+          primary_template(primary_template),
+          guide_parameters(std::move(guide_parameters)),
+          function_type(std::move(function_type)) {}
+
+    QualType return_type() const {
+        return function_type ? function_type->ret_type : QualType();
+    }
+
+    static bool classof(const Decl* d) {
+        return d->get_kind() == DeclKind::CppDeductionGuideDecl;
+    }
+};
+
 struct VariableTemplateDecl : TemplateDecl {
     VariableTemplateDecl(TemplateParameterList parameters,
                          std::unique_ptr<Decl> templated_decl,
@@ -3197,6 +3231,17 @@ struct ClassTemplateDecl : TemplateDecl {
         return partial_specializations_;
     }
 
+    void add_deduction_guide(CppDeductionGuideDecl* deduction_guide) {
+        if (!deduction_guide) {
+            return;
+        }
+        deduction_guides_.push_back(deduction_guide);
+    }
+
+    const std::vector<CppDeductionGuideDecl*>& deduction_guides() const {
+        return deduction_guides_;
+    }
+
     void set_pattern_semantic_decl(std::unique_ptr<ObjectDecl> semantic_decl);
     ObjectDecl* pattern_semantic_decl();
     const ObjectDecl* pattern_semantic_decl() const;
@@ -3209,6 +3254,7 @@ private:
     // Canonical semantic owner for the primary class template pattern.
     std::unique_ptr<TagDecl> pattern_semantic_decl_;
     std::vector<ClassTemplatePartialSpecializationDecl*> partial_specializations_;
+    std::vector<CppDeductionGuideDecl*> deduction_guides_;
 };
 
 struct AliasTemplateDecl : TemplateDecl {

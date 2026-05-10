@@ -29,6 +29,20 @@ bool any_initializer_argument_depends_on_template_parameters(
     return false;
 }
 
+std::shared_ptr<TemplateSpecializationType>
+class_template_placeholder_type(QualType type) {
+    if (!type) {
+        return nullptr;
+    }
+    auto specialization =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_typedefs(type).get_shared());
+    if (!specialization || !specialization->is_class_template_placeholder) {
+        return nullptr;
+    }
+    return specialization;
+}
+
 const Expr* extract_first_value_init_list(const Expr* init) {
     if (!init) {
         return nullptr;
@@ -262,7 +276,9 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
     bool allow_abstract_object_type_instantiation = flags.allow_abstract_object_type_instantiation;
     bool caller_tracks_symbol_definition = flags.caller_tracks_symbol_definition;
 
-    if (declared_type && contains_deferred_semantic_type(declared_type.get_shared())) {
+    if (declared_type &&
+        !class_template_placeholder_type(declared_type) &&
+        contains_deferred_semantic_type(declared_type.get_shared())) {
         declared_type = resolve_typeof_types(declared_type, loc);
     }
     if (is_constexpr && declared_type) {
@@ -274,6 +290,69 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
     }
     if (is_constexpr && storage_class == StorageClass::AUTO) {
         report_error("'constexpr' cannot be combined with 'auto'", loc);
+    }
+
+    if (auto placeholder = class_template_placeholder_type(declared_type)) {
+        auto* primary_class_template =
+            dyn_cast<ClassTemplateDecl>(
+                const_cast<Decl*>(placeholder->primary_template));
+        if (const auto* canonical_template =
+                get_template_decl_canonical_decl(primary_class_template)) {
+            primary_class_template =
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<TemplateDecl*>(canonical_template));
+        }
+        if (!primary_class_template) {
+            report_error(
+                "class template argument deduction requires a class template",
+                loc);
+        } else if (!init) {
+            report_error(
+                "declaration of variable '" + name +
+                    "' with deduced class template type '" +
+                    declared_type.to_string() + "' requires an initializer",
+                loc);
+        } else {
+            std::vector<Expr*> ctad_args;
+            bool has_designated_initializer = false;
+            if (auto* init_list = dyn_cast<InitListExpr>(init.get())) {
+                ctad_args.reserve(init_list->elements.size());
+                for (const auto& element : init_list->elements) {
+                    if (!element.designators.empty()) {
+                        has_designated_initializer = true;
+                        break;
+                    }
+                    ctad_args.push_back(element.value.get());
+                }
+            } else {
+                ctad_args.push_back(init.get());
+            }
+
+            if (has_designated_initializer) {
+                report_error(
+                    "class template argument deduction does not support designated initializers",
+                    loc);
+            } else {
+                QualType deduced_type;
+                bool is_list_initialization = false;
+                if (auto* init_list = dyn_cast<InitListExpr>(init.get())) {
+                    is_list_initialization = !init_list->is_paren_init;
+                }
+                if (resolve_class_template_argument_deduction(
+                        primary_class_template,
+                        ctad_args,
+                        is_list_initialization,
+                        is_copy_initialization,
+                        loc,
+                        deduced_type) &&
+                    deduced_type) {
+                    declared_type = deduced_type;
+                    if (sym) {
+                        sym->type = declared_type;
+                    }
+                }
+            }
+        }
     }
 
     resolve_auto_variable_type(declared_type, init, sym, name, loc);

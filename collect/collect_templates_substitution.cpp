@@ -1010,7 +1010,8 @@ QualType Collect::substitute_template_type_with_bindings(
             rewritten_name,
             rewritten_primary,
             std::move(substituted_arguments),
-            dependent);
+            dependent,
+            specialization->is_class_template_placeholder);
         return QualType(rewritten, quals);
     }
 
