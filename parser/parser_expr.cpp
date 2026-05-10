@@ -2291,6 +2291,11 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             is_lambda_declarator_parameter_clause_ahead()) {
             break;
         }
+        if (template_head_requires_clause_depth_ > 0 &&
+            gentle_check(TokenType::LEFT_BRACKET) &&
+            peek_token().type == TokenType::LEFT_BRACKET) {
+            break;
+        }
         if (gentle_check(TokenType::LEFT_PAREN)) {
             advance();
             std::vector<std::unique_ptr<Expr>> args;

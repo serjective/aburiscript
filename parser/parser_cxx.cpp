@@ -3090,6 +3090,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     if (lang_opts.is_cxx20_or_later() &&
         gentle_check(TokenType::REQUIRES_KW)) {
         advance(); // 'requires'
+        ++template_head_requires_clause_depth_;
+        struct TemplateHeadRequiresParseGuard {
+            uint32_t& depth;
+            ~TemplateHeadRequiresParseGuard() { --depth; }
+        } template_head_requires_guard{template_head_requires_clause_depth_};
         leading_requires_clause = parse_cpp_constraint_expression();
     }
     if (parameters.empty()) {
