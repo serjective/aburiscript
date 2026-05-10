@@ -464,7 +464,8 @@ private:
     std::unique_ptr<Decl> parse_cpp_record_specifier(
         std::vector<TemplateArgument>* specialization_arguments_out = nullptr,
         bool* has_specialization_argument_list_out = nullptr,
-        bool suppress_placeholder_type = false);
+        bool suppress_placeholder_type = false,
+        const ClassTemplateDecl* current_primary_class_template = nullptr);
     std::unique_ptr<Decl> parse_cpp_constructor_member();
     std::unique_ptr<Decl> parse_cpp_destructor_member();
     std::unique_ptr<Decl> build_cpp_record_semantic_decl(

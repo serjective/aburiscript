@@ -2882,6 +2882,20 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     std::vector<std::unique_ptr<Decl>> templated_decls;
     std::vector<TemplateArgument> record_specialization_arguments;
     bool record_has_specialization_argument_list = false;
+    bool parsing_record_template_declaration =
+        gentle_check(TokenType::CLASS) ||
+        gentle_check(TokenType::STRUCT) ||
+        gentle_check(TokenType::UNION);
+    std::unique_ptr<ClassTemplateDecl> provisional_class_template;
+    const ClassTemplateDecl* provisional_class_template_ptr = nullptr;
+    if (parsing_record_template_declaration) {
+        provisional_class_template = make_ast<ClassTemplateDecl>(
+            *ast_ctx,
+            std::move(parameters),
+            make_ast<NopDecl>(*ast_ctx, template_tok.loc),
+            template_tok.loc);
+        provisional_class_template_ptr = provisional_class_template.get();
+    }
     auto member_template_constructor_name_offset = [&]() -> std::optional<size_t> {
         if (!member_template_declaration ||
             cxx_record_parse_stack_.empty() ||
@@ -2993,7 +3007,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
         auto record_decl =
             parse_cpp_record_specifier(
                 &record_specialization_arguments,
-                &record_has_specialization_argument_list);
+                &record_has_specialization_argument_list,
+                false,
+                provisional_class_template_ptr);
         check_and_consume(TokenType::SEMICOLON);
         templated_decls.push_back(std::move(record_decl));
     } else if (lang_opts.is_cxx20_or_later() &&
@@ -3041,11 +3057,18 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
             }
             prepared_class_template_name = record_decl->name;
             if (!record_has_specialization_argument_list) {
-                prepared_class_template = make_ast<ClassTemplateDecl>(
-                    *ast_ctx,
-                    std::move(parameters),
-                    std::move(templated_decls.front()),
-                    template_tok.loc);
+                if (provisional_class_template) {
+                    provisional_class_template->templated_decl =
+                        std::move(templated_decls.front());
+                    prepared_class_template =
+                        std::move(provisional_class_template);
+                } else {
+                    prepared_class_template = make_ast<ClassTemplateDecl>(
+                        *ast_ctx,
+                        std::move(parameters),
+                        std::move(templated_decls.front()),
+                        template_tok.loc);
+                }
                 if (!member_template_declaration) {
                     collect_->collect_add_class_template_decl(
                         prepared_class_template_name,
@@ -3092,7 +3115,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                     make_ast<ClassTemplatePartialSpecializationDecl>(
                         *ast_ctx,
                         primary_class_template,
-                        std::move(parameters),
+                        provisional_class_template
+                            ? std::move(provisional_class_template->parameters)
+                            : std::move(parameters),
                         std::move(record_specialization_arguments),
                         std::move(templated_decls.front()),
                         template_tok.loc);
@@ -6035,7 +6060,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
 std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
     std::vector<TemplateArgument>* specialization_arguments_out,
     bool* has_specialization_argument_list_out,
-    bool suppress_placeholder_type) {
+    bool suppress_placeholder_type,
+    const ClassTemplateDecl* current_primary_class_template) {
     Token key_tok = current_token();
     CppRecordKind record_kind = CppRecordKind::Class;
     switch (key_tok.type) {
@@ -6219,10 +6245,12 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
     check_and_consume(TokenType::LEFT_BRACE);
 
     const ObjectDecl* semantic_owner = nullptr;
-    const ClassTemplateDecl* primary_class_template = nullptr;
+    const ClassTemplateDecl* primary_class_template =
+        current_primary_class_template;
     if (specialization_arguments_out &&
         has_specialization_argument_list_out &&
         *has_specialization_argument_list_out) {
+        primary_class_template = nullptr;
         semantic_owner =
             ensure_cpp_specialized_record_semantic_owner(
                 record_kind,
