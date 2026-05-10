@@ -1461,15 +1461,28 @@ static BuiltinLoweringResult lower_builtin_math_group(
         auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::log10, {val->getType()});
         return {true, builder.CreateCall(fn, {val}, "log10")};
     }
-    case BuiltinKind::EXP: case BuiltinKind::EXPF: {
+    case BuiltinKind::EXP: case BuiltinKind::EXPF: case BuiltinKind::EXPL: {
         auto val = convert_expression(expr->args[0].get());
         auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::exp, {val->getType()});
         return {true, builder.CreateCall(fn, {val}, "exp")};
     }
-    case BuiltinKind::EXP2: case BuiltinKind::EXP2F: {
+    case BuiltinKind::EXP2: case BuiltinKind::EXP2F: case BuiltinKind::EXP2L: {
         auto val = convert_expression(expr->args[0].get());
         auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::exp2, {val->getType()});
         return {true, builder.CreateCall(fn, {val}, "exp2")};
+    }
+    case BuiltinKind::EXPM1:
+    case BuiltinKind::EXPM1F:
+    case BuiltinKind::EXPM1L: {
+        auto val = convert_expression(expr->args[0].get());
+        llvm::Type* fp_ty = convert_type(expr->result_type);
+        val = coerce_builtin_fp_arg(val, fp_ty);
+        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty}, false);
+        const char* name = expr->kind == BuiltinKind::EXPM1F
+            ? "expm1f"
+            : (expr->kind == BuiltinKind::EXPM1L ? "expm1l" : "expm1");
+        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
+        return {true, builder.CreateCall(callee, {val}, name)};
     }
     case BuiltinKind::CEIL: case BuiltinKind::CEILF: {
         auto val = convert_expression(expr->args[0].get());
@@ -1501,6 +1514,51 @@ static BuiltinLoweringResult lower_builtin_math_group(
         const char* name = fp_ty->isFloatTy() ? "modff" : (fp_ty->isDoubleTy() ? "modf" : "modfl");
         auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
         return {true, builder.CreateCall(callee, {val, iptr}, name)};
+    }
+    case BuiltinKind::FREXP:
+    case BuiltinKind::FREXPF:
+    case BuiltinKind::FREXPL: {
+        auto val = convert_expression(expr->args[0].get());
+        auto exp_ptr = convert_expression(expr->args[1].get());
+        llvm::Type* fp_ty = convert_type(expr->result_type);
+        val = coerce_builtin_fp_arg(val, fp_ty);
+        auto* ptr_ty = llvm::PointerType::getUnqual(ctx);
+        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty, ptr_ty}, false);
+        const char* name = expr->kind == BuiltinKind::FREXPF
+            ? "frexpf"
+            : (expr->kind == BuiltinKind::FREXPL ? "frexpl" : "frexp");
+        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
+        return {true, builder.CreateCall(callee, {val, exp_ptr}, name)};
+    }
+    case BuiltinKind::LDEXP:
+    case BuiltinKind::LDEXPF:
+    case BuiltinKind::LDEXPL:
+    case BuiltinKind::SCALBN:
+    case BuiltinKind::SCALBNF:
+    case BuiltinKind::SCALBNL:
+    case BuiltinKind::SCALBLN:
+    case BuiltinKind::SCALBLNF:
+    case BuiltinKind::SCALBLNL: {
+        auto val = convert_expression(expr->args[0].get());
+        auto exp = convert_expression(expr->args[1].get());
+        llvm::Type* fp_ty = convert_type(expr->result_type);
+        val = coerce_builtin_fp_arg(val, fp_ty);
+
+        bool exponent_is_long =
+            expr->kind == BuiltinKind::SCALBLN ||
+            expr->kind == BuiltinKind::SCALBLNF ||
+            expr->kind == BuiltinKind::SCALBLNL;
+        exp = cast_int_arg(
+            exp,
+            exponent_is_long ? BuiltinTypes::Long : BuiltinTypes::Int,
+            /*src_unsigned=*/false);
+
+        llvm::Intrinsic::ID intrinsic_id = llvm::Intrinsic::ldexp;
+        auto* fn = llvm::Intrinsic::getDeclaration(
+            module.get(),
+            intrinsic_id,
+            {fp_ty, exp->getType()});
+        return {true, builder.CreateCall(fn, {val, exp}, "ldexp")};
     }
     case BuiltinKind::POW: case BuiltinKind::POWF: case BuiltinKind::POWL: {
         auto base_val = convert_expression(expr->args[0].get());

@@ -7881,6 +7881,11 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::LOG10:
         case BuiltinKind::EXP:
         case BuiltinKind::EXP2:
+        case BuiltinKind::EXPM1:
+        case BuiltinKind::FREXP:
+        case BuiltinKind::LDEXP:
+        case BuiltinKind::SCALBN:
+        case BuiltinKind::SCALBLN:
         case BuiltinKind::CEIL:
         case BuiltinKind::FLOOR:
         case BuiltinKind::ROUND:
@@ -7906,6 +7911,11 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::LOG10F:
         case BuiltinKind::EXPF:
         case BuiltinKind::EXP2F:
+        case BuiltinKind::EXPM1F:
+        case BuiltinKind::FREXPF:
+        case BuiltinKind::LDEXPF:
+        case BuiltinKind::SCALBNF:
+        case BuiltinKind::SCALBLNF:
         case BuiltinKind::CEILF:
         case BuiltinKind::FLOORF:
         case BuiltinKind::ROUNDF:
@@ -7926,6 +7936,13 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::POWL:
         case BuiltinKind::SQRTL:
         case BuiltinKind::CBRTL:
+        case BuiltinKind::EXPL:
+        case BuiltinKind::EXP2L:
+        case BuiltinKind::EXPM1L:
+        case BuiltinKind::FREXPL:
+        case BuiltinKind::LDEXPL:
+        case BuiltinKind::SCALBNL:
+        case BuiltinKind::SCALBLNL:
         case BuiltinKind::COPYSIGNL:
         case BuiltinKind::HYPOTL:
         case BuiltinKind::FMINL:
