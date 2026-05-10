@@ -541,6 +541,8 @@ private:
         const std::vector<TemplateArgument>& component_arguments,
         bool component_has_template_argument_list,
         SrcLoc component_loc);
+    QualType lookup_cpp_current_record_nested_type(
+        const std::string& component_name) const;
     const Decl* lookup_cpp_unqualified_type_template_decl(
         const std::string& component_name,
         const std::shared_ptr<Scope>& start_scope,

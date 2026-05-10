@@ -94,6 +94,23 @@ const Decl* Parser::lookup_cpp_unqualified_type_template_decl(
     return nullptr;
 }
 
+QualType Parser::lookup_cpp_current_record_nested_type(
+    const std::string& component_name) const {
+    if (!collect_ || component_name.empty()) {
+        return QualType();
+    }
+
+    QualType current_record_lookup_type =
+        collect_->collect_current_cpp_record_lookup_type();
+    if (!current_record_lookup_type) {
+        return QualType();
+    }
+
+    return collect_->collect_lookup_record_nested_type(
+        current_record_lookup_type,
+        component_name);
+}
+
 QualType Parser::resolve_cpp_unqualified_type_component(
     const std::string& component_name,
     const std::vector<TemplateArgument>& component_arguments,
@@ -108,7 +125,11 @@ QualType Parser::resolve_cpp_unqualified_type_component(
                 collect_->collect_lookup_tag_type(component_name, true)) {
             return QualType(tag_type);
         }
-        return collect_->collect_lookup_type_name(component_name, true, true);
+        if (auto named_type =
+                collect_->collect_lookup_type_name(component_name, true, true)) {
+            return named_type;
+        }
+        return lookup_cpp_current_record_nested_type(component_name);
     }
 
     auto current_scope = collect_->collect_current_scope();
@@ -516,6 +537,10 @@ Parser::resolve_cpp_qualified_owner_chain(
                         resolution.lookup_context,
                         component.name,
                         allow_enclosing_lookup);
+                }
+                if (!resolution.owner_type && allow_enclosing_lookup) {
+                    resolution.owner_type =
+                        lookup_cpp_current_record_nested_type(component.name);
                 }
                 if (!resolution.owner_type) {
                     QualType function_owner_type = current_function_owner_type();

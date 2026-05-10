@@ -1030,8 +1030,6 @@ Parser::try_parse_cpp_named_type_specifier() {
 
     auto current_scope = collect_->collect_current_scope();
     auto current_context = collect_->get_current_decl_context();
-    QualType current_record_lookup_type =
-        collect_->collect_current_cpp_record_lookup_type();
     if (!current_scope || !current_context) {
         error_custloc("internal error: missing C++ type-name lookup context",
                       start_tok.loc);
@@ -1193,11 +1191,9 @@ Parser::try_parse_cpp_named_type_specifier() {
                             component.name,
                             &typedef_symbol);
                     }
-                    if (!resolved_type && current_record_lookup_type) {
+                    if (!resolved_type) {
                         resolved_type =
-                            collect_->collect_lookup_record_nested_type(
-                                current_record_lookup_type,
-                                component.name);
+                            lookup_cpp_current_record_nested_type(component.name);
                     }
                     if (!resolved_type &&
                         is_last_component &&
