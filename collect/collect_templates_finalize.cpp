@@ -126,7 +126,8 @@ bool rebuild_specialized_ctor_initializer_expression(
 
     std::unique_ptr<Expr> rebuilt_init;
     if (!has_designators &&
-        canonical_type_kind(target_type) == TypeKind::Object) {
+        (init_list->is_paren_init || init_list->elements.empty() ||
+         canonical_type_kind(target_type) == TypeKind::Object)) {
         auto owned_list = std::unique_ptr<InitListExpr>(
             static_cast<InitListExpr*>(initializer.init_expr.release()));
         std::vector<std::unique_ptr<Expr>> init_args;

@@ -171,19 +171,14 @@ void Parser::build_cpp_record_parse_deferred_bodies(
                             mem_init.location,
                             true);
                 } else if (canonical_type_kind(member_expr->member_type) ==
-                    TypeKind::Object) {
+                               TypeKind::Object ||
+                           args.empty()) {
                     mem_init.init_expr =
                         collect_->collect_member_initializer_expression(
                             std::move(args),
                             member_expr->member_type,
                             false,
                             mem_init.location);
-                } else if (args.empty()) {
-                    diag_engine->report_error(
-                        "constructor member initializer for '" +
-                            mem_init.member_name +
-                            "' requires an initializer expression",
-                        mem_init.location);
                 } else if (args.size() > 1) {
                     diag_engine->report_error(
                         "constructor member initializer for non-class member '" +

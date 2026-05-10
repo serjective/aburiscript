@@ -1404,19 +1404,15 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                     }
                     check_and_consume(TokenType::RIGHT_PAREN);
 
-                    if (canonical_type_kind(member_expr->member_type) == TypeKind::Object) {
+                    if (canonical_type_kind(member_expr->member_type) ==
+                            TypeKind::Object ||
+                        args.empty()) {
                         mem_init.init_expr =
                             collect_->collect_member_initializer_expression(
                                 std::move(args),
                                 member_expr->member_type,
                                 false,
                                 mem_init.location);
-                    } else if (args.empty()) {
-                        diag_engine->report_error(
-                            "constructor member initializer for '" +
-                                mem_init.member_name +
-                                "' requires an initializer expression",
-                            mem_init.location);
                     } else if (args.size() > 1) {
                         diag_engine->report_error(
                             "constructor member initializer for non-class member '" +

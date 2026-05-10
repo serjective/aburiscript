@@ -655,7 +655,51 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
         return collect_make<ErrorExpr>("invalid member type", loc);
     }
 
-    if (canonical_type_kind(member_type, ast_ctx_.get()) != TypeKind::Object) {
+    bool member_type_is_dependent =
+        type_depends_on_template_parameters(member_type, ast_ctx_.get());
+    bool has_dependent_argument =
+        any_initializer_argument_depends_on_template_parameters(
+            *this, init_args);
+
+    auto make_deferred_init_list =
+        [&](std::vector<std::unique_ptr<Expr>> args) {
+            auto init_list = collect_make<InitListExpr>(loc);
+            init_list->is_paren_init = !is_list_init;
+            init_list->elements.reserve(args.size());
+            for (auto& arg : args) {
+                InitElement elem;
+                elem.value = std::move(arg);
+                elem.loc = loc;
+                init_list->elements.push_back(std::move(elem));
+            }
+            return init_list;
+        };
+
+    if (member_type_is_dependent) {
+        return make_deferred_init_list(std::move(init_args));
+    }
+
+    auto member_kind = canonical_type_kind(member_type, ast_ctx_.get());
+    if (member_kind != TypeKind::Object) {
+        if (init_args.empty()) {
+            if (member_kind == TypeKind::Reference) {
+                report_error(
+                    "reference type cannot be value-initialized",
+                    loc);
+                return collect_make<ErrorExpr>(
+                    "invalid reference value-initialization",
+                    loc);
+            }
+            if (member_kind == TypeKind::Function) {
+                report_error(
+                    "function type cannot be value-initialized",
+                    loc);
+                return collect_make<ErrorExpr>(
+                    "invalid function value-initialization",
+                    loc);
+            }
+            return collect_cpp_value_init_expression(member_type, loc);
+        }
         if (init_args.size() != 1) {
             report_error(
                 "constructor member initializer for non-class member requires a single expression",
@@ -667,22 +711,9 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
                                                      loc);
     }
 
-    bool has_dependent_argument =
-        any_initializer_argument_depends_on_template_parameters(
-            *this, init_args);
+    auto init_list = make_deferred_init_list(std::move(init_args));
 
-    auto init_list = collect_make<InitListExpr>(loc);
-    init_list->is_paren_init = !is_list_init;
-    init_list->elements.reserve(init_args.size());
-    for (auto& arg : init_args) {
-        InitElement elem;
-        elem.value = std::move(arg);
-        elem.loc = loc;
-        init_list->elements.push_back(std::move(elem));
-    }
-
-    if (type_depends_on_template_parameters(member_type) ||
-        has_dependent_argument) {
+    if (has_dependent_argument) {
         return init_list;
     }
     VariableDeclFlags ctor_flags = {
