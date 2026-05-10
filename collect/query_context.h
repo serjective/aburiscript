@@ -60,18 +60,16 @@ public:
     QualType lookup_template_specialization_resolved_type(
         const TemplateSpecializationType* type,
         const CollectSemanticStore& store) const;
-    void publish_template_specialization_resolved_type(
-        const TemplateSpecializationType* type,
-        QualType resolved_type,
-        CollectSemanticStore& store);
+    void publish_template_specialization_resolved_type(QualType type,
+                                                       QualType resolved_type,
+                                                       CollectSemanticStore& store);
 
     QualType lookup_dependent_name_resolved_type(
         const DependentNameType* type,
         const CollectSemanticStore& store) const;
-    void publish_dependent_name_resolved_type(
-        const DependentNameType* type,
-        QualType resolved_type,
-        CollectSemanticStore& store);
+    void publish_dependent_name_resolved_type(QualType type,
+                                              QualType resolved_type,
+                                              CollectSemanticStore& store);
 
     const Metrics& metrics() const { return metrics_; }
     void emit_metrics(std::ostream& os) const;
@@ -86,9 +84,10 @@ private:
             enum_semantics;
         std::unordered_set<const EnumDecl*> erased_enum_semantics;
 
-        std::unordered_map<const TemplateSpecializationType*, QualType>
+        std::unordered_map<const TemplateSpecializationType*,
+                           ResolvedTypeCacheEntry>
             template_specialization_resolved_types;
-        std::unordered_map<const DependentNameType*, QualType>
+        std::unordered_map<const DependentNameType*, ResolvedTypeCacheEntry>
             dependent_name_resolved_types;
     };
 

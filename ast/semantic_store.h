@@ -3,6 +3,13 @@
 
 #include "ast_context.h"
 
+struct ResolvedTypeCacheEntry {
+    // The side table indexes by raw type identity, but temporary deferred types
+    // must stay alive until their cached result is erased or the store is reset.
+    QualType key_type;
+    QualType resolved_type;
+};
+
 class CollectSemanticStore {
 public:
     explicit CollectSemanticStore(ASTContext* owner_ast_ctx);
@@ -93,16 +100,14 @@ public:
         const Symbol* sym) const;
     void clear_symbol_cpp_default_arguments();
 
-    void set_template_specialization_resolved_type(
-        const TemplateSpecializationType* type,
-        QualType resolved_type);
+    void set_template_specialization_resolved_type(QualType type,
+                                                   QualType resolved_type);
     QualType get_template_specialization_resolved_type(
         const TemplateSpecializationType* type) const;
     void clear_template_specialization_resolved_types();
 
-    void set_dependent_name_resolved_type(
-        const DependentNameType* type,
-        QualType resolved_type);
+    void set_dependent_name_resolved_type(QualType type,
+                                          QualType resolved_type);
     QualType get_dependent_name_resolved_type(
         const DependentNameType* type) const;
     void clear_dependent_name_resolved_types();
@@ -212,9 +217,10 @@ private:
     using SymbolExternalSemanticInfoMap =
         std::unordered_map<const Symbol*, SymbolExternalSemanticInfo>;
     using TemplateSpecializationResolvedTypeMap =
-        std::unordered_map<const TemplateSpecializationType*, QualType>;
+        std::unordered_map<const TemplateSpecializationType*,
+                           ResolvedTypeCacheEntry>;
     using DependentNameResolvedTypeMap =
-        std::unordered_map<const DependentNameType*, QualType>;
+        std::unordered_map<const DependentNameType*, ResolvedTypeCacheEntry>;
     using RecordSemanticsCacheMap =
         std::unordered_map<const ObjectDecl*, RecordSemanticState>;
     using EnumSemanticsCacheMap =

@@ -129,7 +129,7 @@ struct FileTokenSrc : TokenSrc {
 };
 
 struct PreProcess {
-    bool isProcessingConditional; // for the conidition (first line) of #if, #ifdefs, etc..
+    bool isProcessingConditional = false; // for the conidition (first line) of #if, #ifdefs, etc..
     int32_t current_file_id;
     std::vector<std::unique_ptr<TokenSrc>> tok_stack;
     std::shared_ptr<SourceManager> sm;
@@ -166,7 +166,7 @@ struct PreProcess {
         bool is_active;      // true if we are currently in the active branch
     };
     std::vector<ConditionalState> conditional_stack;
-    bool skipping; // Global flag to indicate if we are currently skipping tokens due to false conditional
+    bool skipping = false; // Global flag to indicate if we are currently skipping tokens due to false conditional
 
     TokenSrc * current_tok_src() const {
         return tok_stack.back().get();

@@ -1669,7 +1669,7 @@ QualType lookup_template_specialization_resolved_type(
 
 void cache_template_specialization_resolved_type(
     ASTContext* ast_ctx,
-    TemplateSpecializationType* type,
+    QualType type,
     QualType resolved_type) {
     if (!type) {
         return;
@@ -1683,7 +1683,7 @@ void cache_template_specialization_resolved_type(
                 effective_ast_ctx->semantic_store());
         } else {
             effective_ast_ctx->set_template_specialization_resolved_type(
-                type,
+                std::move(type),
                 std::move(resolved_type));
         }
     }
@@ -1713,7 +1713,7 @@ QualType lookup_dependent_name_resolved_type(
 }
 
 void cache_dependent_name_resolved_type(ASTContext* ast_ctx,
-                                        DependentNameType* type,
+                                        QualType type,
                                         QualType resolved_type) {
     if (!type) {
         return;
@@ -1727,7 +1727,7 @@ void cache_dependent_name_resolved_type(ASTContext* ast_ctx,
                 effective_ast_ctx->semantic_store());
         } else {
             effective_ast_ctx->set_dependent_name_resolved_type(
-                type,
+                std::move(type),
                 std::move(resolved_type));
         }
     }

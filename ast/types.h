@@ -609,14 +609,14 @@ QualType lookup_template_specialization_resolved_type(
     const ASTContext* ast_ctx);
 void cache_template_specialization_resolved_type(
     ASTContext* ast_ctx,
-    TemplateSpecializationType* type,
+    QualType type,
     QualType resolved_type);
 QualType lookup_dependent_name_resolved_type(
     const DependentNameType* type,
     const ASTContext* ast_ctx);
 void cache_dependent_name_resolved_type(
     ASTContext* ast_ctx,
-    DependentNameType* type,
+    QualType type,
     QualType resolved_type);
 
 bool is_nullptr_type(QualType type, const ASTContext* ast_ctx = nullptr);

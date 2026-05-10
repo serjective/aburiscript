@@ -64,13 +64,13 @@ void CollectQueryContext::merge_overlay_into_parent(TentativeOverlay& parent,
         parent.enum_semantics[enum_decl] = std::move(state);
     }
 
-    for (auto& [type, resolved_type] :
+    for (auto& [type, entry] :
          child.template_specialization_resolved_types) {
         parent.template_specialization_resolved_types[type] =
-            std::move(resolved_type);
+            std::move(entry);
     }
-    for (auto& [type, resolved_type] : child.dependent_name_resolved_types) {
-        parent.dependent_name_resolved_types[type] = std::move(resolved_type);
+    for (auto& [type, entry] : child.dependent_name_resolved_types) {
+        parent.dependent_name_resolved_types[type] = std::move(entry);
     }
 }
 
@@ -92,13 +92,16 @@ void CollectQueryContext::apply_overlay_to_store(TentativeOverlay& overlay,
         store.set_enum_semantics(enum_decl, std::move(state));
     }
 
-    for (auto& [type, resolved_type] :
-         overlay.template_specialization_resolved_types) {
-        store.set_template_specialization_resolved_type(type,
-                                                        std::move(resolved_type));
+    for (auto& overlay_entry : overlay.template_specialization_resolved_types) {
+        auto& entry = overlay_entry.second;
+        store.set_template_specialization_resolved_type(
+            std::move(entry.key_type),
+            std::move(entry.resolved_type));
     }
-    for (auto& [type, resolved_type] : overlay.dependent_name_resolved_types) {
-        store.set_dependent_name_resolved_type(type, std::move(resolved_type));
+    for (auto& overlay_entry : overlay.dependent_name_resolved_types) {
+        auto& entry = overlay_entry.second;
+        store.set_dependent_name_resolved_type(std::move(entry.key_type),
+                                               std::move(entry.resolved_type));
     }
 }
 
@@ -265,7 +268,7 @@ CollectQueryContext::lookup_template_specialization_resolved_type(
         auto overlay_it = it->template_specialization_resolved_types.find(type);
         if (overlay_it != it->template_specialization_resolved_types.end()) {
             ++metrics_.template_specialization_type_hits;
-            return overlay_it->second;
+            return overlay_it->second.resolved_type;
         }
     }
     if (auto resolved_type = store.get_template_specialization_resolved_type(type)) {
@@ -277,21 +280,23 @@ CollectQueryContext::lookup_template_specialization_resolved_type(
 }
 
 void CollectQueryContext::publish_template_specialization_resolved_type(
-    const TemplateSpecializationType* type,
+    QualType key_type,
     QualType resolved_type,
     CollectSemanticStore& store) {
+    auto* type = key_type.as<TemplateSpecializationType>();
     if (!type) {
         return;
     }
     ++metrics_.template_specialization_type_publications;
     type->external_semantic_owner_id = store.registry_id();
     if (tentative_overlays_.empty()) {
-        store.set_template_specialization_resolved_type(type,
-                                                        std::move(resolved_type));
+        store.set_template_specialization_resolved_type(
+            std::move(key_type),
+            std::move(resolved_type));
         return;
     }
     tentative_overlays_.back().template_specialization_resolved_types[type] =
-        std::move(resolved_type);
+        ResolvedTypeCacheEntry{std::move(key_type), std::move(resolved_type)};
 }
 
 QualType CollectQueryContext::lookup_dependent_name_resolved_type(
@@ -311,7 +316,7 @@ QualType CollectQueryContext::lookup_dependent_name_resolved_type(
         auto overlay_it = it->dependent_name_resolved_types.find(type);
         if (overlay_it != it->dependent_name_resolved_types.end()) {
             ++metrics_.dependent_name_type_hits;
-            return overlay_it->second;
+            return overlay_it->second.resolved_type;
         }
     }
     if (auto resolved_type = store.get_dependent_name_resolved_type(type)) {
@@ -323,20 +328,22 @@ QualType CollectQueryContext::lookup_dependent_name_resolved_type(
 }
 
 void CollectQueryContext::publish_dependent_name_resolved_type(
-    const DependentNameType* type,
+    QualType key_type,
     QualType resolved_type,
     CollectSemanticStore& store) {
+    auto* type = key_type.as<DependentNameType>();
     if (!type) {
         return;
     }
     ++metrics_.dependent_name_type_publications;
     type->external_semantic_owner_id = store.registry_id();
     if (tentative_overlays_.empty()) {
-        store.set_dependent_name_resolved_type(type, std::move(resolved_type));
+        store.set_dependent_name_resolved_type(std::move(key_type),
+                                               std::move(resolved_type));
         return;
     }
     tentative_overlays_.back().dependent_name_resolved_types[type] =
-        std::move(resolved_type);
+        ResolvedTypeCacheEntry{std::move(key_type), std::move(resolved_type)};
 }
 
 void CollectQueryContext::emit_metrics(std::ostream& os) const {
@@ -444,13 +451,13 @@ Collect::query_lookup_template_specialization_resolved_type(
 }
 
 void Collect::query_publish_template_specialization_resolved_type(
-    const TemplateSpecializationType* type,
+    QualType type,
     QualType resolved_type) {
     if (!ast_ctx_ || !type) {
         return;
     }
     query_context_.publish_template_specialization_resolved_type(
-        type,
+        std::move(type),
         std::move(resolved_type),
         ast_ctx_->semantic_store());
 }
@@ -466,13 +473,13 @@ QualType Collect::query_lookup_dependent_name_resolved_type(
 }
 
 void Collect::query_publish_dependent_name_resolved_type(
-    const DependentNameType* type,
+    QualType type,
     QualType resolved_type) {
     if (!ast_ctx_ || !type) {
         return;
     }
     query_context_.publish_dependent_name_resolved_type(
-        type,
+        std::move(type),
         std::move(resolved_type),
         ast_ctx_->semantic_store());
 }

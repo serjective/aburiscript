@@ -833,7 +833,7 @@ QualType Collect::resolve_deferred_template_specialization_type(
         loc,
         mode);
     query_publish_template_specialization_resolved_type(
-        &specialization,
+        original_type,
         nullptr);
     specialization.is_dependent = false;
     for (const auto& argument : specialization.arguments) {
@@ -865,7 +865,7 @@ QualType Collect::resolve_deferred_template_specialization_type(
                       loc);
         if (specialization_decl && specialization_decl->get_record_type()) {
             query_publish_template_specialization_resolved_type(
-                &specialization,
+                original_type,
                 QualType(specialization_decl->get_record_type()));
             return original_type;
         }
@@ -892,7 +892,7 @@ QualType Collect::resolve_deferred_template_specialization_type(
         resolve_deferred_semantic_type_impl(resolved_alias_type, loc, mode);
     if (resolved_alias_type) {
         query_publish_template_specialization_resolved_type(
-            &specialization,
+            original_type,
             resolved_alias_type);
         return original_type;
     }
@@ -960,7 +960,7 @@ QualType Collect::resolve_deferred_dependent_name_type(
         dependent_name.template_arguments,
         loc,
         mode);
-    query_publish_dependent_name_resolved_type(&dependent_name, nullptr);
+    query_publish_dependent_name_resolved_type(original_type, nullptr);
     auto resolved_type =
         query_lookup_dependent_name_resolved_type(&dependent_name);
     if (resolved_type) {
@@ -970,7 +970,7 @@ QualType Collect::resolve_deferred_dependent_name_type(
                 loc,
                 mode);
         query_publish_dependent_name_resolved_type(
-            &dependent_name,
+            original_type,
             rewritten_resolved_type);
         return original_type;
     }
@@ -994,7 +994,7 @@ QualType Collect::resolve_deferred_dependent_name_type(
         loc,
         mode);
     query_publish_dependent_name_resolved_type(
-        &dependent_name,
+        original_type,
         resolved_nested_type);
     return original_type;
 }

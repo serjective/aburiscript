@@ -1434,8 +1434,9 @@ void CollectSemanticStore::clear_symbol_cpp_default_arguments() {
 }
 
 void CollectSemanticStore::set_template_specialization_resolved_type(
-    const TemplateSpecializationType* type,
+    QualType key_type,
     QualType resolved_type) {
+    auto* type = key_type.as<TemplateSpecializationType>();
     if (!type) {
         return;
     }
@@ -1447,7 +1448,8 @@ void CollectSemanticStore::set_template_specialization_resolved_type(
         return;
     }
     type->external_semantic_owner_id = registry_id_;
-    template_specialization_resolved_type_map_[type] = std::move(resolved_type);
+    template_specialization_resolved_type_map_[type] =
+        ResolvedTypeCacheEntry{std::move(key_type), std::move(resolved_type)};
 }
 
 QualType CollectSemanticStore::get_template_specialization_resolved_type(
@@ -1462,7 +1464,7 @@ QualType CollectSemanticStore::get_template_specialization_resolved_type(
     if (it == template_specialization_resolved_type_map_.end()) {
         return QualType();
     }
-    return it->second;
+    return it->second.resolved_type;
 }
 
 void CollectSemanticStore::clear_template_specialization_resolved_types() {
@@ -1476,8 +1478,9 @@ void CollectSemanticStore::clear_template_specialization_resolved_types() {
 }
 
 void CollectSemanticStore::set_dependent_name_resolved_type(
-    const DependentNameType* type,
+    QualType key_type,
     QualType resolved_type) {
+    auto* type = key_type.as<DependentNameType>();
     if (!type) {
         return;
     }
@@ -1489,7 +1492,8 @@ void CollectSemanticStore::set_dependent_name_resolved_type(
         return;
     }
     type->external_semantic_owner_id = registry_id_;
-    dependent_name_resolved_type_map_[type] = std::move(resolved_type);
+    dependent_name_resolved_type_map_[type] =
+        ResolvedTypeCacheEntry{std::move(key_type), std::move(resolved_type)};
 }
 
 QualType CollectSemanticStore::get_dependent_name_resolved_type(
@@ -1504,7 +1508,7 @@ QualType CollectSemanticStore::get_dependent_name_resolved_type(
     if (it == dependent_name_resolved_type_map_.end()) {
         return QualType();
     }
-    return it->second;
+    return it->second.resolved_type;
 }
 
 void CollectSemanticStore::clear_dependent_name_resolved_types() {

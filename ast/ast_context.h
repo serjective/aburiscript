@@ -523,14 +523,13 @@ public:
         const Symbol* sym) const;
     void clear_symbol_cpp_default_arguments();
 
-    void set_template_specialization_resolved_type(
-        const TemplateSpecializationType* type,
-        QualType resolved_type);
+    void set_template_specialization_resolved_type(QualType type,
+                                                   QualType resolved_type);
     QualType get_template_specialization_resolved_type(
         const TemplateSpecializationType* type) const;
     void clear_template_specialization_resolved_types();
 
-    void set_dependent_name_resolved_type(const DependentNameType* type,
+    void set_dependent_name_resolved_type(QualType type,
                                           QualType resolved_type);
     QualType get_dependent_name_resolved_type(
         const DependentNameType* type) const;
