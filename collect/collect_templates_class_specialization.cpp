@@ -1800,6 +1800,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         collect.collect_record_resolve_virtual_dispatch(ctx);
         collect.collect_record_compute_layout(ctx);
         collect.collect_record_materialize_defaulted_method_bodies(ctx);
+        collect.collect_record_infer_constexpr_special_members(ctx);
         collect.collect_record_publish_semantics(ctx);
 
         if (ast_ctx() && ast_ctx()->has_attrs(cloned_record->node_id)) {
@@ -2244,6 +2245,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_decl->is_consteval = function_decl->is_consteval;
             cloned_decl->is_deleted = function_decl->is_deleted;
             cloned_decl->is_defaulted = function_decl->is_defaulted;
+            cloned_decl->is_defaulted_on_first_declaration =
+                function_decl->is_defaulted_on_first_declaration;
             cloned_decl->set_language_linkage(
                 function_decl->get_language_linkage());
         };
@@ -2446,6 +2449,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_function->is_consteval = function_decl->is_consteval;
         cloned_function->is_deleted = function_decl->is_deleted;
         cloned_function->is_defaulted = function_decl->is_defaulted;
+        cloned_function->is_defaulted_on_first_declaration =
+            function_decl->is_defaulted_on_first_declaration;
         cloned_function->set_language_linkage(function_decl->get_language_linkage());
         if (function_decl->asm_label) {
             cloned_function->set_asm_label(*function_decl->asm_label);
@@ -2544,6 +2549,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 specialized_decl->storage_class == StorageClass::STATIC;
             semantic_method.is_deleted = specialized_decl->is_deleted;
             semantic_method.is_defaulted = specialized_decl->is_defaulted;
+            semantic_method.is_constexpr = specialized_decl->is_constexpr;
+            semantic_method.is_consteval = specialized_decl->is_consteval;
             semantic_method.is_explicit =
                 specialized_decl->is_explicit_conversion;
             semantic_method.is_virtual = specialized_decl->is_virtual;
@@ -2584,6 +2591,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_consteval = method_decl->is_consteval;
         cloned_decl->is_deleted = method_decl->is_deleted;
         cloned_decl->is_defaulted = method_decl->is_defaulted;
+        cloned_decl->is_defaulted_on_first_declaration =
+            method_decl->is_defaulted_on_first_declaration;
         cloned_decl->set_language_linkage(method_decl->get_language_linkage());
         cloned_decl->is_virtual = method_decl->is_virtual;
         cloned_decl->is_override = method_decl->is_override;
@@ -2644,6 +2653,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_decl->storage_class == StorageClass::STATIC;
         semantic_method.is_deleted = cloned_decl->is_deleted;
         semantic_method.is_defaulted = cloned_decl->is_defaulted;
+        semantic_method.is_constexpr = cloned_decl->is_constexpr;
+        semantic_method.is_consteval = cloned_decl->is_consteval;
         semantic_method.is_explicit = cloned_decl->is_explicit_conversion;
         semantic_method.is_virtual = cloned_decl->is_virtual;
         semantic_method.is_override = cloned_decl->is_override;
@@ -2705,6 +2716,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_explicit = cloned_ctor_is_explicit;
         cloned_decl->is_deleted = ctor_decl->is_deleted;
         cloned_decl->is_defaulted = ctor_decl->is_defaulted;
+        cloned_decl->is_defaulted_on_first_declaration =
+            ctor_decl->is_defaulted_on_first_declaration;
         if (ctor_decl->asm_label) {
             cloned_decl->set_asm_label(*ctor_decl->asm_label);
         }
@@ -2742,6 +2755,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         semantic_ctor.is_implicit = false;
         semantic_ctor.is_explicit = cloned_decl->is_explicit;
         semantic_ctor.is_deleted = cloned_decl->is_deleted;
+        semantic_ctor.is_defaulted = cloned_decl->is_defaulted;
+        semantic_ctor.is_constexpr = cloned_decl->is_constexpr;
+        semantic_ctor.is_consteval = cloned_decl->is_consteval;
         semantic_ctor.decl = cloned_decl.get();
         semantic_ctor.symbol = cloned_symbol;
         constructors.push_back(std::move(semantic_ctor));
@@ -2785,6 +2801,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->set_language_linkage(dtor_decl->get_language_linkage());
         cloned_decl->is_deleted = dtor_decl->is_deleted;
         cloned_decl->is_defaulted = dtor_decl->is_defaulted;
+        cloned_decl->is_defaulted_on_first_declaration =
+            dtor_decl->is_defaulted_on_first_declaration;
         cloned_decl->is_virtual = dtor_decl->is_virtual;
         cloned_decl->is_override = dtor_decl->is_override;
         cloned_decl->is_final = dtor_decl->is_final;
@@ -2822,6 +2840,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         semantic_dtor.is_implicit = false;
         semantic_dtor.is_defaulted = cloned_decl->is_defaulted;
         semantic_dtor.is_deleted = cloned_decl->is_deleted;
+        semantic_dtor.is_constexpr = cloned_decl->is_constexpr;
+        semantic_dtor.is_consteval = cloned_decl->is_consteval;
         semantic_dtor.is_virtual = cloned_decl->is_virtual;
         semantic_dtor.is_override = cloned_decl->is_override;
         semantic_dtor.is_final = cloned_decl->is_final;
@@ -3266,6 +3286,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         ctx.enumerator_members = std::move(enumerator_members);
         ctx.semantic_state = semantic_state;
         collect.collect_record_compute_layout(ctx);
+        collect.collect_record_infer_constexpr_special_members(ctx);
         collect.collect_record_publish_semantics(ctx);
         semantic_state = std::move(ctx.semantic_state);
         return true;

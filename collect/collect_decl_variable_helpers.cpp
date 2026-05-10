@@ -747,7 +747,9 @@ bool Collect::materialize_variable_constructor_selection(
             loc);
         return true;
     }
-    if (chosen.ctor->is_implicit && chosen.max_user_param_count == 0) {
+    if (chosen.ctor->is_implicit &&
+        chosen.max_user_param_count == 0 &&
+        !chosen.ctor->symbol) {
         selection.constructor_is_list_init = ctor_is_list_init;
         selection.constructor_args.clear();
         selection.constructor_symbol = nullptr;

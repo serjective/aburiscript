@@ -1484,6 +1484,7 @@ struct RecordSemanticState {
         bool is_static = false;
         bool is_deleted = false;
         bool is_defaulted = false;
+        bool is_constexpr = false;
         bool is_consteval = false;
         bool is_explicit = false;
         bool is_virtual = false;
@@ -1543,6 +1544,8 @@ struct RecordSemanticState {
         bool is_implicit = false;
         bool is_explicit = false;
         bool is_deleted = false;
+        bool is_defaulted = false;
+        bool is_constexpr = false;
         bool is_consteval = false;
         const CppConstructorDecl* decl = nullptr;
         std::shared_ptr<Symbol> symbol = nullptr;
@@ -1555,6 +1558,7 @@ struct RecordSemanticState {
         bool is_implicit = false;
         bool is_defaulted = false;
         bool is_deleted = false;
+        bool is_constexpr = false;
         bool is_consteval = false;
         bool is_virtual = false;
         bool is_override = false;

@@ -1001,6 +1001,107 @@ std::unique_ptr<Expr> build_generated_constructor_initializer_expr(
         loc);
 }
 
+bool type_needs_generated_default_constructor_initializer(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    QualType canonical = desugar_type(type, ast_ctx);
+    if (!canonical) {
+        return false;
+    }
+    if (canonical_type_kind(canonical, ast_ctx) == TypeKind::Object) {
+        return true;
+    }
+    if (auto array_type = canonical.as_shared<ArrayType>()) {
+        return type_needs_generated_default_constructor_initializer(
+            array_type->element_type,
+            ast_ctx);
+    }
+    return false;
+}
+
+bool type_supports_generated_default_construction(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    QualType canonical = desugar_type(type, ast_ctx);
+    if (!canonical) {
+        return false;
+    }
+    if (auto array_type = canonical.as_shared<ArrayType>()) {
+        return array_type->size_kind == ArraySizeKind::Constant &&
+               array_type->size.has_value() &&
+               type_supports_generated_default_construction(
+                   array_type->element_type,
+                   ast_ctx);
+    }
+    if (canonical_type_kind(canonical, ast_ctx) != TypeKind::Object) {
+        return true;
+    }
+
+    auto object_type = canonical.as_shared<ObjectType>();
+    const ObjectDecl* object_decl =
+        object_type ? canonical_cpp_record_decl(
+                          dyn_cast<ObjectDecl>(object_type->get_decl()))
+                    : nullptr;
+    const RecordSemanticState* object_state =
+        object_decl ? record_semantics_cache_lookup(object_decl, ast_ctx)
+                    : nullptr;
+    return cpp_record_has_viable_default_constructor(
+        object_state,
+        false);
+}
+
+std::unique_ptr<Expr> build_generated_default_constructor_initializer_expr(
+    Collect& collect,
+    const ASTContext* ast_ctx,
+    QualType type,
+    SrcLoc loc) {
+    if (!type) {
+        return nullptr;
+    }
+
+    if (auto array_type = desugar_type(type, ast_ctx).as_shared<ArrayType>()) {
+        if (array_type->size_kind != ArraySizeKind::Constant ||
+            !array_type->size.has_value() ||
+            !type_needs_generated_default_constructor_initializer(
+                array_type->element_type,
+                ast_ctx)) {
+            return nullptr;
+        }
+
+        auto init_list = collect.collect_make<InitListExpr>(loc);
+        init_list->is_paren_init = false;
+        init_list->elements.reserve(*array_type->size);
+        for (size_t idx = 0; idx < *array_type->size; ++idx) {
+            InitElement element;
+            element.value = build_generated_default_constructor_initializer_expr(
+                collect,
+                ast_ctx,
+                array_type->element_type,
+                loc);
+            element.loc = loc;
+            if (!element.value) {
+                return nullptr;
+            }
+            init_list->elements.push_back(std::move(element));
+        }
+        return collect.collect_member_initializer_expression(
+            std::move(init_list),
+            type,
+            loc);
+    }
+
+    if (canonical_type_kind(type, ast_ctx) != TypeKind::Object) {
+        return nullptr;
+    }
+
+    return collect.collect_member_initializer_expression(
+        std::vector<std::unique_ptr<Expr>>{},
+        type,
+        false,
+        loc,
+        false);
+}
+
 bool is_defaulted_comparison_operator_name(const std::string& name) {
     return name == "operator==" ||
            name == "operator!=" ||
@@ -1554,6 +1655,7 @@ public:
             collect_.collect_record_resolve_virtual_dispatch(ctx);
             collect_.collect_record_compute_layout(ctx);
             collect_.collect_record_materialize_defaulted_method_bodies(ctx);
+            collect_.collect_record_infer_constexpr_special_members(ctx);
             collect_.collect_record_publish_semantics(ctx);
             if (ctx.record_type) {
                 ctx.record_type->set_decl(ctx.semantic_decl);
@@ -2324,6 +2426,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             ctor.is_implicit = false;
             ctor.is_explicit = ctor_decl->is_explicit;
             ctor.is_deleted = ctor_decl->is_deleted;
+            ctor.is_defaulted = ctor_decl->is_defaulted;
+            ctor.is_constexpr = ctor_decl->is_constexpr;
             ctor.is_consteval = ctor_decl->is_consteval;
             ctor.decl = ctor_decl;
             ctor.symbol = std::move(ctor_sym);
@@ -2427,6 +2531,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             dtor.is_implicit = false;
             dtor.is_defaulted = dtor_decl->is_defaulted;
             dtor.is_deleted = dtor_decl->is_deleted;
+            dtor.is_constexpr = dtor_decl->is_constexpr;
             dtor.is_consteval = dtor_decl->is_consteval;
             dtor.is_virtual = dtor_decl->is_virtual;
             dtor.is_override = dtor_decl->is_override;
@@ -2586,6 +2691,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
         method.is_static = is_static_method || is_operator_new_delete;
         method.is_deleted = method_decl->is_deleted;
         method.is_defaulted = method_decl->is_defaulted;
+        method.is_constexpr = method_decl->is_constexpr;
         method.is_consteval = method_decl->is_consteval;
         method.is_explicit = method_decl->is_explicit_conversion;
         method.is_virtual = method_decl->is_virtual;
@@ -2657,9 +2763,9 @@ void Collect::collect_record_synthesize_implicit_members(
         std::vector<std::unique_ptr<Decl>> parameters;
         parameters.push_back(collect_make<ParamDecl>(
             this_param_type,
-            "__this",
+            "this",
             std::make_shared<Symbol>(
-                "__this",
+                "this",
                 SymbolKind::VARIABLE,
                 this_param_type,
                 StorageClass::NONE),
@@ -2697,6 +2803,7 @@ void Collect::collect_record_synthesize_implicit_members(
         ctor_decl->is_explicit = false;
         ctor_decl->is_deleted = is_deleted;
         ctor_decl->is_defaulted = true;
+        ctor_decl->is_defaulted_on_first_declaration = true;
         ctor_decl->set_language_linkage(LanguageLinkage::CXX);
 
         std::string ctor_prefix = ctx.tag;
@@ -2704,9 +2811,8 @@ void Collect::collect_record_synthesize_implicit_members(
         set_func_decl_cxx_qualifier_prefix(ctor_decl.get(), ctor_prefix);
         set_func_decl_owner_record_type(ctor_decl.get(), owner_type);
 
-        std::shared_ptr<Symbol> ctor_sym = nullptr;
-        if (source_ref_kind.has_value()) {
-            ctor_sym = mutable_self->collect_declare_function_symbol(
+        std::shared_ptr<Symbol> ctor_sym =
+            mutable_self->collect_declare_function_symbol(
                 ctor_decl->name,
                 QualType(ctor_decl->type),
                 ctor_decl->storage_class,
@@ -2719,11 +2825,10 @@ void Collect::collect_record_synthesize_implicit_members(
                 true,
                 ctor_decl->is_deleted,
                 ctor_decl->is_defaulted);
-            if (ctor_sym) {
-                set_symbol_cxx_qualifier_prefix(ctor_sym.get(), ctor_prefix);
-                set_symbol_owner_record_type(ctor_sym.get(), owner_type);
-                ctor_sym->function_definition = ctor_decl.get();
-            }
+        if (ctor_sym) {
+            set_symbol_cxx_qualifier_prefix(ctor_sym.get(), ctor_prefix);
+            set_symbol_owner_record_type(ctor_sym.get(), owner_type);
+            ctor_sym->function_definition = ctor_decl.get();
         }
 
         if (ast_ctx_) {
@@ -2747,6 +2852,9 @@ void Collect::collect_record_synthesize_implicit_members(
         ctor.is_implicit = true;
         ctor.is_explicit = false;
         ctor.is_deleted = is_deleted;
+        ctor.is_defaulted = true;
+        ctor.is_constexpr =
+            retained_ctor_decl && retained_ctor_decl->is_constexpr;
         ctor.decl = retained_ctor_decl;
         ctor.symbol = std::move(ctor_sym);
         ctx.constructors.push_back(std::move(ctor));
@@ -2805,6 +2913,7 @@ void Collect::collect_record_synthesize_implicit_members(
         method_decl->is_inline = true;
         method_decl->is_deleted = is_deleted;
         method_decl->is_defaulted = true;
+        method_decl->is_defaulted_on_first_declaration = true;
         method_decl->set_language_linkage(LanguageLinkage::CXX);
 
         std::string method_prefix = ctx.tag;
@@ -2853,6 +2962,8 @@ void Collect::collect_record_synthesize_implicit_members(
         method.is_static = false;
         method.is_deleted = is_deleted;
         method.is_defaulted = true;
+        method.is_constexpr =
+            retained_method_decl && retained_method_decl->is_constexpr;
         method.is_explicit = false;
         method.is_virtual = false;
         method.is_override = false;
@@ -2989,6 +3100,8 @@ void Collect::collect_record_synthesize_implicit_members(
         method.is_static = false;
         method.is_deleted = false;
         method.is_defaulted = true;
+        method.is_constexpr =
+            retained_method_decl && retained_method_decl->is_constexpr;
         method.is_explicit = false;
         method.is_virtual = false;
         method.is_override = false;
@@ -3299,6 +3412,7 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
     }
 
     RecordSemanticState owner_state = ctx.semantic_state;
+    QualType owner_type(ctx.semantic_decl->get_record_type());
     owner_state.bases = ctx.bases;
     owner_state.virtual_bases = ctx.virtual_bases;
     owner_state.fields = ctx.semantic_state.fields;
@@ -3327,6 +3441,69 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
     };
     publish_owner_state();
 
+    std::function<bool(const Expr*)> initializer_expr_needs_callable_body;
+    initializer_expr_needs_callable_body = [&](const Expr* expr) -> bool {
+        if (!expr) {
+            return false;
+        }
+        if (const auto* construct = dyn_cast<CppConstructExpr>(expr)) {
+            return static_cast<bool>(construct->ctor_sym);
+        }
+        if (const auto* init_list = dyn_cast<InitListExpr>(expr)) {
+            for (const auto& element : init_list->elements) {
+                if (initializer_expr_needs_callable_body(element.value.get())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    auto constructor_initializers_need_callable_body =
+        [&](const CppConstructorDecl* ctor_decl) {
+        if (!ctor_decl) {
+            return false;
+        }
+        for (const auto& init : ctor_decl->ctor_initializers) {
+            if (initializer_expr_needs_callable_body(init.init_expr.get())) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto implicit_default_constructor_can_use_recursive_lowering =
+        [&](const RecordSemanticState::Constructor& ctor,
+            const CppConstructorDecl* ctor_decl) {
+        if (!ctor.is_implicit || !ctor_decl || !ctor_decl->is_defaulted ||
+            ctor_decl->is_deleted) {
+            return false;
+        }
+        RecordSemanticState::Constructor ctor_probe = ctor;
+        ctor_probe.type = QualType(ctor_decl->type);
+        if (cpp_constructor_is_copy_constructor(
+                ctor_probe,
+                owner_type,
+                ast_ctx_.get()) ||
+            cpp_constructor_is_move_constructor(
+                ctor_probe,
+                owner_type,
+                ast_ctx_.get())) {
+            return false;
+        }
+        CppConstructorUserParamInfo param_info =
+            cpp_compute_constructor_user_param_info(ctor_probe);
+        if (param_info.required_user_param_count != 0) {
+            return false;
+        }
+
+        // If the synthesized initializer graph does not call a real constructor
+        // symbol, codegen can keep using the recursive implicit-construction
+        // fallback for bases, fields, and vptrs instead of manufacturing a no-op
+        // callable constructor symbol.
+        return !constructor_initializers_need_callable_body(ctor_decl);
+    };
+
     for (auto& ctor : ctx.constructors) {
         auto* ctor_decl =
             const_cast<CppConstructorDecl*>(ctor.decl);
@@ -3343,6 +3520,11 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
         }
 
         ctor.is_deleted = ctor_decl->is_deleted;
+        if (implicit_default_constructor_can_use_recursive_lowering(
+                ctor,
+                ctor_decl)) {
+            ctor.symbol.reset();
+        }
         if (ctor.symbol) {
             ctor.symbol->is_deleted = ctor_decl->is_deleted;
             ctor.symbol->is_defined =
@@ -3355,9 +3537,7 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
                 continue;
             }
             cached_ctor.is_deleted = ctor_decl->is_deleted;
-            if (ctor.symbol) {
-                cached_ctor.symbol = ctor.symbol;
-            }
+            cached_ctor.symbol = ctor.symbol;
             break;
         }
         publish_owner_state();
@@ -3456,6 +3636,125 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
         ast_ctx_.get());
 }
 
+void Collect::collect_record_infer_constexpr_special_members(
+    CollectRecordBuildContext& ctx) const {
+    if (!ctx.record_type) {
+        return;
+    }
+
+    QualType owner_type(ctx.record_type);
+    auto sync_constexpr = [&](FuncDecl* decl,
+                              const std::shared_ptr<Symbol>& symbol,
+                              bool value) {
+        if (decl) {
+            decl->is_constexpr = value;
+        }
+        if (symbol) {
+            symbol->is_constexpr = value;
+        }
+        if (ast_ctx_ && decl) {
+            if (auto* member_info =
+                    ast_ctx_->get_cpp_member_decl_info(decl->node_id)) {
+                member_info->is_constexpr = value;
+            }
+        }
+    };
+
+    auto is_defaulted_on_first_declaration =
+        [](const FuncDecl* decl) -> bool {
+        return decl &&
+               decl->is_defaulted &&
+               decl->is_defaulted_on_first_declaration;
+    };
+
+    for (auto& ctor : ctx.constructors) {
+        auto* ctor_decl = const_cast<CppConstructorDecl*>(ctor.decl);
+        RecordSemanticState::Constructor ctor_probe = ctor;
+        ctor_probe.type = ctor.type;
+        bool is_special_constructor =
+            cpp_compute_constructor_user_param_info(ctor_probe)
+                    .required_user_param_count == 0 ||
+            cpp_constructor_is_copy_constructor(
+                ctor_probe,
+                owner_type,
+                ast_ctx_.get()) ||
+            cpp_constructor_is_move_constructor(
+                ctor_probe,
+                owner_type,
+                ast_ctx_.get());
+        bool should_infer =
+            is_special_constructor &&
+            !ctor.is_deleted &&
+            (ctor.is_implicit ||
+             is_defaulted_on_first_declaration(ctor_decl));
+        bool is_constexpr =
+            ctor.is_constexpr ||
+            (ctor_decl && ctor_decl->is_constexpr) ||
+            should_infer;
+        if (is_constexpr) {
+            sync_constexpr(ctor_decl, ctor.symbol, true);
+        }
+        ctor.is_constexpr = is_constexpr;
+        if (ctor_decl) {
+            ctor.is_defaulted = ctor_decl->is_defaulted;
+            ctor.is_deleted = ctor_decl->is_deleted;
+            ctor.is_consteval = ctor_decl->is_consteval;
+        }
+    }
+
+    for (auto& method : ctx.methods) {
+        auto* method_decl = const_cast<CppMethodDecl*>(method.decl);
+        bool is_special_assignment =
+            cpp_method_is_copy_assignment(
+                method,
+                owner_type,
+                ast_ctx_.get()) ||
+            cpp_method_is_move_assignment(
+                method,
+                owner_type,
+                ast_ctx_.get());
+        bool should_infer =
+            is_special_assignment &&
+            !method.is_deleted &&
+            (method.is_implicit ||
+             is_defaulted_on_first_declaration(method_decl));
+        bool is_constexpr =
+            method.is_constexpr ||
+            (method_decl && method_decl->is_constexpr) ||
+            should_infer;
+        if (is_constexpr) {
+            sync_constexpr(method_decl, method.symbol, true);
+        }
+        method.is_constexpr = is_constexpr;
+        if (method_decl) {
+            method.is_deleted = method_decl->is_deleted;
+            method.is_defaulted = method_decl->is_defaulted;
+            method.is_consteval = method_decl->is_consteval;
+        }
+    }
+
+    for (auto& dtor : ctx.destructors) {
+        auto* dtor_decl = const_cast<CppDestructorDecl*>(dtor.decl);
+        bool should_infer =
+            !dtor.is_deleted &&
+            (dtor.is_implicit ||
+             is_defaulted_on_first_declaration(dtor_decl));
+        bool is_constexpr =
+            dtor.is_constexpr ||
+            (dtor_decl && dtor_decl->is_constexpr) ||
+            should_infer;
+        if (is_constexpr) {
+            sync_constexpr(dtor_decl, dtor.symbol, true);
+        }
+        dtor.is_constexpr = is_constexpr;
+        if (dtor_decl) {
+            dtor.is_deleted = dtor_decl->is_deleted;
+            dtor.is_defaulted = dtor_decl->is_defaulted;
+            dtor.is_consteval = dtor_decl->is_consteval;
+        }
+    }
+}
+
 bool Collect::collect_materialize_defaulted_constructor(
     CppConstructorDecl* ctor_decl,
     const ObjectDecl* owner_record_decl,
@@ -3463,35 +3762,48 @@ bool Collect::collect_materialize_defaulted_constructor(
     if (!ctor_decl || !owner_record_decl || !ctor_decl->is_defaulted) {
         return false;
     }
+    if (ctor_decl->is_deleted) {
+        return true;
+    }
 
     RecordSemanticState::Constructor ctor_state;
     ctor_state.type = QualType(ctor_decl->type);
     QualType owner_type(owner_record_decl->get_record_type());
     bool use_move = false;
+    bool is_copy_or_move_constructor = false;
+    bool is_default_constructor = false;
     if (cpp_constructor_is_move_constructor(
             ctor_state,
             owner_type,
             ast_ctx_.get())) {
         use_move = true;
+        is_copy_or_move_constructor = true;
     } else if (!cpp_constructor_is_copy_constructor(
                    ctor_state,
                    owner_type,
                    ast_ctx_.get())) {
-        return false;
+        CppConstructorUserParamInfo param_info =
+            cpp_compute_constructor_user_param_info(ctor_state);
+        if (param_info.required_user_param_count != 0) {
+            return false;
+        }
+        is_default_constructor = true;
+    } else {
+        is_copy_or_move_constructor = true;
     }
 
     auto* rhs_param =
-        ctor_decl->parameters.size() > 1
+        is_copy_or_move_constructor && ctor_decl->parameters.size() > 1
             ? dyn_cast<ParamDecl>(ctor_decl->parameters[1].get())
             : nullptr;
-    if (!rhs_param) {
+    if (is_copy_or_move_constructor && !rhs_param) {
         ctor_decl->is_deleted = true;
         ctor_decl->body.reset();
         ctor_decl->ctor_initializers.clear();
         return true;
     }
 
-    if (!owner_state.is_incomplete) {
+    if (!owner_state.is_incomplete && is_copy_or_move_constructor) {
         for (const auto& base : owner_state.bases) {
             bool supported = use_move
                 ? type_supports_generated_move_construction(
@@ -3527,6 +3839,27 @@ bool Collect::collect_materialize_defaulted_constructor(
             if (field.name.empty() &&
                 canonical_type_kind(field.type, ast_ctx_.get()) !=
                     TypeKind::Array) {
+                ctor_decl->is_deleted = true;
+                ctor_decl->body.reset();
+                ctor_decl->ctor_initializers.clear();
+                return true;
+            }
+        }
+    }
+    if (!owner_state.is_incomplete && is_default_constructor) {
+        for (const auto& field : owner_state.fields) {
+            if (field.is_base_subobject || field.is_virtual_base_storage) {
+                continue;
+            }
+            if (!type_needs_generated_default_constructor_initializer(
+                    field.type,
+                    ast_ctx_.get())) {
+                continue;
+            }
+            if (field.name.empty() ||
+                !type_supports_generated_default_construction(
+                    field.type,
+                    ast_ctx_.get())) {
                 ctor_decl->is_deleted = true;
                 ctor_decl->body.reset();
                 ctor_decl->ctor_initializers.clear();
@@ -3579,6 +3912,53 @@ bool Collect::collect_materialize_defaulted_constructor(
                     std::move(this_expr),
                     ctor_decl->location);
             };
+
+            if (is_default_constructor) {
+                if (owner_record_decl->get_record_type() &&
+                    owner_record_decl->get_record_type()->is_union) {
+                    return true;
+                }
+
+                for (const auto& field : owner_state.fields) {
+                    if (field.is_base_subobject || field.is_virtual_base_storage) {
+                        continue;
+                    }
+                    if (!type_needs_generated_default_constructor_initializer(
+                            field.type,
+                            ast_ctx_.get())) {
+                        continue;
+                    }
+                    if (field.name.empty()) {
+                        return false;
+                    }
+                    auto init_expr =
+                        build_generated_default_constructor_initializer_expr(
+                            *this,
+                            ast_ctx_.get(),
+                            field.type,
+                            ctor_decl->location);
+                    if (!init_expr || isa<ErrorExpr>(init_expr.get())) {
+                        return false;
+                    }
+
+                    CppCtorInitializer field_init;
+                    field_init.member_name = field.name;
+                    field_init.location = ctor_decl->location;
+                    field_init.member_expr = collect_member_expression(
+                        make_this_expr(),
+                        field.name,
+                        true,
+                        ctor_decl->location);
+                    if (!field_init.member_expr ||
+                        isa<ErrorExpr>(field_init.member_expr.get())) {
+                        return false;
+                    }
+                    field_init.init_expr = std::move(init_expr);
+                    synthesized_initializers.push_back(std::move(field_init));
+                }
+
+                return true;
+            }
 
             if (owner_record_decl->get_record_type() &&
                 owner_record_decl->get_record_type()->is_union) {

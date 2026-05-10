@@ -1066,6 +1066,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             ctor.is_implicit = false;
             ctor.is_explicit = ctor_decl->is_explicit;
             ctor.is_deleted = ctor_decl->is_deleted;
+            ctor.is_defaulted = ctor_decl->is_defaulted;
+            ctor.is_constexpr = ctor_decl->is_constexpr;
             ctor.is_consteval = ctor_decl->is_consteval;
             ctor.decl = ctor_decl;
             ctor.symbol = std::move(ctor_sym);
@@ -1119,6 +1121,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             dtor.is_implicit = false;
             dtor.is_defaulted = dtor_decl->is_defaulted;
             dtor.is_deleted = dtor_decl->is_deleted;
+            dtor.is_constexpr = dtor_decl->is_constexpr;
             dtor.is_consteval = dtor_decl->is_consteval;
             dtor.is_virtual = dtor_decl->is_virtual;
             dtor.is_override = dtor_decl->is_override;
@@ -1222,6 +1225,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             method.is_static = method_decl->storage_class == StorageClass::STATIC;
             method.is_deleted = method_decl->is_deleted;
             method.is_defaulted = method_decl->is_defaulted;
+            method.is_constexpr = method_decl->is_constexpr;
             method.is_consteval = method_decl->is_consteval;
             method.is_explicit = method_decl->is_explicit_conversion;
             method.is_virtual = method_decl->is_virtual;
@@ -3127,6 +3131,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         }
         out_of_line_method->is_deleted = parsed_method_func->is_deleted;
         out_of_line_method->is_defaulted = parsed_method_func->is_defaulted;
+        out_of_line_method->is_defaulted_on_first_declaration = false;
         out_of_line_method->explicit_specialization_arguments =
             parsed_method_func->explicit_specialization_arguments;
         out_of_line_method->has_explicit_specialization_argument_list =
@@ -3397,6 +3402,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                 out_of_line_method->is_deleted;
             matched_method_decl->is_defaulted =
                 out_of_line_method->is_defaulted;
+            matched_method_decl->is_defaulted_on_first_declaration = false;
             matched_method_decl->is_conversion_function =
                 out_of_line_method->is_conversion_function;
             matched_method_decl->is_explicit_conversion =
@@ -3455,6 +3461,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                         method.type = QualType(matched_method_decl->type);
                         method.is_deleted = matched_method_decl->is_deleted;
                         method.is_defaulted = matched_method_decl->is_defaulted;
+                        method.is_constexpr = matched_method_decl->is_constexpr;
                         method.is_consteval = matched_method_decl->is_consteval;
                         method.is_explicit =
                             matched_method_decl->is_explicit_conversion;
@@ -4703,6 +4710,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 ctor_decl->is_constexpr = decl_parser.is_constexpr;
                 ctor_decl->is_deleted = ctor_is_deleted;
                 ctor_decl->is_defaulted = ctor_is_defaulted;
+                ctor_decl->is_defaulted_on_first_declaration =
+                    ctor_is_defaulted;
                 ctor_decl->set_language_linkage(current_decl_language_linkage());
                 ctor_decl->ctor_initializers = std::move(parsed_ctor_initializers);
                 if (ctor_is_defaulted) {
@@ -4891,6 +4900,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->is_consteval = decl_parser.is_consteval;
                 cpp_method->is_deleted = false;
                 cpp_method->is_defaulted = false;
+                cpp_method->is_defaulted_on_first_declaration = false;
                 cpp_method->is_conversion_function =
                     decl_parser.is_conversion_function;
                 cpp_method->is_explicit_conversion = member_explicit;
@@ -4936,6 +4946,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->is_consteval = parsed_method->is_consteval;
                 cpp_method->is_deleted = parsed_method->is_deleted;
                 cpp_method->is_defaulted = parsed_method->is_defaulted;
+                cpp_method->is_defaulted_on_first_declaration =
+                    parsed_method->is_defaulted;
                 cpp_method->is_conversion_function =
                     decl_parser.is_conversion_function;
                 cpp_method->is_explicit_conversion = member_explicit;

@@ -523,6 +523,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_ctor->is_consteval = pattern_ctor->is_consteval;
             specialized_ctor->is_deleted = pattern_ctor->is_deleted;
             specialized_ctor->is_defaulted = pattern_ctor->is_defaulted;
+            specialized_ctor->is_defaulted_on_first_declaration =
+                pattern_ctor->is_defaulted_on_first_declaration;
             specialized_ctor->set_language_linkage(
                 pattern_ctor->get_language_linkage());
             specialized_ctor->is_explicit = pattern_ctor->is_explicit;
@@ -559,6 +561,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_method->is_consteval = pattern_method->is_consteval;
             specialized_method->is_deleted = pattern_method->is_deleted;
             specialized_method->is_defaulted = pattern_method->is_defaulted;
+            specialized_method->is_defaulted_on_first_declaration =
+                pattern_method->is_defaulted_on_first_declaration;
             specialized_method->set_language_linkage(
                 pattern_method->get_language_linkage());
             specialized_method->is_virtual = pattern_method->is_virtual;
@@ -615,6 +619,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_function->is_consteval = pattern->is_consteval;
             specialized_function->is_deleted = pattern->is_deleted;
             specialized_function->is_defaulted = pattern->is_defaulted;
+            specialized_function->is_defaulted_on_first_declaration =
+                pattern->is_defaulted_on_first_declaration;
             specialized_function->set_language_linkage(
                 pattern->get_language_linkage());
             if (pattern->asm_label) {

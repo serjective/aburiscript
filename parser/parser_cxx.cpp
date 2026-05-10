@@ -5702,6 +5702,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     }
     ctor_decl->is_deleted = is_deleted;
     ctor_decl->is_defaulted = is_defaulted;
+    ctor_decl->is_defaulted_on_first_declaration =
+        is_defaulted && is_parsing_cpp_record_body();
     ctor_decl->set_language_linkage(current_decl_language_linkage());
     ctor_decl->ctor_initializers = std::move(parsed_ctor_initializers);
     ast_ctx->append_attrs(ctor_decl->node_id, std::move(leading_attrs));
@@ -5943,6 +5945,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
     dtor_decl->is_constexpr = false;
     dtor_decl->is_deleted = is_deleted;
     dtor_decl->is_defaulted = is_defaulted;
+    dtor_decl->is_defaulted_on_first_declaration =
+        is_defaulted && is_parsing_cpp_record_body();
     dtor_decl->is_override = is_override;
     dtor_decl->is_final = is_final;
     dtor_decl->is_pure = is_pure;
@@ -6545,6 +6549,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     method_decl->storage_class == StorageClass::STATIC;
                 semantic_method.is_deleted = method_decl->is_deleted;
                 semantic_method.is_defaulted = method_decl->is_defaulted;
+                semantic_method.is_constexpr = method_decl->is_constexpr;
                 semantic_method.is_consteval = method_decl->is_consteval;
                 semantic_method.is_explicit =
                     method_decl->is_explicit_conversion;

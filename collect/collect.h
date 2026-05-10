@@ -1243,6 +1243,8 @@ public:
         CollectRecordBuildContext& ctx) const;
     void collect_record_materialize_defaulted_method_bodies(
         CollectRecordBuildContext& ctx);
+    void collect_record_infer_constexpr_special_members(
+        CollectRecordBuildContext& ctx) const;
     bool collect_materialize_defaulted_constructor(
         CppConstructorDecl* ctor_decl,
         const ObjectDecl* owner_record_decl,

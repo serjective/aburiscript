@@ -1,6 +1,8 @@
 #include "collect.h"
 #include "collect_decl_internal.h"
 
+#include "../ast/special_members.h"
+
 using namespace collect_decl_internal;
 
 namespace {
@@ -106,6 +108,29 @@ bool is_same_type_object_prvalue_initializer(
 
     return collect.classify_value_category(const_cast<Expr*>(init)) ==
            Collect::ValueCategory::PRValue;
+}
+
+bool empty_class_initialization_needs_default_constructor_overload(
+    const RecordSemanticState* record_state,
+    const Expr* init) {
+    const auto* init_list = dyn_cast<InitListExpr>(init);
+    if (!record_state || !init_list || !init_list->elements.empty()) {
+        return false;
+    }
+
+    for (const auto& ctor : record_state->constructors) {
+        if (!ctor.symbol || !ctor.decl) {
+            continue;
+        }
+        if (!cpp_constructor_is_viable_default_candidate(
+                ctor,
+                /*allow_protected_access=*/false)) {
+            continue;
+        }
+        return !ctor.decl->ctor_initializers.empty();
+    }
+
+    return false;
 }
 
 } // namespace
@@ -361,6 +386,9 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         (!record_state->constructors.empty() || has_constructor_template) &&
         (has_constructor_template ||
          record_state->definition_data.has_user_declared_constructor ||
+         empty_class_initialization_needs_default_constructor_overload(
+             record_state,
+             init.get()) ||
          should_use_implicit_special_member_constructor_overload(
              declared_type,
              record_state,
