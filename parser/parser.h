@@ -314,9 +314,12 @@ private:
         bool diagnose_on_failure = true);
     std::unique_ptr<Expr> parse_block_literal_expression();
     std::unique_ptr<Expr> parse_cpp_lambda_expression();
+    bool is_lambda_declarator_parameter_clause_ahead();
     TemplateParameterList lower_generic_lambda_parameter_placeholders(
         std::vector<std::unique_ptr<Decl>>& parameters,
+        TemplateParameterList template_parameters,
         const std::string& closure_name,
+        uint32_t parameter_depth,
         SrcLoc lambda_loc);
     std::unique_ptr<Expr> maybe_parse_pack_expansion_expression(
         std::unique_ptr<Expr> expr);
@@ -734,6 +737,7 @@ private:
     uint32_t template_parameter_depth_ = 0;
     uint32_t template_argument_expression_depth_ = 0;
     uint32_t template_argument_group_depth_ = 0;
+    uint32_t lambda_template_requires_clause_depth_ = 0;
     uint32_t cpp_explicit_specialization_parse_depth_ = 0;
     std::vector<std::vector<const TemplateParameterDecl*>>
         active_template_parameter_stack_;

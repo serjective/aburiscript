@@ -185,17 +185,15 @@ void Parser::retain_type_specifier_decl_if_needed(DeclarationParser& decl_parser
 
 TemplateParameterList Parser::lower_generic_lambda_parameter_placeholders(
     std::vector<std::unique_ptr<Decl>>& parameters,
+    TemplateParameterList template_parameters,
     const std::string& closure_name,
+    uint32_t parameter_depth,
     SrcLoc lambda_loc) {
-    TemplateParameterList template_parameters;
     if (!ast_ctx) {
         error_custloc(
             "internal error: missing AST context for generic lambda",
             lambda_loc);
     }
-
-    const uint32_t parameter_depth =
-        static_cast<uint32_t>(active_template_parameter_stack_.size());
 
     for (auto& parameter : parameters) {
         auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
@@ -238,6 +236,43 @@ TemplateParameterList Parser::lower_generic_lambda_parameter_placeholders(
     }
 
     return template_parameters;
+}
+
+bool Parser::is_lambda_declarator_parameter_clause_ahead() {
+    if (!gentle_check(TokenType::LEFT_PAREN)) {
+        return false;
+    }
+
+    size_t offset = 0;
+    size_t depth = 0;
+    while (true) {
+        TokenType type = peek_token_shortcut(offset).type;
+        if (type == TokenType::Eof) {
+            return false;
+        }
+        if (type == TokenType::LEFT_PAREN) {
+            ++depth;
+        } else if (type == TokenType::RIGHT_PAREN) {
+            if (depth == 0) {
+                return false;
+            }
+            --depth;
+            if (depth == 0) {
+                ++offset;
+                break;
+            }
+        }
+        ++offset;
+    }
+
+    Token after = peek_token_shortcut(offset);
+    if (after.type == TokenType::LEFT_BRACE ||
+        after.type == TokenType::NOEXCEPT_KW ||
+        after.type == TokenType::ARROW ||
+        after.type == TokenType::REQUIRES_KW) {
+        return true;
+    }
+    return after.type == TokenType::IDENTIFIER && after.value == "mutable";
 }
 
 std::unique_ptr<Expr> Parser::maybe_parse_pack_expansion_expression(
@@ -1116,13 +1151,82 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
     bool is_mutable = false;
     bool has_trailing_return = false;
     bool is_generic = false;
+    bool has_auto_template_parameters = false;
+    uint32_t lambda_template_parameter_depth =
+        static_cast<uint32_t>(active_template_parameter_stack_.size());
     TemplateParameterList call_operator_template_parameters;
+    std::unique_ptr<Expr> template_requires_clause = nullptr;
+    std::unique_ptr<Expr> trailing_requires_clause = nullptr;
     std::vector<std::unique_ptr<Decl>> parameters;
     auto semantic_info = make_lambda_semantic_info(*ast_ctx, lambda_loc);
     semantic_info.lexical_this_context = enclosing_this_context;
     auto lambda_function_type = std::make_shared<FunctionType>();
     lambda_function_type->ret_type =
         QualType(std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
+
+    struct LambdaTemplateScopeGuard {
+        Collect* collect = nullptr;
+        std::vector<std::vector<const TemplateParameterDecl*>>* stack = nullptr;
+        std::shared_ptr<Scope> scope;
+        bool scope_active = false;
+        bool stack_active = false;
+
+        void leave_now() {
+            if (scope_active && collect && scope) {
+                collect->collect_set_current_scope(scope);
+                collect->collect_leave_scope();
+                scope_active = false;
+            }
+            if (stack_active && stack && !stack->empty()) {
+                stack->pop_back();
+                stack_active = false;
+            }
+        }
+
+        ~LambdaTemplateScopeGuard() {
+            leave_now();
+        }
+    } lambda_template_scope_guard;
+
+    if (gentle_check(TokenType::LESS_THAN)) {
+        if (!lang_opts.is_cxx20_or_later()) {
+            error_custloc(
+                "lambda template parameter list requires C++20",
+                current_token().loc);
+        }
+        is_generic = true;
+        auto entered_template_scope =
+            collect_->collect_enter_scope(ScopeFlags::TemplateParameterScope);
+        lambda_template_scope_guard.collect = collect_.get();
+        lambda_template_scope_guard.stack = &active_template_parameter_stack_;
+        lambda_template_scope_guard.scope = entered_template_scope.scope;
+        lambda_template_scope_guard.scope_active = true;
+        active_template_parameter_stack_.emplace_back();
+        lambda_template_scope_guard.stack_active = true;
+
+        call_operator_template_parameters =
+            parse_cpp_template_parameter_list(lambda_template_parameter_depth);
+        if (call_operator_template_parameters.empty()) {
+            error_custloc(
+                "lambda template parameter list cannot be empty",
+                lambda_loc);
+        }
+
+        if (gentle_check(TokenType::REQUIRES_KW)) {
+            advance(); // 'requires'
+            ++lambda_template_requires_clause_depth_;
+            struct TemplateRequiresParseGuard {
+                uint32_t& depth;
+                ~TemplateRequiresParseGuard() { --depth; }
+            } template_requires_guard{lambda_template_requires_clause_depth_};
+            template_requires_clause = parse_cpp_constraint_expression();
+            if (!template_requires_clause) {
+                error_custloc(
+                    "invalid lambda template requires-clause",
+                    current_token().loc);
+            }
+        }
+    }
 
     auto saved_scope = collect_->collect_current_scope();
     auto saved_func_type = func_type;
@@ -1216,6 +1320,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
                     if (auto_type_utils::has_cxx_auto_type(
                             param_decl->type.get_shared())) {
                         is_generic = true;
+                        has_auto_template_parameters = true;
                     }
                     parameters.push_back(std::move(parameter));
                     if (!gentle_check_and_consume(TokenType::COMMA)) {
@@ -1226,11 +1331,13 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
             check_and_consume(TokenType::RIGHT_PAREN);
         }
 
-        if (is_generic) {
+        if (has_auto_template_parameters) {
             call_operator_template_parameters =
                 lower_generic_lambda_parameter_placeholders(
                     parameters,
+                    std::move(call_operator_template_parameters),
                     semantic_info.closure_name(),
+                    lambda_template_parameter_depth,
                     lambda_loc);
         }
 
@@ -1268,6 +1375,24 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
             }
             lambda_function_type->ret_type = return_type;
             has_trailing_return = true;
+        }
+
+        if (lang_opts.is_cxx20_or_later() &&
+            gentle_check(TokenType::REQUIRES_KW)) {
+            advance(); // 'requires'
+            trailing_requires_clause = parse_cpp_constraint_expression();
+            if (!trailing_requires_clause) {
+                error_custloc(
+                    "invalid lambda trailing requires-clause",
+                    current_token().loc);
+            }
+            if (!is_generic) {
+                error_custloc(
+                    "non-generic lambda cannot have a trailing requires-clause",
+                    trailing_requires_clause->location.isInvalid()
+                        ? lambda_loc
+                        : trailing_requires_clause->location);
+            }
         }
 
         auto call_operator_type = std::make_shared<FunctionType>(*lambda_function_type);
@@ -1315,11 +1440,14 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
         }
 
         restore_lambda_parse_state();
+        lambda_template_scope_guard.leave_now();
         auto lambda_expr = collect_->collect_cpp_lambda_expression(
             std::move(closure_info),
             std::move(semantic_info),
             QualType(lambda_function_type),
             std::move(call_operator_template_parameters),
+            std::move(template_requires_clause),
+            std::move(trailing_requires_clause),
             std::move(parameters),
             std::move(body),
             std::move(lambda_stmt_labels),
@@ -2038,6 +2166,15 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                 try {
                     auto explicit_template_args =
                         parse_cpp_template_argument_list();
+                    if (lambda_template_requires_clause_depth_ > 0 &&
+                        is_lambda_declarator_parameter_clause_ahead()) {
+                        tentative.commit();
+                        expr = collect_->collect_explicit_template_id_expression(
+                            std::move(expr),
+                            std::move(explicit_template_args),
+                            loc);
+                        continue;
+                    }
                     if (gentle_check(TokenType::LEFT_PAREN)) {
                         tentative.commit();
                         advance();
@@ -2067,6 +2204,10 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                     throw;
                 }
             }
+        }
+        if (lambda_template_requires_clause_depth_ > 0 &&
+            is_lambda_declarator_parameter_clause_ahead()) {
+            break;
         }
         if (gentle_check(TokenType::LEFT_PAREN)) {
             advance();

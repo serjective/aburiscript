@@ -459,6 +459,8 @@ public:
         LambdaSemanticInfo semantic_info,
         QualType written_call_operator_type,
         TemplateParameterList call_operator_template_parameters,
+        std::unique_ptr<Expr> template_requires_clause,
+        std::unique_ptr<Expr> trailing_requires_clause,
         std::vector<std::unique_ptr<Decl>> parameters,
         std::unique_ptr<CompoundStmt> body,
         std::unordered_set<std::string> stmt_labels,

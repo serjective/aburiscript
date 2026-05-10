@@ -1999,6 +1999,39 @@ bool Collect::finalize_cpp_lambda_semantics(
             ? dyn_cast<CompoundStmt>(synthesized_method->body.get())->scope
             : nullptr;
     synthesized_method->set_language_linkage(LanguageLinkage::None);
+    auto clone_lambda_constraint =
+        [&](const std::unique_ptr<Expr>& constraint,
+            const char* description) -> std::unique_ptr<Expr> {
+            if (!constraint) {
+                return nullptr;
+            }
+            std::string clone_error;
+            auto cloned_constraint =
+                clone_expr_with_substitution(
+                    constraint.get(),
+                    clone_ctx,
+                    &clone_error);
+            if (!cloned_constraint) {
+                fail(
+                    clone_error.empty()
+                        ? "failed to clone lambda " +
+                              std::string(description) + " constraint"
+                        : clone_error,
+                    constraint->location.isInvalid()
+                        ? lambda.location
+                        : constraint->location);
+            }
+            return cloned_constraint;
+        };
+    if (lambda.trailing_requires_clause) {
+        synthesized_method->trailing_requires_clause =
+            clone_lambda_constraint(
+                lambda.trailing_requires_clause,
+                "trailing requires-clause");
+        if (!synthesized_method->trailing_requires_clause) {
+            return false;
+        }
+    }
 
     auto synthesized_method_type =
         QualType(synthesized_method->type).as_shared<FunctionType>();
@@ -2111,6 +2144,15 @@ bool Collect::finalize_cpp_lambda_semantics(
             std::move(lambda.call_operator_template_parameters),
             std::move(synthesized_method),
             lambda.location);
+        if (lambda.template_requires_clause) {
+            function_template->associated_constraint =
+                clone_lambda_constraint(
+                    lambda.template_requires_clause,
+                    "template requires-clause");
+            if (!function_template->associated_constraint) {
+                return false;
+            }
+        }
         set_template_decl_canonical_decl(
             function_template.get(),
             function_template.get());
@@ -2526,6 +2568,8 @@ std::unique_ptr<Expr> Collect::collect_cpp_lambda_expression(
     LambdaSemanticInfo semantic_info,
     QualType written_call_operator_type,
     TemplateParameterList call_operator_template_parameters,
+    std::unique_ptr<Expr> template_requires_clause,
+    std::unique_ptr<Expr> trailing_requires_clause,
     std::vector<std::unique_ptr<Decl>> parameters,
     std::unique_ptr<CompoundStmt> body,
     std::unordered_set<std::string> stmt_labels,
@@ -2541,6 +2585,8 @@ std::unique_ptr<Expr> Collect::collect_cpp_lambda_expression(
         std::move(semantic_info),
         std::move(written_call_operator_type),
         std::move(call_operator_template_parameters),
+        std::move(template_requires_clause),
+        std::move(trailing_requires_clause),
         std::move(parameters),
         std::move(body),
         std::move(stmt_labels),

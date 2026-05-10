@@ -3,6 +3,7 @@
 #include "../ast/special_members.h"
 
 using template_sema_internal::lookup_symbol_remap_in_clone_context;
+using template_sema_internal::clone_symbol_shallow_for_specialization;
 using template_sema_internal::make_template_binding_clone_pass_builder;
 using template_sema_internal::normalize_concrete_template_value_argument;
 using template_sema_internal::template_argument_has_known_payload;
@@ -826,6 +827,24 @@ bool Collect::are_template_constraints_satisfied_with_bindings(
                 rewrite_constraint_arguments,
                 register_cloned_symbol,
                 {});
+            if (auto* function_decl = dyn_cast<FuncDecl>(
+                    const_cast<Decl*>(template_decl->get_templated_decl()))) {
+                for (const auto& parameter : function_decl->parameters) {
+                    auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
+                    if (!param_decl || !param_decl->sym) {
+                        continue;
+                    }
+                    QualType rewritten_param_type =
+                        rewrite_constraint_type(param_decl->sym->type);
+                    if (!rewritten_param_type) {
+                        return false;
+                    }
+                    clone_pass_builder.symbol_remap[param_decl->sym.get()] =
+                        clone_symbol_shallow_for_specialization(
+                            param_decl->sym,
+                            rewritten_param_type);
+                }
+            }
             clone_pass_builder.rewrite_symbol =
                 [&](const std::shared_ptr<Symbol>& sym,
                     ASTCloneContext& clone_ctx) -> std::shared_ptr<Symbol> {

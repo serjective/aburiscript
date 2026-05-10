@@ -1470,6 +1470,8 @@ private:
                 for (const auto& param : node->parameters) {
                     visit_decl(param.get());
                 }
+                visit_stmt(node->template_requires_clause.get());
+                visit_stmt(node->trailing_requires_clause.get());
                 visit_stmt(node->body.get());
                 return;
             }

@@ -1727,6 +1727,8 @@ struct CppLambdaExpr : Expr {
     LambdaSemanticInfo semantic_info;
     QualType written_call_operator_type;
     TemplateParameterList call_operator_template_parameters;
+    std::unique_ptr<Expr> template_requires_clause;
+    std::unique_ptr<Expr> trailing_requires_clause;
     std::vector<std::unique_ptr<Decl>> parameters;
     std::unique_ptr<CompoundStmt> body;
     std::unordered_set<std::string> stmt_labels;
@@ -1741,6 +1743,8 @@ struct CppLambdaExpr : Expr {
                   LambdaSemanticInfo semantic_info,
                   QualType written_call_operator_type,
                   TemplateParameterList call_operator_template_parameters,
+                  std::unique_ptr<Expr> template_requires_clause,
+                  std::unique_ptr<Expr> trailing_requires_clause,
                   std::vector<std::unique_ptr<Decl>> parameters,
                   std::unique_ptr<CompoundStmt> body,
                   std::unordered_set<std::string> stmt_labels,
@@ -1757,6 +1761,8 @@ struct CppLambdaExpr : Expr {
           written_call_operator_type(std::move(written_call_operator_type)),
           call_operator_template_parameters(
               std::move(call_operator_template_parameters)),
+          template_requires_clause(std::move(template_requires_clause)),
+          trailing_requires_clause(std::move(trailing_requires_clause)),
           parameters(std::move(parameters)),
           body(std::move(body)),
           stmt_labels(std::move(stmt_labels)),

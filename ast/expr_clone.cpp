@@ -1008,6 +1008,22 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
                 remap_lambda_template_parameter_types(
                     lambda->explicit_return_type,
                     parameter_rebinds);
+            auto cloned_template_requires_clause = clone_expr_tree(
+                lambda->template_requires_clause.get(),
+                ast_ctx,
+                error_out);
+            if (lambda->template_requires_clause &&
+                !cloned_template_requires_clause) {
+                return {};
+            }
+            auto cloned_trailing_requires_clause = clone_expr_tree(
+                lambda->trailing_requires_clause.get(),
+                ast_ctx,
+                error_out);
+            if (lambda->trailing_requires_clause &&
+                !cloned_trailing_requires_clause) {
+                return {};
+            }
 
             if (!parameter_rebinds.empty()) {
                 ASTCloneContext rebind_ctx;
@@ -1050,6 +1066,20 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
                         error_out)) {
                     return {};
                 }
+                if (cloned_template_requires_clause &&
+                    !rewrite_expr_tree_in_place(
+                        cloned_template_requires_clause,
+                        rebind_ctx,
+                        error_out)) {
+                    return {};
+                }
+                if (cloned_trailing_requires_clause &&
+                    !rewrite_expr_tree_in_place(
+                        cloned_trailing_requires_clause,
+                        rebind_ctx,
+                        error_out)) {
+                    return {};
+                }
                 for (auto& capture : cloned_closure_info.captures) {
                     if (!capture.initializer) {
                         continue;
@@ -1084,6 +1114,8 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
                 std::move(cloned_semantic_info),
                 std::move(cloned_written_type),
                 std::move(cloned_template_parameters),
+                std::move(cloned_template_requires_clause),
+                std::move(cloned_trailing_requires_clause),
                 std::move(cloned_parameters),
                 std::move(cloned_body),
                 lambda->stmt_labels,

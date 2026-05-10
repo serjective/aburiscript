@@ -936,6 +936,20 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
                 rewrite_type(
                     lambda->semantic_info.lexical_this_context.this_type,
                     ctx);
+            if (lambda->template_requires_clause &&
+                !rewrite_expr_tree(
+                    lambda->template_requires_clause,
+                    ctx,
+                    error_out)) {
+                return false;
+            }
+            if (lambda->trailing_requires_clause &&
+                !rewrite_expr_tree(
+                    lambda->trailing_requires_clause,
+                    ctx,
+                    error_out)) {
+                return false;
+            }
             for (auto& capture : lambda->closure_info.captures) {
                 capture.symbol = remap_symbol(capture.symbol, ctx);
                 if (!capture.initializer) {

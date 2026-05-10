@@ -679,6 +679,16 @@ bool collect_pack_expansion_shape_in_expr(
                     shape_out)) {
                 return false;
             }
+            if (!collect_pack_expansion_shape_in_expr(
+                    lambda->template_requires_clause.get(),
+                    parameters,
+                    shape_out) ||
+                !collect_pack_expansion_shape_in_expr(
+                    lambda->trailing_requires_clause.get(),
+                    parameters,
+                    shape_out)) {
+                return false;
+            }
             for (const auto& capture : lambda->closure_info.captures) {
                 if (!collect_pack_expansion_shape_in_expr(
                         capture.initializer.get(),
