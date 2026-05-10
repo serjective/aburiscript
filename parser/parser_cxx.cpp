@@ -2135,6 +2135,95 @@ Parser::parse_cpp_explicit_specialization_declaration(
     return explicit_decls;
 }
 
+std::optional<CppTypeConstraint>
+Parser::parse_cpp_type_constraint(bool diagnose_on_failure) {
+    Token start_tok = current_token();
+    size_t saved_idx = get_token_idx();
+    auto saved_split_state = tok_mgnt.get_split_token_state();
+    auto restore = [&]() {
+        set_token_idx(saved_idx);
+        tok_mgnt.set_split_token_state(saved_split_state);
+    };
+    auto fail = [&](const std::string& message,
+                    SrcLoc loc) -> std::optional<CppTypeConstraint> {
+        restore();
+        if (diagnose_on_failure) {
+            error_custloc(message, loc);
+        }
+        return std::nullopt;
+    };
+
+    bool has_global_qualifier = consume_cpp_scope_resolution();
+    if (!gentle_check(TokenType::IDENTIFIER)) {
+        return fail("expected concept name in type-constraint", start_tok.loc);
+    }
+
+    std::vector<std::string> qualifier_components;
+    std::string concept_name;
+    SrcLoc concept_loc = current_token().loc;
+    while (gentle_check(TokenType::IDENTIFIER)) {
+        std::string component = current_token().value;
+        SrcLoc component_loc = current_token().loc;
+        advance();
+        if (!is_cpp_scope_resolution_here()) {
+            concept_name = std::move(component);
+            concept_loc = component_loc;
+            break;
+        }
+        qualifier_components.push_back(std::move(component));
+        consume_cpp_scope_resolution();
+    }
+
+    if (concept_name.empty()) {
+        return fail("expected concept name in type-constraint", start_tok.loc);
+    }
+
+    std::vector<TemplateArgument> written_arguments;
+    if (gentle_check(TokenType::LESS_THAN)) {
+        written_arguments = parse_cpp_template_argument_list();
+    }
+
+    CppQualifiedExprInfo qualified_info =
+        build_cpp_qualified_expr_info(
+            has_global_qualifier,
+            qualifier_components);
+    const CppQualifiedExprInfo* lookup_qualifier =
+        qualified_info.has_qualifier() ? &qualified_info : nullptr;
+    auto concepts =
+        collect_->collect_lookup_concepts(concept_name, lookup_qualifier);
+    if (concepts.empty()) {
+        std::string display_name =
+            qualified_name_utils::format_cpp_qualified_name(
+                has_global_qualifier,
+                qualifier_components,
+                concept_name);
+        return fail(
+            "unknown concept '" + display_name + "' in type-constraint",
+            concept_loc);
+    }
+    if (concepts.size() > 1) {
+        std::string display_name =
+            qualified_name_utils::format_cpp_qualified_name(
+                has_global_qualifier,
+                qualifier_components,
+                concept_name);
+        return fail(
+            "ambiguous concept '" + display_name + "' in type-constraint",
+            concept_loc);
+    }
+
+    CppTypeConstraint constraint;
+    constraint.concept_decl = concepts.front();
+    constraint.concept_name =
+        qualified_name_utils::format_cpp_qualified_name(
+            has_global_qualifier,
+            qualifier_components,
+            concept_name);
+    constraint.template_arguments = std::move(written_arguments);
+    constraint.location = concept_loc;
+    return constraint;
+}
+
 TemplateParameterList
 Parser::parse_cpp_template_parameter_list(uint32_t depth) {
     TemplateParameterList parameters;
@@ -2155,122 +2244,22 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
                 [&]() -> std::unique_ptr<TemplateTypeParmDecl> {
                     TentativeParsingAction tentative(*this);
 
-                    bool has_global_qualifier = consume_cpp_scope_resolution();
-                    std::vector<std::string> qualifier_components;
-                    std::string concept_name;
-                    SrcLoc concept_loc = current_token().loc;
-                    while (gentle_check(TokenType::IDENTIFIER)) {
-                        std::string component = current_token().value;
-                        concept_loc = current_token().loc;
-                        advance();
-                        if (!is_cpp_scope_resolution_here()) {
-                            concept_name = std::move(component);
-                            break;
-                        }
-                        qualifier_components.push_back(std::move(component));
-                        consume_cpp_scope_resolution();
-                    }
-                    if (concept_name.empty()) {
+                    auto type_constraint =
+                        parse_cpp_type_constraint(
+                            /*diagnose_on_failure=*/false);
+                    if (!type_constraint) {
                         return nullptr;
-                    }
-
-                    std::vector<TemplateArgument> concept_arguments;
-                    if (gentle_check(TokenType::LESS_THAN)) {
-                        concept_arguments = parse_cpp_template_argument_list();
                     }
 
                     bool is_parameter_pack =
                         gentle_check_and_consume(TokenType::ELLIPSIS);
 
                     std::string param_name;
-                    SrcLoc param_loc = concept_loc;
+                    SrcLoc param_loc = type_constraint->location;
                     if (gentle_check(TokenType::IDENTIFIER)) {
                         param_name = current_token().value;
                         param_loc = current_token().loc;
                         advance();
-                    }
-
-                    auto current_scope = collect_->collect_current_scope();
-                    auto current_context = collect_->get_current_decl_context();
-                    auto tu_context = collect_->get_translation_unit_decl_context();
-                    auto global_scope = current_scope;
-                    while (global_scope && global_scope->parent) {
-                        global_scope = global_scope->parent;
-                    }
-
-                    auto lookup_scope =
-                        has_global_qualifier ? global_scope : current_scope;
-                    const DeclContext* lookup_context =
-                        has_global_qualifier
-                            ? (tu_context ? tu_context.get() : nullptr)
-                            : (current_context ? current_context.get()
-                                               : nullptr);
-
-                    for (size_t idx = 0; idx < qualifier_components.size(); ++idx) {
-                        if (!lookup_context) {
-                            return nullptr;
-                        }
-                        auto namespace_scope = resolve_named_namespace_scope(
-                            lookup_context,
-                            qualifier_components[idx],
-                            !has_global_qualifier && idx == 0);
-                        if (!namespace_scope ||
-                            !namespace_scope->associated_decl_context) {
-                            return nullptr;
-                        }
-                        lookup_scope = namespace_scope;
-                        lookup_context = namespace_scope->associated_decl_context;
-                    }
-
-                    auto find_concept_candidate =
-                        [](const DeclBinding* binding) -> const ConceptDecl* {
-                            if (!binding) {
-                                return nullptr;
-                            }
-                            if (auto* concept_candidate =
-                                    dyn_cast<ConceptDecl>(
-                                        const_cast<Decl*>(binding->template_decl))) {
-                                return concept_candidate;
-                            }
-                            const ConceptDecl* selected = nullptr;
-                            for (const auto* candidate :
-                                 binding->template_overload_candidates) {
-                                auto* concept_candidate =
-                                    dyn_cast<ConceptDecl>(
-                                        const_cast<Decl*>(candidate));
-                                if (!concept_candidate) {
-                                    continue;
-                                }
-                                if (selected &&
-                                    selected != concept_candidate) {
-                                    return nullptr;
-                                }
-                                selected = concept_candidate;
-                            }
-                            return selected;
-                        };
-
-                    const ConceptDecl* concept_decl = nullptr;
-                    if (qualifier_components.empty()) {
-                        concept_decl = find_concept_candidate(
-                            LookupEngine::lookup_unqualified_template_binding(
-                                concept_name,
-                                lookup_scope,
-                                !has_global_qualifier,
-                                LookupNamespace::Ordinary));
-                    } else if (lookup_context) {
-                        auto qualified_lookup = LookupEngine::lookup_qualified(
-                            concept_name,
-                            lookup_context,
-                            LookupNamespace::Ordinary);
-                        if (qualified_lookup.status ==
-                            LookupEngine::QualifiedLookupStatus::Found) {
-                            concept_decl = find_concept_candidate(
-                                qualified_lookup.binding);
-                        }
-                    }
-                    if (!concept_decl) {
-                        return nullptr;
                     }
 
                     auto param_type = std::make_shared<TemplateTypeParmType>(
@@ -2288,19 +2277,19 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
                         param_loc);
                     param_type->parameter_decl = param_decl.get();
 
+                    std::vector<TemplateArgument> concept_arguments;
                     concept_arguments.push_back(
                         TemplateArgument(QualType(param_type)));
-                    std::string display_name =
-                        qualified_name_utils::format_cpp_qualified_name(
-                            has_global_qualifier,
-                            qualifier_components,
-                            concept_name);
+                    concept_arguments.insert(
+                        concept_arguments.end(),
+                        type_constraint->template_arguments.begin(),
+                        type_constraint->template_arguments.end());
                     param_decl->type_constraint =
                         collect_->collect_concept_specialization_expression(
-                            concept_decl,
-                            std::move(display_name),
+                            type_constraint->concept_decl,
+                            type_constraint->concept_name,
                             std::move(concept_arguments),
-                            concept_loc);
+                            type_constraint->location);
                     tentative.commit();
                     return param_decl;
                 };
@@ -3498,7 +3487,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_requires_expression() {
                 advance();
             }
             if (gentle_check_and_consume(TokenType::ARROW)) {
-                requirement.return_constraint = parse_cpp_constraint_expression();
+                requirement.return_type_constraint = parse_cpp_type_constraint();
             }
             check_and_consume(TokenType::SEMICOLON);
         } else {

@@ -469,6 +469,10 @@ struct CppQualifiedExprInfo {
     bool is_current_instantiation = false;
     QualType qualifier_type = nullptr;
     std::vector<std::string> qualifiers;
+
+    bool has_qualifier() const {
+        return has_global_qualifier || is_type_qualified || !qualifiers.empty();
+    }
 };
 
 inline CppQualifiedExprInfo build_cpp_qualified_expr_info(

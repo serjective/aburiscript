@@ -1364,7 +1364,13 @@ private:
                 }
                 for (const auto& requirement : node->requirements) {
                     visit_stmt(requirement.expr.get());
-                    visit_stmt(requirement.return_constraint.get());
+                    if (requirement.return_type_constraint) {
+                        add_ast_string(
+                            requirement.return_type_constraint->concept_name);
+                        visit_template_arguments(
+                            requirement.return_type_constraint
+                                ->template_arguments);
+                    }
                 }
                 return;
             }

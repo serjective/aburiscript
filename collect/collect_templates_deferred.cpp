@@ -1,9 +1,9 @@
 #include "collect.h"
 
 namespace {
-bool decltype_uses_declared_entity_rule(const DecltypeExprType& decltype_type,
+bool decltype_uses_declared_entity_rule(bool use_declared_type_rule,
                                         const Expr* expr) {
-    if (!decltype_type.use_declared_type_rule || !expr) {
+    if (!use_declared_type_rule || !expr) {
         return false;
     }
     auto* stripped = Collect::strip_implicit_casts(const_cast<Expr*>(expr));
@@ -14,17 +14,23 @@ bool decltype_uses_declared_entity_rule(const DecltypeExprType& decltype_type,
 }
 
 bool template_arguments_contain_dependency(
-    const std::optional<std::vector<TemplateArgument>>& arguments,
+    const std::vector<TemplateArgument>& arguments,
     const ASTContext* ast_ctx) {
-    if (!arguments.has_value()) {
-        return false;
-    }
-    for (const auto& argument : *arguments) {
+    for (const auto& argument : arguments) {
         if (template_argument_depends_on_template_parameters(argument, ast_ctx)) {
             return true;
         }
     }
     return false;
+}
+
+bool template_arguments_contain_dependency(
+    const std::optional<std::vector<TemplateArgument>>& arguments,
+    const ASTContext* ast_ctx) {
+    if (!arguments.has_value()) {
+        return false;
+    }
+    return template_arguments_contain_dependency(*arguments, ast_ctx);
 }
 
 bool symbol_is_non_type_template_parameter(const Symbol* sym) {
@@ -229,10 +235,10 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                     type_depends_on_template_parameters(
                         requirement.type_requirement,
                         ast_ctx) ||
-                    expr_depends_on_template_parameters_impl(
-                        requirement.return_constraint.get(),
-                        ast_ctx,
-                        active_variable_symbols)) {
+                    (requirement.return_type_constraint.has_value() &&
+                     template_arguments_contain_dependency(
+                         requirement.return_type_constraint->template_arguments,
+                         ast_ctx))) {
                     return true;
                 }
             }
@@ -700,14 +706,28 @@ QualType Collect::resolve_deferred_decltype_expr_type(
     QualType original_type,
     SrcLoc loc,
     DeferredTypeResolutionMode mode) {
-    if (!decltype_type.expr) {
+    return resolve_decltype_expression_type(
+        decltype_type.expr.get(),
+        decltype_type.use_declared_type_rule,
+        original_type,
+        loc,
+        mode);
+}
+
+QualType Collect::resolve_decltype_expression_type(
+    Expr* expr,
+    bool use_declared_type_rule,
+    QualType original_type,
+    SrcLoc loc,
+    DeferredTypeResolutionMode mode) {
+    if (!expr) {
         if (mode == DeferredTypeResolutionMode::Finalize) {
             report_error("cannot determine type of expression in decltype", loc);
         }
         return QualType();
     }
 
-    auto* stripped_expr = strip_implicit_casts(decltype_type.expr.get());
+    auto* stripped_expr = strip_implicit_casts(expr);
     if (decltype_expression_requires_deferred_resolution(stripped_expr)) {
         return original_type;
     }
@@ -721,7 +741,9 @@ QualType Collect::resolve_deferred_decltype_expr_type(
         return QualType();
     }
 
-    if (decltype_uses_declared_entity_rule(decltype_type, stripped_expr)) {
+    if (decltype_uses_declared_entity_rule(
+            use_declared_type_rule,
+            stripped_expr)) {
         return QualType(
             expr_type.get_shared(),
             static_cast<uint8_t>(

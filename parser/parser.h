@@ -310,6 +310,8 @@ private:
 
     std::unique_ptr<Expr> parse_primary_expression();
     std::unique_ptr<Expr> parse_cpp_requires_expression();
+    std::optional<CppTypeConstraint> parse_cpp_type_constraint(
+        bool diagnose_on_failure = true);
     std::unique_ptr<Expr> parse_block_literal_expression();
     std::unique_ptr<Expr> parse_cpp_lambda_expression();
     TemplateParameterList lower_generic_lambda_parameter_placeholders(

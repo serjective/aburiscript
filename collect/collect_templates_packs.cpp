@@ -531,9 +531,12 @@ bool collect_pack_expansion_shape_in_expr(
                     !collect_pack_expansion_shape_in_type(
                         requirement.type_requirement,
                         parameters,
-                        shape_out) ||
-                    !collect_pack_expansion_shape_in_expr(
-                        requirement.return_constraint.get(),
+                        shape_out)) {
+                    return false;
+                }
+                if (requirement.return_type_constraint &&
+                    !collect_pack_expansion_shape_in_template_arguments(
+                        requirement.return_type_constraint->template_arguments,
                         parameters,
                         shape_out)) {
                     return false;

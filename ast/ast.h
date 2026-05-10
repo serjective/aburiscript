@@ -66,6 +66,7 @@ struct FieldDecl;
 struct ObjectDecl;
 struct CppRecordDecl;
 struct TemplateDecl;
+struct ConceptDecl;
 enum class UnaryOpTypes : uint8_t;
 
 enum class IfStatementKind : uint8_t {
@@ -508,12 +509,19 @@ enum class ConstraintRequirementKind : uint8_t {
     Nested,
 };
 
+struct CppTypeConstraint {
+    const ConceptDecl* concept_decl = nullptr;
+    std::string concept_name;
+    std::vector<TemplateArgument> template_arguments;
+    SrcLoc location;
+};
+
 struct ConstraintRequirement {
     ConstraintRequirementKind kind = ConstraintRequirementKind::Simple;
     std::unique_ptr<Expr> expr;
     QualType type_requirement = nullptr;
     uint8_t is_noexcept : 1;
-    std::unique_ptr<Expr> return_constraint;
+    std::optional<CppTypeConstraint> return_type_constraint;
     SrcLoc location;
 
     ConstraintRequirement()

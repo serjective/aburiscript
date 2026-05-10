@@ -526,6 +526,21 @@ std::vector<const ConceptDecl*> lookup_qualified_concepts(
 
 } // namespace
 
+std::vector<const ConceptDecl*> Collect::collect_lookup_concepts(
+    std::string_view name,
+    const CppQualifiedExprInfo* qualified_info) const {
+    if (qualified_info && qualified_info->has_qualifier()) {
+        return lookup_qualified_concepts(
+            name,
+            *qualified_info,
+            get_current_decl_context().get());
+    }
+    return lookup_unqualified_concepts(
+        name,
+        collect_current_scope(),
+        get_current_decl_context());
+}
+
 std::unique_ptr<Expr>
 Collect::complete_selected_function_template_specialization_symbol(
     std::shared_ptr<Symbol>& selected_symbol,
@@ -2084,15 +2099,7 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
                   session_.current_scope_,
                   session_.current_decl_context_);
     auto concept_templates =
-        qualified_info
-            ? lookup_qualified_concepts(
-                  callee_name,
-                  *qualified_info,
-                  get_current_decl_context().get())
-            : lookup_unqualified_concepts(
-                  callee_name,
-                  session_.current_scope_,
-                  session_.current_decl_context_);
+        collect_lookup_concepts(callee_name, qualified_info);
 
     if (function_templates.empty() &&
         variable_templates.empty() &&

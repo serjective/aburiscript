@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -500,6 +501,9 @@ public:
         std::string concept_name,
         std::vector<TemplateArgument> arguments,
         SrcLoc loc) ;
+    std::vector<const ConceptDecl*> collect_lookup_concepts(
+        std::string_view name,
+        const CppQualifiedExprInfo* qualified_info = nullptr) const ;
     std::optional<bool> evaluate_concept_specialization(
         const ConceptDecl* concept_decl,
         const std::vector<TemplateArgument>& arguments,
@@ -1624,6 +1628,12 @@ private:
 
     QualType resolve_deferred_decltype_expr_type(
         const DecltypeExprType& decltype_type,
+        QualType original_type,
+        SrcLoc loc,
+        DeferredTypeResolutionMode mode) ;
+    QualType resolve_decltype_expression_type(
+        Expr* expr,
+        bool use_declared_type_rule,
         QualType original_type,
         SrcLoc loc,
         DeferredTypeResolutionMode mode) ;

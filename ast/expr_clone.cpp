@@ -61,10 +61,8 @@ std::vector<std::unique_ptr<Expr>> clone_expr_vector_impl(
 
 std::vector<std::unique_ptr<ParamDecl>> clone_requires_param_list(
     const std::vector<std::unique_ptr<ParamDecl>>& input,
-    ASTContext* ast_ctx,
+    ASTCloneContext& clone_ctx,
     std::string* error_out) {
-    ASTCloneContext clone_ctx;
-    clone_ctx.ast_ctx = ast_ctx;
     std::vector<std::unique_ptr<ParamDecl>> result;
     result.reserve(input.size());
     for (const auto& parameter : input) {
@@ -85,23 +83,18 @@ std::vector<std::unique_ptr<ParamDecl>> clone_requires_param_list(
 
 bool clone_constraint_requirement_impl(const ConstraintRequirement& input,
                                        ConstraintRequirement& output,
-                                       ASTContext* ast_ctx,
+                                       ASTCloneContext& clone_ctx,
                                        std::string* error_out) {
     output.kind = input.kind;
     output.type_requirement = input.type_requirement;
     output.is_noexcept = input.is_noexcept;
+    output.return_type_constraint = input.return_type_constraint;
     output.location = input.location;
 
     if (input.expr) {
-        output.expr = clone_expr_impl(input.expr.get(), ast_ctx, error_out);
+        output.expr =
+            clone_expr_with_substitution(input.expr.get(), clone_ctx, error_out);
         if (!output.expr) {
-            return false;
-        }
-    }
-    if (input.return_constraint) {
-        output.return_constraint =
-            clone_expr_impl(input.return_constraint.get(), ast_ctx, error_out);
-        if (!output.return_constraint) {
             return false;
         }
     }
@@ -1642,9 +1635,11 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
         }
         case StmtKind::RequiresExpr: {
             const auto* requires_expr = static_cast<const RequiresExpr*>(expr);
+            ASTCloneContext requires_clone_ctx;
+            requires_clone_ctx.ast_ctx = ast_ctx;
             auto cloned_parameters = clone_requires_param_list(
                 requires_expr->parameters,
-                ast_ctx,
+                requires_clone_ctx,
                 error_out);
             if (cloned_parameters.size() != requires_expr->parameters.size()) {
                 return {};
@@ -1656,7 +1651,7 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
                 if (!clone_constraint_requirement_impl(
                         requirement,
                         cloned_requirement,
-                        ast_ctx,
+                        requires_clone_ctx,
                         error_out)) {
                     return {};
                 }

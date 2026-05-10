@@ -5682,7 +5682,9 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
             if (!allows_condition_conversion(exp_type, ast_ctx_.get())) {
                 report_error("logical not requires scalar operand", loc);
             }
-            node->ctype = QualType(get_builtin_int());
+            node->ctype = lang_opts_.is_cxx_mode()
+                              ? QualType(get_builtin_bool())
+                              : QualType(get_builtin_int());
             break;
         case UnaryOpTypes::NEG:
         case UnaryOpTypes::POSITIVE:

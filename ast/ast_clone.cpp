@@ -332,9 +332,12 @@ bool rewrite_constraint_requirements_in_place(
         }
         requirement.type_requirement =
             rewrite_type(requirement.type_requirement, ctx);
-        if (requirement.return_constraint &&
-            !rewrite_expr_tree(requirement.return_constraint, ctx, error_out)) {
-            return false;
+        if (requirement.return_type_constraint) {
+            requirement.return_type_constraint->template_arguments =
+                rewrite_template_arguments(
+                    requirement.return_type_constraint->template_arguments,
+                    ctx,
+                    error_out);
         }
     }
     return true;

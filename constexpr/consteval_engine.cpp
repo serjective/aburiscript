@@ -1220,24 +1220,11 @@ ConstEvalResult eval_requires_expr(RequiresExpr* requires_expr,
                         requirement.expr.get())) {
                     return ConstEvalResult::constant(ConstValue::boolean(false));
                 }
-                if (requirement.return_constraint) {
-                    ConstEvalResult nested =
-                        eval_expr(
-                            requirement.return_constraint.get(),
-                            mode,
-                            depth + 1);
-                    if (nested.status != ConstEvalStatus::Constant ||
-                        !nested.value.has_value()) {
-                        return nested;
-                    }
-                    bool nested_value = false;
-                    if (!const_value_to_constraint_bool(
-                            *nested.value,
-                            nested_value) ||
-                        !nested_value) {
-                        return ConstEvalResult::constant(
-                            ConstValue::boolean(false));
-                    }
+                if (requirement.return_type_constraint) {
+                    return make_not_evaluated(
+                        ConstEvalDiagCode::UnsupportedExpression,
+                        "requires-expression type constraint is not fully resolved for constant evaluation",
+                        requirement.return_type_constraint->location);
                 }
                 break;
             }
@@ -2234,6 +2221,12 @@ ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_
         if (!const_value_to_bool(inner.value.value(), truthy)) {
             return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
                 "logical not requires scalar constant operand", unary->location);
+        }
+        auto result_builtin =
+            desugar_type(unary->get_type()).as_shared<BuiltinType>();
+        if (result_builtin &&
+            result_builtin->builtin_kind == BuiltinTypes::Bool) {
+            return ConstEvalResult::constant(ConstValue::boolean(!truthy));
         }
         return make_constant_int(ConstIntValue::from_signed(truthy ? 0 : 1, 32));
     }

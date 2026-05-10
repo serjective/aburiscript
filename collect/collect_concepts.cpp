@@ -84,8 +84,9 @@ bool requires_expr_depends_on_template_parameters(
             type_depends_on_template_parameters(
                 requirement.type_requirement,
                 ast_ctx) ||
-            collect.expression_depends_on_template_parameters(
-                requirement.return_constraint.get())) {
+            (requirement.return_type_constraint.has_value() &&
+             template_arguments_depend_on_template_parameters(
+                 requirement.return_type_constraint->template_arguments))) {
             return true;
         }
     }
@@ -129,12 +130,6 @@ bool refresh_constraint_expr_satisfaction(
                 if (!refresh_constraint_expr_satisfaction(
                         collect,
                         requirement.expr.get(),
-                        requirement.location.isInvalid()
-                            ? loc
-                            : requirement.location) ||
-                    !refresh_constraint_expr_satisfaction(
-                        collect,
-                        requirement.return_constraint.get(),
                         requirement.location.isInvalid()
                             ? loc
                             : requirement.location)) {
@@ -707,15 +702,46 @@ std::optional<bool> Collect::evaluate_requires_expression(
                         ast_ctx_.get())) {
                     return false;
                 }
-                if (requirement.return_constraint) {
-                    bool return_satisfied = false;
-                    if (!evaluate_constraint_expr_to_bool(
-                            requirement.return_constraint.get(),
-                            requirement.location.isInvalid()
-                                ? loc
-                                : requirement.location,
-                            return_satisfied) ||
-                        !return_satisfied) {
+                if (requirement.return_type_constraint) {
+                    const auto& type_constraint =
+                        *requirement.return_type_constraint;
+                    if (!type_constraint.concept_decl) {
+                        return false;
+                    }
+                    SrcLoc constraint_loc = type_constraint.location.isInvalid()
+                                                ? loc
+                                                : type_constraint.location;
+                    auto result_type = resolve_decltype_expression_type(
+                        requirement.expr.get(),
+                        /*use_declared_type_rule=*/false,
+                        QualType(),
+                        constraint_loc,
+                        DeferredTypeResolutionMode::TryRealize);
+                    if (!result_type ||
+                        type_depends_on_template_parameters(
+                            result_type,
+                            ast_ctx_.get())) {
+                        return false;
+                    }
+
+                    std::vector<TemplateArgument> concept_arguments;
+                    concept_arguments.push_back(TemplateArgument(result_type));
+                    concept_arguments.insert(
+                        concept_arguments.end(),
+                        type_constraint.template_arguments.begin(),
+                        type_constraint.template_arguments.end());
+                    auto concept_expr =
+                        collect_concept_specialization_expression(
+                            type_constraint.concept_decl,
+                            type_constraint.concept_name,
+                            std::move(concept_arguments),
+                            constraint_loc);
+                    auto* concept_specialization =
+                        dyn_cast<ConceptSpecializationExpr>(
+                            concept_expr.get());
+                    if (!concept_specialization ||
+                        !concept_specialization->satisfaction.has_value() ||
+                        !*concept_specialization->satisfaction) {
                         return false;
                     }
                 }
