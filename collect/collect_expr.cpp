@@ -7869,6 +7869,7 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::BUILTIN_HUGE_VAL:
         case BuiltinKind::INF:
         case BuiltinKind::NAN_BUILTIN:
+        case BuiltinKind::NANS:
         case BuiltinKind::FABS:
         case BuiltinKind::POW:
         case BuiltinKind::SQRT:
@@ -7893,6 +7894,7 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::BUILTIN_HUGE_VALF:
         case BuiltinKind::INFF:
         case BuiltinKind::NANF:
+        case BuiltinKind::NANSF:
         case BuiltinKind::FABSF:
         case BuiltinKind::POWF:
         case BuiltinKind::SQRTF:
@@ -7919,6 +7921,7 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::BUILTIN_HUGE_VALL:
         case BuiltinKind::INFL:
         case BuiltinKind::NANL:
+        case BuiltinKind::NANSL:
         case BuiltinKind::FABSL:
         case BuiltinKind::POWL:
         case BuiltinKind::SQRTL:

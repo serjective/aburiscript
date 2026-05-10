@@ -247,6 +247,9 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__builtin_nan", BuiltinKind::NAN_BUILTIN, 1, 1, false, true});
     register_builtin({"__builtin_nanf", BuiltinKind::NANF, 1, 1, false, true});
     register_builtin({"__builtin_nanl", BuiltinKind::NANL, 1, 1, false, true});
+    register_builtin({"__builtin_nans", BuiltinKind::NANS, 1, 1, false, true});
+    register_builtin({"__builtin_nansf", BuiltinKind::NANSF, 1, 1, false, true});
+    register_builtin({"__builtin_nansl", BuiltinKind::NANSL, 1, 1, false, true});
     register_builtin({"__builtin_abs", BuiltinKind::ABS, 1, 1, false, false});
     register_builtin({"__builtin_labs", BuiltinKind::LABS, 1, 1, false, false});
     register_builtin({"__builtin_llabs", BuiltinKind::LLABS, 1, 1, false, false});

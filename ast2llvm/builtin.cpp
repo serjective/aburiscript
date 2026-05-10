@@ -1357,6 +1357,12 @@ static BuiltinLoweringResult lower_builtin_math_group(
         return {true, llvm::ConstantFP::getNaN(llvm::Type::getFloatTy(ctx))};
     case BuiltinKind::NANL:
         return {true, llvm::ConstantFP::getNaN(convert_type(expr->result_type))};
+    case BuiltinKind::NANS:
+        return {true, llvm::ConstantFP::getSNaN(llvm::Type::getDoubleTy(ctx))};
+    case BuiltinKind::NANSF:
+        return {true, llvm::ConstantFP::getSNaN(llvm::Type::getFloatTy(ctx))};
+    case BuiltinKind::NANSL:
+        return {true, llvm::ConstantFP::getSNaN(convert_type(expr->result_type))};
     // --- Integer absolute value ---
     case BuiltinKind::ABS: {
         auto val = convert_expression(expr->args[0].get());
