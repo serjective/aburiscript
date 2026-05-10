@@ -3680,6 +3680,11 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
     bool is_out_of_line_static_data_member =
         qualified_declarator.owner_record_decl != nullptr;
     std::shared_ptr<Symbol> declared_sym = nullptr;
+    bool is_variable_template_specialization_declarator =
+        is_cxx_mode_active() &&
+        decl_parser.has_explicit_specialization_argument_list &&
+        (is_parsing_cpp_explicit_specialization() ||
+         is_in_template_pattern_context());
     bool preserve_explicit_specialization_static_decl =
         is_parsing_cpp_explicit_specialization() &&
         qualified_declarator.owner_class_template != nullptr &&
@@ -3708,7 +3713,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
                     declaration_language_linkage);
             }
         }
-    } else {
+    } else if (!is_variable_template_specialization_declarator) {
         declared_sym = collect_->collect_declare_variable_symbol(
             decl_parser.name,
             declared_type,

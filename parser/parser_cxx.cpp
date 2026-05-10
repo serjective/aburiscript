@@ -2358,6 +2358,8 @@ Parser::parse_cpp_explicit_specialization_declaration(
             resolve_primary_variable_template(
                 specialized_variable,
                 specialization_arguments);
+        auto registered_specialization_arguments = specialization_arguments;
+        SrcLoc specialization_loc = specialized_variable->location;
         auto explicit_specialization =
             make_ast<TemplateExplicitSpecializationDecl>(
                 *ast_ctx,
@@ -2373,6 +2375,14 @@ Parser::parse_cpp_explicit_specialization_declaration(
             primary_template,
             nullptr,
             std::move(explicit_specialization));
+        if (collect_) {
+            std::shared_ptr<Symbol> specialization_symbol;
+            collect_->ensure_variable_template_specialization_symbol(
+                primary_template,
+                registered_specialization_arguments,
+                specialization_loc,
+                &specialization_symbol);
+        }
         return explicit_decls;
     }
 

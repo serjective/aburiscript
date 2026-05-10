@@ -3,6 +3,7 @@
 
 using template_sema_internal::clone_symbol_shallow_for_specialization;
 using template_sema_internal::deduce_variable_template_partial_specialization_bindings;
+using template_sema_internal::append_template_argument_cache_key;
 using template_sema_internal::is_variable_template_partial_specialization_more_specialized;
 using template_sema_internal::make_template_binding_clone_pass_builder;
 using template_sema_internal::normalize_concrete_template_value_argument;
@@ -310,6 +311,31 @@ struct Collect::VariableTemplateSpecializationInstantiator {
         }
     }
 
+    void ensure_explicit_specialization_uid(Symbol* specialization_symbol) const {
+        if (!specialization_symbol || !specialization_symbol->uid.empty()) {
+            return;
+        }
+
+        const auto* canonical_template =
+            dyn_cast<VariableTemplateDecl>(
+                const_cast<TemplateDecl*>(
+                    get_template_decl_canonical_decl(variable_template)));
+        if (!canonical_template) {
+            canonical_template = variable_template;
+        }
+
+        std::string uid = pattern && !pattern->name.empty()
+            ? pattern->name
+            : std::string("variable-template");
+        uid += ".explicit-specialization.";
+        uid += std::to_string(reinterpret_cast<uintptr_t>(canonical_template));
+        uid += ".";
+        for (const auto& argument : normalized_arguments) {
+            append_template_argument_cache_key(uid, argument);
+        }
+        specialization_symbol->uid = std::move(uid);
+    }
+
     std::shared_ptr<Symbol> synthesize_explicit_specialization_symbol(
         VariableDecl* explicit_decl) const {
         if (!explicit_decl) {
@@ -317,6 +343,7 @@ struct Collect::VariableTemplateSpecializationInstantiator {
         }
         if (explicit_decl->sym) {
             apply_specialization_metadata(explicit_decl, explicit_decl->sym.get());
+            ensure_explicit_specialization_uid(explicit_decl->sym.get());
             return explicit_decl->sym;
         }
 
@@ -338,10 +365,19 @@ struct Collect::VariableTemplateSpecializationInstantiator {
         synthesized_symbol->linkage =
             variable_linkage_for_specialization(explicit_decl);
         synthesized_symbol->is_inline = explicit_decl->is_inline;
+        synthesized_symbol->is_defined =
+            explicit_decl->init != nullptr ||
+            explicit_decl->storage_class != StorageClass::EXTERN;
+        synthesized_symbol->is_constexpr = explicit_decl->is_constexpr;
+        synthesized_symbol->is_block_byref = explicit_decl->is_block_byref;
         synthesized_symbol->type = desugar_type(explicit_decl->type, ast_ctx());
         synthesized_symbol->variable_definition = explicit_decl;
+        if (pattern) {
+            copy_variable_symbol_metadata(pattern, synthesized_symbol.get());
+        }
         copy_variable_symbol_metadata(explicit_decl, synthesized_symbol.get());
         apply_specialization_metadata(explicit_decl, synthesized_symbol.get());
+        ensure_explicit_specialization_uid(synthesized_symbol.get());
         explicit_decl->sym = synthesized_symbol;
         return synthesized_symbol;
     }

@@ -1231,6 +1231,18 @@ public:
             specialization_symbol_out);
     }
 
+    VariableDecl* ensure_variable_template_specialization_symbol(
+        const VariableTemplateDecl* variable_template,
+        const std::vector<TemplateArgument>& arguments,
+        SrcLoc loc,
+        std::shared_ptr<Symbol>* specialization_symbol_out = nullptr) {
+        return instantiate_variable_template_specialization(
+            variable_template,
+            arguments,
+            loc,
+            specialization_symbol_out);
+    }
+
     void collect_record_register_function_default_arguments(
         const std::shared_ptr<Symbol>& sym,
         const FuncDecl* decl,
