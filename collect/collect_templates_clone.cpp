@@ -1710,33 +1710,42 @@ bool clone_function_body_for_specialization(Collect& collect,
         }
         return false;
     }
-    if (!resolution_pass.resolve_stmt_in_place(cloned_body, &clone_error)) {
-        if (error_out) {
-            *error_out =
-                failure_context +
-                " dependent body resolution is not supported" +
-                (clone_error.empty() ? std::string() : ": " + clone_error);
-        }
-        return false;
-    }
-    if (finalize_body_semantics) {
-        if (!collect.with_function_definition_state(
-                specialization,
-                [&]() {
-                    return finalize_specialized_stmt_semantics(
+    enum class BodyCloneFailurePhase {
+        None,
+        DependentResolution,
+        SemanticFinalization,
+    };
+    BodyCloneFailurePhase failure_phase = BodyCloneFailurePhase::None;
+    if (!collect.with_function_definition_state(
+            specialization,
+            [&]() {
+                if (!resolution_pass.resolve_stmt_in_place(
+                        cloned_body,
+                        &clone_error)) {
+                    failure_phase = BodyCloneFailurePhase::DependentResolution;
+                    return false;
+                }
+                if (finalize_body_semantics &&
+                    !finalize_specialized_stmt_semantics(
                         collect,
                         cloned_body,
                         QualType(specialization->type),
-                        &clone_error);
-                })) {
-            if (error_out) {
-                *error_out =
-                    failure_context +
-                    " body semantic finalization is not supported" +
-                    (clone_error.empty() ? std::string() : ": " + clone_error);
-            }
-            return false;
+                        &clone_error)) {
+                    failure_phase = BodyCloneFailurePhase::SemanticFinalization;
+                    return false;
+                }
+                return true;
+            })) {
+        if (error_out) {
+            const char* phase_message =
+                failure_phase == BodyCloneFailurePhase::DependentResolution
+                    ? " dependent body resolution is not supported"
+                    : " body semantic finalization is not supported";
+            *error_out =
+                failure_context + phase_message +
+                (clone_error.empty() ? std::string() : ": " + clone_error);
         }
+        return false;
     }
     specialization->body = std::move(cloned_body);
     specialization->stmt_labels = pattern->stmt_labels;

@@ -821,18 +821,23 @@ bool Collect::with_function_definition_state(
     }
 
     auto saved_state = capture_current_function_definition_state();
+    QualType saved_record_lookup_type = session_.current_cpp_record_lookup_type_;
     struct FunctionStateGuard {
         Collect* collect = nullptr;
         FunctionDefinitionState saved_state;
+        QualType saved_record_lookup_type = nullptr;
         ~FunctionStateGuard() {
             if (collect) {
                 collect->restore_current_function_definition_state(
                     std::move(saved_state));
+                collect->session_.current_cpp_record_lookup_type_ =
+                    saved_record_lookup_type;
             }
         }
-    } state_guard{this, std::move(saved_state)};
+    } state_guard{this, std::move(saved_state), saved_record_lookup_type};
 
     FunctionDefinitionState new_state;
+    QualType function_record_lookup_type = nullptr;
     new_state.in_function = function_decl != nullptr;
     new_state.current_function_cpp_friend_access_type = friend_access_type;
     if (function_decl) {
@@ -871,6 +876,7 @@ bool Collect::with_function_definition_state(
                 }
                 if (QualType owner_type =
                         get_func_decl_owner_record_type(function_decl)) {
+                    function_record_lookup_type = owner_type;
                     uint8_t pointee_quals = QUAL_NONE;
                     if (auto this_ptr = this_type.as_shared<PointerType>()) {
                         pointee_quals = this_ptr->pointed_type.get_qualifiers();
@@ -888,6 +894,7 @@ bool Collect::with_function_definition_state(
     }
 
     restore_current_function_definition_state(std::move(new_state));
+    session_.current_cpp_record_lookup_type_ = function_record_lookup_type;
     return action();
 }
 
