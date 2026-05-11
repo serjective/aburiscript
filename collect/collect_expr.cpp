@@ -1357,41 +1357,16 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
                     current_record ? QualType(current_record) : QualType());
             }
 
-            size_t static_candidate_matches =
-                member_lookup.static_method_matches +
-                static_template_candidate_matches +
-                member_lookup.static_data_matches +
-                member_lookup.enumerator_matches;
             if (member_lookup.field_matches == 0 &&
                 member_lookup.nonstatic_method_matches == 0 &&
                 nonstatic_template_candidate_matches == 0 &&
-                static_candidate_matches > 0) {
-                if (static_candidate_matches > 1) {
-                    report_error("member '" + name + "' is ambiguous", loc);
-                    return collect_make<ErrorExpr>(
-                        "ambiguous member lookup", loc);
-                }
-                if (member_lookup.static_data_matches == 1 &&
-                    member_lookup.single_static_data_member &&
-                    member_lookup.single_static_data_member->symbol) {
-                    return collect_identifier_reference(
-                        name,
-                        member_lookup.single_static_data_member->symbol,
-                        loc);
-                }
-                if (member_lookup.enumerator_matches == 1 &&
-                    member_lookup.single_enumerator_member &&
-                    member_lookup.single_enumerator_member->symbol) {
-                    return collect_identifier_reference(
-                        name,
-                        member_lookup.single_enumerator_member->symbol,
-                        loc);
-                }
-                if (member_lookup.single_static_method &&
-                    member_lookup.single_static_method->symbol) {
-                    return collect_identifier_reference(
-                        name, member_lookup.single_static_method->symbol, loc);
-                }
+                (member_lookup.static_method_matches > 0 ||
+                 static_template_candidate_matches > 0 ||
+                 member_lookup.static_data_matches > 0 ||
+                 member_lookup.enumerator_matches > 0)) {
+                return resolve_static_record_member_lookup(
+                    member_lookup,
+                    current_record ? QualType(current_record) : QualType());
             }
 
             if (!session_.func_state_.current_function_cpp_this_type) {
