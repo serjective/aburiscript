@@ -711,6 +711,43 @@ void DeclarationParser::reset_declarator_parsing_state() {
         asm_label = std::nullopt;
         // Don't clear leading_attrs here - they persist across declarators in the same declaration
     }
+
+std::optional<QualType> DeclarationParser::parse_cpp_trailing_return_type() {
+    if (!pars->is_cxx_mode_active() ||
+        !mgnt->gentle_check_and_consume(TokenType::ARROW)) {
+        return std::nullopt;
+    }
+
+    DeclarationParser return_parser(pars);
+    return_parser.parse_new_type_id_context = true;
+    QualType return_type(return_parser.parse_declaration());
+    if (!return_type) {
+        error("trailing return type must be a type-id");
+    }
+    if (!return_parser.name.empty()) {
+        return_parser.error_custloc(
+            "trailing return type must be a type-id",
+            return_parser.loc.isInvalid() ? return_parser.begin_loc
+                                          : return_parser.loc);
+    }
+    if (return_parser.str_class != StorageClass::NONE ||
+        return_parser.is_inline ||
+        return_parser.is_constexpr ||
+        return_parser.is_consteval ||
+        return_parser.is_friend ||
+        return_parser.explicit_specifier.is_present) {
+        return_parser.error_custloc(
+            "trailing return type cannot contain declaration specifiers",
+            return_parser.begin_loc);
+    }
+    if (return_parser.is_parameter_pack) {
+        return_parser.error_custloc(
+            "trailing return type cannot be a parameter pack",
+            return_parser.begin_loc);
+    }
+    return return_type;
+}
+
     // Handles pointers *, block pointers ^, and type qualifiers (const, volatile, restrict, _Atomic)
 
 std::shared_ptr<CType> DeclarationParser::parse_declarator(std::shared_ptr<CType> base) {
@@ -1137,6 +1174,7 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
         // void (*signal(int, void (*)(int)))(int)
         // we might ahve Pointer(Placeholder)
         bool consumed_outer_param_array_suffix = false;
+        bool has_trailing_return_type = false;
         while (true) {
             if (mgnt->gentle_check_and_consume(TokenType::LEFT_BRACKET)) {
                 // inner becomes overarching
@@ -1522,6 +1560,17 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                     }
                 }
                 pars->parse_cpp_optional_noexcept_spec(*func_type);
+                if (auto trailing_return_type = parse_cpp_trailing_return_type()) {
+                    auto* leading_auto =
+                        old_type ? dyn_cast<AutoType>(old_type.get()) : nullptr;
+                    if (!leading_auto ||
+                        leading_auto->flavor != AutoTypeFlavor::Cxx ||
+                        base_qualifiers != QUAL_NONE) {
+                        error("function with trailing return type must specify return type 'auto'");
+                    }
+                    func_type->ret_type = *trailing_return_type;
+                    has_trailing_return_type = true;
+                }
                 if (pars->lang_opts.is_cxx20_or_later() &&
                     mgnt->gentle_check(TokenType::REQUIRES_KW)) {
                     mgnt->advance(); // consume 'requires'
@@ -1532,7 +1581,8 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                     }
                 }
                 // C11 6.7.6.3: A function declarator shall not return a function type
-                if (new_type && canonical_type_kind(new_type) == TypeKind::Function) {
+                if (func_type->ret_type &&
+                    canonical_type_kind(func_type->ret_type) == TypeKind::Function) {
                     error("function cannot return a function type (use a function pointer instead)");
                 }
                 new_type = func_type;
@@ -1551,7 +1601,8 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                   //  new_type = old_type; // cointinuing
                 } else {
                     // this will insert basic type at the end
-                    if (old_type || !is_conversion_function) {
+                    if (!has_trailing_return_type &&
+                        (old_type || !is_conversion_function)) {
                         new_type = replace_placeholder(new_type, old_type);
                     }
                 }

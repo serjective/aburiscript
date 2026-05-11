@@ -1412,17 +1412,16 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
             parse_cpp_optional_noexcept_spec(*lambda_function_type);
         }
 
-        if (gentle_check_and_consume(TokenType::ARROW)) {
-            DeclarationParser return_parser(this);
-            QualType return_type(return_parser.parse_declaration());
+        DeclarationParser return_parser(this);
+        if (auto return_type = return_parser.parse_cpp_trailing_return_type()) {
             if (return_parser.is_parameter_pack ||
-                auto_type_utils::has_cxx_auto_type(return_type.get_shared())) {
+                auto_type_utils::has_cxx_auto_type(return_type->get_shared())) {
                 fail_cpp_future_work(
                     "generic lambda trailing return",
                     "generic_lambda",
                     lambda_loc);
             }
-            lambda_function_type->ret_type = return_type;
+            lambda_function_type->ret_type = *return_type;
             has_trailing_return = true;
         }
 

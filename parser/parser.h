@@ -1200,6 +1200,8 @@ struct DeclarationParser {
     // Handles pointers *, block pointers ^, and type qualifiers (const, volatile, restrict, _Atomic)
     std::shared_ptr<CType> parse_declarator(std::shared_ptr<CType> base);
 
+    std::optional<QualType> parse_cpp_trailing_return_type();
+
     // int (*const [])(unsigned int, ...) turns to
     // Array(Pointer(Placeholder) -> Array(Pointer(Function)
     std::shared_ptr<CType> parse_direct_declarator(std::shared_ptr<CType> base);
