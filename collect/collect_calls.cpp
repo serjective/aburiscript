@@ -2751,6 +2751,50 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 error_out)) {
             return false;
         }
+        if (implicit_cast->ctype &&
+            (contains_deferred_semantic_type(
+                 implicit_cast->ctype.get_shared()) ||
+             type_depends_on_template_parameters(
+                 implicit_cast->ctype,
+                 ast_ctx_.get()))) {
+            QualType realized_type =
+                try_realize_deferred_semantic_type(implicit_cast->ctype);
+            if (realized_type) {
+                implicit_cast->ctype = realized_type;
+            }
+        }
+        QualType concrete_cast_type =
+            implicit_cast->ctype
+                ? desugar_type(implicit_cast->ctype, ast_ctx_.get())
+                : QualType();
+        if (concrete_cast_type &&
+            !contains_deferred_semantic_type(concrete_cast_type.get_shared()) &&
+            !type_depends_on_template_parameters(
+                concrete_cast_type,
+                ast_ctx_.get())) {
+            implicit_cast->ctype = concrete_cast_type;
+            switch (implicit_cast->kind) {
+                case ImplicitCastTypes::UNKNOWN:
+                case ImplicitCastTypes::ARITH_CAST:
+                case ImplicitCastTypes::RAW_CAST: {
+                    auto owned_cast = std::unique_ptr<ImplicitCast>(
+                        static_cast<ImplicitCast*>(expr.release()));
+                    expr = cast_if_needed(
+                        std::move(owned_cast->expr),
+                        owned_cast->ctype);
+                    return true;
+                }
+                case ImplicitCastTypes::LVALUE_TO_RVALUE:
+                case ImplicitCastTypes::ARRAY_TO_POINTER:
+                case ImplicitCastTypes::FUNCTION_TO_POINTER:
+                case ImplicitCastTypes::LAMBDA_TO_FUNCTION_POINTER:
+                case ImplicitCastTypes::VECTOR_SPLAT:
+                case ImplicitCastTypes::REAL_TO_COMPLEX:
+                case ImplicitCastTypes::COMPLEX_TO_REAL:
+                case ImplicitCastTypes::COMPLEX_TO_COMPLEX:
+                    break;
+            }
+        }
         return true;
     }
     if (auto* explicit_cast = dyn_cast<ExplicitCast>(expr.get())) {

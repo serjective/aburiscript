@@ -7409,100 +7409,116 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
                     QualType(std::make_shared<AutoType>(
                         AutoTypeFlavor::TemplateNonType));
             }
-        } else if (true_ty && false_ty && true_ty.equals_qualified(false_ty)) {
-            result_type = true_ty;
-        } else if (true_ty && false_ty &&
-                   is_nullptr_type(true_ty, ast_ctx_.get()) &&
-                   is_nullptr_type(false_ty, ast_ctx_.get())) {
-            result_type = true_ty;
-        } else if (lang_opts_.is_cxx_mode() && true_expr && false_expr) {
-            auto true_category = classify_value_category(true_expr.get());
-            auto false_category = classify_value_category(false_expr.get());
-            if (auto merged_glvalue_type =
-                    merge_cpp_conditional_glvalue_type(
-                        true_ty,
-                        false_ty,
-                        true_category,
-                        false_category)) {
-                result_type = *merged_glvalue_type;
-                preserve_cpp_glvalue_result = true;
-            }
-        } else if ((true_ty &&
-                   is_scoped_enum_type(true_ty, ast_ctx_.get())) ||
-                   (false_ty &&
-                    is_scoped_enum_type(false_ty, ast_ctx_.get()))) {
-            result_type = QualType();
-        } else if ((true_ty && true_ty->isVoid()) || (false_ty && false_ty->isVoid())) {
-            result_type = QualType(get_builtin_void());
-        } else if (true_ty && false_ty &&
-                   ((is_arithmetic_adjacent(true_ty, ast_ctx_.get()) &&
-                     is_arithmetic_adjacent(false_ty, ast_ctx_.get())) ||
-                    true_ty->isComplex() || false_ty->isComplex())) {
-            result_type = usual_arithmetic_conversion_type(true_ty, false_ty);
-        } else if (true_ty && false_ty &&
-                   true_kind == TypeKind::Pointer &&
-                   false_kind == TypeKind::Pointer) {
-            auto true_ptr = desugar_type(true_ty).as_shared<PointerType>();
-            auto false_ptr = desugar_type(false_ty).as_shared<PointerType>();
-            bool true_void = true_ptr && true_ptr->pointed_type && true_ptr->pointed_type->isVoid();
-            bool false_void = false_ptr && false_ptr->pointed_type && false_ptr->pointed_type->isVoid();
-            if (!(pointers_to_compatible_types(true_ty, false_ty) || true_void || false_void)) {
-                report_error("incompatible pointer types in conditional expression ('" +
-                    true_ty.to_string() + "' and '" + false_ty.to_string() + "')", loc);
-                result_type = true_ty;
-            } else {
-                QualType base = true_void ? false_ptr->pointed_type : true_ptr->pointed_type;
-                if (!base) {
-                    base = false_ptr ? false_ptr->pointed_type : QualType();
-                }
-                if (!base) {
-                    base = QualType(get_builtin_void());
-                }
-                uint8_t merged_quals = QUAL_NONE;
-                if (true_ptr) merged_quals |= true_ptr->pointed_type.get_qualifiers();
-                if (false_ptr) merged_quals |= false_ptr->pointed_type.get_qualifiers();
-                base = base.with_qualifiers(merged_quals);
-                result_type = QualType(std::make_shared<PointerType>(base));
-            }
-        } else if (true_ty && false_ty &&
-                   is_nullptr_type(true_ty, ast_ctx_.get()) &&
-                   (false_kind == TypeKind::Pointer ||
-                    false_kind == TypeKind::MemberPointer ||
-                    false_kind == TypeKind::BlockPointer)) {
-            result_type = false_ty;
-        } else if (true_ty && false_ty &&
-                   is_nullptr_type(false_ty, ast_ctx_.get()) &&
-                   (true_kind == TypeKind::Pointer ||
-                    true_kind == TypeKind::MemberPointer ||
-                    true_kind == TypeKind::BlockPointer)) {
-            result_type = true_ty;
-        } else if (true_ty && true_kind == TypeKind::Pointer &&
-                   false_ty &&
-                   is_integer_adjacent(false_ty, ast_ctx_.get()) &&
-                   is_null_pointer_constant_expr(false_expr.get())) {
-            result_type = true_ty;
-        } else if (true_ty && true_kind == TypeKind::BlockPointer &&
-                   false_ty &&
-                   is_integer_adjacent(false_ty, ast_ctx_.get()) &&
-                   is_null_pointer_constant_expr(false_expr.get())) {
-            result_type = true_ty;
-        } else if (false_ty && false_kind == TypeKind::Pointer &&
-                   true_ty &&
-                   is_integer_adjacent(true_ty, ast_ctx_.get()) &&
-                   is_null_pointer_constant_expr(true_expr.get())) {
-            result_type = false_ty;
-        } else if (false_ty && false_kind == TypeKind::BlockPointer &&
-                   true_ty &&
-                   is_integer_adjacent(true_ty, ast_ctx_.get()) &&
-                   is_null_pointer_constant_expr(true_expr.get())) {
-            result_type = false_ty;
         } else {
-            result_type = pick_common_type(true_ty, false_ty);
+            if (lang_opts_.is_cxx_mode() && true_expr && false_expr) {
+                auto true_category = classify_value_category(true_expr.get());
+                auto false_category = classify_value_category(false_expr.get());
+                if (auto merged_glvalue_type =
+                        merge_cpp_conditional_glvalue_type(
+                            true_ty,
+                            false_ty,
+                            true_category,
+                            false_category)) {
+                    result_type = *merged_glvalue_type;
+                    preserve_cpp_glvalue_result = true;
+                }
+            }
+            if (!preserve_cpp_glvalue_result) {
+                if (true_ty && false_ty && true_ty.equals_qualified(false_ty)) {
+                    result_type = true_ty;
+                } else if (true_ty && false_ty &&
+                           is_nullptr_type(true_ty, ast_ctx_.get()) &&
+                           is_nullptr_type(false_ty, ast_ctx_.get())) {
+                    result_type = true_ty;
+                } else if ((true_ty &&
+                           is_scoped_enum_type(true_ty, ast_ctx_.get())) ||
+                           (false_ty &&
+                            is_scoped_enum_type(false_ty, ast_ctx_.get()))) {
+                    result_type = QualType();
+                } else if ((true_ty && true_ty->isVoid()) ||
+                           (false_ty && false_ty->isVoid())) {
+                    result_type = QualType(get_builtin_void());
+                } else if (true_ty && false_ty &&
+                           ((is_arithmetic_adjacent(true_ty, ast_ctx_.get()) &&
+                             is_arithmetic_adjacent(false_ty, ast_ctx_.get())) ||
+                            true_ty->isComplex() || false_ty->isComplex())) {
+                    result_type = usual_arithmetic_conversion_type(true_ty, false_ty);
+                } else if (true_ty && false_ty &&
+                           true_kind == TypeKind::Pointer &&
+                           false_kind == TypeKind::Pointer) {
+                    auto true_ptr = desugar_type(true_ty).as_shared<PointerType>();
+                    auto false_ptr = desugar_type(false_ty).as_shared<PointerType>();
+                    bool true_void = true_ptr && true_ptr->pointed_type && true_ptr->pointed_type->isVoid();
+                    bool false_void = false_ptr && false_ptr->pointed_type && false_ptr->pointed_type->isVoid();
+                    if (!(pointers_to_compatible_types(true_ty, false_ty) || true_void || false_void)) {
+                        report_error("incompatible pointer types in conditional expression ('" +
+                            true_ty.to_string() + "' and '" + false_ty.to_string() + "')", loc);
+                        result_type = true_ty;
+                    } else {
+                        QualType base = true_void ? false_ptr->pointed_type : true_ptr->pointed_type;
+                        if (!base) {
+                            base = false_ptr ? false_ptr->pointed_type : QualType();
+                        }
+                        if (!base) {
+                            base = QualType(get_builtin_void());
+                        }
+                        uint8_t merged_quals = QUAL_NONE;
+                        if (true_ptr) merged_quals |= true_ptr->pointed_type.get_qualifiers();
+                        if (false_ptr) merged_quals |= false_ptr->pointed_type.get_qualifiers();
+                        base = base.with_qualifiers(merged_quals);
+                        result_type = QualType(std::make_shared<PointerType>(base));
+                    }
+                } else if (true_ty && false_ty &&
+                           is_nullptr_type(true_ty, ast_ctx_.get()) &&
+                           (false_kind == TypeKind::Pointer ||
+                            false_kind == TypeKind::MemberPointer ||
+                            false_kind == TypeKind::BlockPointer)) {
+                    result_type = false_ty;
+                } else if (true_ty && false_ty &&
+                           is_nullptr_type(false_ty, ast_ctx_.get()) &&
+                           (true_kind == TypeKind::Pointer ||
+                            true_kind == TypeKind::MemberPointer ||
+                            true_kind == TypeKind::BlockPointer)) {
+                    result_type = true_ty;
+                } else if (true_ty && true_kind == TypeKind::Pointer &&
+                           false_ty &&
+                           is_integer_adjacent(false_ty, ast_ctx_.get()) &&
+                           is_null_pointer_constant_expr(false_expr.get())) {
+                    result_type = true_ty;
+                } else if (true_ty && true_kind == TypeKind::BlockPointer &&
+                           false_ty &&
+                           is_integer_adjacent(false_ty, ast_ctx_.get()) &&
+                           is_null_pointer_constant_expr(false_expr.get())) {
+                    result_type = true_ty;
+                } else if (false_ty && false_kind == TypeKind::Pointer &&
+                           true_ty &&
+                           is_integer_adjacent(true_ty, ast_ctx_.get()) &&
+                           is_null_pointer_constant_expr(true_expr.get())) {
+                    result_type = false_ty;
+                } else if (false_ty && false_kind == TypeKind::BlockPointer &&
+                           true_ty &&
+                           is_integer_adjacent(true_ty, ast_ctx_.get()) &&
+                           is_null_pointer_constant_expr(true_expr.get())) {
+                    result_type = false_ty;
+                } else {
+                    result_type = pick_common_type(true_ty, false_ty);
+                }
+            }
         }
         if (!result_type) {
             report_error("incompatible operand types in conditional expression", loc);
             result_type = QualType(get_builtin_int());
         }
+    }
+    if (!preserve_cpp_glvalue_result && lang_opts_.is_cxx_mode()) {
+        if (true_expr) {
+            true_expr = collect_apply_standard_conversions(
+                std::move(true_expr),
+                ExprUseContext::ConditionalOperand);
+        }
+        false_expr = collect_apply_standard_conversions(
+            std::move(false_expr),
+            ExprUseContext::ConditionalOperand);
     }
     if (!preserve_cpp_glvalue_result &&
         result_type &&
