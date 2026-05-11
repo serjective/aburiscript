@@ -592,6 +592,10 @@ public:
         QualType target_type,
         std::vector<std::unique_ptr<Expr>> args,
         SrcLoc loc) ;
+    std::unique_ptr<Expr> collect_cpp_type_list_initialization_expression(
+        QualType target_type,
+        std::unique_ptr<InitListExpr> init_list,
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> collect_cpp_named_cast(CppNamedCastKind cast_kind,
                                                  std::unique_ptr<Expr> expr,

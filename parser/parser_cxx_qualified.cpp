@@ -827,11 +827,16 @@ bool Parser::starts_with_cpp_dependent_qualified_call_expression() {
         advance();
         if (gentle_check(TokenType::LESS_THAN)) {
             RevertingTentativeParsingAction template_args(*this);
-            auto parsed_arguments = parse_cpp_template_argument_list();
-            if (is_cpp_scope_resolution_here()) {
-                template_args.commit();
-                component.has_template_argument_list = true;
-                component.template_arguments = std::move(parsed_arguments);
+            try {
+                auto parsed_arguments = parse_cpp_template_argument_list();
+                if (is_cpp_scope_resolution_here()) {
+                    template_args.commit();
+                    component.has_template_argument_list = true;
+                    component.template_arguments = std::move(parsed_arguments);
+                }
+            } catch (const ParseError&) {
+            } catch (const FatalErrorLimitReached&) {
+                throw;
             }
         }
         return component;

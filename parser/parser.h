@@ -603,6 +603,7 @@ private:
     std::vector<std::unique_ptr<Decl>> parse_cpp_out_of_line_destructor_definition();
     std::vector<std::unique_ptr<Decl>> parse_cpp_namespace_definition();
     std::vector<std::unique_ptr<Decl>> parse_cpp_using_alias_declaration();
+    std::unique_ptr<Expr> try_parse_cpp_type_construction_expression();
     std::unique_ptr<Expr> parse_cpp_qualified_primary_expression();
     std::unique_ptr<Expr> parse_cpp_named_cast_expression();
     std::unique_ptr<Expr> parse_cpp_typeid_expression();

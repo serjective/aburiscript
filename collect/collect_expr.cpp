@@ -4146,6 +4146,44 @@ std::unique_ptr<Expr> Collect::collect_cpp_value_init_expression(
     return collect_make<CppValueInitExpr>(target_type, loc);
 }
 
+std::unique_ptr<Expr> Collect::collect_cpp_type_list_initialization_expression(
+    QualType target_type,
+    std::unique_ptr<InitListExpr> init_list,
+    SrcLoc loc) {
+    if (!target_type) {
+        report_error("type construction requires a valid target type", loc);
+        return collect_make<ErrorExpr>("invalid type construction target", loc);
+    }
+
+    if (contains_deferred_semantic_type(target_type.get_shared())) {
+        target_type = resolve_typeof_types(target_type, loc);
+    }
+
+    if (!init_list) {
+        init_list = collect_make<InitListExpr>(loc);
+    }
+
+    VariableDeclFlags flags;
+    auto temp_decl = collect_variable_declaration(
+        target_type,
+        "__cpp_type_list_init_tmp",
+        std::move(init_list),
+        nullptr,
+        StorageClass::NONE,
+        flags,
+        loc);
+    auto* temp_var = dyn_cast<VariableDecl>(temp_decl.get());
+    if (!temp_var) {
+        report_error("internal error: failed to build type construction expression", loc);
+        return collect_make<ErrorExpr>("invalid type construction", loc);
+    }
+
+    if (temp_var->init) {
+        return std::move(temp_var->init);
+    }
+    return collect_cpp_value_init_expression(target_type, loc);
+}
+
 std::unique_ptr<Expr> Collect::collect_cpp_function_style_cast(
     QualType target_type,
     std::vector<std::unique_ptr<Expr>> args,
@@ -6825,7 +6863,6 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
                     return true;
                 }
             }
-            return false;
         }
 
         auto function_candidates =

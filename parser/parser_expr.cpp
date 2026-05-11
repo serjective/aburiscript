@@ -439,6 +439,132 @@ std::unique_ptr<Expr> Parser::try_parse_fold_expression(SrcLoc lparen_loc) {
     }
 }
 
+std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
+    if (!is_cxx_mode_active()) {
+        return nullptr;
+    }
+
+    SrcLoc loc = current_token().loc;
+    auto qualified_id_brace_scan = [&]() {
+        struct Result {
+            bool is_qualified = false;
+            bool followed_by_left_brace = false;
+        } result;
+
+        size_t offset = 0;
+        auto consume_scope_at = [&](size_t& at) -> bool {
+            Token tok = peek_token_shortcut(at);
+            if (tok.type == TokenType::SCOPE_RESOLUTION) {
+                ++at;
+                return true;
+            }
+            if (tok.type == TokenType::COLON &&
+                peek_token_shortcut(at + 1).type == TokenType::COLON) {
+                at += 2;
+                return true;
+            }
+            return false;
+        };
+
+        bool saw_scope = consume_scope_at(offset);
+        if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER) {
+            return result;
+        }
+        ++offset;
+        while (consume_scope_at(offset)) {
+            saw_scope = true;
+            if (peek_token_shortcut(offset).type == TokenType::TEMPLATE) {
+                ++offset;
+            }
+            if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER) {
+                return result;
+            }
+            ++offset;
+        }
+        result.is_qualified = saw_scope;
+        result.followed_by_left_brace =
+            peek_token_shortcut(offset).type == TokenType::LEFT_BRACE;
+        return result;
+    };
+    // Keep non-braced qualified-ids on the existing qualified-id expression
+    // path. Tentative declaration parsing can diagnose or attach semantic
+    // state even when reverted, so only probe the qualified form needed here:
+    // qualified type list-initialization such as `N::T{}`.
+    auto qualified_scan = qualified_id_brace_scan();
+    if (qualified_scan.is_qualified && !qualified_scan.followed_by_left_brace) {
+        return nullptr;
+    }
+    if (!qualified_scan.is_qualified &&
+        current_token().type == TokenType::IDENTIFIER &&
+        peek_token().type != TokenType::LEFT_PAREN &&
+        peek_token().type != TokenType::LEFT_BRACE) {
+        return nullptr;
+    }
+    if (starts_with_cpp_dependent_qualified_call_expression()) {
+        return nullptr;
+    }
+
+    RevertingTentativeParsingAction tentative(*this);
+    try {
+        DeclarationParser parse_decl(this);
+        auto parsed_type = parse_decl.parse_declaration(false);
+        if (!parsed_type ||
+            !parse_decl.name.empty() ||
+            parse_decl.str_class != StorageClass::NONE) {
+            return nullptr;
+        }
+
+        QualType target_type(parsed_type, parse_decl.qualifiers);
+        // Dependent qualified-ids are expressions unless `typename` made the
+        // type interpretation explicit; otherwise calls like Box<T>::f() would
+        // be misparsed as unresolved type construction.
+        if (auto dependent_name =
+                dyn_cast_shared<DependentNameType>(target_type.get_shared());
+            dependent_name && !dependent_name->requires_typename_keyword) {
+            return nullptr;
+        }
+        if (gentle_check(TokenType::LEFT_PAREN)) {
+            advance(); // consume '('
+            std::vector<std::unique_ptr<Expr>> args;
+            if (!gentle_check(TokenType::RIGHT_PAREN)) {
+                TemplateArgumentGroupGuard group_guard(*this);
+                do {
+                    auto arg = parse_call_argument_expression();
+                    args.push_back(std::move(arg));
+                } while (gentle_check_and_consume(TokenType::COMMA));
+            }
+            check_and_consume(TokenType::RIGHT_PAREN);
+            retain_type_specifier_decl_if_needed(parse_decl);
+            tentative.commit();
+            return collect_->collect_cpp_function_style_cast(
+                target_type,
+                std::move(args),
+                loc);
+        }
+
+        if (gentle_check(TokenType::LEFT_BRACE)) {
+            auto init_expr = parse_init_list();
+            auto* init_list = dyn_cast<InitListExpr>(init_expr.get());
+            if (!init_list) {
+                return nullptr;
+            }
+            auto owned_init_list = std::unique_ptr<InitListExpr>(
+                static_cast<InitListExpr*>(init_expr.release()));
+            retain_type_specifier_decl_if_needed(parse_decl);
+            tentative.commit();
+            return collect_->collect_cpp_type_list_initialization_expression(
+                target_type,
+                std::move(owned_init_list),
+                loc);
+        }
+    } catch (const ParseError&) {
+    } catch (const FatalErrorLimitReached&) {
+        throw;
+    }
+
+    return nullptr;
+}
+
 std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
     SrcLoc qualified_loc = current_token().loc;
     auto current_scope = collect_->collect_current_scope();
@@ -1675,6 +1801,9 @@ std::unique_ptr<Expr> Parser::parse_block_literal_expression() {
 std::unique_ptr<Expr> Parser::parse_primary_expression() {
     Token tok = current_token();
     if (is_cxx_mode_active()) {
+        if (auto type_construction = try_parse_cpp_type_construction_expression()) {
+            return type_construction;
+        }
         TPResult qualified_id_probe = try_parse_cpp_qualified_id();
         if (qualified_id_probe == TPResult::True) {
             return parse_cpp_qualified_primary_expression();

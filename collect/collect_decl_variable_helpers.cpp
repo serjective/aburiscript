@@ -152,7 +152,10 @@ void Collect::resolve_auto_variable_type_from_expr(
         }
         return;
     }
-    if (isa<InitListExpr>(init_expr)) {
+    // A typed InitListExpr is a C++ type-construction expression such as T{};
+    // only raw braced-init-lists need the unsupported auto-list-deduction path.
+    if (auto* init_list = dyn_cast<InitListExpr>(init_expr);
+        init_list && (!treat_as_cxx_auto || !init_list->type)) {
         if (treat_as_cxx_auto) {
             report_error(
                 "C++ parser unsupported syntax: auto braced-init-list deduction",
