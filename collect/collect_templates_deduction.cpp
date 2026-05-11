@@ -515,10 +515,12 @@ int compare_pack_layout_specificity(const FunctionParameterLayout& lhs,
     return 0;
 }
 
+template <typename CompleteBindings>
 bool function_template_is_at_least_as_specialized_as(
     const FunctionTemplateDecl* parameter_template,
     const FunctionParameterLayout& parameter_layout,
-    const std::vector<QualType>& transformed_argument_types) {
+    const std::vector<QualType>& transformed_argument_types,
+    CompleteBindings&& complete_bindings) {
     if (!parameter_template) {
         return false;
     }
@@ -588,9 +590,10 @@ bool function_template_is_at_least_as_specialized_as(
         }
     }
 
-    return finalize_deduced_template_bindings(
-        parameter_template->parameters,
-        deduced_arguments);
+    return complete_bindings(
+        parameter_template,
+        deduced_arguments,
+        parameter_pattern->location);
 }
 
 bool bind_deduced_template_argument(
@@ -1908,6 +1911,18 @@ Collect::compare_function_template_partial_ordering(
         return TemplatePartialOrderingResult::Unordered;
     }
 
+    auto complete_partial_ordering_bindings =
+        [&](const TemplateDecl* template_decl,
+            TemplateArgumentBindings& bindings,
+            SrcLoc loc) {
+        std::string default_error;
+        return complete_template_argument_bindings_with_substituted_defaults(
+            template_decl,
+            bindings,
+            loc,
+            &default_error);
+    };
+
     if (!lhs_layout.pack_index.has_value() &&
         !rhs_layout.pack_index.has_value() &&
         lhs_layout.parameter_count == rhs_layout.parameter_count) {
@@ -1975,7 +1990,8 @@ Collect::compare_function_template_partial_ordering(
             return function_template_is_at_least_as_specialized_as(
                 parameter_template,
                 parameter_layout,
-                transformed_argument_types);
+                transformed_argument_types,
+                complete_partial_ordering_bindings);
         };
 
         bool lhs_at_least_as =
@@ -2128,7 +2144,8 @@ Collect::compare_function_template_partial_ordering(
         return function_template_is_at_least_as_specialized_as(
             parameter_template,
             parameter_layout,
-            transformed_argument_types);
+            transformed_argument_types,
+            complete_partial_ordering_bindings);
     };
 
     bool lhs_at_least_as =
