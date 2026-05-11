@@ -6422,6 +6422,31 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     has_global_qualifier,
                     qualifiers,
                     components.back().spelling());
+                auto template_arguments_are_dependent =
+                    [&](const std::vector<TemplateArgument>& arguments) {
+                        for (const auto& argument : arguments) {
+                            if (template_argument_depends_on_template_parameters(
+                                    argument,
+                                    ast_ctx.get())) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                if (!has_global_qualifier &&
+                    components.size() == 1 &&
+                    current_primary_class_template &&
+                    components.back().name == name &&
+                    components.back().has_template_argument_list &&
+                    template_arguments_are_dependent(
+                        components.back().template_arguments)) {
+                    parsed.type = QualType(
+                        std::make_shared<TemplateSpecializationType>(
+                            parsed.spelling,
+                            current_primary_class_template,
+                            components.back().template_arguments,
+                            true));
+                }
                 return parsed;
             };
 

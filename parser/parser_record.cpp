@@ -385,6 +385,77 @@ static bool cpp_base_type_is_dependent(QualType base_type) {
     return false;
 }
 
+static bool template_argument_names_template_parameter(
+    const TemplateArgument& argument,
+    const TemplateParameterDecl* parameter) {
+    if (!parameter) {
+        return false;
+    }
+
+    if (auto* type_parameter =
+            dyn_cast<TemplateTypeParmDecl>(const_cast<TemplateParameterDecl*>(parameter))) {
+        if (argument.kind != TemplateArgumentKind::Type) {
+            return false;
+        }
+        auto argument_type =
+            desugar_type(argument.type).as_shared<TemplateTypeParmType>();
+        if (!argument_type) {
+            return false;
+        }
+        if (argument_type->parameter_decl) {
+            return argument_type->parameter_decl == type_parameter;
+        }
+        return argument_type->depth == type_parameter->depth &&
+               argument_type->index == type_parameter->index;
+    }
+
+    if (auto* value_parameter =
+            dyn_cast<TemplateNonTypeParmDecl>(const_cast<TemplateParameterDecl*>(parameter))) {
+        if (argument.kind != TemplateArgumentKind::Value) {
+            return false;
+        }
+        if (argument.referenced_parameter == value_parameter) {
+            return true;
+        }
+        auto* value_ref = dyn_cast<VarRef>(
+            Collect::strip_implicit_casts(argument.value_expr.get()));
+        return value_ref &&
+               value_ref->symref &&
+               value_ref->symref->template_parameter_decl == value_parameter;
+    }
+
+    if (auto* template_parameter =
+            dyn_cast<TemplateTemplateParmDecl>(const_cast<TemplateParameterDecl*>(parameter))) {
+        return argument.kind == TemplateArgumentKind::Template &&
+               argument.referenced_parameter == template_parameter;
+    }
+
+    return false;
+}
+
+static bool cpp_base_type_is_current_instantiation(QualType base_type) {
+    auto specialization =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_type(base_type).get_shared());
+    auto* class_template =
+        specialization
+            ? dyn_cast<ClassTemplateDecl>(
+                  const_cast<Decl*>(specialization->primary_template))
+            : nullptr;
+    if (!class_template ||
+        specialization->arguments.size() != class_template->parameters.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < specialization->arguments.size(); ++idx) {
+        if (!template_argument_names_template_parameter(
+                specialization->arguments[idx],
+                class_template->parameters[idx].get())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Virtual slot keying: two methods occupy the same vtable slot iff they have
 // the same name, cv-qualifiers on the implicit this pointer, ref-qualifiers,
 // and user parameter types.  Return type is NOT part of the key because
@@ -858,6 +929,11 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             resolved_base_type =
                 collect_->collect_try_realize_deferred_semantic_type(
                     resolved_base_type);
+        }
+        if (cpp_base_type_is_current_instantiation(resolved_base_type)) {
+            error_custloc(
+                "class '" + record->name + "' cannot derive from itself",
+                base_spec.location);
         }
         auto* base_record_decl = cpp_base_record_decl_from_type(resolved_base_type);
         if (!base_record_decl && !resolved_base_type) {
