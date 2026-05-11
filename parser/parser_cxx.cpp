@@ -2080,11 +2080,71 @@ Parser::parse_cpp_explicit_specialization_declaration(
             return true;
         };
 
+    auto normalize_explicit_specialization_arguments =
+        [&](const TemplateDecl* primary_template,
+            std::vector<TemplateArgument>& arguments,
+            SrcLoc loc,
+            const std::string& subject) -> bool {
+            if (!collect_) {
+                error_custloc(
+                    "internal error: missing Collect during explicit specialization normalization",
+                    loc);
+                return false;
+            }
+            if (!primary_template) {
+                error_custloc(
+                    "internal error: missing primary template during explicit specialization normalization",
+                    loc);
+                return false;
+            }
+
+            TemplateArgumentBindings bindings;
+            std::vector<TemplateArgument> normalized_arguments;
+            std::string normalize_error;
+            if (!collect_->collect_bind_and_normalize_template_arguments_for_specialization(
+                    primary_template,
+                    arguments,
+                    bindings,
+                    normalized_arguments,
+                    loc,
+                    &normalize_error)) {
+                error_custloc(
+                    subject + " argument list does not match primary template" +
+                        (normalize_error.empty()
+                             ? std::string()
+                             : ": " + normalize_error),
+                    loc);
+                return false;
+            }
+
+            arguments = std::move(normalized_arguments);
+            return true;
+        };
+
     auto register_explicit_specialization =
         [&](const TemplateDecl* primary_template,
             const ClassTemplateDecl* owner_primary_template,
             std::unique_ptr<TemplateExplicitSpecializationDecl> explicit_specialization) {
             if (!primary_template || !explicit_specialization) {
+                return;
+            }
+
+            if (!normalize_explicit_specialization_arguments(
+                    primary_template,
+                    explicit_specialization->specialization_arguments,
+                    explicit_specialization->location,
+                    "explicit specialization")) {
+                explicit_decls.push_back(std::move(explicit_specialization));
+                return;
+            }
+            if (owner_primary_template &&
+                !explicit_specialization->owner_specialization_arguments.empty() &&
+                !normalize_explicit_specialization_arguments(
+                    owner_primary_template,
+                    explicit_specialization->owner_specialization_arguments,
+                    explicit_specialization->location,
+                    "explicit specialization owner")) {
+                explicit_decls.push_back(std::move(explicit_specialization));
                 return;
             }
 
@@ -2180,6 +2240,13 @@ Parser::parse_cpp_explicit_specialization_declaration(
 
         const ClassTemplateDecl* primary_template =
             resolve_primary_class_template(record_decl->name, record_decl->location);
+        if (!normalize_explicit_specialization_arguments(
+                primary_template,
+                specialization_arguments,
+                record_decl->location,
+                "explicit class specialization")) {
+            return explicit_decls;
+        }
         std::unique_ptr<ObjectDecl> specialized_semantic_decl;
         if (auto semantic_decl = build_cpp_record_semantic_decl(
                 *record_decl,
@@ -2300,24 +2367,43 @@ Parser::parse_cpp_explicit_specialization_declaration(
                 deduced_arguments);
         std::vector<TemplateArgument> specialization_arguments =
             deduced_arguments;
+        if (!normalize_explicit_specialization_arguments(
+                primary_template,
+                specialization_arguments,
+                specialized_function->location,
+                "explicit function specialization")) {
+            return explicit_decls;
+        }
         bool has_explicit_argument_list =
             specialized_function->has_explicit_specialization_argument_list;
         if (has_explicit_argument_list) {
-            const auto& explicit_arguments =
+            auto explicit_arguments =
                 specialized_function->explicit_specialization_arguments;
-            if (explicit_arguments.size() != deduced_arguments.size()) {
+            if (!normalize_explicit_specialization_arguments(
+                    primary_template,
+                    explicit_arguments,
+                    specialized_function->location,
+                    "explicit function specialization")) {
+                return explicit_decls;
+            }
+            bool explicit_arguments_match =
+                explicit_arguments.size() == specialization_arguments.size();
+            size_t compare_count =
+                explicit_arguments.size() < specialization_arguments.size()
+                    ? explicit_arguments.size()
+                    : specialization_arguments.size();
+            for (size_t idx = 0; idx < compare_count; ++idx) {
+                if (!explicit_arguments[idx].equals(specialization_arguments[idx])) {
+                    explicit_arguments_match = false;
+                }
+            }
+            if (!explicit_arguments_match) {
                 error_custloc(
                     "explicit specialization argument list does not match specialized function declaration",
                     specialized_function->location);
+                return explicit_decls;
             }
-            for (size_t idx = 0; idx < explicit_arguments.size(); ++idx) {
-                if (!explicit_arguments[idx].equals(deduced_arguments[idx])) {
-                    error_custloc(
-                        "explicit specialization argument list does not match specialized function declaration",
-                        specialized_function->location);
-                }
-            }
-            specialization_arguments = explicit_arguments;
+            specialization_arguments = std::move(explicit_arguments);
         }
         auto explicit_specialization =
             make_ast<TemplateExplicitSpecializationDecl>(
@@ -2354,6 +2440,13 @@ Parser::parse_cpp_explicit_specialization_declaration(
             resolve_primary_variable_template(
                 specialized_variable,
                 specialization_arguments);
+        if (!normalize_explicit_specialization_arguments(
+                primary_template,
+                specialization_arguments,
+                specialized_variable->location,
+                "explicit variable specialization")) {
+            return explicit_decls;
+        }
         auto registered_specialization_arguments = specialization_arguments;
         SrcLoc specialization_loc = specialized_variable->location;
         auto explicit_specialization =

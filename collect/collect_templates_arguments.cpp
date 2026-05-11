@@ -1384,3 +1384,68 @@ bool Collect::bind_template_arguments_for_specialization(
         loc,
         error_out);
 }
+
+bool Collect::bind_and_normalize_template_arguments_for_specialization(
+    const TemplateDecl* template_decl,
+    const std::vector<TemplateArgument>& arguments,
+    TemplateArgumentBindings& bindings_out,
+    std::vector<TemplateArgument>& normalized_arguments_out,
+    SrcLoc loc,
+    std::string* error_out) {
+    normalized_arguments_out.clear();
+    if (!bind_template_arguments_for_specialization(
+            template_decl,
+            arguments,
+            bindings_out,
+            loc,
+            error_out)) {
+        return false;
+    }
+
+    for (const auto& binding : bindings_out) {
+        for (const auto& argument : binding.arguments) {
+            if (!template_sema_internal::template_argument_has_known_payload(
+                    argument)) {
+                set_template_default_completion_error(
+                    error_out,
+                    "template argument has unknown payload");
+                return false;
+            }
+        }
+    }
+
+    for (size_t idx = 0; idx < template_decl->parameters.size(); ++idx) {
+        auto* non_type_parameter = dyn_cast<TemplateNonTypeParmDecl>(
+            template_decl->parameters[idx].get());
+        if (!non_type_parameter || idx >= bindings_out.size()) {
+            continue;
+        }
+        if (bindings_out[idx].arguments.empty()) {
+            continue;
+        }
+
+        QualType expected_type = substitute_template_type_with_bindings(
+            non_type_parameter->type,
+            template_decl->parameters,
+            bindings_out,
+            loc);
+        expected_type = finalize_deferred_semantic_type(expected_type, loc);
+        for (auto& bound_argument : bindings_out[idx].arguments) {
+            std::string normalize_error;
+            if (!template_sema_internal::normalize_concrete_template_value_argument(
+                    bound_argument,
+                    expected_type,
+                    &normalize_error)) {
+                set_template_default_completion_error(
+                    error_out,
+                    normalize_error.empty()
+                        ? "failed to normalize template value argument"
+                        : normalize_error);
+                return false;
+            }
+        }
+    }
+
+    normalized_arguments_out = flatten_template_argument_bindings(bindings_out);
+    return true;
+}

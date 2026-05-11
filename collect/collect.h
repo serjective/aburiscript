@@ -1096,6 +1096,22 @@ public:
         uint8_t parsed_trailing_cv_qualifiers = QUAL_NONE,
         size_t implicit_object_parameter_count = 0) ;
 
+    bool collect_bind_and_normalize_template_arguments_for_specialization(
+        const TemplateDecl* template_decl,
+        const std::vector<TemplateArgument>& arguments,
+        TemplateArgumentBindings& bindings_out,
+        std::vector<TemplateArgument>& normalized_arguments_out,
+        SrcLoc loc,
+        std::string* error_out = nullptr) {
+        return bind_and_normalize_template_arguments_for_specialization(
+            template_decl,
+            arguments,
+            bindings_out,
+            normalized_arguments_out,
+            loc,
+            error_out);
+    }
+
     QualType collect_substitute_template_type(
         QualType type,
         const TemplateParameterList& parameters,
@@ -1737,6 +1753,14 @@ private:
         const TemplateDecl* template_decl,
         const std::vector<TemplateArgument>& arguments,
         TemplateArgumentBindings& bindings_out,
+        SrcLoc loc,
+        std::string* error_out = nullptr) ;
+
+    bool bind_and_normalize_template_arguments_for_specialization(
+        const TemplateDecl* template_decl,
+        const std::vector<TemplateArgument>& arguments,
+        TemplateArgumentBindings& bindings_out,
+        std::vector<TemplateArgument>& normalized_arguments_out,
         SrcLoc loc,
         std::string* error_out = nullptr) ;
 
