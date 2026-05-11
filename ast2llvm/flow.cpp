@@ -1675,6 +1675,13 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
     if (node->storage_class == StorageClass::STATIC || suppress_external_definition) {
         llvm_storage = llvm::Function::InternalLinkage;
     }
+    auto llvm_declaration_storage = llvm_storage;
+    if (!node->body &&
+        llvm_declaration_storage == llvm::Function::InternalLinkage) {
+        llvm_declaration_storage = llvm::Function::ExternalLinkage;
+    }
+    auto desired_llvm_storage =
+        node->body ? llvm_storage : llvm_declaration_storage;
 
     // Header-only inline definitions that suppress an external definition
     // still need a callable body when we are not running a dedicated inliner.
@@ -1734,7 +1741,11 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
         prepend_indirect_result_parameter(paramTypes, func_ctype->ret_type);
         llvm::Type* returnType = convert_function_return_type(func_ctype->ret_type);
         llvm::FunctionType* funcType = llvm::FunctionType::get(returnType, paramTypes, func_ctype->is_variadic);
-        mainFunc = llvm::Function::Create(funcType, llvm_storage, llvm_name, module.get());
+        mainFunc = llvm::Function::Create(
+            funcType,
+            desired_llvm_storage,
+            llvm_name,
+            module.get());
         apply_indirect_result_attributes(mainFunc, 0, func_ctype->ret_type);
 
         // Replace all uses of the old function with the new one, then erase old
@@ -1747,8 +1758,9 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
         // Preserve an existing internal definition across later extern
         // redeclarations. Header patterns like `static inline` followed by an
         // `extern` prototype should keep the local definition local.
-        if (mainFunc->getLinkage() != llvm::Function::InternalLinkage) {
-            mainFunc->setLinkage(llvm_storage);
+        if (mainFunc->getLinkage() != llvm::Function::InternalLinkage ||
+            desired_llvm_storage == llvm::Function::InternalLinkage) {
+            mainFunc->setLinkage(desired_llvm_storage);
         }
     } else {
         // Create function type with parameters
@@ -1770,7 +1782,7 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
         llvm::Type* returnType = convert_function_return_type(func_ctype->ret_type); // fall back to i32 if not
 
         llvm::FunctionType* funcType = llvm::FunctionType::get(returnType, paramTypes, func_ctype->is_variadic);
-        mainFunc = llvm::Function::Create(funcType, llvm_storage,
+        mainFunc = llvm::Function::Create(funcType, desired_llvm_storage,
             llvm_name, module.get());
         apply_indirect_result_attributes(mainFunc, 0, func_ctype->ret_type);
     }

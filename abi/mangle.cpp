@@ -1097,7 +1097,12 @@ void append_type_encoding(std::string& out, const QualType& qt, ItaniumMangleCon
     }
 
     auto canonical = desugar_typedefs(qt);
-    if (!canonical.equals_qualified(qt)) {
+    if (!canonical) {
+        append_vendor_extended_type(out, "null");
+        return;
+    }
+    if (canonical.get_shared() != qt.get_shared() ||
+        canonical.get_qualifiers() != qt.get_qualifiers()) {
         append_type_encoding(out, canonical, ctx);
         return;
     }

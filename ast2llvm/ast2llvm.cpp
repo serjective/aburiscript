@@ -912,6 +912,10 @@ llvm::Function* ASTToLLVM::get_or_create_function_symbol(
         sym->storage_class == StorageClass::STATIC
             ? llvm::Function::InternalLinkage
             : llvm::Function::ExternalLinkage;
+    if (linkage == llvm::Function::InternalLinkage &&
+        (!sym->function_definition || !sym->function_definition->body)) {
+        linkage = llvm::Function::ExternalLinkage;
+    }
     llvm::Function* fn =
         llvm::Function::Create(ft, linkage, fn_name, module.get());
     apply_indirect_result_attributes(fn, 0, func_ctype->ret_type);

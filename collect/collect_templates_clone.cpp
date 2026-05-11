@@ -1176,6 +1176,127 @@ bool rebind_member_expr_for_specialized_record(MemberExpr* member,
     return true;
 }
 
+// Some expression-bearing function types have already been cloned once before
+// the final parameter-symbol remap exists. Repair only stale dependent
+// parameter references by matching them to the specialization parameters.
+void rewrite_stale_parameter_refs_by_name(
+    Expr* expr,
+    const std::unordered_map<std::string, std::shared_ptr<Symbol>>&
+        parameter_symbols,
+    const ASTContext* ast_ctx) {
+    if (!expr || parameter_symbols.empty()) {
+        return;
+    }
+
+    auto visit = [&](auto&& self, Expr* candidate) -> void {
+        if (!candidate) {
+            return;
+        }
+        if (auto* var_ref = dyn_cast<VarRef>(candidate)) {
+            auto replacement_it = parameter_symbols.find(var_ref->get_name());
+            if (replacement_it != parameter_symbols.end() &&
+                replacement_it->second &&
+                (!var_ref->symref ||
+                 (var_ref->symref->kind == SymbolKind::VARIABLE &&
+                  type_depends_on_template_parameters(
+                      var_ref->symref->type,
+                      ast_ctx)))) {
+                var_ref->symref = replacement_it->second;
+            }
+            return;
+        }
+
+        auto visit_unique = [&](const std::unique_ptr<Expr>& child) {
+            self(self, child.get());
+        };
+        auto visit_vector =
+            [&](const std::vector<std::unique_ptr<Expr>>& children) {
+            for (const auto& child : children) {
+                self(self, child.get());
+            }
+        };
+
+        switch (candidate->get_kind()) {
+            case StmtKind::FuncCall: {
+                auto* call = static_cast<FuncCall*>(candidate);
+                visit_unique(call->func);
+                visit_vector(call->args);
+                return;
+            }
+            case StmtKind::DependentCallExpr: {
+                auto* call = static_cast<DependentCallExpr*>(candidate);
+                visit_unique(call->callee);
+                visit_vector(call->args);
+                return;
+            }
+            case StmtKind::ImplicitCast: {
+                visit_unique(static_cast<ImplicitCast*>(candidate)->expr);
+                return;
+            }
+            case StmtKind::ExplicitCast: {
+                visit_unique(static_cast<ExplicitCast*>(candidate)->expr);
+                return;
+            }
+            case StmtKind::UnaryOperation: {
+                visit_unique(static_cast<UnaryOperation*>(candidate)->exp);
+                return;
+            }
+            case StmtKind::DependentUnaryExpr: {
+                visit_unique(static_cast<DependentUnaryExpr*>(candidate)->operand);
+                return;
+            }
+            case StmtKind::BinaryOperation: {
+                auto* binary = static_cast<BinaryOperation*>(candidate);
+                visit_unique(binary->left);
+                visit_unique(binary->right);
+                return;
+            }
+            case StmtKind::DependentBinaryExpr: {
+                auto* binary = static_cast<DependentBinaryExpr*>(candidate);
+                visit_unique(binary->left);
+                visit_unique(binary->right);
+                return;
+            }
+            case StmtKind::ArraySubscriptExpr: {
+                auto* subscript = static_cast<ArraySubscriptExpr*>(candidate);
+                visit_unique(subscript->array);
+                visit_unique(subscript->index);
+                return;
+            }
+            case StmtKind::DependentArraySubscriptExpr: {
+                auto* subscript =
+                    static_cast<DependentArraySubscriptExpr*>(candidate);
+                visit_unique(subscript->array);
+                visit_unique(subscript->index);
+                return;
+            }
+            case StmtKind::MemberExpr: {
+                visit_unique(static_cast<MemberExpr*>(candidate)->base);
+                return;
+            }
+            case StmtKind::UnresolvedMemberExpr: {
+                visit_unique(static_cast<UnresolvedMemberExpr*>(candidate)->base);
+                return;
+            }
+            case StmtKind::CppFunctionStyleCastExpr: {
+                visit_vector(
+                    static_cast<CppFunctionStyleCastExpr*>(candidate)->args);
+                return;
+            }
+            case StmtKind::CppConstructExpr: {
+                visit_vector(static_cast<CppConstructExpr*>(candidate)->args);
+                return;
+            }
+            case StmtKind::CppValueInitExpr:
+                return;
+            default:
+                return;
+        }
+    };
+
+    visit(visit, expr);
+}
+
 bool clone_function_parameters_for_specialization(
     Collect& collect,
     const FuncDecl* pattern,
@@ -1423,6 +1544,20 @@ bool clone_function_parameters_for_specialization(
         }
     }
 
+    resolution_pass.sync_from_substitution_pass(substitution_pass);
+
+    std::unordered_map<std::string, std::shared_ptr<Symbol>>
+        specialized_parameter_symbols_by_name;
+    for (const auto& parameter_decl : specialization->parameters) {
+        auto* param_decl = dyn_cast<ParamDecl>(parameter_decl.get());
+        if (!param_decl || !param_decl->sym || param_decl->get_name().empty()) {
+            continue;
+        }
+        specialized_parameter_symbols_by_name.emplace(
+            param_decl->get_name(),
+            param_decl->sym);
+    }
+
     auto rebuilt_function_type =
         desugar_type(
             substitution_pass.rewrite_type(QualType(pattern->type)),
@@ -1439,6 +1574,101 @@ bool clone_function_parameters_for_specialization(
     auto specialized_function_type =
         std::make_shared<FunctionType>(*rebuilt_function_type);
     rebuilt_function_type = specialized_function_type;
+
+    auto pattern_function_type =
+        desugar_type(QualType(pattern->type), substitution_pass.context().ast_ctx)
+            .as_shared<FunctionType>();
+    if (pattern_function_type) {
+        auto rewritten_decltype =
+            rebuilt_function_type->ret_type.as_shared<DecltypeExprType>();
+        if (rewritten_decltype) {
+            const auto* source_decltype = rewritten_decltype.get();
+            if (auto pattern_decltype =
+                    pattern_function_type->ret_type.as_shared<DecltypeExprType>()) {
+                source_decltype = pattern_decltype.get();
+            }
+
+            if (source_decltype && source_decltype->expr) {
+                std::string clone_error;
+                auto cloned_expr = substitution_pass.clone_expr(
+                    source_decltype->expr.get(),
+                    &clone_error);
+                if (!cloned_expr) {
+                    if (error_out) {
+                        *error_out =
+                            failure_context +
+                            " decltype return expression cloning is not supported" +
+                            (clone_error.empty() ? std::string()
+                                                 : ": " + clone_error);
+                    }
+                    return false;
+                }
+                rewrite_stale_parameter_refs_by_name(
+                    cloned_expr.get(),
+                    specialized_parameter_symbols_by_name,
+                    substitution_pass.context().ast_ctx);
+
+                QualType realized_return_type;
+                constexpr unsigned kMaxDecltypeReturnResolutionPasses = 8;
+                // The decltype operand was collected as unevaluated already;
+                // this loop only completes staged overload/dependent-call
+                // resolution now that specialization parameters are concrete.
+                for (unsigned pass = 0;
+                     pass < kMaxDecltypeReturnResolutionPasses;
+                     ++pass) {
+                    if (!resolution_pass.resolve_expr_in_place(
+                            cloned_expr,
+                            &clone_error) ||
+                        !cloned_expr) {
+                        if (error_out) {
+                            *error_out =
+                                failure_context +
+                                " decltype return dependent resolution is not supported" +
+                                (clone_error.empty() ? std::string()
+                                                     : ": " + clone_error);
+                        }
+                        return false;
+                    }
+
+                    auto probe_expr = std::shared_ptr<Expr>(
+                        cloned_expr.get(),
+                        [](Expr*) {});
+                    auto probe_decltype = QualType(
+                        std::make_shared<DecltypeExprType>(
+                            std::move(probe_expr),
+                            source_decltype->use_declared_type_rule),
+                        rebuilt_function_type->ret_type.get_qualifiers());
+                    auto realized_decltype =
+                        collect.collect_try_realize_deferred_semantic_type(
+                            probe_decltype);
+                    if (realized_decltype &&
+                        !isa<DecltypeExprType>(realized_decltype.get())) {
+                        realized_return_type = realized_decltype;
+                        break;
+                    }
+                }
+
+                if (realized_return_type) {
+                    rebuilt_function_type->ret_type = realized_return_type;
+                } else {
+                    auto resolved_decltype = QualType(
+                        std::make_shared<DecltypeExprType>(
+                            std::shared_ptr<Expr>(cloned_expr.release()),
+                            source_decltype->use_declared_type_rule),
+                        rebuilt_function_type->ret_type.get_qualifiers());
+                    auto realized_decltype =
+                        collect.collect_try_realize_deferred_semantic_type(
+                            resolved_decltype);
+                    if (realized_decltype) {
+                        rebuilt_function_type->ret_type = realized_decltype;
+                    } else {
+                        rebuilt_function_type->ret_type = resolved_decltype;
+                    }
+                }
+            }
+        }
+    }
+
     rebuilt_function_type->parameters.clear();
     rebuilt_function_type->parameters.reserve(specialization->parameters.size());
     for (const auto& parameter_decl : specialization->parameters) {

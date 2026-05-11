@@ -269,6 +269,9 @@ bool expr_vector_structurally_matches(
 }
 
 bool expr_structurally_matches(const Expr* lhs, const Expr* rhs) {
+    if (lhs == rhs) {
+        return true;
+    }
     lhs = strip_structural_implicit_casts(lhs);
     rhs = strip_structural_implicit_casts(rhs);
     if (!lhs || !rhs) {

@@ -3654,10 +3654,68 @@ bool Collect::resolve_dependent_expr_after_substitution(
         for (auto& arg : owned_call->args) {
             strip_stale_dependent_implicit_casts(arg);
         }
-        auto rewritten = collect_function_call(
-            std::move(owned_call->callee),
-            std::move(owned_call->args),
-            owned_call->location);
+
+        bool arguments_still_dependent = false;
+        for (const auto& arg : owned_call->args) {
+            if (!arg) {
+                continue;
+            }
+            if (expression_depends_on_template_parameters(arg.get()) ||
+                type_depends_on_template_parameters(
+                    arg->get_type(),
+                    ast_ctx_.get())) {
+                arguments_still_dependent = true;
+                break;
+            }
+        }
+
+        auto collect_concrete_call_after_substitution =
+            [&](std::unique_ptr<Expr> callee,
+                std::vector<std::unique_ptr<Expr>> args,
+                SrcLoc call_loc) -> std::unique_ptr<Expr> {
+            auto call = collect_make<FuncCall>(
+                std::move(callee),
+                std::move(args),
+                call_loc);
+            if (!call->func) {
+                return call;
+            }
+            MemberCallSelection member_call_selection;
+            if (auto error = try_function_object_call_overload(call, call_loc)) {
+                return error;
+            }
+            if (auto early_result =
+                    try_builtin_or_overloaded_varref_call(call, call_loc)) {
+                return early_result;
+            }
+            if (auto error = try_member_function_overload_call(
+                    call,
+                    member_call_selection,
+                    call_loc)) {
+                return error;
+            }
+            return finalize_call_expression(
+                std::move(call),
+                member_call_selection,
+                call_loc);
+        };
+
+        auto* callee_ref =
+            dyn_cast<VarRef>(strip_implicit_casts(owned_call->callee.get()));
+        bool force_concrete_function_ref_call =
+            callee_ref &&
+            callee_ref->symref &&
+            callee_ref->symref->kind == SymbolKind::FUNCTION &&
+            !arguments_still_dependent;
+        auto rewritten = force_concrete_function_ref_call
+            ? collect_concrete_call_after_substitution(
+                  std::move(owned_call->callee),
+                  std::move(owned_call->args),
+                  owned_call->location)
+            : collect_function_call(
+                  std::move(owned_call->callee),
+                  std::move(owned_call->args),
+                  owned_call->location);
         if (!rewritten) {
             if (error_out && error_out->empty()) {
                 *error_out =
