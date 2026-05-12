@@ -4991,6 +4991,15 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
                           declarator.terminal_loc);
         }
 
+        CppUsingDeclarationDecl::ReplayTarget* replay_target = nullptr;
+        if (replayable_using_decl) {
+            replayable_using_decl->replay_targets.push_back(
+                CppUsingDeclarationDecl::ReplayTarget{
+                    declarator.terminal_name,
+                    target_context});
+            replay_target = &replayable_using_decl->replay_targets.back();
+        }
+
         auto ordinary_lookup = LookupEngine::lookup_qualified(
             declarator.terminal_name,
             target_context,
@@ -5033,11 +5042,14 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
             collect_->collect_bind_template_decl(
                 declarator.terminal_name, template_decl, lookup_namespace);
             if (replayable_using_decl) {
-                replayable_using_decl->template_decls.push_back(
-                    CppUsingDeclarationDecl::ImportedTemplate{
-                        declarator.terminal_name,
-                        template_decl,
-                        using_import_namespace(lookup_namespace)});
+                CppUsingDeclarationDecl::ImportedTemplate imported{
+                    declarator.terminal_name,
+                    template_decl,
+                    using_import_namespace(lookup_namespace)};
+                replayable_using_decl->template_decls.push_back(imported);
+                if (replay_target) {
+                    replay_target->template_decls.push_back(std::move(imported));
+                }
             }
         };
 
@@ -5056,14 +5068,20 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
         if (tag_binding &&
             !current_context->lookup_local(declarator.terminal_name,
                                            LookupNamespace::Tag)) {
+            if (replay_target) {
+                replay_target->import_tag = true;
+            }
             if (auto* tag_decl = dyn_cast<TagDecl>(tag_binding->ast_decl)) {
                 collect_->collect_add_tag_decl(
                     declarator.terminal_name, const_cast<TagDecl*>(tag_decl));
                 if (replayable_using_decl) {
-                    replayable_using_decl->tag_decls.push_back(
-                        CppUsingDeclarationDecl::ImportedTag{
-                            declarator.terminal_name,
-                            const_cast<TagDecl*>(tag_decl)});
+                    CppUsingDeclarationDecl::ImportedTag imported{
+                        declarator.terminal_name,
+                        const_cast<TagDecl*>(tag_decl)};
+                    replayable_using_decl->tag_decls.push_back(imported);
+                    if (replay_target) {
+                        replay_target->tag_decls.push_back(imported);
+                    }
                 }
             }
             import_template_binding(tag_binding, LookupNamespace::Tag);
@@ -5076,13 +5094,20 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
             collect_->collect_bind_symbol_in_current_scope(
                 declarator.terminal_name, symbol);
             if (replayable_using_decl) {
-                replayable_using_decl->ordinary_symbols.push_back(
-                    CppUsingDeclarationDecl::ImportedSymbol{
-                        declarator.terminal_name, symbol});
+                CppUsingDeclarationDecl::ImportedSymbol imported{
+                    declarator.terminal_name,
+                    symbol};
+                replayable_using_decl->ordinary_symbols.push_back(imported);
+                if (replay_target) {
+                    replay_target->ordinary_symbols.push_back(std::move(imported));
+                }
             }
         };
 
         if (ordinary_binding) {
+            if (replay_target) {
+                replay_target->import_ordinary = true;
+            }
             if (ordinary_binding->has_overload_set()) {
                 for (const auto& candidate : ordinary_binding->overload_candidates) {
                     import_ordinary_symbol(candidate);

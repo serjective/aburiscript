@@ -88,6 +88,156 @@ QualType lookup_ctor_initializer_target_type(const CppConstructorDecl* ctor_decl
     return QualType();
 }
 
+LookupNamespace using_import_lookup_namespace(
+    CppUsingImportNamespace lookup_namespace) {
+    return lookup_namespace == CppUsingImportNamespace::Tag
+        ? LookupNamespace::Tag
+        : LookupNamespace::Ordinary;
+}
+
+void bind_imported_template_decl(Collect& collect,
+                                 const CppUsingDeclarationDecl::ImportedTemplate& imported) {
+    collect.collect_bind_template_decl(
+        imported.name,
+        imported.decl,
+        using_import_lookup_namespace(imported.lookup_namespace));
+}
+
+void bind_stored_ordinary_using_imports(
+    Collect& collect,
+    const std::vector<CppUsingDeclarationDecl::ImportedSymbol>& ordinary_symbols,
+    const std::vector<CppUsingDeclarationDecl::ImportedTemplate>& template_decls) {
+    for (const auto& imported : ordinary_symbols) {
+        collect.collect_bind_symbol_in_current_scope(
+            imported.name,
+            imported.symbol);
+    }
+    for (const auto& imported : template_decls) {
+        if (imported.lookup_namespace != CppUsingImportNamespace::Ordinary) {
+            continue;
+        }
+        bind_imported_template_decl(collect, imported);
+    }
+}
+
+void bind_stored_tag_using_imports(
+    Collect& collect,
+    const std::vector<CppUsingDeclarationDecl::ImportedTag>& tag_decls,
+    const std::vector<CppUsingDeclarationDecl::ImportedTemplate>& template_decls) {
+    for (const auto& imported : tag_decls) {
+        collect.collect_add_tag_decl(imported.name, imported.decl);
+    }
+    for (const auto& imported : template_decls) {
+        if (imported.lookup_namespace != CppUsingImportNamespace::Tag) {
+            continue;
+        }
+        bind_imported_template_decl(collect, imported);
+    }
+}
+
+void bind_template_binding_from_using_lookup(Collect& collect,
+                                             const std::string& name,
+                                             const DeclBinding* binding,
+                                             LookupNamespace lookup_namespace) {
+    if (!binding) {
+        return;
+    }
+    if (binding->template_decl) {
+        collect.collect_bind_template_decl(
+            name,
+            binding->template_decl,
+            lookup_namespace);
+    }
+    for (const auto* template_candidate :
+         binding->template_overload_candidates) {
+        collect.collect_bind_template_decl(
+            name,
+            template_candidate,
+            lookup_namespace);
+    }
+}
+
+bool replay_ordinary_using_target(
+    Collect& collect,
+    const CppUsingDeclarationDecl::ReplayTarget& target) {
+    if (!target.target_context) {
+        return false;
+    }
+    auto lookup = LookupEngine::lookup_qualified(
+        target.name,
+        target.target_context,
+        LookupNamespace::Ordinary);
+    if (lookup.status != LookupEngine::QualifiedLookupStatus::Found ||
+        !lookup.binding) {
+        return false;
+    }
+
+    const auto* binding = lookup.binding;
+    if (binding->has_overload_set()) {
+        for (const auto& candidate : binding->overload_candidates) {
+            collect.collect_bind_symbol_in_current_scope(
+                target.name,
+                candidate);
+        }
+    } else {
+        collect.collect_bind_symbol_in_current_scope(
+            target.name,
+            lookup.symbol ? lookup.symbol : binding->symbol);
+    }
+    bind_template_binding_from_using_lookup(
+        collect,
+        target.name,
+        binding,
+        LookupNamespace::Ordinary);
+    return true;
+}
+
+bool replay_tag_using_target(
+    Collect& collect,
+    const CppUsingDeclarationDecl::ReplayTarget& target) {
+    if (!target.target_context) {
+        return false;
+    }
+    auto lookup = LookupEngine::lookup_qualified(
+        target.name,
+        target.target_context,
+        LookupNamespace::Tag);
+    if (lookup.status != LookupEngine::QualifiedLookupStatus::Found ||
+        !lookup.binding) {
+        return false;
+    }
+
+    if (auto* tag_decl = dyn_cast<TagDecl>(lookup.binding->ast_decl)) {
+        collect.collect_add_tag_decl(
+            target.name,
+            const_cast<TagDecl*>(tag_decl));
+    }
+    bind_template_binding_from_using_lookup(
+        collect,
+        target.name,
+        lookup.binding,
+        LookupNamespace::Tag);
+    return true;
+}
+
+void replay_or_bind_stored_using_target(
+    Collect& collect,
+    const CppUsingDeclarationDecl::ReplayTarget& target) {
+    if (target.import_tag && !replay_tag_using_target(collect, target)) {
+        bind_stored_tag_using_imports(
+            collect,
+            target.tag_decls,
+            target.template_decls);
+    }
+    if (target.import_ordinary &&
+        !replay_ordinary_using_target(collect, target)) {
+        bind_stored_ordinary_using_imports(
+            collect,
+            target.ordinary_symbols,
+            target.template_decls);
+    }
+}
+
 bool rebuild_specialized_ctor_initializer_expression(
     Collect& collect,
     CppConstructorDecl* ctor_decl,
@@ -191,24 +341,21 @@ bool finalize_specialized_decl_semantics(Collect& collect,
         case DeclKind::CppUsingDeclarationDecl: {
             const auto* using_decl =
                 static_cast<const CppUsingDeclarationDecl*>(decl.get());
-            for (const auto& imported : using_decl->ordinary_symbols) {
-                collect.collect_bind_symbol_in_current_scope(
-                    imported.name,
-                    imported.symbol);
+            if (!using_decl->replay_targets.empty()) {
+                for (const auto& target : using_decl->replay_targets) {
+                    replay_or_bind_stored_using_target(collect, target);
+                }
+                return true;
             }
-            for (const auto& imported : using_decl->tag_decls) {
-                collect.collect_add_tag_decl(imported.name, imported.decl);
-            }
-            for (const auto& imported : using_decl->template_decls) {
-                LookupNamespace lookup_namespace =
-                    imported.lookup_namespace == CppUsingImportNamespace::Tag
-                        ? LookupNamespace::Tag
-                        : LookupNamespace::Ordinary;
-                collect.collect_bind_template_decl(
-                    imported.name,
-                    imported.decl,
-                    lookup_namespace);
-            }
+
+            bind_stored_tag_using_imports(
+                collect,
+                using_decl->tag_decls,
+                using_decl->template_decls);
+            bind_stored_ordinary_using_imports(
+                collect,
+                using_decl->ordinary_symbols,
+                using_decl->template_decls);
             return true;
         }
         case DeclKind::VariableDecl: {

@@ -314,9 +314,20 @@ struct CppUsingDeclarationDecl: Decl {
         TagDecl* decl = nullptr;
     };
 
+    struct ReplayTarget {
+        std::string name;
+        const DeclContext* target_context = nullptr;
+        bool import_ordinary = false;
+        bool import_tag = false;
+        std::vector<ImportedSymbol> ordinary_symbols;
+        std::vector<ImportedTemplate> template_decls;
+        std::vector<ImportedTag> tag_decls;
+    };
+
     std::vector<ImportedSymbol> ordinary_symbols;
     std::vector<ImportedTemplate> template_decls;
     std::vector<ImportedTag> tag_decls;
+    std::vector<ReplayTarget> replay_targets;
 
     CppUsingDeclarationDecl(SrcLoc loc = SrcLoc())
         : Decl(DeclKind::CppUsingDeclarationDecl, loc) {}

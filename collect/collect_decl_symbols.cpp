@@ -172,7 +172,8 @@ std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr
     }
     auto namespace_prefix_for_scope = [](const std::shared_ptr<Scope>& scope)
         -> std::optional<std::string> {
-        return qualified_name_utils::namespace_prefix_from_scope(scope);
+        return qualified_name_utils::namespace_prefix_from_effective_decl_scope(
+            scope);
     };
     const bool is_cxx_mode = lang_opts_.is_cxx_mode();
     const LanguageLinkage requested_language_linkage =
@@ -441,7 +442,8 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
     bool is_file_scope = is_file_or_namespace_scope(effective_decl_scope);
     auto namespace_prefix_for_scope = [](const std::shared_ptr<Scope>& scope)
         -> std::optional<std::string> {
-        return qualified_name_utils::namespace_prefix_from_scope(scope);
+        return qualified_name_utils::namespace_prefix_from_effective_decl_scope(
+            scope);
     };
     auto decl_scope = effective_decl_scope ? effective_decl_scope : scope;
     if (!is_file_scope && !is_definition && !is_cpp_member_function) {

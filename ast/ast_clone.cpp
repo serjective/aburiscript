@@ -2222,6 +2222,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
             result->ordinary_symbols = using_decl->ordinary_symbols;
             result->template_decls = using_decl->template_decls;
             result->tag_decls = using_decl->tag_decls;
+            result->replay_targets = using_decl->replay_targets;
             assign_node_id(result.get(), ctx.ast_ctx);
             if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;

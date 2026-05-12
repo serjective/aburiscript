@@ -61,6 +61,81 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
         return false;
     }
 
+    static std::vector<std::string> split_qualifier_prefix(
+        const std::string& qualifier_prefix) {
+        std::vector<std::string> qualifiers;
+        size_t start = 0;
+        while (start < qualifier_prefix.size()) {
+            size_t end = qualifier_prefix.find("::", start);
+            if (end == std::string::npos) {
+                end = qualifier_prefix.size();
+            }
+            if (end > start) {
+                qualifiers.push_back(qualifier_prefix.substr(start, end - start));
+            }
+            start = end + 2;
+        }
+        return qualifiers;
+    }
+
+    const FunctionTemplateDecl* preferred_function_template_redeclaration(
+        const FunctionTemplateDecl* candidate) const {
+        if (!candidate || !candidate->function_decl()) {
+            return candidate;
+        }
+        const auto* function_decl = candidate->function_decl();
+        if (get_func_decl_owner_record_type(function_decl)) {
+            return candidate;
+        }
+        if (function_decl->name.empty() ||
+            !collect.session_.translation_unit_decl_context_) {
+            return candidate;
+        }
+
+        LookupEngine::QualifiedLookupResult lookup;
+        if (const auto* qualifier_prefix =
+                get_func_decl_cxx_qualifier_prefix(function_decl)) {
+            LookupEngine::QualifiedNameSpec name_spec;
+            name_spec.qualifiers = split_qualifier_prefix(*qualifier_prefix);
+            name_spec.terminal_name = function_decl->name;
+            lookup = LookupEngine::lookup_qualified_name(
+                name_spec,
+                collect.session_.translation_unit_decl_context_.get(),
+                LookupNamespace::Ordinary);
+        } else {
+            lookup = LookupEngine::lookup_qualified(
+                function_decl->name,
+                collect.session_.translation_unit_decl_context_.get(),
+                LookupNamespace::Ordinary);
+        }
+        if (lookup.status != LookupEngine::QualifiedLookupStatus::Found ||
+            !lookup.binding) {
+            return candidate;
+        }
+
+        const FunctionTemplateDecl* best = candidate;
+        auto consider = [&](const Decl* decl) {
+            auto* function_template =
+                dyn_cast<FunctionTemplateDecl>(const_cast<Decl*>(decl));
+            if (!function_template ||
+                !template_decls_share_lookup_identity(candidate, function_template)) {
+                return;
+            }
+            if (!best ||
+                template_decl_is_preferred_lookup_representative(
+                    best,
+                    function_template)) {
+                best = function_template;
+            }
+        };
+        consider(lookup.binding->template_decl);
+        for (const auto* template_candidate :
+             lookup.binding->template_overload_candidates) {
+            consider(template_candidate);
+        }
+        return best ? best : candidate;
+    }
+
     FuncDecl* run() {
         if (specialization_symbol_out) {
             *specialization_symbol_out = nullptr;
@@ -69,6 +144,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             return nullptr;
         }
 
+        function_template =
+            preferred_function_template_redeclaration(function_template);
         pattern = function_template->function_decl();
         if (!pattern) {
             fail("internal error: missing function template pattern", loc);
@@ -331,14 +408,27 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
         if (source_decl->asm_label) {
             symbol->asm_label = *source_decl->asm_label;
         }
+        auto source_symbol = lookup_existing_function_symbol_for_decl(source_decl);
         if (const auto* qualifier_prefix =
                 get_func_decl_cxx_qualifier_prefix(source_decl)) {
             set_symbol_cxx_qualifier_prefix(
                 symbol,
                 std::string(*qualifier_prefix));
+        } else if (source_symbol) {
+            if (const auto* qualifier_prefix =
+                    get_symbol_cxx_qualifier_prefix(source_symbol.get())) {
+                set_symbol_cxx_qualifier_prefix(
+                    symbol,
+                    std::string(*qualifier_prefix));
+            }
         }
         if (QualType owner_type = get_func_decl_owner_record_type(source_decl)) {
             set_symbol_owner_record_type(symbol, owner_type);
+        } else if (source_symbol) {
+            if (QualType owner_type =
+                    get_symbol_owner_record_type(source_symbol.get())) {
+                set_symbol_owner_record_type(symbol, owner_type);
+            }
         }
     }
 

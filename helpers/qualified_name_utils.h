@@ -30,6 +30,9 @@ std::string format_cpp_qualified_name(
 std::optional<std::string> namespace_prefix_from_scope(
     const std::shared_ptr<Scope>& scope);
 
+std::optional<std::string> namespace_prefix_from_effective_decl_scope(
+    const std::shared_ptr<Scope>& scope);
+
 void ensure_namespace_qualifier_prefix_for_scope(
     const std::shared_ptr<Scope>& scope,
     std::string& qualifier_prefix);

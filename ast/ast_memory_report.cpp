@@ -492,6 +492,21 @@ private:
                     add_ast_string(imported.name);
                     visit_decl(imported.decl);
                 }
+                for (const auto& target : node->replay_targets) {
+                    add_ast_string(target.name);
+                    for (const auto& imported : target.ordinary_symbols) {
+                        add_ast_string(imported.name);
+                        visit_symbol(imported.symbol);
+                    }
+                    for (const auto& imported : target.template_decls) {
+                        add_ast_string(imported.name);
+                        visit_decl(imported.decl);
+                    }
+                    for (const auto& imported : target.tag_decls) {
+                        add_ast_string(imported.name);
+                        visit_decl(imported.decl);
+                    }
+                }
                 return;
             }
             case DeclKind::TypedefDecl: {

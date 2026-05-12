@@ -197,7 +197,8 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     if (is_cxx_mode_active()) {
         auto current_scope = collect_->collect_current_scope();
         auto qualifier_prefix =
-            qualified_name_utils::namespace_prefix_from_scope(current_scope);
+            qualified_name_utils::namespace_prefix_from_effective_decl_scope(
+                current_scope);
         if (qualifier_prefix.has_value()) {
             set_func_decl_cxx_qualifier_prefix(
                 fin_funcdecl.get(), std::move(*qualifier_prefix));

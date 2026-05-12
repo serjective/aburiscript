@@ -189,6 +189,19 @@ std::optional<std::string> namespace_prefix_from_scope(
     return prefix;
 }
 
+std::optional<std::string> namespace_prefix_from_effective_decl_scope(
+    const std::shared_ptr<Scope>& scope) {
+    auto effective_scope = scope;
+    while (effective_scope &&
+           scope_flags_contains(
+               effective_scope->flags,
+               ScopeFlags::TemplateParameterScope) &&
+           effective_scope->parent) {
+        effective_scope = effective_scope->parent;
+    }
+    return namespace_prefix_from_scope(effective_scope);
+}
+
 void ensure_namespace_qualifier_prefix_for_scope(
     const std::shared_ptr<Scope>& scope,
     std::string& qualifier_prefix) {
