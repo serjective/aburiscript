@@ -477,6 +477,10 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
                 mangled = mangleCIdentifier(sym->uid);
             }
         }
+        if (sym->kind == SymbolKind::FUNCTION &&
+            sym->type.as_shared<FunctionType>()) {
+            mark_function_symbol_odr_used(sym);
+        }
         if (!named_values.contains(mangled)) {
             error("get_lvalue(): variable not allocated", expr->location);
             return {};

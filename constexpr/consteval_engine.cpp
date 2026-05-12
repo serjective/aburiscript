@@ -3644,6 +3644,39 @@ ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size
     return ConstEvalResult::constant(casted_call_value.value());
 }
 
+const CppConstructorDecl* find_consteval_constructor_definition(
+    const CppConstructExpr* construct) {
+    if (!construct || !construct->ctor_sym) {
+        return nullptr;
+    }
+
+    const CppConstructorDecl* direct_decl =
+        dyn_cast<CppConstructorDecl>(construct->ctor_sym->function_definition);
+    if (direct_decl && direct_decl->body) {
+        return direct_decl;
+    }
+
+    QualType owner_type = get_symbol_owner_record_type(construct->ctor_sym.get());
+    if (!owner_type) {
+        owner_type = construct->ctype;
+    }
+    auto owner_object = desugar_type(owner_type).as_shared<ObjectType>();
+    auto* owner_decl = owner_object
+        ? dyn_cast<ObjectDecl>(owner_object->get_decl())
+        : nullptr;
+    const RecordSemanticState* state =
+        owner_decl ? record_semantics_cache_lookup(owner_decl) : nullptr;
+    if (state) {
+        for (const auto& ctor : state->constructors) {
+            if (ctor.symbol && ctor.symbol.get() == construct->ctor_sym.get()) {
+                return ctor.decl ? ctor.decl : direct_decl;
+            }
+        }
+    }
+
+    return direct_decl;
+}
+
 ConstEvalResult eval_cpp_construct_expr(CppConstructExpr* construct,
                                         ConstEvalMode mode,
                                         size_t depth) {
@@ -3667,18 +3700,31 @@ ConstEvalResult eval_cpp_construct_expr(CppConstructExpr* construct,
             construct->location);
     }
 
-    auto* ctor_decl =
-        dyn_cast<CppConstructorDecl>(construct->ctor_sym->function_definition);
-    if (!ctor_decl || !ctor_decl->body) {
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "constexpr interpreter cannot evaluate constructor without a visible definition",
-            construct->location);
-    }
-    if (is_cpp_core_constant_expression_mode(mode) && !ctor_decl->is_constexpr) {
+    auto* ctor_decl = find_consteval_constructor_definition(construct);
+    bool constructor_is_constexpr =
+        (ctor_decl && ctor_decl->is_constexpr) ||
+        construct->ctor_sym->is_constexpr ||
+        construct->ctor_sym->is_consteval;
+    if (is_cpp_core_constant_expression_mode(mode) &&
+        !constructor_is_constexpr) {
         return make_not_evaluated(
             ConstEvalDiagCode::UnsupportedExpression,
             "call to non-constexpr constructor is not a constant expression",
+            construct->location);
+    }
+    if (!ctor_decl || !ctor_decl->body) {
+        if (((ctor_decl && ctor_decl->is_defaulted) ||
+             construct->ctor_sym->is_defaulted) &&
+            construct->args.empty() &&
+            constructor_is_constexpr) {
+            auto default_object = default_const_value_for_type(construct->ctype);
+            if (default_object.has_value()) {
+                return ConstEvalResult::constant(*default_object);
+            }
+        }
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter cannot evaluate constructor without a visible definition",
             construct->location);
     }
 

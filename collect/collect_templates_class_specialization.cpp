@@ -38,6 +38,17 @@ std::optional<std::string> namespace_prefix_from_member_qualifier(
     return qualifier_prefix->substr(0, pos);
 }
 
+std::optional<std::string> namespace_prefix_for_specialized_member(
+    const std::string* decl_qualifier_prefix,
+    const Symbol* pattern_symbol) {
+    if (auto namespace_prefix =
+            namespace_prefix_from_member_qualifier(decl_qualifier_prefix)) {
+        return namespace_prefix;
+    }
+    return namespace_prefix_from_member_qualifier(
+        pattern_symbol ? get_symbol_cxx_qualifier_prefix(pattern_symbol) : nullptr);
+}
+
 struct ClassTemplatePartialSpecializationMatch {
     const ClassTemplatePartialSpecializationDecl* partial_specialization = nullptr;
     TemplateArgumentBindings bindings;
@@ -1926,24 +1937,27 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         }
 
         auto pattern_symbol_it = pattern_static_member_symbols.find(static_member);
+        const std::shared_ptr<Symbol> pattern_symbol =
+            pattern_symbol_it != pattern_static_member_symbols.end()
+                ? pattern_symbol_it->second
+                : nullptr;
         std::shared_ptr<Symbol> cloned_symbol = cloned_decl->sym;
-        if (!cloned_symbol &&
-            pattern_symbol_it != pattern_static_member_symbols.end() &&
-            pattern_symbol_it->second) {
+        if (!cloned_symbol && pattern_symbol) {
             cloned_symbol = clone_symbol_shallow_for_specialization(
-                pattern_symbol_it->second,
+                pattern_symbol,
                 desugar_type(cloned_decl->type));
             clone_pass.context().symbol_remap.emplace(
-                pattern_symbol_it->second.get(),
+                pattern_symbol.get(),
                 cloned_symbol);
             collect.collect_add_global_symbol(cloned_symbol);
             cloned_decl->sym = cloned_symbol;
         }
 
-        auto namespace_prefix = namespace_prefix_from_member_qualifier(
+        auto namespace_prefix = namespace_prefix_for_specialized_member(
             cloned_symbol
                 ? get_symbol_cxx_qualifier_prefix(cloned_symbol.get())
-                : nullptr);
+                : nullptr,
+            pattern_symbol.get());
         if (namespace_prefix.has_value() && cloned_symbol) {
             set_symbol_cxx_qualifier_prefix(
                 cloned_symbol.get(),
@@ -2631,8 +2645,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_decl->set_asm_label(*method_decl->asm_label);
         }
 
-        auto namespace_prefix = namespace_prefix_from_member_qualifier(
-            get_func_decl_cxx_qualifier_prefix(method_decl));
+        auto pattern_symbol_it = pattern_method_symbols.find(method_decl);
+        const std::shared_ptr<Symbol> pattern_symbol =
+            pattern_symbol_it != pattern_method_symbols.end()
+                ? pattern_symbol_it->second
+                : nullptr;
+        auto namespace_prefix = namespace_prefix_for_specialized_member(
+            get_func_decl_cxx_qualifier_prefix(method_decl),
+            pattern_symbol.get());
         if (namespace_prefix.has_value()) {
             set_func_decl_cxx_qualifier_prefix(
                 cloned_decl.get(),
@@ -2660,11 +2680,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             member_info->is_explicit = cloned_decl->is_explicit_conversion;
         }
 
-        auto pattern_symbol_it = pattern_method_symbols.find(method_decl);
         auto cloned_symbol = clone_member_symbol(
-            pattern_symbol_it != pattern_method_symbols.end()
-                ? pattern_symbol_it->second
-                : nullptr,
+            pattern_symbol,
             QualType(canonical_type),
             namespace_prefix ? &*namespace_prefix : nullptr,
             true);
@@ -2746,8 +2763,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_decl->set_asm_label(*ctor_decl->asm_label);
         }
 
-        auto namespace_prefix = namespace_prefix_from_member_qualifier(
-            get_func_decl_cxx_qualifier_prefix(ctor_decl));
+        auto pattern_symbol_it = pattern_constructor_symbols.find(ctor_decl);
+        const std::shared_ptr<Symbol> pattern_symbol =
+            pattern_symbol_it != pattern_constructor_symbols.end()
+                ? pattern_symbol_it->second
+                : nullptr;
+        auto namespace_prefix = namespace_prefix_for_specialized_member(
+            get_func_decl_cxx_qualifier_prefix(ctor_decl),
+            pattern_symbol.get());
         if (namespace_prefix.has_value()) {
             set_func_decl_cxx_qualifier_prefix(
                 cloned_decl.get(),
@@ -2763,11 +2786,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             member_info->is_explicit = cloned_decl->is_explicit;
         }
 
-        auto pattern_symbol_it = pattern_constructor_symbols.find(ctor_decl);
         auto cloned_symbol = clone_member_symbol(
-            pattern_symbol_it != pattern_constructor_symbols.end()
-                ? pattern_symbol_it->second
-                : nullptr,
+            pattern_symbol,
             QualType(canonical_type),
             namespace_prefix ? &*namespace_prefix : nullptr,
             true);
@@ -2835,8 +2855,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_decl->set_asm_label(*dtor_decl->asm_label);
         }
 
-        auto namespace_prefix = namespace_prefix_from_member_qualifier(
-            get_func_decl_cxx_qualifier_prefix(dtor_decl));
+        auto pattern_symbol_it = pattern_destructor_symbols.find(dtor_decl);
+        const std::shared_ptr<Symbol> pattern_symbol =
+            pattern_symbol_it != pattern_destructor_symbols.end()
+                ? pattern_symbol_it->second
+                : nullptr;
+        auto namespace_prefix = namespace_prefix_for_specialized_member(
+            get_func_decl_cxx_qualifier_prefix(dtor_decl),
+            pattern_symbol.get());
         if (namespace_prefix.has_value()) {
             set_func_decl_cxx_qualifier_prefix(
                 cloned_decl.get(),
@@ -2848,11 +2874,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             dtor_decl->node_id,
             cloned_decl->node_id);
 
-        auto pattern_symbol_it = pattern_destructor_symbols.find(dtor_decl);
         auto cloned_symbol = clone_member_symbol(
-            pattern_symbol_it != pattern_destructor_symbols.end()
-                ? pattern_symbol_it->second
-                : nullptr,
+            pattern_symbol,
             QualType(canonical_type),
             namespace_prefix ? &*namespace_prefix : nullptr,
             true);

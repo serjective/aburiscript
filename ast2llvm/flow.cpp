@@ -1688,7 +1688,7 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
     // still need a callable body when we are not running a dedicated inliner.
     // Give them internal linkage so a same-TU call can resolve locally without
     // exporting a global symbol from the object file.
-    
+
     std::string llvm_name = get_function_llvm_name(*node);
     auto mainFunc = module->getFunction(llvm_name);
     // If existing LLVM function has a different param count and the new declaration
@@ -2110,10 +2110,14 @@ void ASTToLLVM::emit_deferred_inline_definitions() {
     bool changed = true;
     while (changed) {
         changed = false;
-        for (auto* node : deferred_inline_defs) {
+        for (size_t index = 0; index < deferred_inline_defs.size(); ++index) {
+            auto* node = deferred_inline_defs[index];
+            if (!node) {
+                continue;
+            }
             const bool is_lambda_invoker =
                 ast_ctx && ast_ctx->get_cpp_lambda_invoker_info(node->node_id);
-            if (!node || (!node->body && !is_lambda_invoker)) {
+            if (!node->body && !is_lambda_invoker) {
                 continue;
             }
             std::string llvm_name = get_function_llvm_name(*node);

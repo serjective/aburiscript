@@ -1941,6 +1941,17 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             collect_current_scope(),
             qualifier_prefix);
     };
+    auto append_decl_attrs_to_symbol =
+        [&](const Decl* decl, const std::shared_ptr<Symbol>& sym) {
+        if (!ast_ctx_ || !decl || !sym) {
+            return;
+        }
+        const auto& attrs = ast_ctx_->get_attrs(decl->node_id).attrs;
+        sym->sym_attrs.attrs.insert(
+            sym->sym_attrs.attrs.end(),
+            attrs.begin(),
+            attrs.end());
+    };
     std::function<QualType(QualType)> realize_nested_record_member_type =
         [&](QualType type) -> QualType {
         if (!type) {
@@ -2302,6 +2313,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             set_symbol_owner_record_type(
                 static_member_sym.get(),
                 QualType(ctx.record_type));
+            append_decl_attrs_to_symbol(static_data_decl, static_member_sym);
 
             if (ast_ctx_) {
                 CppMemberDeclInfo member_info;
@@ -2457,6 +2469,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 if (is_definition) {
                     ctor_sym->function_definition = ctor_decl;
                 }
+                append_decl_attrs_to_symbol(ctor_decl, ctor_sym);
             }
 
             if (ast_ctx_) {
@@ -2561,6 +2574,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 if (is_definition) {
                     dtor_sym->function_definition = dtor_decl;
                 }
+                append_decl_attrs_to_symbol(dtor_decl, dtor_sym);
             }
 
             if (ast_ctx_) {
@@ -2721,6 +2735,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             if (is_definition) {
                 method_sym->function_definition = method_decl;
             }
+            append_decl_attrs_to_symbol(method_decl, method_sym);
         }
 
         if (ast_ctx_) {

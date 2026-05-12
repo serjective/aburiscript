@@ -786,16 +786,31 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
         } else {
             llvm::Value* val = nullptr;
             if (ctor_init && ctor_init->ctor_sym) {
-                if (varDecl->is_thread_local) {
-                    error("deal_global_variable_declaration(): thread_local dynamic constructor initialization is not supported",
-                          varDecl->location);
-                    return;
+                initVal = emit_constant_initializer(varDecl->init.get());
+                if (initVal) {
+                    initVal = coerce_global_initializer_constant(initVal);
+                    if (!initVal) {
+                        error("deal_global_variable_declaration(): failed to coerce constant constructor initializer to variable type",
+                              decl->location);
+                        return;
+                    }
+                } else {
+                    if (varDecl->is_constexpr) {
+                        error("deal_global_variable_declaration(): constexpr constructor initializer must be a constant expression",
+                              varDecl->location);
+                        return;
+                    }
+                    if (varDecl->is_thread_local) {
+                        error("deal_global_variable_declaration(): thread_local dynamic constructor initialization is not supported",
+                              varDecl->location);
+                        return;
+                    }
+                    gVar->setConstant(false);
+                    initVal = varType->isArrayTy()
+                        ? static_cast<llvm::Constant*>(llvm::ConstantAggregateZero::get(varType))
+                        : static_cast<llvm::Constant*>(llvm::Constant::getNullValue(varType));
+                    needs_dynamic_ctor_thunk = true;
                 }
-                gVar->setConstant(false);
-                initVal = varType->isArrayTy()
-                    ? static_cast<llvm::Constant*>(llvm::ConstantAggregateZero::get(varType))
-                    : static_cast<llvm::Constant*>(llvm::Constant::getNullValue(varType));
-                needs_dynamic_ctor_thunk = true;
             } else if (canonical_type_kind(varDecl->type, ast_ctx.get()) ==
                 TypeKind::Reference) {
                 auto ref_type =
@@ -1067,6 +1082,7 @@ bool ASTToLLVM::emit_cpp_construct_call(const std::shared_ptr<Symbol>& ctor_sym,
         module->getFunction(complete_ctor_name) != nullptr) {
         ctor_name = complete_ctor_name;
     }
+    mark_function_symbol_odr_used(ctor_sym);
     llvm::FunctionCallee ctor_callee =
         module->getOrInsertFunction(ctor_name, llvm_fn_type);
     llvm::Value* ctor_callee_value = ctor_callee.getCallee();
@@ -1251,6 +1267,7 @@ bool ASTToLLVM::emit_cpp_destruct_call(const std::shared_ptr<Symbol>& dtor_sym,
         module->getFunction(complete_dtor_name) != nullptr) {
         dtor_name = complete_dtor_name;
     }
+    mark_function_symbol_odr_used(dtor_sym);
     llvm::FunctionCallee dtor_callee =
         module->getOrInsertFunction(dtor_name, llvm_fn_type);
     llvm::Value* dtor_callee_value = dtor_callee.getCallee();

@@ -155,6 +155,11 @@ llvm::Value* ASTToLLVM::convert_function_call(FuncCall *expr) {
         member_ptr_callee) {
         return emit_member_pointer_dispatch(expr, member_ptr_callee);
     }
+    if (auto* callee_ref = dyn_cast<VarRef>(raw_member_callee);
+        callee_ref && callee_ref->symref &&
+        callee_ref->symref->kind == SymbolKind::FUNCTION) {
+        mark_function_symbol_odr_used(callee_ref->symref);
+    }
 
     // ---- Regular (non-member-pointer) function call ----
 

@@ -884,6 +884,17 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
         qualified_name_utils::ensure_namespace_qualifier_prefix_for_scope(
             scope, qualifier_prefix);
     };
+    auto append_decl_attrs_to_symbol =
+        [&](const Decl* decl, const std::shared_ptr<Symbol>& sym) {
+        if (!ast_ctx || !decl || !sym) {
+            return;
+        }
+        const auto& attrs = ast_ctx->get_attrs(decl->node_id).attrs;
+        sym->sym_attrs.attrs.insert(
+            sym->sym_attrs.attrs.end(),
+            attrs.begin(),
+            attrs.end());
+    };
 
     RecordSemanticState semantic_state;
     semantic_state.is_incomplete = false;
@@ -1068,6 +1079,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             }
             set_symbol_owner_record_type(
                 static_member_sym.get(), QualType(record_type));
+            append_decl_attrs_to_symbol(static_member_decl, static_member_sym);
             RecordSemanticState::StaticDataMember static_member;
             static_member.name = static_member_decl->name;
             static_member.type = static_member_decl->type;
@@ -1154,6 +1166,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                     ctor_sym->function_definition =
                         const_cast<CppConstructorDecl*>(ctor_decl);
                 }
+                append_decl_attrs_to_symbol(ctor_decl, ctor_sym);
             }
 
             RecordSemanticState::Constructor ctor;
@@ -1211,6 +1224,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                     dtor_sym->function_definition =
                         const_cast<CppDestructorDecl*>(dtor_decl);
                 }
+                append_decl_attrs_to_symbol(dtor_decl, dtor_sym);
             }
 
             RecordSemanticState::Destructor dtor;
@@ -1317,6 +1331,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                     method_sym->function_definition =
                         const_cast<CppMethodDecl*>(method_decl);
                 }
+                append_decl_attrs_to_symbol(method_decl, method_sym);
             }
 
             RecordSemanticState::Method method;

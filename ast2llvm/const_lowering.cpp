@@ -179,12 +179,12 @@ llvm::Constant* lower_struct_constant(const ConstValue& value, llvm::Type* targe
         value.kind != ConstValueKind::Object ||
         !value.object_value ||
         value.object_value->kind != ConstObjectValueKind::Record ||
-        value.object_value->elements.size() != struct_type->getNumElements()) {
+        value.object_value->elements.size() > struct_type->getNumElements()) {
         return nullptr;
     }
 
     std::vector<llvm::Constant*> elements;
-    elements.reserve(value.object_value->elements.size());
+    elements.reserve(struct_type->getNumElements());
     for (size_t index = 0; index < value.object_value->elements.size(); ++index) {
         const auto& element = value.object_value->elements[index];
         llvm::Type* field_type = struct_type->getElementType(static_cast<unsigned>(index));
@@ -196,6 +196,13 @@ llvm::Constant* lower_struct_constant(const ConstValue& value, llvm::Type* targe
             return nullptr;
         }
         elements.push_back(lowered);
+    }
+    for (size_t index = value.object_value->elements.size();
+         index < struct_type->getNumElements();
+         ++index) {
+        elements.push_back(
+            llvm::Constant::getNullValue(
+                struct_type->getElementType(static_cast<unsigned>(index))));
     }
     return llvm::ConstantStruct::get(struct_type, elements);
 }

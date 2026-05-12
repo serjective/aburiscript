@@ -218,6 +218,10 @@ public:
     void apply_global_visibility(llvm::GlobalValue& global,
                                  const std::string& visibility) const;
     void configure_odr_function_linkage(llvm::Function* function) const;
+    FuncDecl* find_function_symbol_definition(
+        const std::shared_ptr<Symbol>& sym) const;
+    void mark_function_symbol_odr_used(
+        const std::shared_ptr<Symbol>& sym);
     std::string get_variable_linkage_identity(const VariableDecl& decl) const;
     std::string get_variable_llvm_name(const VariableDecl& decl) const;
     std::string get_variable_llvm_name(const std::shared_ptr<Symbol>& sym,

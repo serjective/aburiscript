@@ -954,6 +954,88 @@ void ASTToLLVM::configure_odr_function_linkage(
     function->setComdat(module->getOrInsertComdat(function->getName()));
 }
 
+FuncDecl* ASTToLLVM::find_function_symbol_definition(
+    const std::shared_ptr<Symbol>& sym) const {
+    if (!sym || sym->kind != SymbolKind::FUNCTION) {
+        return nullptr;
+    }
+
+    FuncDecl* direct = const_cast<FuncDecl*>(sym->function_definition);
+    auto owner_type =
+        desugar_type(get_symbol_owner_record_type(sym.get()), ast_ctx.get())
+            .as_shared<ObjectType>();
+    auto* owner_decl =
+        owner_type ? dyn_cast<ObjectDecl>(owner_type->get_decl()) : nullptr;
+    const RecordSemanticState* state = lookup_cpp_record_state(owner_decl);
+    if (!state) {
+        return direct;
+    }
+
+    auto select_decl = [&](const auto& entries) -> FuncDecl* {
+        for (const auto& entry : entries) {
+            if (entry.symbol.get() == sym.get() && entry.decl) {
+                return const_cast<FuncDecl*>(
+                    static_cast<const FuncDecl*>(entry.decl));
+            }
+        }
+        return nullptr;
+    };
+
+    if (auto* method = select_decl(state->methods)) {
+        return method;
+    }
+    if (auto* ctor = select_decl(state->constructors)) {
+        return ctor;
+    }
+    if (auto* dtor = select_decl(state->destructors)) {
+        return dtor;
+    }
+    for (const auto& friend_function : state->friend_functions) {
+        if (friend_function.symbol.get() == sym.get() &&
+            friend_function.function_decl) {
+            return const_cast<FuncDecl*>(friend_function.function_decl);
+        }
+    }
+
+    return direct;
+}
+
+void ASTToLLVM::mark_function_symbol_odr_used(
+    const std::shared_ptr<Symbol>& sym) {
+    if (!sym || sym->kind != SymbolKind::FUNCTION) {
+        return;
+    }
+
+    auto* decl = find_function_symbol_definition(sym);
+    if (!decl) {
+        return;
+    }
+    if (sym->function_definition != decl) {
+        sym->function_definition = decl;
+    }
+    const bool is_lambda_invoker =
+        ast_ctx && ast_ctx->get_cpp_lambda_invoker_info(decl->node_id);
+    if (!decl->body && !is_lambda_invoker) {
+        return;
+    }
+
+    const bool is_inline_equivalent =
+        decl->is_inline ||
+        (lang_opts.is_cxx_mode() &&
+         (decl->is_constexpr || decl->is_consteval));
+    if (!is_inline_equivalent && !is_lambda_invoker) {
+        return;
+    }
+
+    if (decl->storage_class == StorageClass::EXTERN && !is_lambda_invoker) {
+        return;
+    }
+
+    if (deferred_inline_set.insert(decl).second) {
+        deferred_inline_defs.push_back(decl);
+    }
+}
+
 llvm::Function* ASTToLLVM::get_or_create_function_symbol(
     const std::shared_ptr<Symbol>& sym,
     const std::string& fallback_spelling) {
@@ -966,6 +1048,7 @@ llvm::Function* ASTToLLVM::get_or_create_function_symbol(
         if (!sym->uid.empty()) {
             named_values[mangleCIdentifier(sym->uid)] = fn;
         }
+        mark_function_symbol_odr_used(sym);
         return fn;
     }
 
@@ -998,6 +1081,7 @@ llvm::Function* ASTToLLVM::get_or_create_function_symbol(
     if (!sym->uid.empty()) {
         named_values[mangleCIdentifier(sym->uid)] = fn;
     }
+    mark_function_symbol_odr_used(sym);
     return fn;
 }
 
