@@ -57,7 +57,7 @@ enum class TypeKind {
     CppTypeInfo,
     Typedef, Vector, Complex, BlockPointer, TemplateTypeParm,
     TemplateSpecialization, DependentName, Other, Placeholder, Auto,
-    TypeofExpr, DecltypeExpr, BuiltinTypeTransform
+    TypeofExpr, DecltypeExpr, BuiltinTypeTransform, BuiltinTypePackElement
 };
 std::string to_string_type_kind(TypeKind tkind);
 
@@ -368,6 +368,40 @@ struct TemplateArgument {
 
     bool equals(const TemplateArgument& other) const;
     std::string to_string() const;
+};
+
+// Represents Clang's template-style builtin type selection
+// __type_pack_element<I, Ts...>.  The first argument is the index expression;
+// remaining arguments are type arguments and may include pack expansions until
+// template substitution materializes them.
+struct BuiltinTypePackElementType : CType {
+    std::vector<TemplateArgument> arguments;
+
+    explicit BuiltinTypePackElementType(std::vector<TemplateArgument> arguments)
+        : CType(TypeKind::BuiltinTypePackElement),
+          arguments(std::move(arguments)) {}
+
+    bool isIncomplete() const override;
+    std::string to_string() const override;
+    bool equals(const CType& other) override {
+        if (other.kind != TypeKind::BuiltinTypePackElement) {
+            return false;
+        }
+        const auto& rhs =
+            static_cast<const BuiltinTypePackElementType&>(other);
+        if (arguments.size() != rhs.arguments.size()) {
+            return false;
+        }
+        for (size_t idx = 0; idx < arguments.size(); ++idx) {
+            if (!arguments[idx].equals(rhs.arguments[idx])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    static bool classof(const CType* t) {
+        return t->kind == TypeKind::BuiltinTypePackElement;
+    }
 };
 
 enum class TemplateArgumentBindingKind : uint8_t {
@@ -1808,12 +1842,18 @@ std::shared_ptr<CType> make_reference_type(
 bool lookup_builtin_type_transform_kind(
     std::string_view name,
     BuiltinTypeTransformKind& out);
+bool is_builtin_type_pack_element_name(std::string_view name);
 QualType apply_builtin_type_transform(
     BuiltinTypeTransformKind kind,
     QualType operand_type);
 QualType apply_builtin_type_transform(
     BuiltinTypeTransformKind kind,
     QualType operand_type,
+    const ASTContext* ast_ctx);
+QualType apply_builtin_type_pack_element(
+    const std::vector<TemplateArgument>& arguments);
+QualType apply_builtin_type_pack_element(
+    const std::vector<TemplateArgument>& arguments,
     const ASTContext* ast_ctx);
 
 bool type_contains_vla(const std::shared_ptr<CType>& type);

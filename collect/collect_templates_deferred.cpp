@@ -1097,6 +1097,49 @@ QualType Collect::resolve_deferred_semantic_type_impl(
                 type.get_qualifiers() | transformed.get_qualifiers()));
     }
 
+    if (auto* pack_element_type =
+            dyn_cast<BuiltinTypePackElementType>(raw.get())) {
+        for (auto& argument : pack_element_type->arguments) {
+            if (argument.kind == TemplateArgumentKind::Type) {
+                argument.type =
+                    resolve_deferred_semantic_type_impl(argument.type, loc, mode);
+                if (!argument.type) {
+                    if (mode == DeferredTypeResolutionMode::Finalize) {
+                        report_error(
+                            "cannot determine type argument of __type_pack_element",
+                            loc);
+                    }
+                    return QualType();
+                }
+            } else if (argument.kind == TemplateArgumentKind::Value) {
+                argument.value_type = resolve_deferred_semantic_type_impl(
+                    argument.value_type,
+                    loc,
+                    mode);
+            }
+        }
+
+        if (template_arguments_contain_dependency(
+                pack_element_type->arguments,
+                ast_ctx_.get())) {
+            return type;
+        }
+
+        auto selected_type = apply_builtin_type_pack_element(
+            pack_element_type->arguments,
+            ast_ctx_.get());
+        if (!selected_type) {
+            if (mode == DeferredTypeResolutionMode::Finalize) {
+                report_error("cannot resolve __type_pack_element", loc);
+            }
+            return QualType();
+        }
+        return QualType(
+            selected_type.get_shared(),
+            static_cast<uint8_t>(
+                type.get_qualifiers() | selected_type.get_qualifiers()));
+    }
+
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
         return resolve_deferred_template_specialization_type(
             *specialization,

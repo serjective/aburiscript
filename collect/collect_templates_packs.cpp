@@ -229,6 +229,18 @@ bool collect_pack_expansion_shape_in_type(
             parameters,
             shape_out);
     }
+    if (auto pack_element =
+            dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
+        for (const auto& argument : pack_element->arguments) {
+            if (!collect_pack_expansion_shape_in_template_argument(
+                    argument,
+                    parameters,
+                    shape_out)) {
+                return false;
+            }
+        }
+        return true;
+    }
     if (auto mem_ptr = dyn_cast_shared<MemberPointerType>(raw)) {
         return collect_pack_expansion_shape_in_type(
                    mem_ptr->class_type, parameters, shape_out) &&

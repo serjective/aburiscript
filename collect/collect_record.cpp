@@ -2069,6 +2069,36 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 quals);
         }
 
+        if (auto pack_element =
+                dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
+            bool changed = false;
+            std::vector<TemplateArgument> rewritten_arguments;
+            rewritten_arguments.reserve(pack_element->arguments.size());
+            for (const auto& argument : pack_element->arguments) {
+                TemplateArgument rewritten_argument = argument;
+                if (argument.kind == TemplateArgumentKind::Type) {
+                    rewritten_argument.type =
+                        realize_nested_record_member_type(argument.type);
+                    changed = changed ||
+                        !rewritten_argument.type.equals_qualified(argument.type);
+                } else if (argument.kind == TemplateArgumentKind::Value) {
+                    rewritten_argument.value_type =
+                        realize_nested_record_member_type(argument.value_type);
+                    changed = changed ||
+                        !rewritten_argument.value_type.equals_qualified(
+                            argument.value_type);
+                }
+                rewritten_arguments.push_back(std::move(rewritten_argument));
+            }
+            if (!changed) {
+                return type;
+            }
+            return QualType(
+                std::make_shared<BuiltinTypePackElementType>(
+                    std::move(rewritten_arguments)),
+                quals);
+        }
+
         return type;
     };
     RecordMemberAccess current_access = encode_cpp_access(ctx.record->default_access);

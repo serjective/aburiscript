@@ -720,6 +720,25 @@ QualType remap_template_parameter_types_in_type(
             quals);
     }
 
+    if (auto pack_element =
+            dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
+        std::vector<TemplateArgument> remapped_arguments;
+        remapped_arguments.reserve(pack_element->arguments.size());
+        bool changed = false;
+        for (const auto& argument : pack_element->arguments) {
+            auto remapped_argument = remap_template_argument(argument);
+            changed |= !remapped_argument.equals(argument);
+            remapped_arguments.push_back(std::move(remapped_argument));
+        }
+        if (!changed) {
+            return type;
+        }
+        return QualType(
+            std::make_shared<BuiltinTypePackElementType>(
+                std::move(remapped_arguments)),
+            quals);
+    }
+
     if (auto dependent_name = dyn_cast_shared<DependentNameType>(raw)) {
         auto remapped_qualifier = remap_template_parameter_types_in_type(
             dependent_name->qualifier_type,

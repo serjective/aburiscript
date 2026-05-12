@@ -124,6 +124,41 @@ QualType replace_record_decl_in_type(QualType type,
                 rewritten),
             quals);
     }
+    if (auto pack_element =
+            dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
+        bool changed = false;
+        std::vector<TemplateArgument> rewritten_arguments;
+        rewritten_arguments.reserve(pack_element->arguments.size());
+        for (const auto& argument : pack_element->arguments) {
+            TemplateArgument rewritten_argument = argument;
+            if (argument.kind == TemplateArgumentKind::Type) {
+                rewritten_argument.type = replace_record_decl_in_type(
+                    argument.type,
+                    pattern_decl,
+                    replacement_type,
+                    ast_ctx);
+                changed = changed ||
+                    !rewritten_argument.type.equals_qualified(argument.type);
+            } else if (argument.kind == TemplateArgumentKind::Value) {
+                rewritten_argument.value_type = replace_record_decl_in_type(
+                    argument.value_type,
+                    pattern_decl,
+                    replacement_type,
+                    ast_ctx);
+                changed = changed ||
+                    !rewritten_argument.value_type.equals_qualified(
+                        argument.value_type);
+            }
+            rewritten_arguments.push_back(std::move(rewritten_argument));
+        }
+        if (!changed) {
+            return type;
+        }
+        return QualType(
+            std::make_shared<BuiltinTypePackElementType>(
+                std::move(rewritten_arguments)),
+            quals);
+    }
     if (auto mem_ptr = dyn_cast_shared<MemberPointerType>(raw)) {
         auto rewritten_class = replace_record_decl_in_type(
             mem_ptr->class_type,

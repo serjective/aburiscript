@@ -561,6 +561,21 @@ void append_type_semantic_fingerprint(std::string& out, QualType type) {
             out += ")";
             return;
         }
+        case TypeKind::BuiltinTypePackElement: {
+            auto pack_element =
+                static_cast<const BuiltinTypePackElementType*>(raw.get());
+            out += "BTPE<";
+            for (size_t idx = 0; idx < pack_element->arguments.size(); ++idx) {
+                if (idx > 0) {
+                    out += ",";
+                }
+                append_template_argument_semantic_fingerprint(
+                    out,
+                    pack_element->arguments[idx]);
+            }
+            out += ">";
+            return;
+        }
         case TypeKind::Typedef:
             out += "Typedef(";
             append_type_semantic_fingerprint(

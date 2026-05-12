@@ -174,6 +174,35 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                 }
                 return QualType(rebuilt, quals);
             }
+            if (auto pack_element =
+                    dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
+                bool changed = false;
+                std::vector<TemplateArgument> rewritten_args;
+                rewritten_args.reserve(pack_element->arguments.size());
+                for (const auto& argument : pack_element->arguments) {
+                    TemplateArgument rewritten_argument = argument;
+                    if (argument.kind == TemplateArgumentKind::Type) {
+                        rewritten_argument.type = self(self, argument.type);
+                        changed = changed ||
+                            !rewritten_argument.type.equals_qualified(
+                                argument.type);
+                    } else if (argument.kind == TemplateArgumentKind::Value) {
+                        rewritten_argument.value_type =
+                            self(self, argument.value_type);
+                        changed = changed ||
+                            !rewritten_argument.value_type.equals_qualified(
+                                argument.value_type);
+                    }
+                    rewritten_args.push_back(std::move(rewritten_argument));
+                }
+                if (!changed) {
+                    return current_type;
+                }
+                return QualType(
+                    std::make_shared<BuiltinTypePackElementType>(
+                        std::move(rewritten_args)),
+                    quals);
+            }
             return current_type;
         };
 

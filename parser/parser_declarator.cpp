@@ -483,6 +483,30 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                         continue;
                     }
                     if (t.type == TokenType::IDENTIFIER && !typedef_resolved_type) {
+                        if (pars->is_cxx_mode_active() &&
+                            is_builtin_type_pack_element_name(t.value)) {
+                            mgnt->advance();
+                            auto arguments = pars->parse_cpp_template_argument_list();
+                            if (arguments.empty() ||
+                                arguments.front().kind !=
+                                    TemplateArgumentKind::Value) {
+                                error_custloc(
+                                    "__type_pack_element requires an index argument",
+                                    t.loc);
+                            }
+                            for (size_t idx = 1; idx < arguments.size(); ++idx) {
+                                if (arguments[idx].kind !=
+                                    TemplateArgumentKind::Type) {
+                                    error_custloc(
+                                        "__type_pack_element arguments after the index must be types",
+                                        t.loc);
+                                }
+                            }
+                            typedef_resolved_type =
+                                std::make_shared<BuiltinTypePackElementType>(
+                                    std::move(arguments));
+                            continue;
+                        }
                         BuiltinTypeTransformKind builtin_transform_kind;
                         if (lookup_builtin_type_transform_kind(
                                 t.value,

@@ -910,6 +910,33 @@ void append_type_substitution_key(std::string& out, QualType qt) {
             out += ")";
             return;
         }
+        case TypeKind::BuiltinTypePackElement: {
+            auto pack_element =
+                static_cast<BuiltinTypePackElementType*>(raw.get());
+            auto resolved =
+                apply_builtin_type_pack_element(pack_element->arguments);
+            if (resolved) {
+                append_type_substitution_key(
+                    out,
+                    QualType(
+                        resolved.get_shared(),
+                        static_cast<uint8_t>(
+                            canonical.get_qualifiers() |
+                            resolved.get_qualifiers())));
+                return;
+            }
+            out += "builtin-type-pack-element:<";
+            for (size_t idx = 0; idx < pack_element->arguments.size(); ++idx) {
+                if (idx > 0) {
+                    out += ",";
+                }
+                append_template_argument_substitution_key(
+                    out,
+                    pack_element->arguments[idx]);
+            }
+            out += ">";
+            return;
+        }
         case TypeKind::Placeholder:
         case TypeKind::Other:
         case TypeKind::Auto:

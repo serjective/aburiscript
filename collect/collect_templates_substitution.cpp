@@ -955,6 +955,43 @@ QualType Collect::substitute_template_type_with_bindings(
             quals);
     }
 
+    if (auto pack_element_type =
+            dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
+        auto substituted_arguments = substitute_template_arguments_with_bindings(
+            pack_element_type->arguments,
+            parameters,
+            argument_bindings,
+            loc,
+            allow_unsubstituted_parameters);
+        if (auto selected_type = apply_builtin_type_pack_element(
+                substituted_arguments,
+                ast_ctx_.get())) {
+            return QualType(
+                selected_type.get_shared(),
+                static_cast<uint8_t>(
+                    selected_type.get_qualifiers() | quals));
+        }
+
+        bool changed = substituted_arguments.size() !=
+            pack_element_type->arguments.size();
+        if (!changed) {
+            for (size_t idx = 0; idx < substituted_arguments.size(); ++idx) {
+                if (!substituted_arguments[idx].equals(
+                        pack_element_type->arguments[idx])) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if (!changed) {
+            return type;
+        }
+        return QualType(
+            std::make_shared<BuiltinTypePackElementType>(
+                std::move(substituted_arguments)),
+            quals);
+    }
+
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
         const Decl* rewritten_primary = specialization->primary_template;
         std::string rewritten_name = specialization->template_name;

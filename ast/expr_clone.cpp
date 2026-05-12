@@ -331,6 +331,29 @@ QualType remap_lambda_template_parameter_types(
             quals);
     }
 
+    if (auto pack_element =
+            dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
+        bool changed = false;
+        std::vector<TemplateArgument> rewritten_args;
+        rewritten_args.reserve(pack_element->arguments.size());
+        for (const auto& arg : pack_element->arguments) {
+            auto rewritten = remap_lambda_template_argument(
+                arg,
+                parameter_rebinds);
+            if (!rewritten.equals(arg)) {
+                changed = true;
+            }
+            rewritten_args.push_back(std::move(rewritten));
+        }
+        if (!changed) {
+            return type;
+        }
+        return QualType(
+            std::make_shared<BuiltinTypePackElementType>(
+                std::move(rewritten_args)),
+            quals);
+    }
+
     // Leaf types that cannot contain template parameter references (Builtin,
     // Object, Enum, Auto, etc.) pass through unchanged.  If a new composite
     // type kind is added that can embed template parameters, it must be

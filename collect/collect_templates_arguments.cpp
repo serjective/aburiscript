@@ -1181,6 +1181,21 @@ void append_type_cache_key(std::string& out, QualType type) {
             out += ")";
             return;
         }
+        case TypeKind::BuiltinTypePackElement: {
+            auto pack_element =
+                static_cast<BuiltinTypePackElementType*>(raw.get());
+            out += "BTPE<";
+            for (size_t idx = 0; idx < pack_element->arguments.size(); ++idx) {
+                if (idx > 0) {
+                    out += ",";
+                }
+                append_template_argument_cache_key(
+                    out,
+                    pack_element->arguments[idx]);
+            }
+            out += ">";
+            return;
+        }
         case TypeKind::Typedef:
         case TypeKind::Other:
         case TypeKind::Placeholder:

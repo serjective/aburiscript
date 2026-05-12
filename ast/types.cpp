@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cassert>
 #include <functional>
+#include <limits>
 #include <sstream>
 #include <utility>
 #include <unordered_map>
@@ -1316,6 +1317,17 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
         if (auto transform = dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
             type = transform->operand_type;
             continue;
+        }
+        if (auto pack_element =
+                dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
+            for (const auto& argument : pack_element->arguments) {
+                if (template_argument_depends_on_template_parameters(
+                        argument,
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
         }
         if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
             if (specialization->is_dependent) {
@@ -3248,6 +3260,7 @@ std::string to_string_type_kind(TypeKind tkind) {
         case TypeKind::TypeofExpr: return "TypeofExpr";
         case TypeKind::DecltypeExpr: return "DecltypeExpr";
         case TypeKind::BuiltinTypeTransform: return "BuiltinTypeTransform";
+        case TypeKind::BuiltinTypePackElement: return "BuiltinTypePackElement";
         default: return "Unknown";
     }
 }
@@ -3305,6 +3318,16 @@ QualType desugar_type(QualType type, const ASTContext* ast_ctx) {
                         dependent_name.get(),
                         ast_ctx)) {
                     peeled = desugar_typedefs(resolved_type.with_qualifiers(quals));
+                    continue;
+                }
+            } else if (auto pack_element =
+                           dyn_cast_shared<BuiltinTypePackElementType>(current)) {
+                if (auto resolved_type = apply_builtin_type_pack_element(
+                        pack_element->arguments,
+                        ast_ctx)) {
+                    peeled = desugar_typedefs(resolved_type.with_qualifiers(
+                        static_cast<uint8_t>(
+                            resolved_type.get_qualifiers() | quals)));
                     continue;
                 }
             }
@@ -3496,6 +3519,14 @@ TypeKind canonical_type_kind(QualType type, const ASTContext* ast_ctx) {
                 current = desugar_typedefs(resolved_type.with_qualifiers(quals));
                 continue;
             }
+        } else if (auto pack_element =
+                       dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
+            if (auto resolved_type = apply_builtin_type_pack_element(
+                    pack_element->arguments,
+                    ast_ctx)) {
+                current = desugar_typedefs(resolved_type.with_qualifiers(quals));
+                continue;
+            }
         }
         return raw->kind;
     }
@@ -3682,6 +3713,43 @@ bool lookup_builtin_type_transform_kind(
     return false;
 }
 
+bool is_builtin_type_pack_element_name(std::string_view name) {
+    return name == "__type_pack_element";
+}
+
+namespace {
+std::optional<size_t> concrete_type_pack_element_index(
+    const TemplateArgument& argument) {
+    if (argument.kind != TemplateArgumentKind::Value ||
+        argument.is_dependent ||
+        argument.expands_parameter_pack) {
+        return std::nullopt;
+    }
+
+    uint64_t index = 0;
+    if (argument.value.kind == ConstValueKind::Boolean) {
+        index = argument.value.bool_value ? 1 : 0;
+    } else if (argument.value.kind == ConstValueKind::Integer) {
+        if (argument.value.int_value.is_unsigned) {
+            index = argument.value.int_value.to_unsigned_u64();
+        } else {
+            int64_t signed_index = argument.value.int_value.to_signed_i64();
+            if (signed_index < 0) {
+                return std::nullopt;
+            }
+            index = static_cast<uint64_t>(signed_index);
+        }
+    } else {
+        return std::nullopt;
+    }
+
+    if (index > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<size_t>(index);
+}
+} // namespace
+
 QualType apply_builtin_type_transform(
     BuiltinTypeTransformKind kind,
     QualType operand_type) {
@@ -3800,6 +3868,35 @@ QualType apply_builtin_type_transform(
     return operand_type;
 }
 
+QualType apply_builtin_type_pack_element(
+    const std::vector<TemplateArgument>& arguments) {
+    return apply_builtin_type_pack_element(
+        arguments,
+        get_active_side_table_ast_context());
+}
+
+QualType apply_builtin_type_pack_element(
+    const std::vector<TemplateArgument>& arguments,
+    const ASTContext*) {
+    if (arguments.size() < 2) {
+        return QualType();
+    }
+
+    auto index = concrete_type_pack_element_index(arguments.front());
+    if (!index.has_value() || *index >= arguments.size() - 1) {
+        return QualType();
+    }
+
+    for (size_t idx = 1; idx < arguments.size(); ++idx) {
+        if (arguments[idx].kind != TemplateArgumentKind::Type ||
+            arguments[idx].expands_parameter_pack) {
+            return QualType();
+        }
+    }
+
+    return arguments[*index + 1].type;
+}
+
 std::string PointerType::to_string() const {
     return pointed_type.to_string() + " *";
 }
@@ -3812,6 +3909,23 @@ std::string ReferenceType::to_string() const {
 std::string BuiltinTypeTransformType::to_string() const {
     return std::string(builtin_type_transform_name(transform_kind)) +
         "(" + operand_type.to_string() + ")";
+}
+
+bool BuiltinTypePackElementType::isIncomplete() const {
+    auto selected_type = apply_builtin_type_pack_element(arguments);
+    return !selected_type || selected_type->isIncomplete();
+}
+
+std::string BuiltinTypePackElementType::to_string() const {
+    std::string out = "__type_pack_element<";
+    for (size_t idx = 0; idx < arguments.size(); ++idx) {
+        if (idx > 0) {
+            out += ", ";
+        }
+        out += arguments[idx].to_string();
+    }
+    out += ">";
+    return out;
 }
 
 std::string ArrayType::to_string() const {
@@ -4042,6 +4156,21 @@ bool type_contains_vla(const std::shared_ptr<CType>& type) {
                 static_cast<BuiltinTypeTransformType*>(raw.get())
                     ->operand_type
                     .get_shared());
+        case TypeKind::BuiltinTypePackElement: {
+            auto* pack_element =
+                static_cast<BuiltinTypePackElementType*>(raw.get());
+            for (const auto& argument : pack_element->arguments) {
+                if (argument.kind == TemplateArgumentKind::Type &&
+                    type_contains_vla(argument.type.get_shared())) {
+                    return true;
+                }
+                if (argument.kind == TemplateArgumentKind::Value &&
+                    type_contains_vla(argument.value_type.get_shared())) {
+                    return true;
+                }
+            }
+            return false;
+        }
         default:
             // VLAs cannot appear in struct fields (C99 6.7.2.1), so no need to recurse
             return false;
