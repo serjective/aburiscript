@@ -11,6 +11,7 @@
 // C++-only parser entrypoints and helpers belong here.
 // Keep shared C/C++ parsing logic in parser.cpp.
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -5002,6 +5003,34 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
                 declarator.terminal_loc);
         }
 
+        std::vector<const Decl*> imported_template_decls;
+        auto import_template_decl = [&](const Decl* template_decl,
+                                        LookupNamespace lookup_namespace) {
+            if (!template_decl) {
+                return;
+            }
+            if (std::find(imported_template_decls.begin(),
+                          imported_template_decls.end(),
+                          template_decl) != imported_template_decls.end()) {
+                return;
+            }
+            imported_template_decls.push_back(template_decl);
+            collect_->collect_bind_template_decl(
+                declarator.terminal_name, template_decl, lookup_namespace);
+        };
+
+        auto import_template_binding = [&](const DeclBinding* binding,
+                                           LookupNamespace lookup_namespace) {
+            if (!binding) {
+                return;
+            }
+            import_template_decl(binding->template_decl, lookup_namespace);
+            for (const auto* template_candidate :
+                 binding->template_overload_candidates) {
+                import_template_decl(template_candidate, lookup_namespace);
+            }
+        };
+
         if (tag_binding &&
             !current_context->lookup_local(declarator.terminal_name,
                                            LookupNamespace::Tag)) {
@@ -5009,6 +5038,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
                 collect_->collect_add_tag_decl(
                     declarator.terminal_name, const_cast<TagDecl*>(tag_decl));
             }
+            import_template_binding(tag_binding, LookupNamespace::Tag);
         }
 
         auto import_ordinary_symbol = [&](const std::shared_ptr<Symbol>& symbol) {
@@ -5029,6 +5059,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
                     ordinary_lookup.symbol ? ordinary_lookup.symbol
                                            : ordinary_binding->symbol);
             }
+            import_template_binding(ordinary_binding, LookupNamespace::Ordinary);
         }
     }
 
