@@ -295,241 +295,6 @@ bool template_parameters_have_same_lookup_shape(
     const TemplateParameterList& lhs,
     const TemplateParameterList& rhs);
 
-bool template_parameter_types_have_same_lookup_shape(QualType lhs,
-                                                     QualType rhs);
-
-bool template_parameter_references_have_same_lookup_shape(
-    const TemplateParameterDecl* lhs,
-    const TemplateParameterDecl* rhs) {
-    if (!lhs || !rhs) {
-        return lhs == rhs;
-    }
-    return lhs->get_kind() == rhs->get_kind() &&
-           lhs->depth == rhs->depth &&
-           lhs->index == rhs->index &&
-           lhs->is_parameter_pack == rhs->is_parameter_pack;
-}
-
-bool template_arguments_have_same_lookup_shape(
-    const std::vector<TemplateArgument>& lhs,
-    const std::vector<TemplateArgument>& rhs);
-
-bool template_argument_has_same_lookup_shape(const TemplateArgument& lhs,
-                                             const TemplateArgument& rhs) {
-    if (lhs.kind != rhs.kind ||
-        lhs.expands_parameter_pack != rhs.expands_parameter_pack ||
-        lhs.pack_expansion_parameters.size() !=
-            rhs.pack_expansion_parameters.size()) {
-        return false;
-    }
-    for (size_t idx = 0; idx < lhs.pack_expansion_parameters.size(); ++idx) {
-        if (!template_parameter_references_have_same_lookup_shape(
-                lhs.pack_expansion_parameters[idx],
-                rhs.pack_expansion_parameters[idx])) {
-            return false;
-        }
-    }
-
-    switch (lhs.kind) {
-        case TemplateArgumentKind::Type:
-            return template_parameter_types_have_same_lookup_shape(
-                lhs.type,
-                rhs.type);
-        case TemplateArgumentKind::Value:
-            if (!template_parameter_types_have_same_lookup_shape(
-                    lhs.value_type,
-                    rhs.value_type) ||
-                lhs.is_dependent != rhs.is_dependent) {
-                return false;
-            }
-            if (lhs.is_dependent) {
-                if (lhs.referenced_parameter || rhs.referenced_parameter) {
-                    return template_parameter_references_have_same_lookup_shape(
-                        lhs.referenced_parameter,
-                        rhs.referenced_parameter);
-                }
-                return lhs.value_spelling == rhs.value_spelling;
-            }
-            return lhs.equals(rhs);
-        case TemplateArgumentKind::Template:
-            if (lhs.is_dependent != rhs.is_dependent) {
-                return false;
-            }
-            if (lhs.is_dependent) {
-                if (lhs.referenced_parameter || rhs.referenced_parameter) {
-                    return template_parameter_references_have_same_lookup_shape(
-                        lhs.referenced_parameter,
-                        rhs.referenced_parameter);
-                }
-                return lhs.template_name == rhs.template_name &&
-                       lhs.dependent_template_member_name ==
-                           rhs.dependent_template_member_name &&
-                       template_parameter_types_have_same_lookup_shape(
-                           lhs.dependent_template_qualifier_type,
-                           rhs.dependent_template_qualifier_type);
-            }
-            return get_template_decl_lookup_identity(lhs.template_decl) ==
-                       get_template_decl_lookup_identity(rhs.template_decl) &&
-                   lhs.template_name == rhs.template_name;
-    }
-    return false;
-}
-
-bool template_arguments_have_same_lookup_shape(
-    const std::vector<TemplateArgument>& lhs,
-    const std::vector<TemplateArgument>& rhs) {
-    if (lhs.size() != rhs.size()) {
-        return false;
-    }
-    for (size_t idx = 0; idx < lhs.size(); ++idx) {
-        if (!template_argument_has_same_lookup_shape(lhs[idx], rhs[idx])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool template_parameter_types_have_same_lookup_shape(QualType lhs,
-                                                     QualType rhs) {
-    if (!lhs || !rhs) {
-        return lhs.get_shared() == rhs.get_shared();
-    }
-
-    lhs = desugar_typedefs(lhs);
-    rhs = desugar_typedefs(rhs);
-    if (lhs.get_qualifiers() != rhs.get_qualifiers()) {
-        return false;
-    }
-
-    auto lhs_raw = lhs.get_shared();
-    auto rhs_raw = rhs.get_shared();
-    if (!lhs_raw || !rhs_raw) {
-        return lhs_raw == rhs_raw;
-    }
-
-    if (auto lhs_parameter = dyn_cast_shared<TemplateTypeParmType>(lhs_raw)) {
-        auto rhs_parameter = dyn_cast_shared<TemplateTypeParmType>(rhs_raw);
-        return rhs_parameter &&
-               lhs_parameter->depth == rhs_parameter->depth &&
-               lhs_parameter->index == rhs_parameter->index &&
-               lhs_parameter->is_parameter_pack ==
-                   rhs_parameter->is_parameter_pack;
-    }
-
-    if (auto lhs_pointer = dyn_cast_shared<PointerType>(lhs_raw)) {
-        auto rhs_pointer = dyn_cast_shared<PointerType>(rhs_raw);
-        return rhs_pointer &&
-               template_parameter_types_have_same_lookup_shape(
-                   lhs_pointer->pointed_type,
-                   rhs_pointer->pointed_type);
-    }
-
-    if (auto lhs_reference = dyn_cast_shared<ReferenceType>(lhs_raw)) {
-        auto rhs_reference = dyn_cast_shared<ReferenceType>(rhs_raw);
-        return rhs_reference &&
-               lhs_reference->reference_kind == rhs_reference->reference_kind &&
-               template_parameter_types_have_same_lookup_shape(
-                   lhs_reference->referred_type,
-                   rhs_reference->referred_type);
-    }
-
-    if (auto lhs_member_pointer =
-            dyn_cast_shared<MemberPointerType>(lhs_raw)) {
-        auto rhs_member_pointer =
-            dyn_cast_shared<MemberPointerType>(rhs_raw);
-        return rhs_member_pointer &&
-               template_parameter_types_have_same_lookup_shape(
-                   lhs_member_pointer->class_type,
-                   rhs_member_pointer->class_type) &&
-               template_parameter_types_have_same_lookup_shape(
-                   lhs_member_pointer->member_type,
-                   rhs_member_pointer->member_type);
-    }
-
-    if (auto lhs_block_pointer = dyn_cast_shared<BlockPointerType>(lhs_raw)) {
-        auto rhs_block_pointer = dyn_cast_shared<BlockPointerType>(rhs_raw);
-        return rhs_block_pointer &&
-               template_parameter_types_have_same_lookup_shape(
-                   lhs_block_pointer->pointed_type,
-                   rhs_block_pointer->pointed_type);
-    }
-
-    if (auto lhs_array = dyn_cast_shared<ArrayType>(lhs_raw)) {
-        auto rhs_array = dyn_cast_shared<ArrayType>(rhs_raw);
-        return rhs_array &&
-               lhs_array->size_kind == rhs_array->size_kind &&
-               lhs_array->size == rhs_array->size &&
-               template_parameter_types_have_same_lookup_shape(
-                   lhs_array->element_type,
-                   rhs_array->element_type);
-    }
-
-    if (auto lhs_function = dyn_cast_shared<FunctionType>(lhs_raw)) {
-        auto rhs_function = dyn_cast_shared<FunctionType>(rhs_raw);
-        if (!rhs_function ||
-            lhs_function->parameters.size() !=
-                rhs_function->parameters.size() ||
-            lhs_function->is_variadic != rhs_function->is_variadic ||
-            lhs_function->has_prototype != rhs_function->has_prototype ||
-            lhs_function->member_ref_qualifier !=
-                rhs_function->member_ref_qualifier ||
-            !function_exception_specs_equal(*lhs_function, *rhs_function) ||
-            !template_parameter_types_have_same_lookup_shape(
-                lhs_function->ret_type,
-                rhs_function->ret_type)) {
-            return false;
-        }
-        for (size_t idx = 0; idx < lhs_function->parameters.size(); ++idx) {
-            if (!template_parameter_types_have_same_lookup_shape(
-                    lhs_function->parameters[idx],
-                    rhs_function->parameters[idx])) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    if (auto lhs_specialization =
-            dyn_cast_shared<TemplateSpecializationType>(lhs_raw)) {
-        auto rhs_specialization =
-            dyn_cast_shared<TemplateSpecializationType>(rhs_raw);
-        if (!rhs_specialization ||
-            lhs_specialization->primary_template !=
-                rhs_specialization->primary_template ||
-            lhs_specialization->template_name !=
-                rhs_specialization->template_name ||
-            lhs_specialization->is_dependent !=
-                rhs_specialization->is_dependent ||
-            lhs_specialization->is_class_template_placeholder !=
-                rhs_specialization->is_class_template_placeholder) {
-            return false;
-        }
-        return template_arguments_have_same_lookup_shape(
-            lhs_specialization->arguments,
-            rhs_specialization->arguments);
-    }
-
-    if (auto lhs_dependent = dyn_cast_shared<DependentNameType>(lhs_raw)) {
-        auto rhs_dependent = dyn_cast_shared<DependentNameType>(rhs_raw);
-        return rhs_dependent &&
-               lhs_dependent->member_name == rhs_dependent->member_name &&
-               lhs_dependent->is_current_instantiation ==
-                   rhs_dependent->is_current_instantiation &&
-               lhs_dependent->requires_typename_keyword ==
-                   rhs_dependent->requires_typename_keyword &&
-               lhs_dependent->requires_template_keyword ==
-                   rhs_dependent->requires_template_keyword &&
-               template_parameter_types_have_same_lookup_shape(
-                   lhs_dependent->qualifier_type,
-                   rhs_dependent->qualifier_type) &&
-               template_arguments_have_same_lookup_shape(
-                   lhs_dependent->template_arguments,
-                   rhs_dependent->template_arguments);
-    }
-
-    return lhs.equals_qualified(rhs);
-}
-
 bool template_parameter_has_lookup_constraint(
     const TemplateParameterDecl* parameter) {
     if (!parameter) {
@@ -607,12 +372,20 @@ bool function_templates_have_same_structural_lookup_identity(
 
     const FuncDecl* lhs_function = lhs->function_decl();
     const FuncDecl* rhs_function = rhs->function_decl();
-    if (!lhs_function || !rhs_function ||
-        lhs_function->trailing_requires_clause ||
-        rhs_function->trailing_requires_clause ||
-        lhs_function->name != rhs_function->name ||
-        !function_template_lookup_owners_match(lhs_function, rhs_function) ||
-        !template_parameters_have_same_lookup_shape(
+    if (!lhs_function || !rhs_function) {
+        return false;
+    }
+    if (lhs_function->trailing_requires_clause ||
+        rhs_function->trailing_requires_clause) {
+        return false;
+    }
+    if (lhs_function->name != rhs_function->name) {
+        return false;
+    }
+    if (!function_template_lookup_owners_match(lhs_function, rhs_function)) {
+        return false;
+    }
+    if (!template_parameters_have_same_lookup_shape(
             lhs->parameters,
             rhs->parameters)) {
         return false;
@@ -622,13 +395,25 @@ bool function_templates_have_same_structural_lookup_identity(
         desugar_type(QualType(lhs_function->type)).as_shared<FunctionType>();
     auto rhs_type =
         desugar_type(QualType(rhs_function->type)).as_shared<FunctionType>();
-    if (!lhs_type || !rhs_type ||
-        lhs_type->parameters.size() != rhs_type->parameters.size() ||
-        lhs_type->is_variadic != rhs_type->is_variadic ||
-        lhs_type->has_prototype != rhs_type->has_prototype ||
-        lhs_type->member_ref_qualifier != rhs_type->member_ref_qualifier ||
-        !function_exception_specs_equal(*lhs_type, *rhs_type) ||
-        !template_parameter_types_have_same_lookup_shape(lhs_type->ret_type,
+    if (!lhs_type || !rhs_type) {
+        return false;
+    }
+    if (lhs_type->parameters.size() != rhs_type->parameters.size()) {
+        return false;
+    }
+    if (lhs_type->is_variadic != rhs_type->is_variadic) {
+        return false;
+    }
+    if (lhs_type->has_prototype != rhs_type->has_prototype) {
+        return false;
+    }
+    if (lhs_type->member_ref_qualifier != rhs_type->member_ref_qualifier) {
+        return false;
+    }
+    if (!function_exception_specs_equal(*lhs_type, *rhs_type)) {
+        return false;
+    }
+    if (!template_parameter_types_have_same_lookup_shape(lhs_type->ret_type,
                                                         rhs_type->ret_type)) {
         return false;
     }

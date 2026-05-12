@@ -553,6 +553,17 @@ inline DependentLookupQualifier build_dependent_lookup_qualifier(
     return build_dependent_lookup_qualifier(*info);
 }
 
+bool template_parameter_references_have_same_lookup_shape(
+    const TemplateParameterDecl* lhs,
+    const TemplateParameterDecl* rhs);
+bool template_parameter_types_have_same_lookup_shape(QualType lhs,
+                                                     QualType rhs);
+bool template_argument_has_same_lookup_shape(const TemplateArgument& lhs,
+                                             const TemplateArgument& rhs);
+bool template_arguments_have_same_lookup_shape(
+    const std::vector<TemplateArgument>& lhs,
+    const std::vector<TemplateArgument>& rhs);
+
 struct TemplateEnvironmentFrame {
     std::vector<const TemplateParameterDecl*> parameters;
     TemplateArgumentBindings bindings;
