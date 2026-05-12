@@ -3,9 +3,10 @@
 
 #include "ast.h"
 #include "symbols.h"
+#include <unordered_set>
 
 namespace {
-const RecordSemanticState* lookup_record_state_for_type(
+const ObjectDecl* lookup_record_decl_for_type(
     QualType type,
     const ASTContext* ast_ctx) {
     auto record_type =
@@ -13,7 +14,13 @@ const RecordSemanticState* lookup_record_state_for_type(
     if (!record_type) {
         return nullptr;
     }
-    auto* record_decl = dyn_cast<ObjectDecl>(record_type->get_decl());
+    return dyn_cast<ObjectDecl>(record_type->get_decl());
+}
+
+const RecordSemanticState* lookup_record_state_for_type(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    auto* record_decl = lookup_record_decl_for_type(type, ast_ctx);
     if (!record_decl) {
         return nullptr;
     }
@@ -124,6 +131,128 @@ bool cpp_record_subobjects_are_nothrow_destructible(
             return false;
         }
     }
+    return true;
+}
+
+bool cpp_constructor_is_user_provided_default_candidate(
+    const RecordSemanticState::Constructor& ctor) {
+    if (!cpp_constructor_is_viable_default_candidate(
+            ctor,
+            /*allow_protected_access=*/false)) {
+        return false;
+    }
+    if (ctor.is_implicit || !ctor.decl) {
+        return false;
+    }
+    return !(ctor.decl->is_defaulted &&
+             ctor.decl->is_defaulted_on_first_declaration);
+}
+
+bool cpp_record_is_const_default_constructible(
+    const ObjectDecl* record_decl,
+    const RecordSemanticState* state,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const ObjectDecl*>& active_records);
+
+bool cpp_type_is_const_default_constructible_impl(
+    QualType type,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const ObjectDecl*>& active_records) {
+    if (!type) {
+        return false;
+    }
+
+    QualType canonical = desugar_type(type, ast_ctx);
+    if (!canonical) {
+        return false;
+    }
+
+    switch (canonical->kind) {
+        case TypeKind::Array: {
+            auto array_type = canonical.as_shared<ArrayType>();
+            if (!array_type ||
+                array_type->size_kind != ArraySizeKind::Constant ||
+                !array_type->size.has_value()) {
+                return false;
+            }
+            return cpp_type_is_const_default_constructible_impl(
+                array_type->element_type,
+                ast_ctx,
+                active_records);
+        }
+        case TypeKind::Object: {
+            const ObjectDecl* record_decl =
+                lookup_record_decl_for_type(canonical, ast_ctx);
+            const RecordSemanticState* state =
+                record_decl
+                    ? record_semantics_cache_lookup(record_decl, ast_ctx)
+                    : nullptr;
+            return cpp_record_is_const_default_constructible(
+                record_decl,
+                state,
+                ast_ctx,
+                active_records);
+        }
+        default:
+            return false;
+    }
+}
+
+bool cpp_record_is_const_default_constructible(
+    const ObjectDecl* record_decl,
+    const RecordSemanticState* state,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const ObjectDecl*>& active_records) {
+    if (!record_decl || !state || state->is_incomplete) {
+        return false;
+    }
+    if (!cpp_record_has_viable_default_constructor(
+            state,
+            /*allow_protected_access=*/false)) {
+        return false;
+    }
+    for (const auto& ctor : state->constructors) {
+        if (cpp_constructor_is_user_provided_default_candidate(ctor)) {
+            return true;
+        }
+    }
+
+    if (!active_records.insert(record_decl).second) {
+        return true;
+    }
+
+    for (const auto& base : state->bases) {
+        if (!cpp_type_is_const_default_constructible_impl(
+                base.type,
+                ast_ctx,
+                active_records)) {
+            active_records.erase(record_decl);
+            return false;
+        }
+    }
+    for (const auto& virtual_base : state->virtual_bases) {
+        if (!cpp_type_is_const_default_constructible_impl(
+                virtual_base.type,
+                ast_ctx,
+                active_records)) {
+            active_records.erase(record_decl);
+            return false;
+        }
+    }
+    for (const auto& field : state->fields) {
+        if (field.is_base_subobject || field.is_virtual_base_storage) {
+            continue;
+        }
+        if (!cpp_type_is_const_default_constructible_impl(
+                field.type,
+                ast_ctx,
+                active_records)) {
+            active_records.erase(record_decl);
+            return false;
+        }
+    }
+
+    active_records.erase(record_decl);
     return true;
 }
 } // namespace
@@ -552,6 +681,16 @@ bool cpp_type_is_nothrow_destructible(
         default:
             return canonical->isScalar();
     }
+}
+
+bool cpp_type_is_const_default_constructible(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    std::unordered_set<const ObjectDecl*> active_records;
+    return cpp_type_is_const_default_constructible_impl(
+        type,
+        ast_ctx,
+        active_records);
 }
 
 bool cpp_expression_is_known_noexcept(

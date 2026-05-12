@@ -371,11 +371,6 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         is_cpp_static_data_member,
         loc);
 
-    if (is_constexpr && !init &&
-        !allow_constexpr_redeclaration_without_initializer) {
-        report_error("constexpr variable requires an initializer", loc);
-    }
-
     // --- Classify the variable declaration ---
     // These derived flags determine which code paths (constructor selection,
     // destructor binding, initializer processing) apply to this variable.
@@ -391,6 +386,19 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
             : nullptr;
     const RecordSemanticState* record_state =
         record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
+
+    bool constexpr_default_initialization_allowed =
+        is_constexpr &&
+        !init &&
+        lang_opts_.is_cxx_mode() &&
+        cpp_type_is_const_default_constructible(
+            declared_type,
+            ast_ctx_.get());
+    if (is_constexpr && !init &&
+        !allow_constexpr_redeclaration_without_initializer &&
+        !constexpr_default_initialization_allowed) {
+        report_error("constexpr variable requires an initializer", loc);
+    }
 
     struct VarDeclAnalysis {
         bool is_automatic_storage = false;
@@ -632,7 +640,10 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         }
     }
 
-    if (is_constexpr && init && !defer_initializer_semantics) {
+    auto validate_constexpr_initializer = [&](Expr* initializer) {
+        if (!is_constexpr || !initializer || defer_initializer_semantics) {
+            return;
+        }
         std::string constexpr_failure;
         SrcLoc constexpr_failure_loc = loc;
         ConstEvalMode constexpr_mode = lang_opts_.is_cxx_mode()
@@ -640,7 +651,7 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
             : ConstEvalMode::c23_constexpr_initializer();
         if (!validate_constexpr_initializer_expr(
                 *this,
-                init.get(),
+                initializer,
                 constexpr_mode,
                 constexpr_failure,
                 constexpr_failure_loc)) {
@@ -648,7 +659,8 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
                 "constexpr initializer is not a constant expression: " + constexpr_failure,
                 constexpr_failure_loc);
         }
-    }
+    };
+    validate_constexpr_initializer(init.get());
 
     // --- Finalize symbol and build declaration node ---
     if (sym) {
@@ -675,6 +687,9 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
             declared_type,
             selection.constructor_is_list_init,
             loc);
+    }
+    if (selection.used_constructor_initialization) {
+        validate_constexpr_initializer(decl->init.get());
     }
     if (selection.destructor_symbol && ast_ctx_) {
         ast_ctx_->set_cpp_variable_destructor_symbol(

@@ -73,6 +73,10 @@ bool cpp_type_is_nothrow_destructible(
     QualType type,
     const ASTContext* ast_ctx = nullptr);
 
+bool cpp_type_is_const_default_constructible(
+    QualType type,
+    const ASTContext* ast_ctx = nullptr);
+
 bool cpp_expression_is_known_noexcept(
     const Expr* expr,
     const ASTContext* ast_ctx = nullptr);
