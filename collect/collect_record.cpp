@@ -1537,12 +1537,15 @@ public:
         const CppRecordDecl& record,
         std::optional<std::string> semantic_tag_name,
         std::vector<std::unique_ptr<Decl>>* transient_decls_out,
-        Collect::CppRecordDeferredBodyCallback deferred_body_callback)
+        Collect::CppRecordDeferredBodyCallback deferred_body_callback,
+        bool allow_parent_tag_lookup_for_non_definition)
         : collect_(collect),
           record_(record),
           semantic_tag_name_(std::move(semantic_tag_name)),
           transient_decls_out_(transient_decls_out),
-          deferred_body_callback_(std::move(deferred_body_callback)) {}
+          deferred_body_callback_(std::move(deferred_body_callback)),
+          allow_parent_tag_lookup_for_non_definition_(
+              allow_parent_tag_lookup_for_non_definition) {}
 
     std::unique_ptr<Decl> build() {
         if (record_.name.empty()) {
@@ -1557,12 +1560,25 @@ public:
         const std::string& tag = semantic_tag;
 
         ObjectDecl* existing_obj_decl = nullptr;
+        bool existing_decl_from_parent_scope = false;
         if (auto* existing_tag_decl = collect_.collect_lookup_tag_decl(tag, false)) {
             existing_obj_decl = dyn_cast<ObjectDecl>(existing_tag_decl);
             if (!existing_obj_decl) {
                 collect_.report_error(
                     "tag '" + tag + "' was previously declared with a different kind",
                     record_.location);
+            }
+        } else if (!record_.is_definition &&
+                   allow_parent_tag_lookup_for_non_definition_) {
+            if (auto* inherited_tag_decl =
+                    collect_.collect_lookup_tag_decl(tag, true)) {
+                existing_obj_decl = dyn_cast<ObjectDecl>(inherited_tag_decl);
+                existing_decl_from_parent_scope = existing_obj_decl != nullptr;
+                if (!existing_obj_decl) {
+                    collect_.report_error(
+                        "tag '" + tag + "' was previously declared with a different kind",
+                        record_.location);
+                }
             }
         }
 
@@ -1683,7 +1699,9 @@ public:
 
         collect_.query_publish_record_semantics(semantic_decl.get(),
                                                 std::move(semantic_state));
-        collect_.collect_add_tag_decl(tag, semantic_decl.get());
+        if (!existing_decl_from_parent_scope) {
+            collect_.collect_add_tag_decl(tag, semantic_decl.get());
+        }
         return semantic_decl;
     }
 
@@ -1693,18 +1711,21 @@ private:
     std::optional<std::string> semantic_tag_name_;
     std::vector<std::unique_ptr<Decl>>* transient_decls_out_ = nullptr;
     Collect::CppRecordDeferredBodyCallback deferred_body_callback_;
+    bool allow_parent_tag_lookup_for_non_definition_ = false;
 };
 
 std::unique_ptr<Decl> Collect::collect_build_cpp_record_semantic_decl(
     const CppRecordDecl& record,
     std::optional<std::string> semantic_tag_name,
     std::vector<std::unique_ptr<Decl>>* transient_decls_out,
-    CppRecordDeferredBodyCallback deferred_body_callback) {
+    CppRecordDeferredBodyCallback deferred_body_callback,
+    bool allow_parent_tag_lookup_for_non_definition) {
     CollectRecordBuilder builder(*this,
                                  record,
                                  std::move(semantic_tag_name),
                                  transient_decls_out,
-                                 std::move(deferred_body_callback));
+                                 std::move(deferred_body_callback),
+                                 allow_parent_tag_lookup_for_non_definition);
     return builder.build();
 }
 

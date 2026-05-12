@@ -470,7 +470,8 @@ private:
     std::unique_ptr<Decl> parse_cpp_destructor_member();
     std::unique_ptr<Decl> build_cpp_record_semantic_decl(
         const CppRecordDecl& record,
-        std::optional<std::string> semantic_tag_name = std::nullopt);
+        std::optional<std::string> semantic_tag_name = std::nullopt,
+        bool allow_parent_tag_lookup_for_non_definition = false);
     struct CppRecordDeferredParseContext {
         const CppRecordDecl& record;
         std::shared_ptr<ObjectType> record_type;

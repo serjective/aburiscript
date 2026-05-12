@@ -764,7 +764,8 @@ std::optional<std::string> extract_weakref_target(
 
 std::unique_ptr<Decl> Parser::build_cpp_record_semantic_decl(
     const CppRecordDecl& record,
-    std::optional<std::string> semantic_tag_name) {
+    std::optional<std::string> semantic_tag_name,
+    bool allow_parent_tag_lookup_for_non_definition) {
     if (is_in_template_pattern_context()) {
         return nullptr;
     }
@@ -785,7 +786,8 @@ std::unique_ptr<Decl> Parser::build_cpp_record_semantic_decl(
         record,
         std::move(semantic_tag_name),
         &cpp_transient_semantic_decls_,
-        std::move(deferred_body_callback));
+        std::move(deferred_body_callback),
+        allow_parent_tag_lookup_for_non_definition);
     if (!semantic_decl || !ast_ctx) {
         return semantic_decl;
     }

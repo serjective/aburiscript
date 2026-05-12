@@ -191,7 +191,10 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                                       t.loc);
                     }
                     if (!pars->is_in_template_pattern_context()) {
-                        struct_obj = pars->build_cpp_record_semantic_decl(*cpp_record_decl);
+                        struct_obj = pars->build_cpp_record_semantic_decl(
+                            *cpp_record_decl,
+                            std::nullopt,
+                            true);
                         if (!struct_obj) {
                             if (cpp_record_decl->name.empty()) {
                                 error_custloc(
