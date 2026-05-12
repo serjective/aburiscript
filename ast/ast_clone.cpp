@@ -1340,8 +1340,42 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
             if (!rewrite_expr_vector(builtin->args, ctx, error_out)) {
                 return false;
             }
-            for (auto& type_arg : builtin->type_args) {
-                type_arg = rewrite_type(type_arg, ctx);
+            bool has_type_pack_expansion = false;
+            for (const auto& type_arg : builtin->type_args) {
+                auto parameter_type = type_arg.as_shared<TemplateTypeParmType>();
+                if (parameter_type && parameter_type->is_parameter_pack) {
+                    has_type_pack_expansion = true;
+                    break;
+                }
+            }
+            if (has_type_pack_expansion && ctx.rewrite_template_arguments) {
+                std::vector<TemplateArgument> type_arguments;
+                type_arguments.reserve(builtin->type_args.size());
+                for (const auto& type_arg : builtin->type_args) {
+                    TemplateArgument argument(type_arg);
+                    auto parameter_type = type_arg.as_shared<TemplateTypeParmType>();
+                    if (parameter_type && parameter_type->is_parameter_pack) {
+                        argument = argument.as_pack_expansion();
+                    }
+                    type_arguments.push_back(std::move(argument));
+                }
+                auto rewritten_arguments =
+                    rewrite_template_arguments(type_arguments, ctx, error_out);
+                std::vector<QualType> rewritten_types;
+                rewritten_types.reserve(rewritten_arguments.size());
+                for (const auto& argument : rewritten_arguments) {
+                    if (argument.kind != TemplateArgumentKind::Type) {
+                        return set_expr_error(
+                            error_out,
+                            "builtin type trait pack expansion produced a non-type argument");
+                    }
+                    rewritten_types.push_back(argument.type);
+                }
+                builtin->type_args = std::move(rewritten_types);
+            } else {
+                for (auto& type_arg : builtin->type_args) {
+                    type_arg = rewrite_type(type_arg, ctx);
+                }
             }
             builtin->result_type = rewrite_type(builtin->result_type, ctx);
             return true;

@@ -292,9 +292,15 @@ std::string describe_function_call_target(const FuncCall* call) {
     return "<indirect>";
 }
 
-bool interpreter_mode_enabled(ConstEvalMode mode) {
+bool mode_allows_constexpr_interpreter(ConstEvalMode mode) {
     return mode.kind == ConstEvalModeKind::CppCoreConstantExpression ||
+           mode.kind == ConstEvalModeKind::CppNonTypeTemplateArgument ||
            mode.kind == ConstEvalModeKind::CppImmediateFunction;
+}
+
+bool mode_requires_constexpr_call(ConstEvalMode mode) {
+    return mode.kind == ConstEvalModeKind::CppCoreConstantExpression ||
+           mode.kind == ConstEvalModeKind::CppNonTypeTemplateArgument;
 }
 
 bool is_cpp_core_constant_expression_mode(ConstEvalMode mode) {
@@ -3491,7 +3497,8 @@ ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size
         return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
             "unsupported function call expression", call ? call->location : SrcLoc());
     }
-    if (!g_interpreter_session || !g_interpreter_session->state || !interpreter_mode_enabled(mode)) {
+    if (!g_interpreter_session || !g_interpreter_session->state ||
+        !mode_allows_constexpr_interpreter(mode)) {
         return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
             "constexpr function interpreter is unavailable for this evaluation mode",
             call->location);
@@ -3530,8 +3537,11 @@ ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size
             "constexpr interpreter cannot evaluate call without visible function definition",
             call->location);
     }
-    if (is_cpp_core_constant_expression_mode(mode) &&
-        !function_decl->is_constexpr) {
+    bool function_is_constexpr =
+        function_decl->is_constexpr ||
+        callee_ref->symref->is_constexpr ||
+        callee_ref->symref->is_consteval;
+    if (mode_requires_constexpr_call(mode) && !function_is_constexpr) {
         return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
             "call to non-constexpr function is not a constant expression",
             call->location);
@@ -3687,7 +3697,7 @@ ConstEvalResult eval_cpp_construct_expr(CppConstructExpr* construct,
             construct ? construct->location : SrcLoc());
     }
     if (!g_interpreter_session || !g_interpreter_session->state ||
-        !interpreter_mode_enabled(mode)) {
+        !mode_allows_constexpr_interpreter(mode)) {
         return make_not_evaluated(
             ConstEvalDiagCode::UnsupportedExpression,
             "constructor expression is not a constant expression in this mode",
@@ -3705,8 +3715,7 @@ ConstEvalResult eval_cpp_construct_expr(CppConstructExpr* construct,
         (ctor_decl && ctor_decl->is_constexpr) ||
         construct->ctor_sym->is_constexpr ||
         construct->ctor_sym->is_consteval;
-    if (is_cpp_core_constant_expression_mode(mode) &&
-        !constructor_is_constexpr) {
+    if (mode_requires_constexpr_call(mode) && !constructor_is_constexpr) {
         return make_not_evaluated(
             ConstEvalDiagCode::UnsupportedExpression,
             "call to non-constexpr constructor is not a constant expression",
@@ -4238,7 +4247,7 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
                 "function call is not allowed in C23 constexpr initializer",
                 expr->location);
         }
-        if (!g_interpreter_session || !interpreter_mode_enabled(mode)) {
+        if (!g_interpreter_session || !mode_allows_constexpr_interpreter(mode)) {
             return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
                 "function call is not a constant expression in this mode",
                 expr->location);
@@ -4257,7 +4266,7 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
                 "function call is not allowed in C23 constexpr initializer",
                 expr->location);
         }
-        if (!g_interpreter_session || !interpreter_mode_enabled(mode)) {
+        if (!g_interpreter_session || !mode_allows_constexpr_interpreter(mode)) {
             return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
                 "member call is not a constant expression in this mode",
                 expr->location);
@@ -4482,7 +4491,7 @@ ConstEvalResult ConstEvalEngine::evaluate(const Expr* expr, ConstEvalMode mode) 
     }
 
     if (lang_options_.enable_consteval_function_interpreter &&
-        interpreter_mode_enabled(mode)) {
+        mode_allows_constexpr_interpreter(mode)) {
         EvalState state(
             lang_options_.consteval_step_limit,
             lang_options_.consteval_recursion_limit);
