@@ -107,6 +107,7 @@ constexpr auto kAllStmtKinds = std::to_array<StmtKind>({
 
 constexpr auto kAllDeclKinds = std::to_array<DeclKind>({
     DeclKind::NopDecl,
+    DeclKind::CppUsingDeclarationDecl,
     DeclKind::TypedefDecl,
     DeclKind::TemplateTypeParmDecl,
     DeclKind::TemplateNonTypeParmDecl,
@@ -231,6 +232,8 @@ const char* stmt_kind_name(StmtKind kind) {
 const char* decl_kind_name(DeclKind kind) {
     switch (kind) {
         case DeclKind::NopDecl: return "NopDecl";
+        case DeclKind::CppUsingDeclarationDecl:
+            return "CppUsingDeclarationDecl";
         case DeclKind::TypedefDecl: return "TypedefDecl";
         case DeclKind::TemplateTypeParmDecl: return "TemplateTypeParmDecl";
         case DeclKind::TemplateNonTypeParmDecl: return "TemplateNonTypeParmDecl";
@@ -471,6 +474,24 @@ private:
         switch (decl->get_kind()) {
             case DeclKind::NopDecl: {
                 record_decl<NopDecl>(DeclKind::NopDecl);
+                return;
+            }
+            case DeclKind::CppUsingDeclarationDecl: {
+                auto* node = static_cast<const CppUsingDeclarationDecl*>(decl);
+                record_decl<CppUsingDeclarationDecl>(
+                    DeclKind::CppUsingDeclarationDecl);
+                for (const auto& imported : node->ordinary_symbols) {
+                    add_ast_string(imported.name);
+                    visit_symbol(imported.symbol);
+                }
+                for (const auto& imported : node->template_decls) {
+                    add_ast_string(imported.name);
+                    visit_decl(imported.decl);
+                }
+                for (const auto& imported : node->tag_decls) {
+                    add_ast_string(imported.name);
+                    visit_decl(imported.decl);
+                }
                 return;
             }
             case DeclKind::TypedefDecl: {

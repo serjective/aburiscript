@@ -167,6 +167,7 @@ enum class StmtKind : uint8_t {
 // Discriminant for Decl hierarchy
 enum class DeclKind : uint8_t {
     NopDecl,
+    CppUsingDeclarationDecl,
     TypedefDecl,
     TemplateTypeParmDecl,
     TemplateNonTypeParmDecl,
@@ -288,6 +289,41 @@ private:
 struct NopDecl: Decl {
     NopDecl(SrcLoc loc = SrcLoc()) : Decl(DeclKind::NopDecl, loc) {}
     static bool classof(const Decl *d) { return d->get_kind() == DeclKind::NopDecl; }
+};
+
+enum class CppUsingImportNamespace : uint8_t {
+    Ordinary,
+    Tag
+};
+
+struct CppUsingDeclarationDecl: Decl {
+    struct ImportedSymbol {
+        std::string name;
+        std::shared_ptr<Symbol> symbol;
+    };
+
+    struct ImportedTemplate {
+        std::string name;
+        const Decl* decl = nullptr;
+        CppUsingImportNamespace lookup_namespace =
+            CppUsingImportNamespace::Ordinary;
+    };
+
+    struct ImportedTag {
+        std::string name;
+        TagDecl* decl = nullptr;
+    };
+
+    std::vector<ImportedSymbol> ordinary_symbols;
+    std::vector<ImportedTemplate> template_decls;
+    std::vector<ImportedTag> tag_decls;
+
+    CppUsingDeclarationDecl(SrcLoc loc = SrcLoc())
+        : Decl(DeclKind::CppUsingDeclarationDecl, loc) {}
+
+    static bool classof(const Decl *d) {
+        return d->get_kind() == DeclKind::CppUsingDeclarationDecl;
+    }
 };
 
 struct TypedefDecl: Decl {

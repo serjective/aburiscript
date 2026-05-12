@@ -1110,6 +1110,10 @@ std::unique_ptr<Stmt> Parser::parse_compound_stmt(std::shared_ptr<Scope> use_sco
         auto entered_scope = collect_->collect_enter_scope(ScopeFlags::BlockScope);
         new_scope = entered_scope.scope;
         scope_entered = entered_scope.created_new;
+    } else if (collect_->collect_current_scope() != new_scope) {
+        // Reused scopes are owned by the caller, but declarations inside the
+        // compound must still bind to that scope while the body is parsed.
+        collect_->collect_set_current_scope(new_scope);
     }
     check_and_consume(TokenType::LEFT_BRACE);
     size_t last_recovery_idx = std::numeric_limits<size_t>::max();

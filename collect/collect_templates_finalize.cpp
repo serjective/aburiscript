@@ -188,6 +188,29 @@ bool finalize_specialized_decl_semantics(Collect& collect,
     }
 
     switch (decl->get_kind()) {
+        case DeclKind::CppUsingDeclarationDecl: {
+            const auto* using_decl =
+                static_cast<const CppUsingDeclarationDecl*>(decl.get());
+            for (const auto& imported : using_decl->ordinary_symbols) {
+                collect.collect_bind_symbol_in_current_scope(
+                    imported.name,
+                    imported.symbol);
+            }
+            for (const auto& imported : using_decl->tag_decls) {
+                collect.collect_add_tag_decl(imported.name, imported.decl);
+            }
+            for (const auto& imported : using_decl->template_decls) {
+                LookupNamespace lookup_namespace =
+                    imported.lookup_namespace == CppUsingImportNamespace::Tag
+                        ? LookupNamespace::Tag
+                        : LookupNamespace::Ordinary;
+                collect.collect_bind_template_decl(
+                    imported.name,
+                    imported.decl,
+                    lookup_namespace);
+            }
+            return true;
+        }
         case DeclKind::VariableDecl: {
             auto* variable = static_cast<VariableDecl*>(decl.get());
             if (!variable->init || variable->get_cpp_construct_init()) {

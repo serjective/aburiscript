@@ -717,6 +717,11 @@ void Collect::collect_abort_function_definition() {
     reset_current_function_definition_state();
 }
 
+bool Collect::collect_is_in_function_definition() const {
+
+    return session_.func_state_.in_function;
+}
+
 
 std::shared_ptr<Scope> Collect::collect_current_scope() const {
 
@@ -1026,7 +1031,6 @@ void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
     if (!context) {
         return;
     }
-
     DeclBinding binding;
     binding.name = name;
     binding.lookup_namespace = lookup_namespace;
@@ -1265,15 +1269,21 @@ QualType Collect::collect_lookup_type_name(const std::string& name,
 
 
 std::shared_ptr<Symbol> Collect::collect_lookup_variable_symbol(const std::string& name, bool look_parents) const {
+    return collect_lookup_variable_symbol_result(name, look_parents).symbol;
+}
+
+LookupEngine::UnqualifiedOrdinaryLookupResult Collect::collect_lookup_variable_symbol_result(
+    const std::string& name,
+    bool look_parents) const {
 
     if (!session_.current_scope_) {
-        return nullptr;
+        return {};
     }
     LookupEngine::LookupTrace trace;
     auto* trace_ptr = lookup_trace_enabled() ? &trace : nullptr;
-    auto lookup = LookupEngine::lookup_unqualified_ordinary(
+    auto lookup = LookupEngine::lookup_unqualified_ordinary_result(
         name, session_.current_scope_, look_parents, LookupEngine::OrdinaryFilter::Any, trace_ptr);
-    emit_lookup_trace("ordinary", name, trace, lookup != nullptr);
+    emit_lookup_trace("ordinary", name, trace, lookup.found());
     return lookup;
 }
 

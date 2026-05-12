@@ -15,6 +15,29 @@ using namespace collect_internal;
 
 namespace {
 
+bool scope_is_before_current_record_member_lookup(ScopeFlags flags) {
+    return scope_flags_contains(flags, ScopeFlags::FunctionScope) ||
+           scope_flags_contains(flags, ScopeFlags::BlockScope) ||
+           scope_flags_contains(flags, ScopeFlags::PrototypeScope) ||
+           scope_flags_contains(flags, ScopeFlags::LoopScope) ||
+           scope_flags_contains(flags, ScopeFlags::SwitchScope) ||
+           scope_flags_contains(flags, ScopeFlags::TemplateParameterScope);
+}
+
+bool ordinary_lookup_blocks_current_record_member_lookup(
+    const LookupEngine::UnqualifiedOrdinaryLookupResult& lookup) {
+    return lookup.found_in_lookup_context() &&
+           lookup.scope &&
+           scope_is_before_current_record_member_lookup(lookup.scope->flags);
+}
+
+bool template_lookup_blocks_current_record_member_lookup(
+    const LookupEngine::UnqualifiedTemplateLookupResult& lookup) {
+    return lookup.found_in_lookup_context() &&
+           lookup.scope &&
+           scope_is_before_current_record_member_lookup(lookup.scope->flags);
+}
+
 std::optional<QualType> merge_cpp_conditional_glvalue_type(
     QualType lhs_type,
     QualType rhs_type,
@@ -1205,17 +1228,22 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
     bool might_be_template_id,
     SrcLoc loc) {
 
-    auto sym = collect_lookup_variable_symbol(name, true);
+    auto ordinary_lookup = collect_lookup_variable_symbol_result(name, true);
+    auto sym = ordinary_lookup.symbol;
+    LookupEngine::UnqualifiedTemplateLookupResult ordinary_template_lookup;
     const DeclBinding* ordinary_template_binding = nullptr;
-    if (lang_opts_.is_cxx_mode() &&
-        might_be_template_id &&
-        session_.current_scope_) {
-        ordinary_template_binding =
-            LookupEngine::lookup_unqualified_template_binding(
+    if (lang_opts_.is_cxx_mode() && session_.current_scope_) {
+        ordinary_template_lookup =
+            LookupEngine::lookup_unqualified_template_binding_result(
                 name,
                 session_.current_scope_,
                 true,
                 LookupNamespace::Ordinary);
+        ordinary_template_binding = ordinary_template_lookup.binding;
+    }
+    if (lang_opts_.is_cxx_mode() &&
+        might_be_template_id &&
+        ordinary_template_binding) {
         if (sym &&
             sym->kind == SymbolKind::FUNCTION &&
             ordinary_template_binding &&
@@ -1230,6 +1258,10 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
     bool symbol_is_local = is_local_variable_or_parameter_symbol(sym);
     bool symbol_is_template_parameter =
         sym && sym->template_parameter_decl != nullptr;
+    bool ordinary_lookup_blocks_record_member_lookup =
+        ordinary_lookup_blocks_current_record_member_lookup(ordinary_lookup) ||
+        template_lookup_blocks_current_record_member_lookup(
+            ordinary_template_lookup);
     bool is_predefined_ident =
         (name == "__func__" || name == "__FUNCTION__" ||
          name == "__PRETTY_FUNCTION__");
@@ -1333,6 +1365,7 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
             current_record_from_this_type(session_.func_state_.current_function_cpp_this_type, ast_ctx_.get());
         auto member_lookup = lookup_record_member_name(current_record.get(), name);
         if (member_lookup.has_member_match() &&
+            !ordinary_lookup_blocks_record_member_lookup &&
             !symbol_is_local &&
             !symbol_is_template_parameter) {
             size_t static_template_candidate_matches =
@@ -1385,6 +1418,7 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
     if (lang_opts_.is_cxx_mode() &&
         session_.current_cpp_record_lookup_type_ &&
         !session_.func_state_.current_function_is_cpp_member &&
+        !ordinary_lookup_blocks_record_member_lookup &&
         !symbol_is_local &&
         !symbol_is_template_parameter) {
         auto current_record =

@@ -22,6 +22,7 @@
 #include "../source_mgnt.h"
 #include "query_context.h"
 #include "decl_context.h"
+#include "lookup_engine.h"
 
 class CollectRecordBuilder;
 
@@ -226,6 +227,8 @@ public:
 
     void collect_abort_function_definition() ;
 
+    bool collect_is_in_function_definition() const ;
+
     // === Scope management ===
 
     std::shared_ptr<Scope> collect_current_scope() const ;
@@ -294,6 +297,10 @@ public:
 
     std::shared_ptr<Symbol> collect_lookup_variable_symbol(const std::string& name,
                                                            bool look_parents = true) const ;
+
+    LookupEngine::UnqualifiedOrdinaryLookupResult collect_lookup_variable_symbol_result(
+        const std::string& name,
+        bool look_parents = true) const ;
 
     TagDecl* collect_lookup_tag_decl(const std::string& tag,
                                      bool look_parents = true) const ;

@@ -4682,7 +4682,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
     Token using_tok = current_token();
     advance(); // consume using
 
-    const bool in_class_scope = is_parsing_cpp_record_body();
+    const bool in_class_scope =
+        is_parsing_cpp_record_body() &&
+        !collect_->collect_is_in_function_definition();
 
     auto current_scope = collect_->collect_current_scope();
     auto current_context = collect_->get_current_decl_context();
@@ -4952,6 +4954,17 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
         return parsed_decls;
     }
 
+    auto replayable_using_decl = collect_->collect_is_in_function_definition()
+        ? make_ast<CppUsingDeclarationDecl>(*ast_ctx, using_tok.loc)
+        : nullptr;
+
+    auto using_import_namespace =
+        [](LookupNamespace lookup_namespace) {
+            return lookup_namespace == LookupNamespace::Tag
+                ? CppUsingImportNamespace::Tag
+                : CppUsingImportNamespace::Ordinary;
+        };
+
     for (const auto& declarator : using_declarators) {
         if (!declarator.has_global_qualifier && declarator.qualifiers.empty()) {
             fail_cpp_unsupported("using-declaration", declarator.terminal_loc);
@@ -5019,6 +5032,13 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
             imported_template_decls.push_back(template_decl);
             collect_->collect_bind_template_decl(
                 declarator.terminal_name, template_decl, lookup_namespace);
+            if (replayable_using_decl) {
+                replayable_using_decl->template_decls.push_back(
+                    CppUsingDeclarationDecl::ImportedTemplate{
+                        declarator.terminal_name,
+                        template_decl,
+                        using_import_namespace(lookup_namespace)});
+            }
         };
 
         auto import_template_binding = [&](const DeclBinding* binding,
@@ -5039,6 +5059,12 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
             if (auto* tag_decl = dyn_cast<TagDecl>(tag_binding->ast_decl)) {
                 collect_->collect_add_tag_decl(
                     declarator.terminal_name, const_cast<TagDecl*>(tag_decl));
+                if (replayable_using_decl) {
+                    replayable_using_decl->tag_decls.push_back(
+                        CppUsingDeclarationDecl::ImportedTag{
+                            declarator.terminal_name,
+                            const_cast<TagDecl*>(tag_decl)});
+                }
             }
             import_template_binding(tag_binding, LookupNamespace::Tag);
         }
@@ -5049,6 +5075,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
             }
             collect_->collect_bind_symbol_in_current_scope(
                 declarator.terminal_name, symbol);
+            if (replayable_using_decl) {
+                replayable_using_decl->ordinary_symbols.push_back(
+                    CppUsingDeclarationDecl::ImportedSymbol{
+                        declarator.terminal_name, symbol});
+            }
         };
 
         if (ordinary_binding) {
@@ -5065,7 +5096,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
         }
     }
 
-    parsed_decls.push_back(collect_->collect_nop_declaration(using_tok.loc));
+    if (replayable_using_decl) {
+        parsed_decls.push_back(std::move(replayable_using_decl));
+    } else {
+        parsed_decls.push_back(collect_->collect_nop_declaration(using_tok.loc));
+    }
     return parsed_decls;
 }
 

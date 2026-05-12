@@ -1408,6 +1408,7 @@ bool rewrite_decl_tree_in_place_impl(std::unique_ptr<Decl>& decl,
 
     switch (decl->get_kind()) {
         case DeclKind::NopDecl:
+        case DeclKind::CppUsingDeclarationDecl:
         case DeclKind::NamespaceDecl:
         case DeclKind::ErrorDecl:
             return true;
@@ -2173,6 +2174,20 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
     switch (decl->get_kind()) {
         case DeclKind::NopDecl: {
             auto result = std::make_unique<NopDecl>(decl->location);
+            assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::CppUsingDeclarationDecl: {
+            const auto* using_decl =
+                static_cast<const CppUsingDeclarationDecl*>(decl);
+            auto result =
+                std::make_unique<CppUsingDeclarationDecl>(decl->location);
+            result->ordinary_symbols = using_decl->ordinary_symbols;
+            result->template_decls = using_decl->template_decls;
+            result->tag_decls = using_decl->tag_decls;
             assign_node_id(result.get(), ctx.ast_ctx);
             if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;

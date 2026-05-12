@@ -65,9 +65,49 @@ public:
         bool empty() const { return frames.empty(); }
     };
 
+    struct UnqualifiedOrdinaryLookupResult {
+        std::shared_ptr<Symbol> symbol = nullptr;
+        const DeclBinding* binding = nullptr;
+        std::shared_ptr<Scope> scope = nullptr;
+        const DeclContext* lookup_context = nullptr;
+        const DeclContext* owner_context = nullptr;
+        size_t scope_depth = 0;
+        bool blocked = false;
+
+        bool found() const { return symbol != nullptr; }
+        bool found_in_lookup_context() const {
+            return found() &&
+                   lookup_context != nullptr &&
+                   lookup_context == owner_context;
+        }
+    };
+
+    struct UnqualifiedTemplateLookupResult {
+        const DeclBinding* binding = nullptr;
+        std::shared_ptr<Scope> scope = nullptr;
+        const DeclContext* lookup_context = nullptr;
+        const DeclContext* owner_context = nullptr;
+        size_t scope_depth = 0;
+        bool blocked = false;
+
+        bool found() const { return binding != nullptr; }
+        bool found_in_lookup_context() const {
+            return found() &&
+                   lookup_context != nullptr &&
+                   lookup_context == owner_context;
+        }
+    };
+
     static LookupEnvironment build_unqualified_environment(
         const std::shared_ptr<Scope>& start_scope,
         bool look_parents,
+        LookupTrace* trace = nullptr);
+
+    static UnqualifiedOrdinaryLookupResult lookup_unqualified_ordinary_result(
+        const std::string& name,
+        const std::shared_ptr<Scope>& start_scope,
+        bool look_parents,
+        OrdinaryFilter filter = OrdinaryFilter::Any,
         LookupTrace* trace = nullptr);
 
     static std::shared_ptr<Symbol> lookup_unqualified_ordinary(
@@ -78,6 +118,13 @@ public:
         LookupTrace* trace = nullptr);
 
     static const DeclBinding* lookup_unqualified_template_binding(
+        const std::string& name,
+        const std::shared_ptr<Scope>& start_scope,
+        bool look_parents,
+        LookupNamespace lookup_namespace,
+        LookupTrace* trace = nullptr);
+
+    static UnqualifiedTemplateLookupResult lookup_unqualified_template_binding_result(
         const std::string& name,
         const std::shared_ptr<Scope>& start_scope,
         bool look_parents,
