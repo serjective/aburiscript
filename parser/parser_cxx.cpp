@@ -6206,8 +6206,45 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
     }
     const std::string& record_name = record_frame.name;
 
-    if (gentle_check(TokenType::CONSTEVAL_KW)) {
-        error_custloc("destructor cannot be consteval", current_token().loc);
+    bool is_constexpr = false;
+    bool is_inline = false;
+    std::vector<ParsedAttribute> leading_attrs;
+    while (true) {
+        if (gentle_check(TokenType::CONSTEXPR_KW)) {
+            if (!lang_opts.is_cxx20_or_later()) {
+                error_custloc("'constexpr' destructor is only available in C++20",
+                              current_token().loc);
+            }
+            if (is_constexpr) {
+                error_custloc("duplicate 'constexpr' specifier", current_token().loc);
+            }
+            is_constexpr = true;
+            advance();
+            continue;
+        }
+        if (gentle_check(TokenType::CONSTEVAL_KW)) {
+            error_custloc("destructor cannot be consteval", current_token().loc);
+        }
+        if (gentle_check(TokenType::INLINE)) {
+            if (is_inline) {
+                error_custloc("duplicate 'inline' specifier", current_token().loc);
+            }
+            is_inline = true;
+            advance();
+            continue;
+        }
+        if (is_gnu_attribute_token(current_token()) ||
+            gentle_check(TokenType::ALIGNAS) ||
+            (gentle_check(TokenType::LEFT_BRACKET) &&
+             peek_token().type == TokenType::LEFT_BRACKET)) {
+            auto parsed_attrs = try_parse_attributes();
+            leading_attrs.insert(
+                leading_attrs.end(),
+                std::make_move_iterator(parsed_attrs.begin()),
+                std::make_move_iterator(parsed_attrs.end()));
+            continue;
+        }
+        break;
     }
 
     Token tilde_tok = current_token();
@@ -6343,10 +6380,10 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
         nullptr,
         std::unordered_set<std::string>{},
         StorageClass::NONE,
-        false,
+        is_inline,
         tilde_tok.loc);
     dtor_decl->type = dtor_fn_type;
-    dtor_decl->is_constexpr = false;
+    dtor_decl->is_constexpr = is_constexpr;
     dtor_decl->is_deleted = is_deleted;
     dtor_decl->is_defaulted = is_defaulted;
     dtor_decl->is_defaulted_on_first_declaration =
@@ -6355,6 +6392,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
     dtor_decl->is_final = is_final;
     dtor_decl->is_pure = is_pure;
     dtor_decl->set_language_linkage(current_decl_language_linkage());
+    ast_ctx->append_attrs(dtor_decl->node_id, std::move(leading_attrs));
 
     std::string dtor_qualifier_prefix;
     if (auto* existing_prefix = get_func_decl_cxx_qualifier_prefix(dtor_decl.get())) {
@@ -7112,11 +7150,9 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 const std::string& record_name = cxx_record_parse_stack_.back().name;
                 bool in_named_record =
                     cxx_record_parse_stack_.back().kind != CppRecordKind::Union;
-                if (in_named_record) {
-                    auto skip_balanced_tokens =
-                        [&](size_t& offset,
-                            TokenType open_tok,
-                            TokenType close_tok) -> bool {
+                auto skip_balanced_tokens =
+                    [&](size_t& offset, TokenType open_tok, TokenType close_tok)
+                    -> bool {
                         if (peek_token_shortcut(offset).type != open_tok) {
                             return false;
                         }
@@ -7136,40 +7172,42 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                         }
                         return false;
                     };
-                    auto skip_gnu_attribute = [&](size_t& offset) -> bool {
-                        if (!is_gnu_attribute_token(peek_token_shortcut(offset))) {
-                            return false;
+                auto skip_gnu_attribute = [&](size_t& offset) -> bool {
+                    if (!is_gnu_attribute_token(peek_token_shortcut(offset))) {
+                        return false;
+                    }
+                    ++offset;
+                    if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN) {
+                        skip_balanced_tokens(
+                            offset,
+                            TokenType::LEFT_PAREN,
+                            TokenType::RIGHT_PAREN);
+                    }
+                    return true;
+                };
+                auto skip_cxx_attribute = [&](size_t& offset) -> bool {
+                    if (peek_token_shortcut(offset).type != TokenType::LEFT_BRACKET ||
+                        peek_token_shortcut(offset + 1).type != TokenType::LEFT_BRACKET) {
+                        return false;
+                    }
+                    offset += 2;
+                    while (peek_token_shortcut(offset).type != TokenType::Eof) {
+                        if (peek_token_shortcut(offset).type == TokenType::RIGHT_BRACKET &&
+                            peek_token_shortcut(offset + 1).type == TokenType::RIGHT_BRACKET) {
+                            offset += 2;
+                            return true;
                         }
                         ++offset;
-                        if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN) {
-                            skip_balanced_tokens(
-                                offset,
-                                TokenType::LEFT_PAREN,
-                                TokenType::RIGHT_PAREN);
-                        }
-                        return true;
-                    };
-                    auto skip_cxx_attribute = [&](size_t& offset) -> bool {
-                        if (peek_token_shortcut(offset).type != TokenType::LEFT_BRACKET ||
-                            peek_token_shortcut(offset + 1).type != TokenType::LEFT_BRACKET) {
-                            return false;
-                        }
-                        offset += 2;
-                        while (peek_token_shortcut(offset).type != TokenType::Eof) {
-                            if (peek_token_shortcut(offset).type == TokenType::RIGHT_BRACKET &&
-                                peek_token_shortcut(offset + 1).type == TokenType::RIGHT_BRACKET) {
-                                offset += 2;
-                                return true;
-                            }
-                            ++offset;
-                        }
-                        return false;
-                    };
-                    auto skip_constructor_prefix = [&]() -> size_t {
+                    }
+                    return false;
+                };
+                auto skip_special_member_prefix =
+                    [&](bool allow_explicit) -> size_t {
                         size_t offset = 0;
                         while (true) {
                             Token tok = peek_token_shortcut(offset);
-                            if (tok.type == TokenType::EXPLICIT_KW) {
+                            if (allow_explicit &&
+                                tok.type == TokenType::EXPLICIT_KW) {
                                 ++offset;
                                 if (peek_token_shortcut(offset).type ==
                                     TokenType::LEFT_PAREN) {
@@ -7204,8 +7242,10 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                             }
                             return offset;
                         }
-                    };
-                    size_t constructor_name_offset = skip_constructor_prefix();
+                };
+                if (in_named_record) {
+                    size_t constructor_name_offset =
+                        skip_special_member_prefix(/*allow_explicit=*/true);
                     Token ctor_name_tok = peek_token_shortcut(constructor_name_offset);
                     bool looks_like_constructor =
                         ctor_name_tok.type == TokenType::IDENTIFIER &&
@@ -7227,11 +7267,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                         }
                     }
                 }
-                size_t destructor_prefix_offset = 0;
-                if (peek_token_shortcut(destructor_prefix_offset).type ==
-                    TokenType::CONSTEVAL_KW) {
-                    ++destructor_prefix_offset;
-                }
+                size_t destructor_prefix_offset =
+                    skip_special_member_prefix(/*allow_explicit=*/false);
                 if (peek_token_shortcut(destructor_prefix_offset).type ==
                         TokenType::BITWISE_NOT &&
                     peek_token_shortcut(destructor_prefix_offset + 1).type ==
