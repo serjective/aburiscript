@@ -2085,6 +2085,7 @@ enum class BinOpTypes : uint8_t {
 
 };
 bool is_assignment_binop(BinOpTypes typ);
+bool is_compound_assignment_binop(BinOpTypes typ);
 bool is_binary_operator(std::string c);
 BinOpTypes string2bop(std::string& c);
 

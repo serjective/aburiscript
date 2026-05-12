@@ -6119,6 +6119,14 @@ std::unique_ptr<Expr> Collect::collect_binary_operation_impl(
     SrcLoc loc,
     bool allow_cpp_rewritten_candidates) {
 
+    if (is_compound_assignment_binop(bop)) {
+        return collect_compound_assign_operation(
+            std::move(lhs),
+            std::move(rhs),
+            bop,
+            loc);
+    }
+
     if (bop == BinOpTypes::MEMBER_PTR_DOT ||
         bop == BinOpTypes::MEMBER_PTR_ARROW) {
         return collect_member_pointer_access_expression(

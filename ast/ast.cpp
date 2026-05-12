@@ -348,6 +348,9 @@ bool is_assignment_binop(BinOpTypes typ) {
             return false;
     }
 }
+bool is_compound_assignment_binop(BinOpTypes typ) {
+    return is_assignment_binop(typ) && typ != BinOpTypes::ASSIGN;
+}
 bool is_binary_operator(std::string c) {
     if (string2bop(c) != BinOpTypes::UNKNOWN) return true;
     return false;
