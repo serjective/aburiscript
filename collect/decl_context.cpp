@@ -17,6 +17,23 @@ void append_unique(std::vector<T>& values, const T& value) {
     }
     values.push_back(value);
 }
+
+void append_or_replace_template_candidate(std::vector<const Decl*>& values,
+                                          const Decl* value) {
+    if (!value) {
+        return;
+    }
+    for (auto& existing : values) {
+        if (!template_decls_share_lookup_identity(existing, value)) {
+            continue;
+        }
+        if (template_decl_is_preferred_lookup_representative(existing, value)) {
+            existing = value;
+        }
+        return;
+    }
+    values.push_back(value);
+}
 }
 
 DeclContext::DeclContext(
@@ -318,10 +335,12 @@ void DeclContext::replay_binding_into_slot(const DeclBinding& binding, size_t id
     }
 
     if (binding.template_decl) {
-        append_unique(slot.template_candidates, binding.template_decl);
+        append_or_replace_template_candidate(
+            slot.template_candidates,
+            binding.template_decl);
     }
     for (const auto* candidate : binding.template_overload_candidates) {
-        append_unique(slot.template_candidates, candidate);
+        append_or_replace_template_candidate(slot.template_candidates, candidate);
     }
 
     refresh_cached_binding(slot);

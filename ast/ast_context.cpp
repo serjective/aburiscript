@@ -619,9 +619,9 @@ TemplateSpecializationSemanticKey make_template_specialization_semantic_key(
 
 FunctionTemplateSpecializationInfo canonicalize_function_template_specialization_info(
     FunctionTemplateSpecializationInfo info) {
-    info.primary_template = dyn_cast<FunctionTemplateDecl>(
-        const_cast<TemplateDecl*>(
-            canonical_template_decl_identity(info.primary_template)));
+    // Specialization lookup keys canonicalize the template identity separately.
+    // The side-table info must retain the selected redeclaration so deferred
+    // materialization can instantiate from the definition-bearing pattern.
     return info;
 }
 

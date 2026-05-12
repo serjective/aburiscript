@@ -985,6 +985,10 @@ void set_template_decl_canonical_decl(const TemplateDecl* decl,
                                       const TemplateDecl* canonical_decl);
 const TemplateDecl* get_template_decl_canonical_decl(const TemplateDecl* decl);
 void clear_template_decl_canonical_decls();
+const TemplateDecl* get_template_decl_lookup_identity(const Decl* decl);
+bool template_decls_share_lookup_identity(const Decl* lhs, const Decl* rhs);
+bool template_decl_is_preferred_lookup_representative(const Decl* existing,
+                                                      const Decl* candidate);
 void set_template_parameter_default_argument(
     const TemplateParameterDecl* decl,
     std::optional<TemplateArgument> argument);

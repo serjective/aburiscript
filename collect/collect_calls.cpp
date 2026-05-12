@@ -99,10 +99,16 @@ void append_unique_function_template_candidate(
     if (!function_template) {
         return;
     }
-    for (const auto* existing : candidates) {
-        if (existing == function_template) {
-            return;
+    for (auto*& existing : candidates) {
+        if (!template_decls_share_lookup_identity(existing, function_template)) {
+            continue;
         }
+        if (template_decl_is_preferred_lookup_representative(
+                existing,
+                function_template)) {
+            existing = function_template;
+        }
+        return;
     }
     candidates.push_back(function_template);
 }

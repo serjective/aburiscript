@@ -276,10 +276,14 @@ void append_unique_template_decl(std::vector<const Decl*>& decls,
     if (!decl) {
         return;
     }
-    for (const auto* existing : decls) {
-        if (existing == decl) {
-            return;
+    for (auto*& existing : decls) {
+        if (!template_decls_share_lookup_identity(existing, decl)) {
+            continue;
         }
+        if (template_decl_is_preferred_lookup_representative(existing, decl)) {
+            existing = decl;
+        }
+        return;
     }
     decls.push_back(decl);
 }
