@@ -146,6 +146,7 @@ enum class BuiltinKind {
     ISINF_SIGN,
     ISFINITE,
     ISNORMAL,
+    FPCLASSIFY,
     ISEQSIG,
     BUILTIN_HUGE_VAL,
     BUILTIN_HUGE_VALF,

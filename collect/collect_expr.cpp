@@ -7634,6 +7634,14 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_special_cases(
             node->const_value = 0;
             return node;
         }
+        case BuiltinKind::FPCLASSIFY:
+            if (args.size() == 6 && args[5] && args[5]->get_type() &&
+                !args[5]->get_type()->isFloatingPoint()) {
+                report_error(
+                    "__builtin_fpclassify requires a floating-point classification argument",
+                    loc);
+            }
+            return collect_make<BuiltinCallExpr>(kind, std::move(args), int_type, loc);
         case BuiltinKind::SHUFFLEVECTOR: {
             QualType ret = int_type;
             if (!args.empty() && args[0] && args[0]->get_type() &&
@@ -7829,6 +7837,7 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::ISINF_SIGN:
         case BuiltinKind::ISFINITE:
         case BuiltinKind::ISNORMAL:
+        case BuiltinKind::FPCLASSIFY:
         case BuiltinKind::ISEQSIG:
         case BuiltinKind::ISUNORDERED:
         case BuiltinKind::ISLESS:

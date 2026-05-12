@@ -1285,6 +1285,19 @@ static BuiltinLoweringResult lower_builtin_math_group(
         auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
         return {true, builder.CreateCall(callee, {lhs, rhs}, call_name)};
     };
+    auto smallest_normal_constant = [&](llvm::Type* ty) -> llvm::Constant* {
+        llvm::APFloat min_normal = [&]() -> llvm::APFloat {
+            if (ty->isHalfTy()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::IEEEhalf());
+            if (ty->isBFloatTy()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::BFloat());
+            if (ty->isFloatTy()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::IEEEsingle());
+            if (ty->isDoubleTy()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::IEEEdouble());
+            if (ty->isX86_FP80Ty()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::x87DoubleExtended());
+            if (ty->isFP128Ty()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::IEEEquad());
+            if (ty->isPPC_FP128Ty()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::PPCDoubleDouble());
+            return llvm::APFloat::getSmallestNormalized(llvm::APFloat::IEEEdouble());
+        }();
+        return llvm::ConstantFP::get(ctx, min_normal);
+    };
 
     switch (expr->kind) {
     // --- Float classification ---
@@ -1337,20 +1350,93 @@ static BuiltinLoweringResult lower_builtin_math_group(
         auto* abs_val = builder.CreateCall(fabs_fn, {val}, "fabs");
         auto* inf = llvm::ConstantFP::getInfinity(ty);
         auto* is_not_inf = builder.CreateFCmpONE(abs_val, inf, "isnormal_not_inf");
-        llvm::APFloat min_normal = [&]() -> llvm::APFloat {
-            if (ty->isHalfTy()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::IEEEhalf());
-            if (ty->isBFloatTy()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::BFloat());
-            if (ty->isFloatTy()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::IEEEsingle());
-            if (ty->isDoubleTy()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::IEEEdouble());
-            if (ty->isX86_FP80Ty()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::x87DoubleExtended());
-            if (ty->isFP128Ty()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::IEEEquad());
-            if (ty->isPPC_FP128Ty()) return llvm::APFloat::getSmallestNormalized(llvm::APFloat::PPCDoubleDouble());
-            return llvm::APFloat::getSmallestNormalized(llvm::APFloat::IEEEdouble());
-        }();
-        auto* min_norm = llvm::ConstantFP::get(ctx, min_normal);
+        auto* min_norm = smallest_normal_constant(ty);
         auto* is_ge_min_norm = builder.CreateFCmpOGE(abs_val, min_norm, "isnormal_ge_min");
         auto* is_normal = builder.CreateAnd(builder.CreateAnd(is_ord, is_not_inf), is_ge_min_norm, "isnormal");
         return {true, builder.CreateZExt(is_normal, llvm::Type::getInt32Ty(ctx), "isnormal_int")};
+    }
+    case BuiltinKind::FPCLASSIFY: {
+        auto* val = convert_expression(expr->args[5].get());
+        if (!val || !val->getType()->isFloatingPointTy()) {
+            lower.error("__builtin_fpclassify requires a floating-point classification argument", expr->location);
+            return {true, nullptr};
+        }
+
+        llvm::Type* fp_ty = val->getType();
+        llvm::Type* result_ty = convert_type(expr->result_type);
+        if (!result_ty || !result_ty->isIntegerTy()) {
+            result_ty = llvm::Type::getInt32Ty(ctx);
+        }
+
+        auto* is_nan = builder.CreateFCmpUNO(val, val, "fpclassify.nan");
+        llvm::Function* fabs_fn = llvm::Intrinsic::getDeclaration(
+            module.get(), llvm::Intrinsic::fabs, {fp_ty});
+        auto* abs_val = builder.CreateCall(fabs_fn, {val}, "fpclassify.abs");
+        auto* inf = llvm::ConstantFP::getInfinity(fp_ty);
+        auto* is_inf = builder.CreateFCmpOEQ(abs_val, inf, "fpclassify.inf");
+        auto* zero = llvm::ConstantFP::get(fp_ty, 0.0);
+        auto* is_zero = builder.CreateFCmpOEQ(val, zero, "fpclassify.zero");
+        auto* min_norm = smallest_normal_constant(fp_ty);
+        auto* is_normal = builder.CreateFCmpOGE(abs_val, min_norm, "fpclassify.normal");
+
+        llvm::Function* function = builder.GetInsertBlock()->getParent();
+        auto* nan_bb = llvm::BasicBlock::Create(ctx, "fpclassify.nan");
+        auto* inf_check_bb = llvm::BasicBlock::Create(ctx, "fpclassify.inf.check");
+        auto* inf_bb = llvm::BasicBlock::Create(ctx, "fpclassify.inf");
+        auto* zero_check_bb = llvm::BasicBlock::Create(ctx, "fpclassify.zero.check");
+        auto* zero_bb = llvm::BasicBlock::Create(ctx, "fpclassify.zero");
+        auto* normal_check_bb = llvm::BasicBlock::Create(ctx, "fpclassify.normal.check");
+        auto* normal_bb = llvm::BasicBlock::Create(ctx, "fpclassify.normal");
+        auto* subnormal_bb = llvm::BasicBlock::Create(ctx, "fpclassify.subnormal");
+        auto* merge_bb = llvm::BasicBlock::Create(ctx, "fpclassify.merge");
+
+        std::vector<std::pair<llvm::Value*, llvm::BasicBlock*>> incoming;
+        auto emit_category_value = [&](llvm::BasicBlock* bb, size_t arg_index) -> bool {
+            function->insert(function->end(), bb);
+            builder.SetInsertPoint(bb);
+            auto* category = convert_expression(expr->args[arg_index].get());
+            if (!category) {
+                return false;
+            }
+            if (category->getType() != result_ty) {
+                bool src_unsigned =
+                    expr->args[arg_index] && expr->args[arg_index]->get_type() &&
+                    expr->args[arg_index]->get_type()->isUnsigned();
+                category = lower.cast_llvm_type(category, result_ty, src_unsigned);
+            }
+            if (!builder.GetInsertBlock()->getTerminator()) {
+                builder.CreateBr(merge_bb);
+            }
+            incoming.push_back({category, builder.GetInsertBlock()});
+            return true;
+        };
+
+        builder.CreateCondBr(is_nan, nan_bb, inf_check_bb);
+        if (!emit_category_value(nan_bb, 0)) return {true, nullptr};
+
+        function->insert(function->end(), inf_check_bb);
+        builder.SetInsertPoint(inf_check_bb);
+        builder.CreateCondBr(is_inf, inf_bb, zero_check_bb);
+        if (!emit_category_value(inf_bb, 1)) return {true, nullptr};
+
+        function->insert(function->end(), zero_check_bb);
+        builder.SetInsertPoint(zero_check_bb);
+        builder.CreateCondBr(is_zero, zero_bb, normal_check_bb);
+        if (!emit_category_value(zero_bb, 4)) return {true, nullptr};
+
+        function->insert(function->end(), normal_check_bb);
+        builder.SetInsertPoint(normal_check_bb);
+        builder.CreateCondBr(is_normal, normal_bb, subnormal_bb);
+        if (!emit_category_value(normal_bb, 2)) return {true, nullptr};
+        if (!emit_category_value(subnormal_bb, 3)) return {true, nullptr};
+
+        function->insert(function->end(), merge_bb);
+        builder.SetInsertPoint(merge_bb);
+        auto* phi = builder.CreatePHI(result_ty, incoming.size(), "fpclassify.result");
+        for (auto& [value, block] : incoming) {
+            phi->addIncoming(value, block);
+        }
+        return {true, phi};
     }
     case BuiltinKind::ISEQSIG: {
         auto lhs = convert_expression(expr->args[0].get());

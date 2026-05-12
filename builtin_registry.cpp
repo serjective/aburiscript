@@ -237,6 +237,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__builtin_isinf_sign", BuiltinKind::ISINF_SIGN, 1, 1, false, false});
     register_builtin({"__builtin_isfinite", BuiltinKind::ISFINITE, 1, 1, false, false});
     register_builtin({"__builtin_isnormal", BuiltinKind::ISNORMAL, 1, 1, false, false});
+    register_builtin({"__builtin_fpclassify", BuiltinKind::FPCLASSIFY, 6, 6, false, false});
     register_builtin({"__builtin_iseqsig", BuiltinKind::ISEQSIG, 2, 2, false, false});
     register_builtin({"__builtin_huge_val", BuiltinKind::BUILTIN_HUGE_VAL, 0, 0, false, true});
     register_builtin({"__builtin_huge_valf", BuiltinKind::BUILTIN_HUGE_VALF, 0, 0, false, true});
