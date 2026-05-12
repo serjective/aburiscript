@@ -1659,10 +1659,13 @@ void ASTToLLVM::emit_cpp_lambda_invoker_body(
 }
 
 void ASTToLLVM::convert_function_declaration(Decl *decl) {
-    auto llvm_storage = llvm::Function::ExternalLinkage;
     auto *node = dyn_cast<FuncDecl>(decl);
     if (!node) { error("convert_function_declaration(): unexpected subclass", decl->location); return; }
     const bool uses_gnu_inline_semantics = lang_opts.uses_gnu_inline_semantics();
+    const bool is_inline_equivalent =
+        node->is_inline ||
+        (lang_opts.is_cxx_mode() &&
+         (node->is_constexpr || node->is_consteval));
     const bool is_c_inline =
         node->is_inline && !lang_opts.is_cxx_mode();
     const bool suppress_external_definition =
@@ -1672,16 +1675,14 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
          (!uses_gnu_inline_semantics &&
           node->storage_class != StorageClass::EXTERN &&
           !node->has_prior_non_inline_declaration));
-    if (node->storage_class == StorageClass::STATIC || suppress_external_definition) {
-        llvm_storage = llvm::Function::InternalLinkage;
-    }
-    auto llvm_declaration_storage = llvm_storage;
-    if (!node->body &&
-        llvm_declaration_storage == llvm::Function::InternalLinkage) {
-        llvm_declaration_storage = llvm::Function::ExternalLinkage;
-    }
     auto desired_llvm_storage =
-        node->body ? llvm_storage : llvm_declaration_storage;
+        node->body
+            ? get_function_definition_linkage(
+                  *node,
+                  suppress_external_definition)
+            : get_function_declaration_linkage(
+                  *node,
+                  suppress_external_definition);
 
     // Header-only inline definitions that suppress an external definition
     // still need a callable body when we are not running a dedicated inliner.
@@ -1758,8 +1759,14 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
         // Preserve an existing internal definition across later extern
         // redeclarations. Header patterns like `static inline` followed by an
         // `extern` prototype should keep the local definition local.
-        if (mainFunc->getLinkage() != llvm::Function::InternalLinkage ||
-            desired_llvm_storage == llvm::Function::InternalLinkage) {
+        const bool keep_existing_internal =
+            mainFunc->getLinkage() == llvm::GlobalValue::InternalLinkage &&
+            desired_llvm_storage != llvm::GlobalValue::InternalLinkage;
+        const bool keep_existing_odr_definition =
+            !mainFunc->empty() &&
+            mainFunc->getLinkage() == llvm::GlobalValue::LinkOnceODRLinkage &&
+            desired_llvm_storage == llvm::GlobalValue::ExternalLinkage;
+        if (!keep_existing_internal && !keep_existing_odr_definition) {
             mainFunc->setLinkage(desired_llvm_storage);
         }
     } else {
@@ -1840,10 +1847,7 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
                 break;
             case AttributeKind::VISIBILITY: {
                 if (!attr.args.empty() && attr.args[0].kind == AttributeArg::Kind::STRING) {
-                    const auto& vis = attr.args[0].str_value;
-                    if (vis == "default") mainFunc->setVisibility(llvm::GlobalValue::DefaultVisibility);
-                    else if (vis == "hidden") mainFunc->setVisibility(llvm::GlobalValue::HiddenVisibility);
-                    else if (vis == "protected") mainFunc->setVisibility(llvm::GlobalValue::ProtectedVisibility);
+                    apply_global_visibility(*mainFunc, attr.args[0].str_value);
                 }
                 break;
             }
@@ -1910,6 +1914,7 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
                 break;
         }
     }
+    configure_odr_function_linkage(mainFunc);
 
     llvm::Function* base_variant_func = nullptr;
     auto get_base_variant_name_for_decl = [&](const FuncDecl* fn_decl) -> std::string {
@@ -1945,6 +1950,7 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
             base_variant_func->setAttributes(mainFunc->getAttributes());
             base_variant_func->setVisibility(mainFunc->getVisibility());
             base_variant_func->setUnnamedAddr(mainFunc->getUnnamedAddr());
+            configure_odr_function_linkage(base_variant_func);
         }
     }
 
@@ -1983,7 +1989,7 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
     // unit. GNU inline definitions with a prior non-inline declaration still
     // need a real out-of-line definition, so keep emitting those eagerly.
     bool should_defer_unused_inline_definition =
-        node->is_inline &&
+        is_inline_equivalent &&
         node->storage_class != StorageClass::EXTERN &&
         (lang_opts.is_cxx_mode() ||
          suppress_external_definition ||

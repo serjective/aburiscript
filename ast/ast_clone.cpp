@@ -272,10 +272,10 @@ bool rewrite_attribute_list_in_place(AttributeList& attrs,
     return true;
 }
 
-bool copy_decl_side_tables(const Decl* source,
-                           Decl* destination,
-                           ASTCloneContext& ctx,
-                           std::string* error_out) {
+bool copy_decl_side_tables_impl(const Decl* source,
+                                Decl* destination,
+                                ASTCloneContext& ctx,
+                                std::string* error_out) {
     if (!source || !destination || !ctx.ast_ctx ||
         !ctx.ast_ctx->has_attrs(source->node_id)) {
         return true;
@@ -2165,7 +2165,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
         case DeclKind::NopDecl: {
             auto result = std::make_unique<NopDecl>(decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
-            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;
@@ -2181,7 +2181,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 namespace_decl->location);
             result->canonical_decl = result.get();
             assign_node_id(result.get(), ctx.ast_ctx);
-            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;
@@ -2203,7 +2203,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                     field_decl->location);
             }
             assign_node_id(result.get(), ctx.ast_ctx);
-            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;
@@ -2215,7 +2215,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 access_spec_decl->access,
                 access_spec_decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
-            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;
@@ -2253,7 +2253,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
             result->default_access = record_decl->default_access;
             result->definition_data = record_decl->definition_data;
             assign_node_id(result.get(), ctx.ast_ctx);
-            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;
@@ -2274,7 +2274,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 std::move(cloned_sym),
                 typedef_decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
-            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;
@@ -2323,7 +2323,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
             if (result->sym) {
                 result->sym->variable_definition = result.get();
             }
-            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;
@@ -2362,7 +2362,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                     result.get(),
                     std::move(cloned_default));
             }
-            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;
@@ -2380,7 +2380,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 static_assert_decl->has_message != 0,
                 static_assert_decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
-            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;
@@ -2391,7 +2391,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 error_decl->error_message,
                 error_decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
-            if (!copy_decl_side_tables(decl, result.get(), ctx, error_out)) {
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;
@@ -2404,6 +2404,13 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
     }
 }
 } // namespace
+
+bool copy_decl_side_tables(const Decl* source,
+                           Decl* destination,
+                           ASTCloneContext& ctx,
+                           std::string* error_out) {
+    return copy_decl_side_tables_impl(source, destination, ctx, error_out);
+}
 
 std::unique_ptr<Expr> clone_expr_with_substitution(
     const Expr* expr,

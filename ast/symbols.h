@@ -27,6 +27,10 @@ enum class VariableLinkage : uint8_t {
     EXTERNAL
 };
 
+VariableLinkage function_symbol_linkage_for_storage(
+    StorageClass storage_class,
+    bool is_cpp_member_function);
+
 enum class LanguageLinkage : uint8_t {
     None = 0,
     C = 1,

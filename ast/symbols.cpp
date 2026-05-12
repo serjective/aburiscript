@@ -14,6 +14,15 @@ ASTContext* side_table_context_for(const Symbol* sym) {
 }
 } // namespace
 
+VariableLinkage function_symbol_linkage_for_storage(
+    StorageClass storage_class,
+    bool is_cpp_member_function) {
+    if (storage_class == StorageClass::STATIC && !is_cpp_member_function) {
+        return VariableLinkage::INTERNAL;
+    }
+    return VariableLinkage::EXTERNAL;
+}
+
 void set_symbol_cxx_qualifier_prefix(const Symbol* sym,
                                      std::optional<std::string> prefix) {
     if (ASTContext* ctx = side_table_context_for(sym)) {

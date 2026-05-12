@@ -1266,9 +1266,9 @@ Collect::try_collect_typed_dependent_function_template_call(
             SymbolKind::FUNCTION,
             QualType(function_type),
             pattern->storage_class,
-            pattern->storage_class == StorageClass::STATIC
-                ? VariableLinkage::INTERNAL
-                : VariableLinkage::EXTERNAL,
+            function_symbol_linkage_for_storage(
+                pattern->storage_class,
+                static_cast<bool>(get_func_decl_owner_record_type(pattern))),
             pattern->is_inline != 0);
         specialization_symbol->function_definition = pattern;
         specialization_symbol->is_constexpr = pattern->is_constexpr;

@@ -35,6 +35,7 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/IR/IntrinsicInst.h>
+#include <llvm/TargetParser/Triple.h>
 
 namespace {
 struct EmutlsControlLayout {
@@ -874,6 +875,85 @@ std::string ASTToLLVM::get_variable_llvm_name(const std::shared_ptr<Symbol>& sym
     return fallback_spelling;
 }
 
+llvm::GlobalValue::LinkageTypes ASTToLLVM::get_function_definition_linkage(
+    const FuncDecl& decl,
+    bool suppress_external_definition) const {
+    const bool is_cpp_member_function =
+        lang_opts.is_cxx_mode() &&
+        static_cast<bool>(get_func_decl_owner_record_type(&decl));
+    VariableLinkage semantic_linkage =
+        function_symbol_linkage_for_storage(
+            decl.storage_class,
+            is_cpp_member_function);
+    if (semantic_linkage == VariableLinkage::INTERNAL ||
+        suppress_external_definition) {
+        return llvm::GlobalValue::InternalLinkage;
+    }
+    if (lang_opts.is_cxx_mode() &&
+        (decl.is_inline || decl.is_constexpr || decl.is_consteval)) {
+        return llvm::GlobalValue::LinkOnceODRLinkage;
+    }
+    return llvm::GlobalValue::ExternalLinkage;
+}
+
+llvm::GlobalValue::LinkageTypes ASTToLLVM::get_function_declaration_linkage(
+    const FuncDecl& decl,
+    bool suppress_external_definition) const {
+    llvm::GlobalValue::LinkageTypes linkage =
+        get_function_definition_linkage(decl, suppress_external_definition);
+    if (linkage == llvm::GlobalValue::InternalLinkage ||
+        linkage == llvm::GlobalValue::LinkOnceODRLinkage) {
+        return llvm::GlobalValue::ExternalLinkage;
+    }
+    return linkage;
+}
+
+llvm::GlobalValue::LinkageTypes ASTToLLVM::get_function_symbol_linkage(
+    const Symbol& sym) const {
+    if (sym.linkage == VariableLinkage::INTERNAL) {
+        if (sym.function_definition && sym.function_definition->body) {
+            return llvm::GlobalValue::InternalLinkage;
+        }
+        return llvm::GlobalValue::ExternalLinkage;
+    }
+    if (lang_opts.is_cxx_mode() &&
+        (sym.is_inline || sym.is_constexpr || sym.is_consteval) &&
+        sym.function_definition &&
+        sym.function_definition->body) {
+        return llvm::GlobalValue::LinkOnceODRLinkage;
+    }
+    return llvm::GlobalValue::ExternalLinkage;
+}
+
+void ASTToLLVM::apply_global_visibility(
+    llvm::GlobalValue& global,
+    const std::string& visibility) const {
+    if (global.hasLocalLinkage()) {
+        global.setVisibility(llvm::GlobalValue::DefaultVisibility);
+        return;
+    }
+    if (visibility == "default") {
+        global.setVisibility(llvm::GlobalValue::DefaultVisibility);
+    } else if (visibility == "hidden") {
+        global.setVisibility(llvm::GlobalValue::HiddenVisibility);
+    } else if (visibility == "protected") {
+        global.setVisibility(llvm::GlobalValue::ProtectedVisibility);
+    }
+}
+
+void ASTToLLVM::configure_odr_function_linkage(
+    llvm::Function* function) const {
+    if (!function ||
+        function->getLinkage() != llvm::GlobalValue::LinkOnceODRLinkage) {
+        return;
+    }
+    llvm::Triple triple(module->getTargetTriple());
+    if (!triple.supportsCOMDAT()) {
+        return;
+    }
+    function->setComdat(module->getOrInsertComdat(function->getName()));
+}
+
 llvm::Function* ASTToLLVM::get_or_create_function_symbol(
     const std::shared_ptr<Symbol>& sym,
     const std::string& fallback_spelling) {
@@ -909,16 +989,11 @@ llvm::Function* ASTToLLVM::get_or_create_function_symbol(
     llvm::FunctionType* ft = llvm::FunctionType::get(
         ret_type, param_types, func_ctype->is_variadic || !func_ctype->has_prototype);
     llvm::GlobalValue::LinkageTypes linkage =
-        sym->storage_class == StorageClass::STATIC
-            ? llvm::Function::InternalLinkage
-            : llvm::Function::ExternalLinkage;
-    if (linkage == llvm::Function::InternalLinkage &&
-        (!sym->function_definition || !sym->function_definition->body)) {
-        linkage = llvm::Function::ExternalLinkage;
-    }
+        get_function_symbol_linkage(*sym);
     llvm::Function* fn =
         llvm::Function::Create(ft, linkage, fn_name, module.get());
     apply_indirect_result_attributes(fn, 0, func_ctype->ret_type);
+    configure_odr_function_linkage(fn);
 
     if (!sym->uid.empty()) {
         named_values[mangleCIdentifier(sym->uid)] = fn;

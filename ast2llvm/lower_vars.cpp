@@ -949,10 +949,7 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
                 break;
             case AttributeKind::VISIBILITY: {
                 if (!attr.args.empty() && attr.args[0].kind == AttributeArg::Kind::STRING) {
-                    const auto& vis = attr.args[0].str_value;
-                    if (vis == "default") gVar->setVisibility(llvm::GlobalValue::DefaultVisibility);
-                    else if (vis == "hidden") gVar->setVisibility(llvm::GlobalValue::HiddenVisibility);
-                    else if (vis == "protected") gVar->setVisibility(llvm::GlobalValue::ProtectedVisibility);
+                    apply_global_visibility(*gVar, attr.args[0].str_value);
                 }
                 break;
             }
@@ -1847,15 +1844,12 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                     }
                     gVar->setConstant(false);
                     break;
-                case AttributeKind::VISIBILITY: {
-                    if (!attr.args.empty() && attr.args[0].kind == AttributeArg::Kind::STRING) {
-                        const auto& vis = attr.args[0].str_value;
-                        if (vis == "default") gVar->setVisibility(llvm::GlobalValue::DefaultVisibility);
-                        else if (vis == "hidden") gVar->setVisibility(llvm::GlobalValue::HiddenVisibility);
-                        else if (vis == "protected") gVar->setVisibility(llvm::GlobalValue::ProtectedVisibility);
+                    case AttributeKind::VISIBILITY: {
+                        if (!attr.args.empty() && attr.args[0].kind == AttributeArg::Kind::STRING) {
+                            apply_global_visibility(*gVar, attr.args[0].str_value);
+                        }
+                        break;
                     }
-                    break;
-                }
                 case AttributeKind::USED:
                     llvm::appendToCompilerUsed(*module, {gVar});
                     break;

@@ -58,6 +58,11 @@ std::unique_ptr<Decl> clone_decl_tree(const Decl* decl,
                                       ASTCloneContext& ctx,
                                       std::string* error_out = nullptr);
 
+bool copy_decl_side_tables(const Decl* source,
+                           Decl* destination,
+                           ASTCloneContext& ctx,
+                           std::string* error_out = nullptr);
+
 bool rewrite_decl_tree_in_place(std::unique_ptr<Decl>& decl,
                                 ASTCloneContext& ctx,
                                 std::string* error_out = nullptr);

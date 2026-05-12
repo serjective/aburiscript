@@ -423,6 +423,9 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         is_constexpr = true;
         is_inline = true;
     }
+    if (lang_opts_.is_cxx_mode() && is_constexpr) {
+        is_inline = true;
+    }
     materialize_tentative_snapshot_if_needed();
     if (contains_deferred_semantic_type(type.get_shared())) {
         type = resolve_typeof_types(type, loc);
@@ -653,11 +656,17 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
                 existing->is_defaulted = true;
             }
             if (existing->storage_class == StorageClass::STATIC) {
-                existing->linkage = VariableLinkage::INTERNAL;
+                existing->linkage =
+                    function_symbol_linkage_for_storage(
+                        existing->storage_class,
+                        is_cpp_member_function);
             } else if (storage_class == StorageClass::STATIC &&
                        !static_after_non_static_conflict) {
                 existing->storage_class = StorageClass::STATIC;
-                existing->linkage = VariableLinkage::INTERNAL;
+                existing->linkage =
+                    function_symbol_linkage_for_storage(
+                        storage_class,
+                        is_cpp_member_function);
             } else {
                 existing->linkage = VariableLinkage::EXTERNAL;
             }
@@ -671,9 +680,10 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         report_error("redefinition of '" + name + "' as function", loc);
         return existing;
     }
-    VariableLinkage linkage = (storage_class == StorageClass::STATIC)
-        ? VariableLinkage::INTERNAL
-        : VariableLinkage::EXTERNAL;
+    VariableLinkage linkage =
+        function_symbol_linkage_for_storage(
+            storage_class,
+            is_cpp_member_function);
     auto sym = std::make_shared<Symbol>(name, SymbolKind::FUNCTION, std::move(type), storage_class,
         linkage, is_inline);
     if (is_cpp_member_function) {

@@ -207,6 +207,17 @@ public:
     std::string get_function_llvm_name(const FuncDecl& decl) const;
     std::string get_function_llvm_name(const std::shared_ptr<Symbol>& sym,
                                        const std::string& fallback_spelling = "") const;
+    llvm::GlobalValue::LinkageTypes get_function_definition_linkage(
+        const FuncDecl& decl,
+        bool suppress_external_definition) const;
+    llvm::GlobalValue::LinkageTypes get_function_declaration_linkage(
+        const FuncDecl& decl,
+        bool suppress_external_definition) const;
+    llvm::GlobalValue::LinkageTypes get_function_symbol_linkage(
+        const Symbol& sym) const;
+    void apply_global_visibility(llvm::GlobalValue& global,
+                                 const std::string& visibility) const;
+    void configure_odr_function_linkage(llvm::Function* function) const;
     std::string get_variable_linkage_identity(const VariableDecl& decl) const;
     std::string get_variable_llvm_name(const VariableDecl& decl) const;
     std::string get_variable_llvm_name(const std::shared_ptr<Symbol>& sym,

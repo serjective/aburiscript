@@ -1307,9 +1307,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         }
 
         VariableLinkage linkage =
-            decl->storage_class == StorageClass::STATIC
-                ? VariableLinkage::INTERNAL
-                : VariableLinkage::EXTERNAL;
+            function_symbol_linkage_for_storage(
+                decl->storage_class,
+                static_cast<bool>(get_func_decl_owner_record_type(decl)));
         auto synthesized_symbol = std::make_shared<Symbol>(
             decl->name,
             SymbolKind::FUNCTION,
@@ -2296,6 +2296,18 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 ast_ctx(),
                 function_decl->node_id,
                 cloned_function_ptr->node_id);
+            std::string attr_error;
+            if (!copy_decl_side_tables(
+                    function_decl,
+                    cloned_function_ptr,
+                    clone_pass.context(),
+                    &attr_error)) {
+                return fail_instantiation(
+                    attr_error.empty()
+                        ? "failed to copy class template member template attributes"
+                        : attr_error,
+                    function_decl->location);
+            }
             if (auto* member_info =
                     ast_ctx()->get_cpp_member_decl_info(
                         cloned_function_ptr->node_id)) {
@@ -2631,6 +2643,18 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             ast_ctx(),
             method_decl->node_id,
             cloned_decl->node_id);
+        std::string attr_error;
+        if (!copy_decl_side_tables(
+                method_decl,
+                cloned_decl.get(),
+                clone_pass.context(),
+                &attr_error)) {
+            return fail_instantiation(
+                attr_error.empty()
+                    ? "failed to copy class template method attributes"
+                    : attr_error,
+                method_decl->location);
+        }
         if (auto* member_info =
                 ast_ctx()->get_cpp_member_decl_info(cloned_decl->node_id)) {
             member_info->is_explicit = cloned_decl->is_explicit_conversion;

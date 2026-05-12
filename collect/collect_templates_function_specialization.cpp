@@ -346,9 +346,10 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
         FuncDecl* explicit_decl,
         bool is_definition) const {
         VariableLinkage linkage =
-            explicit_decl->storage_class == StorageClass::STATIC
-                ? VariableLinkage::INTERNAL
-                : VariableLinkage::EXTERNAL;
+            function_symbol_linkage_for_storage(
+                explicit_decl->storage_class,
+                static_cast<bool>(
+                    get_func_decl_owner_record_type(explicit_decl)));
         auto synthesized_symbol = std::make_shared<Symbol>(
             explicit_decl->name,
             SymbolKind::FUNCTION,
@@ -636,9 +637,9 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
     std::shared_ptr<Symbol> create_specialization_symbol(
         const std::shared_ptr<FunctionType>& canonical_function_type) const {
         VariableLinkage linkage =
-            pattern->storage_class == StorageClass::STATIC
-                ? VariableLinkage::INTERNAL
-                : VariableLinkage::EXTERNAL;
+            function_symbol_linkage_for_storage(
+                pattern->storage_class,
+                static_cast<bool>(get_func_decl_owner_record_type(pattern)));
         auto specialization_symbol = std::make_shared<Symbol>(
             pattern->name,
             SymbolKind::FUNCTION,
