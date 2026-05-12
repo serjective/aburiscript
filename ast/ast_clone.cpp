@@ -322,7 +322,8 @@ std::shared_ptr<Symbol> remap_symbol(const std::shared_ptr<Symbol>& sym,
                                      ASTCloneContext& ctx);
 bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
                        ASTCloneContext& ctx,
-                       std::string* error_out);
+                       std::string* error_out,
+                       bool apply_current_expr_rewrite = true);
 
 bool rewrite_param_decl_in_place(ParamDecl* param,
                                  ASTCloneContext& ctx,
@@ -413,7 +414,8 @@ std::shared_ptr<Scope> clone_scope(const std::shared_ptr<Scope>& scope,
 
 bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
                        ASTCloneContext& ctx,
-                       std::string* error_out);
+                       std::string* error_out,
+                       bool apply_current_expr_rewrite);
 bool rewrite_stmt_tree_in_place_impl(std::unique_ptr<Stmt>& stmt,
                                      ASTCloneContext& ctx,
                                      std::string* error_out);
@@ -649,7 +651,8 @@ bool rewrite_init_mapping_map(std::map<size_t, std::shared_ptr<Expr>>& mappings,
 
 bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
                        ASTCloneContext& ctx,
-                       std::string* error_out) {
+                       std::string* error_out,
+                       bool apply_current_expr_rewrite) {
     if (!expr) {
         return true;
     }
@@ -739,7 +742,11 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
         case StmtKind::DependentCallExpr: {
             auto* call = static_cast<DependentCallExpr*>(expr.get());
             if (call->callee &&
-                !rewrite_expr_tree(call->callee, ctx, error_out)) {
+                !rewrite_expr_tree(
+                    call->callee,
+                    ctx,
+                    error_out,
+                    /*apply_current_expr_rewrite=*/false)) {
                 return false;
             }
             if (!rewrite_call_argument_vector(call->args, ctx, error_out)) {
@@ -1384,7 +1391,9 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
     if (!ok) {
         return false;
     }
-    if (ctx.rewrite_expr && !ctx.rewrite_expr(expr, error_out)) {
+    if (apply_current_expr_rewrite &&
+        ctx.rewrite_expr &&
+        !ctx.rewrite_expr(expr, error_out)) {
         return false;
     }
     return true;

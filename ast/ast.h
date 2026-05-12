@@ -1498,6 +1498,11 @@ struct CppFunctionStyleCastExpr: Expr {
         return target_type;
     }
 
+    bool isLValue() override {
+        auto ref = desugar_type(target_type).as_shared<ReferenceType>();
+        return ref && ref->isLValueReference();
+    }
+
     static bool classof(const Stmt *s) {
         return s->get_kind() == StmtKind::CppFunctionStyleCastExpr;
     }
@@ -2155,6 +2160,11 @@ struct ExplicitCast: Expr {
     QualType ctype;
     QualType get_type() override {
         return ctype;
+    }
+
+    bool isLValue() override {
+        auto ref = desugar_type(ctype).as_shared<ReferenceType>();
+        return ref && ref->isLValueReference();
     }
 
     ExplicitCast(std::unique_ptr<Expr> expr, QualType ctype, SrcLoc loc = SrcLoc())

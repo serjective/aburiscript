@@ -8247,6 +8247,24 @@ Collect::ValueCategory Collect::classify_value_category(Expr* expr) const {
         return ValueCategory::PRValue;
     }
 
+    if (auto* explicit_cast = dyn_cast<ExplicitCast>(expr)) {
+        auto cast_type = desugar_type(explicit_cast->get_type());
+        if (auto ref = cast_type.as_shared<ReferenceType>()) {
+            return ref->isRValueReference() ? ValueCategory::XValue
+                                            : ValueCategory::LValue;
+        }
+        return ValueCategory::PRValue;
+    }
+
+    if (auto* function_style_cast = dyn_cast<CppFunctionStyleCastExpr>(expr)) {
+        auto cast_type = desugar_type(function_style_cast->get_type());
+        if (auto ref = cast_type.as_shared<ReferenceType>()) {
+            return ref->isRValueReference() ? ValueCategory::XValue
+                                            : ValueCategory::LValue;
+        }
+        return ValueCategory::PRValue;
+    }
+
     if (auto* unary = dyn_cast<UnaryOperation>(expr)) {
         switch (unary->uop) {
             case UnaryOpTypes::INCREMENT_PREFIX:
