@@ -1187,11 +1187,21 @@ static BuiltinLoweringResult lower_builtin_math_group(
     auto cast_int_arg = [&](llvm::Value* val, BuiltinTypes bt, bool src_unsigned) {
         return cast_builtin_integer_arg(lower, val, bt, src_unsigned);
     };
-    auto cast_llvm_type = [&](llvm::Value* v, llvm::Type* t, bool u) {
-        return lower.cast_llvm_type(v, t, u);
+    auto builtin_llvm_type = [&](BuiltinTypes bt) -> llvm::Type* {
+        if (!lower.type_ctx) {
+            if (bt == BuiltinTypes::Float) return llvm::Type::getFloatTy(ctx);
+            if (bt == BuiltinTypes::Double || bt == BuiltinTypes::LongDouble) {
+                return llvm::Type::getDoubleTy(ctx);
+            }
+            if (bt == BuiltinTypes::Long || bt == BuiltinTypes::LongLong) {
+                return llvm::Type::getInt64Ty(ctx);
+            }
+            return llvm::Type::getInt32Ty(ctx);
+        }
+        return convert_type(QualType(lower.type_ctx->get_builtin(bt)));
     };
     auto coerce_builtin_fp_arg =
-        [&](llvm::Value* value, llvm::Type* target_ty) -> llvm::Value* {
+        [&](llvm::Value* value, llvm::Type* target_ty, bool src_unsigned = false) -> llvm::Value* {
         if (!value || !target_ty || value->getType() == target_ty) {
             return value;
         }
@@ -1199,9 +1209,81 @@ static BuiltinLoweringResult lower_builtin_math_group(
             return builder.CreateFPCast(value, target_ty);
         }
         if (value->getType()->isIntegerTy()) {
-            return builder.CreateSIToFP(value, target_ty);
+            return src_unsigned ? builder.CreateUIToFP(value, target_ty) : builder.CreateSIToFP(value, target_ty);
         }
         return value;
+    };
+    auto coerce_builtin_fp_expr_arg =
+        [&](Expr* arg, llvm::Type* target_ty) -> llvm::Value* {
+        auto* value = convert_expression(arg);
+        bool src_unsigned = arg && arg->get_type() && arg->get_type()->isUnsigned();
+        return coerce_builtin_fp_arg(value, target_ty, src_unsigned);
+    };
+    auto result_fp_type = [&]() -> llvm::Type* {
+        llvm::Type* fp_ty = convert_type(expr->result_type);
+        if (fp_ty && fp_ty->isFloatingPointTy()) {
+            return fp_ty;
+        }
+        return llvm::Type::getDoubleTy(ctx);
+    };
+    auto suffix_fp_type = [&](BuiltinKind kind) -> llvm::Type* {
+        switch (kind) {
+            case BuiltinKind::ILOGBF:
+            case BuiltinKind::LRINTF:
+            case BuiltinKind::LROUNDF:
+            case BuiltinKind::LLRINTF:
+            case BuiltinKind::LLROUNDF:
+                return llvm::Type::getFloatTy(ctx);
+            case BuiltinKind::ILOGBL:
+            case BuiltinKind::LRINTL:
+            case BuiltinKind::LROUNDL:
+            case BuiltinKind::LLRINTL:
+            case BuiltinKind::LLROUNDL:
+                return builtin_llvm_type(BuiltinTypes::LongDouble);
+            default:
+                return llvm::Type::getDoubleTy(ctx);
+        }
+    };
+    auto lower_unary_fp_intrinsic =
+        [&](llvm::Intrinsic::ID id, const char* call_name) -> BuiltinLoweringResult {
+        llvm::Type* fp_ty = result_fp_type();
+        auto* val = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
+        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), id, {fp_ty});
+        return {true, builder.CreateCall(fn, {val}, call_name)};
+    };
+    auto lower_binary_fp_intrinsic =
+        [&](llvm::Intrinsic::ID id, const char* call_name) -> BuiltinLoweringResult {
+        llvm::Type* fp_ty = result_fp_type();
+        auto* lhs = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
+        auto* rhs = coerce_builtin_fp_expr_arg(expr->args[1].get(), fp_ty);
+        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), id, {fp_ty});
+        return {true, builder.CreateCall(fn, {lhs, rhs}, call_name)};
+    };
+    auto lower_ternary_fp_intrinsic =
+        [&](llvm::Intrinsic::ID id, const char* call_name) -> BuiltinLoweringResult {
+        llvm::Type* fp_ty = result_fp_type();
+        auto* a = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
+        auto* b = coerce_builtin_fp_expr_arg(expr->args[1].get(), fp_ty);
+        auto* c = coerce_builtin_fp_expr_arg(expr->args[2].get(), fp_ty);
+        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), id, {fp_ty});
+        return {true, builder.CreateCall(fn, {a, b, c}, call_name)};
+    };
+    auto lower_unary_libm =
+        [&](const char* name, const char* call_name) -> BuiltinLoweringResult {
+        llvm::Type* fp_ty = result_fp_type();
+        auto* val = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
+        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty}, false);
+        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
+        return {true, builder.CreateCall(callee, {val}, call_name)};
+    };
+    auto lower_binary_libm =
+        [&](const char* name, const char* call_name) -> BuiltinLoweringResult {
+        llvm::Type* fp_ty = result_fp_type();
+        auto* lhs = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
+        auto* rhs = coerce_builtin_fp_expr_arg(expr->args[1].get(), fp_ty);
+        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty, fp_ty}, false);
+        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
+        return {true, builder.CreateCall(callee, {lhs, rhs}, call_name)};
     };
 
     switch (expr->kind) {
@@ -1391,137 +1473,330 @@ static BuiltinLoweringResult lower_builtin_math_group(
         auto* neg_val = builder.CreateNeg(val, "neg");
         return {true, builder.CreateSelect(is_neg, neg_val, val, "llabs")};
     }
-    // --- Float absolute value ---
+    // --- Float math ---
     case BuiltinKind::FABS:
     case BuiltinKind::FABSF:
-    case BuiltinKind::FABSL: {
-        auto val = convert_expression(expr->args[0].get());
-        llvm::Type* result_ty = convert_type(expr->result_type);
-        if (result_ty && result_ty->isFloatingPointTy() && val->getType() != result_ty)
-            val = cast_llvm_type(val, result_ty, false);
-        llvm::Function* fabs_fn = llvm::Intrinsic::getDeclaration(
-            module.get(), llvm::Intrinsic::fabs, {val->getType()});
-        return {true, builder.CreateCall(fabs_fn, {val}, "fabs")};
-    }
-    // --- Single-arg transcendental and rounding ---
-    case BuiltinKind::ILOGB: {
-        auto val = convert_expression(expr->args[0].get());
-        if (!val->getType()->isFloatingPointTy())
-            val = builder.CreateSIToFP(val, llvm::Type::getDoubleTy(ctx));
+    case BuiltinKind::FABSL:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::fabs, "fabs");
+    case BuiltinKind::SQRT:
+    case BuiltinKind::SQRTF:
+    case BuiltinKind::SQRTL:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::sqrt, "sqrt");
+    case BuiltinKind::SIN:
+    case BuiltinKind::SINF:
+    case BuiltinKind::SINL:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::sin, "sin");
+    case BuiltinKind::COS:
+    case BuiltinKind::COSF:
+    case BuiltinKind::COSL:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::cos, "cos");
+    case BuiltinKind::LOG:
+    case BuiltinKind::LOGF:
+    case BuiltinKind::LOGL:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::log, "log");
+    case BuiltinKind::LOG2:
+    case BuiltinKind::LOG2F:
+    case BuiltinKind::LOG2L:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::log2, "log2");
+    case BuiltinKind::LOG10:
+    case BuiltinKind::LOG10F:
+    case BuiltinKind::LOG10L:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::log10, "log10");
+    case BuiltinKind::EXP:
+    case BuiltinKind::EXPF:
+    case BuiltinKind::EXPL:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::exp, "exp");
+    case BuiltinKind::EXP2:
+    case BuiltinKind::EXP2F:
+    case BuiltinKind::EXP2L:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::exp2, "exp2");
+    case BuiltinKind::CEIL:
+    case BuiltinKind::CEILF:
+    case BuiltinKind::CEILL:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::ceil, "ceil");
+    case BuiltinKind::FLOOR:
+    case BuiltinKind::FLOORF:
+    case BuiltinKind::FLOORL:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::floor, "floor");
+    case BuiltinKind::ROUND:
+    case BuiltinKind::ROUNDF:
+    case BuiltinKind::ROUNDL:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::round, "round");
+    case BuiltinKind::TRUNC:
+    case BuiltinKind::TRUNCF:
+    case BuiltinKind::TRUNCL:
+        return lower_unary_fp_intrinsic(llvm::Intrinsic::trunc, "trunc");
+    case BuiltinKind::POW:
+    case BuiltinKind::POWF:
+    case BuiltinKind::POWL:
+        return lower_binary_fp_intrinsic(llvm::Intrinsic::pow, "pow");
+    case BuiltinKind::COPYSIGN:
+    case BuiltinKind::COPYSIGNF:
+    case BuiltinKind::COPYSIGNL:
+        return lower_binary_fp_intrinsic(llvm::Intrinsic::copysign, "copysign");
+    case BuiltinKind::FMIN:
+    case BuiltinKind::FMINF:
+    case BuiltinKind::FMINL:
+        return lower_binary_fp_intrinsic(llvm::Intrinsic::minnum, "fmin");
+    case BuiltinKind::FMAX:
+    case BuiltinKind::FMAXF:
+    case BuiltinKind::FMAXL:
+        return lower_binary_fp_intrinsic(llvm::Intrinsic::maxnum, "fmax");
+    case BuiltinKind::FMA:
+    case BuiltinKind::FMAF:
+    case BuiltinKind::FMAL:
+        return lower_ternary_fp_intrinsic(llvm::Intrinsic::fma, "fma");
+    case BuiltinKind::CBRT:
+        return lower_unary_libm("cbrt", "cbrt");
+    case BuiltinKind::CBRTF:
+        return lower_unary_libm("cbrtf", "cbrt");
+    case BuiltinKind::CBRTL:
+        return lower_unary_libm("cbrtl", "cbrt");
+    case BuiltinKind::TAN:
+        return lower_unary_libm("tan", "tan");
+    case BuiltinKind::TANF:
+        return lower_unary_libm("tanf", "tan");
+    case BuiltinKind::TANL:
+        return lower_unary_libm("tanl", "tan");
+    case BuiltinKind::ASIN:
+        return lower_unary_libm("asin", "asin");
+    case BuiltinKind::ASINF:
+        return lower_unary_libm("asinf", "asin");
+    case BuiltinKind::ASINL:
+        return lower_unary_libm("asinl", "asin");
+    case BuiltinKind::ACOS:
+        return lower_unary_libm("acos", "acos");
+    case BuiltinKind::ACOSF:
+        return lower_unary_libm("acosf", "acos");
+    case BuiltinKind::ACOSL:
+        return lower_unary_libm("acosl", "acos");
+    case BuiltinKind::ATAN:
+        return lower_unary_libm("atan", "atan");
+    case BuiltinKind::ATANF:
+        return lower_unary_libm("atanf", "atan");
+    case BuiltinKind::ATANL:
+        return lower_unary_libm("atanl", "atan");
+    case BuiltinKind::SINH:
+        return lower_unary_libm("sinh", "sinh");
+    case BuiltinKind::SINHF:
+        return lower_unary_libm("sinhf", "sinh");
+    case BuiltinKind::SINHL:
+        return lower_unary_libm("sinhl", "sinh");
+    case BuiltinKind::COSH:
+        return lower_unary_libm("cosh", "cosh");
+    case BuiltinKind::COSHF:
+        return lower_unary_libm("coshf", "cosh");
+    case BuiltinKind::COSHL:
+        return lower_unary_libm("coshl", "cosh");
+    case BuiltinKind::TANH:
+        return lower_unary_libm("tanh", "tanh");
+    case BuiltinKind::TANHF:
+        return lower_unary_libm("tanhf", "tanh");
+    case BuiltinKind::TANHL:
+        return lower_unary_libm("tanhl", "tanh");
+    case BuiltinKind::ASINH:
+        return lower_unary_libm("asinh", "asinh");
+    case BuiltinKind::ASINHF:
+        return lower_unary_libm("asinhf", "asinh");
+    case BuiltinKind::ASINHL:
+        return lower_unary_libm("asinhl", "asinh");
+    case BuiltinKind::ACOSH:
+        return lower_unary_libm("acosh", "acosh");
+    case BuiltinKind::ACOSHF:
+        return lower_unary_libm("acoshf", "acosh");
+    case BuiltinKind::ACOSHL:
+        return lower_unary_libm("acoshl", "acosh");
+    case BuiltinKind::ATANH:
+        return lower_unary_libm("atanh", "atanh");
+    case BuiltinKind::ATANHF:
+        return lower_unary_libm("atanhf", "atanh");
+    case BuiltinKind::ATANHL:
+        return lower_unary_libm("atanhl", "atanh");
+    case BuiltinKind::EXPM1:
+        return lower_unary_libm("expm1", "expm1");
+    case BuiltinKind::EXPM1F:
+        return lower_unary_libm("expm1f", "expm1");
+    case BuiltinKind::EXPM1L:
+        return lower_unary_libm("expm1l", "expm1");
+    case BuiltinKind::LOG1P:
+        return lower_unary_libm("log1p", "log1p");
+    case BuiltinKind::LOG1PF:
+        return lower_unary_libm("log1pf", "log1p");
+    case BuiltinKind::LOG1PL:
+        return lower_unary_libm("log1pl", "log1p");
+    case BuiltinKind::LOGB:
+        return lower_unary_libm("logb", "logb");
+    case BuiltinKind::LOGBF:
+        return lower_unary_libm("logbf", "logb");
+    case BuiltinKind::LOGBL:
+        return lower_unary_libm("logbl", "logb");
+    case BuiltinKind::RINT:
+        return lower_unary_libm("rint", "rint");
+    case BuiltinKind::RINTF:
+        return lower_unary_libm("rintf", "rint");
+    case BuiltinKind::RINTL:
+        return lower_unary_libm("rintl", "rint");
+    case BuiltinKind::NEARBYINT:
+        return lower_unary_libm("nearbyint", "nearbyint");
+    case BuiltinKind::NEARBYINTF:
+        return lower_unary_libm("nearbyintf", "nearbyint");
+    case BuiltinKind::NEARBYINTL:
+        return lower_unary_libm("nearbyintl", "nearbyint");
+    case BuiltinKind::ERF:
+        return lower_unary_libm("erf", "erf");
+    case BuiltinKind::ERFF:
+        return lower_unary_libm("erff", "erf");
+    case BuiltinKind::ERFL:
+        return lower_unary_libm("erfl", "erf");
+    case BuiltinKind::ERFC:
+        return lower_unary_libm("erfc", "erfc");
+    case BuiltinKind::ERFCF:
+        return lower_unary_libm("erfcf", "erfc");
+    case BuiltinKind::ERFCL:
+        return lower_unary_libm("erfcl", "erfc");
+    case BuiltinKind::LGAMMA:
+        return lower_unary_libm("lgamma", "lgamma");
+    case BuiltinKind::LGAMMAF:
+        return lower_unary_libm("lgammaf", "lgamma");
+    case BuiltinKind::LGAMMAL:
+        return lower_unary_libm("lgammal", "lgamma");
+    case BuiltinKind::TGAMMA:
+        return lower_unary_libm("tgamma", "tgamma");
+    case BuiltinKind::TGAMMAF:
+        return lower_unary_libm("tgammaf", "tgamma");
+    case BuiltinKind::TGAMMAL:
+        return lower_unary_libm("tgammal", "tgamma");
+    case BuiltinKind::ATAN2:
+        return lower_binary_libm("atan2", "atan2");
+    case BuiltinKind::ATAN2F:
+        return lower_binary_libm("atan2f", "atan2");
+    case BuiltinKind::ATAN2L:
+        return lower_binary_libm("atan2l", "atan2");
+    case BuiltinKind::HYPOT:
+        return lower_binary_libm("hypot", "hypot");
+    case BuiltinKind::HYPOTF:
+        return lower_binary_libm("hypotf", "hypot");
+    case BuiltinKind::HYPOTL:
+        return lower_binary_libm("hypotl", "hypot");
+    case BuiltinKind::FDIM:
+        return lower_binary_libm("fdim", "fdim");
+    case BuiltinKind::FDIMF:
+        return lower_binary_libm("fdimf", "fdim");
+    case BuiltinKind::FDIML:
+        return lower_binary_libm("fdiml", "fdim");
+    case BuiltinKind::FMOD:
+        return lower_binary_libm("fmod", "fmod");
+    case BuiltinKind::FMODF:
+        return lower_binary_libm("fmodf", "fmod");
+    case BuiltinKind::FMODL:
+        return lower_binary_libm("fmodl", "fmod");
+    case BuiltinKind::REMAINDER:
+        return lower_binary_libm("remainder", "remainder");
+    case BuiltinKind::REMAINDERF:
+        return lower_binary_libm("remainderf", "remainder");
+    case BuiltinKind::REMAINDERL:
+        return lower_binary_libm("remainderl", "remainder");
+    case BuiltinKind::NEXTAFTER:
+        return lower_binary_libm("nextafter", "nextafter");
+    case BuiltinKind::NEXTAFTERF:
+        return lower_binary_libm("nextafterf", "nextafter");
+    case BuiltinKind::NEXTAFTERL:
+        return lower_binary_libm("nextafterl", "nextafter");
+    case BuiltinKind::ILOGB:
+    case BuiltinKind::ILOGBF:
+    case BuiltinKind::ILOGBL: {
+        llvm::Type* fp_ty = suffix_fp_type(expr->kind);
+        auto* val = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
         auto* i32_ty = llvm::Type::getInt32Ty(ctx);
-        auto* ft = llvm::FunctionType::get(i32_ty, {val->getType()}, false);
-        auto callee = get_or_declare_libc_func(module.get(), ctx, "ilogb", ft);
+        auto* ft = llvm::FunctionType::get(i32_ty, {fp_ty}, false);
+        const char* name = expr->kind == BuiltinKind::ILOGBF
+            ? "ilogbf"
+            : (expr->kind == BuiltinKind::ILOGBL ? "ilogbl" : "ilogb");
+        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
         return {true, builder.CreateCall(callee, {val}, "ilogb")};
     }
-    case BuiltinKind::SQRT: case BuiltinKind::SQRTF: case BuiltinKind::SQRTL: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::sqrt, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "sqrt")};
-    }
-    case BuiltinKind::CBRT:
-    case BuiltinKind::CBRTF:
-    case BuiltinKind::CBRTL: {
-        auto val = convert_expression(expr->args[0].get());
-        llvm::Type* fp_ty = convert_type(expr->result_type);
-        if (!fp_ty || !fp_ty->isFloatingPointTy()) {
-            fp_ty = val->getType()->isFloatingPointTy()
-                ? val->getType()
-                : llvm::Type::getDoubleTy(ctx);
+    case BuiltinKind::LRINT:
+    case BuiltinKind::LRINTF:
+    case BuiltinKind::LRINTL:
+    case BuiltinKind::LROUND:
+    case BuiltinKind::LROUNDF:
+    case BuiltinKind::LROUNDL:
+    case BuiltinKind::LLRINT:
+    case BuiltinKind::LLRINTF:
+    case BuiltinKind::LLRINTL:
+    case BuiltinKind::LLROUND:
+    case BuiltinKind::LLROUNDF:
+    case BuiltinKind::LLROUNDL: {
+        llvm::Type* fp_ty = suffix_fp_type(expr->kind);
+        auto* val = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
+        llvm::Type* result_ty = convert_type(expr->result_type);
+        auto* ft = llvm::FunctionType::get(result_ty, {fp_ty}, false);
+        const char* name = nullptr;
+        switch (expr->kind) {
+            case BuiltinKind::LRINT: name = "lrint"; break;
+            case BuiltinKind::LRINTF: name = "lrintf"; break;
+            case BuiltinKind::LRINTL: name = "lrintl"; break;
+            case BuiltinKind::LROUND: name = "lround"; break;
+            case BuiltinKind::LROUNDF: name = "lroundf"; break;
+            case BuiltinKind::LROUNDL: name = "lroundl"; break;
+            case BuiltinKind::LLRINT: name = "llrint"; break;
+            case BuiltinKind::LLRINTF: name = "llrintf"; break;
+            case BuiltinKind::LLRINTL: name = "llrintl"; break;
+            case BuiltinKind::LLROUND: name = "llround"; break;
+            case BuiltinKind::LLROUNDF: name = "llroundf"; break;
+            case BuiltinKind::LLROUNDL: name = "llroundl"; break;
+            default: name = "lrint"; break;
         }
-        val = coerce_builtin_fp_arg(val, fp_ty);
-        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty}, false);
-        const char* name = fp_ty->isFloatTy()
-            ? "cbrtf"
-            : (fp_ty->isDoubleTy() ? "cbrt" : "cbrtl");
-        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
-        return {true, builder.CreateCall(callee, {val}, "cbrt")};
-    }
-    case BuiltinKind::SIN: case BuiltinKind::SINF: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::sin, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "sin")};
-    }
-    case BuiltinKind::COS: case BuiltinKind::COSF: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::cos, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "cos")};
-    }
-    case BuiltinKind::LOG: case BuiltinKind::LOGF: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::log, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "log")};
-    }
-    case BuiltinKind::LOG2: case BuiltinKind::LOG2F: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::log2, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "log2")};
-    }
-    case BuiltinKind::LOG10: case BuiltinKind::LOG10F: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::log10, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "log10")};
-    }
-    case BuiltinKind::EXP: case BuiltinKind::EXPF: case BuiltinKind::EXPL: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::exp, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "exp")};
-    }
-    case BuiltinKind::EXP2: case BuiltinKind::EXP2F: case BuiltinKind::EXP2L: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::exp2, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "exp2")};
-    }
-    case BuiltinKind::EXPM1:
-    case BuiltinKind::EXPM1F:
-    case BuiltinKind::EXPM1L: {
-        auto val = convert_expression(expr->args[0].get());
-        llvm::Type* fp_ty = convert_type(expr->result_type);
-        val = coerce_builtin_fp_arg(val, fp_ty);
-        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty}, false);
-        const char* name = expr->kind == BuiltinKind::EXPM1F
-            ? "expm1f"
-            : (expr->kind == BuiltinKind::EXPM1L ? "expm1l" : "expm1");
         auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
         return {true, builder.CreateCall(callee, {val}, name)};
     }
-    case BuiltinKind::CEIL: case BuiltinKind::CEILF: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::ceil, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "ceil")};
-    }
-    case BuiltinKind::FLOOR: case BuiltinKind::FLOORF: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::floor, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "floor")};
-    }
-    case BuiltinKind::ROUND: case BuiltinKind::ROUNDF: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::round, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "round")};
-    }
-    case BuiltinKind::TRUNC: case BuiltinKind::TRUNCF: {
-        auto val = convert_expression(expr->args[0].get());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::trunc, {val->getType()});
-        return {true, builder.CreateCall(fn, {val}, "trunc")};
-    }
-    // --- Multi-arg math ---
     case BuiltinKind::MODF: case BuiltinKind::MODFF: case BuiltinKind::MODFL: {
-        auto val = convert_expression(expr->args[0].get());
+        llvm::Type* fp_ty = result_fp_type();
+        auto* val = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
         auto iptr = convert_expression(expr->args[1].get());
-        llvm::Type* fp_ty = val->getType();
         auto* ptr_ty = llvm::PointerType::getUnqual(ctx);
         auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty, ptr_ty}, false);
-        const char* name = fp_ty->isFloatTy() ? "modff" : (fp_ty->isDoubleTy() ? "modf" : "modfl");
+        const char* name = expr->kind == BuiltinKind::MODFF
+            ? "modff"
+            : (expr->kind == BuiltinKind::MODFL ? "modfl" : "modf");
         auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
         return {true, builder.CreateCall(callee, {val, iptr}, name)};
+    }
+    case BuiltinKind::REMQUO:
+    case BuiltinKind::REMQUOF:
+    case BuiltinKind::REMQUOL: {
+        llvm::Type* fp_ty = result_fp_type();
+        auto* lhs = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
+        auto* rhs = coerce_builtin_fp_expr_arg(expr->args[1].get(), fp_ty);
+        auto* quo_ptr = convert_expression(expr->args[2].get());
+        auto* ptr_ty = llvm::PointerType::getUnqual(ctx);
+        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty, fp_ty, ptr_ty}, false);
+        const char* name = expr->kind == BuiltinKind::REMQUOF
+            ? "remquof"
+            : (expr->kind == BuiltinKind::REMQUOL ? "remquol" : "remquo");
+        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
+        return {true, builder.CreateCall(callee, {lhs, rhs, quo_ptr}, "remquo")};
+    }
+    case BuiltinKind::NEXTTOWARD:
+    case BuiltinKind::NEXTTOWARDF:
+    case BuiltinKind::NEXTTOWARDL: {
+        llvm::Type* fp_ty = result_fp_type();
+        llvm::Type* long_double_ty = builtin_llvm_type(BuiltinTypes::LongDouble);
+        auto* from = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
+        auto* to = coerce_builtin_fp_expr_arg(expr->args[1].get(), long_double_ty);
+        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty, long_double_ty}, false);
+        const char* name = expr->kind == BuiltinKind::NEXTTOWARDF
+            ? "nexttowardf"
+            : (expr->kind == BuiltinKind::NEXTTOWARDL ? "nexttowardl" : "nexttoward");
+        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
+        return {true, builder.CreateCall(callee, {from, to}, "nexttoward")};
     }
     case BuiltinKind::FREXP:
     case BuiltinKind::FREXPF:
     case BuiltinKind::FREXPL: {
-        auto val = convert_expression(expr->args[0].get());
+        llvm::Type* fp_ty = result_fp_type();
+        auto* val = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
         auto exp_ptr = convert_expression(expr->args[1].get());
-        llvm::Type* fp_ty = convert_type(expr->result_type);
-        val = coerce_builtin_fp_arg(val, fp_ty);
         auto* ptr_ty = llvm::PointerType::getUnqual(ctx);
         auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty, ptr_ty}, false);
         const char* name = expr->kind == BuiltinKind::FREXPF
@@ -1539,10 +1814,9 @@ static BuiltinLoweringResult lower_builtin_math_group(
     case BuiltinKind::SCALBLN:
     case BuiltinKind::SCALBLNF:
     case BuiltinKind::SCALBLNL: {
-        auto val = convert_expression(expr->args[0].get());
+        llvm::Type* fp_ty = result_fp_type();
+        auto val = coerce_builtin_fp_expr_arg(expr->args[0].get(), fp_ty);
         auto exp = convert_expression(expr->args[1].get());
-        llvm::Type* fp_ty = convert_type(expr->result_type);
-        val = coerce_builtin_fp_arg(val, fp_ty);
 
         bool exponent_is_long =
             expr->kind == BuiltinKind::SCALBLN ||
@@ -1559,88 +1833,6 @@ static BuiltinLoweringResult lower_builtin_math_group(
             intrinsic_id,
             {fp_ty, exp->getType()});
         return {true, builder.CreateCall(fn, {val, exp}, "ldexp")};
-    }
-    case BuiltinKind::POW: case BuiltinKind::POWF: case BuiltinKind::POWL: {
-        auto base_val = convert_expression(expr->args[0].get());
-        auto exp_val = convert_expression(expr->args[1].get());
-        auto* target_ty = base_val->getType()->isFloatingPointTy() ? base_val->getType() : llvm::Type::getDoubleTy(ctx);
-        if (base_val->getType()->isIntegerTy()) base_val = builder.CreateSIToFP(base_val, target_ty);
-        if (exp_val->getType()->isIntegerTy()) exp_val = builder.CreateSIToFP(exp_val, base_val->getType());
-        if (exp_val->getType() != base_val->getType()) exp_val = builder.CreateFPCast(exp_val, base_val->getType());
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::pow, {base_val->getType()});
-        return {true, builder.CreateCall(fn, {base_val, exp_val}, "pow")};
-    }
-    case BuiltinKind::COPYSIGN: case BuiltinKind::COPYSIGNF: case BuiltinKind::COPYSIGNL: {
-        auto mag = convert_expression(expr->args[0].get());
-        auto sgn = convert_expression(expr->args[1].get());
-        llvm::Type* target_ty = convert_type(expr->result_type);
-        if (!target_ty->isFloatingPointTy()) target_ty = mag->getType();
-        if (mag->getType() != target_ty) {
-            mag = mag->getType()->isFloatingPointTy() ? builder.CreateFPCast(mag, target_ty) : builder.CreateSIToFP(mag, target_ty);
-        }
-        if (sgn->getType() != target_ty) {
-            sgn = sgn->getType()->isFloatingPointTy() ? builder.CreateFPCast(sgn, target_ty) : builder.CreateSIToFP(sgn, target_ty);
-        }
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::copysign, {target_ty});
-        return {true, builder.CreateCall(fn, {mag, sgn}, "copysign")};
-    }
-    case BuiltinKind::HYPOT:
-    case BuiltinKind::HYPOTF:
-    case BuiltinKind::HYPOTL: {
-        auto lhs = convert_expression(expr->args[0].get());
-        auto rhs = convert_expression(expr->args[1].get());
-        llvm::Type* fp_ty = convert_type(expr->result_type);
-        if (!fp_ty || !fp_ty->isFloatingPointTy()) {
-            fp_ty = lhs->getType()->isFloatingPointTy()
-                ? lhs->getType()
-                : (rhs->getType()->isFloatingPointTy()
-                    ? rhs->getType()
-                    : llvm::Type::getDoubleTy(ctx));
-        }
-        lhs = coerce_builtin_fp_arg(lhs, fp_ty);
-        rhs = coerce_builtin_fp_arg(rhs, fp_ty);
-        auto* ft = llvm::FunctionType::get(fp_ty, {fp_ty, fp_ty}, false);
-        const char* name = fp_ty->isFloatTy()
-            ? "hypotf"
-            : (fp_ty->isDoubleTy() ? "hypot" : "hypotl");
-        auto callee = get_or_declare_libc_func(module.get(), ctx, name, ft);
-        return {true, builder.CreateCall(callee, {lhs, rhs}, "hypot")};
-    }
-    case BuiltinKind::FMIN:
-    case BuiltinKind::FMINF:
-    case BuiltinKind::FMINL: {
-        auto a = convert_expression(expr->args[0].get());
-        auto b = convert_expression(expr->args[1].get());
-        llvm::Type* fp_ty = convert_type(expr->result_type);
-        if (!fp_ty || !fp_ty->isFloatingPointTy()) {
-            fp_ty = a->getType()->isFloatingPointTy()
-                ? a->getType()
-                : (b->getType()->isFloatingPointTy()
-                    ? b->getType()
-                    : llvm::Type::getDoubleTy(ctx));
-        }
-        a = coerce_builtin_fp_arg(a, fp_ty);
-        b = coerce_builtin_fp_arg(b, fp_ty);
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::minnum, {a->getType()});
-        return {true, builder.CreateCall(fn, {a, b}, "fmin")};
-    }
-    case BuiltinKind::FMAX:
-    case BuiltinKind::FMAXF:
-    case BuiltinKind::FMAXL: {
-        auto a = convert_expression(expr->args[0].get());
-        auto b = convert_expression(expr->args[1].get());
-        llvm::Type* fp_ty = convert_type(expr->result_type);
-        if (!fp_ty || !fp_ty->isFloatingPointTy()) {
-            fp_ty = a->getType()->isFloatingPointTy()
-                ? a->getType()
-                : (b->getType()->isFloatingPointTy()
-                    ? b->getType()
-                    : llvm::Type::getDoubleTy(ctx));
-        }
-        a = coerce_builtin_fp_arg(a, fp_ty);
-        b = coerce_builtin_fp_arg(b, fp_ty);
-        auto* fn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::maxnum, {a->getType()});
-        return {true, builder.CreateCall(fn, {a, b}, "fmax")};
     }
     default:
         return {};

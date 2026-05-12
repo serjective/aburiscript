@@ -7846,6 +7846,8 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::PARITYL:
         case BuiltinKind::PARITYLL:
         case BuiltinKind::ILOGB:
+        case BuiltinKind::ILOGBF:
+        case BuiltinKind::ILOGBL:
         case BuiltinKind::VA_ARG_PACK:
         case BuiltinKind::STRCMP:
         case BuiltinKind::STRNCMP:
@@ -7904,9 +7906,22 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::CBRT:
         case BuiltinKind::SIN:
         case BuiltinKind::COS:
+        case BuiltinKind::TAN:
+        case BuiltinKind::ASIN:
+        case BuiltinKind::ACOS:
+        case BuiltinKind::ATAN:
+        case BuiltinKind::ATAN2:
+        case BuiltinKind::SINH:
+        case BuiltinKind::COSH:
+        case BuiltinKind::TANH:
+        case BuiltinKind::ASINH:
+        case BuiltinKind::ACOSH:
+        case BuiltinKind::ATANH:
         case BuiltinKind::LOG:
         case BuiltinKind::LOG2:
         case BuiltinKind::LOG10:
+        case BuiltinKind::LOG1P:
+        case BuiltinKind::LOGB:
         case BuiltinKind::EXP:
         case BuiltinKind::EXP2:
         case BuiltinKind::EXPM1:
@@ -7917,10 +7932,23 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::CEIL:
         case BuiltinKind::FLOOR:
         case BuiltinKind::ROUND:
+        case BuiltinKind::RINT:
+        case BuiltinKind::NEARBYINT:
         case BuiltinKind::COPYSIGN:
         case BuiltinKind::HYPOT:
         case BuiltinKind::FMIN:
         case BuiltinKind::FMAX:
+        case BuiltinKind::FDIM:
+        case BuiltinKind::FMA:
+        case BuiltinKind::FMOD:
+        case BuiltinKind::REMAINDER:
+        case BuiltinKind::REMQUO:
+        case BuiltinKind::NEXTAFTER:
+        case BuiltinKind::NEXTTOWARD:
+        case BuiltinKind::ERF:
+        case BuiltinKind::ERFC:
+        case BuiltinKind::LGAMMA:
+        case BuiltinKind::TGAMMA:
         case BuiltinKind::MODF:
         case BuiltinKind::TRUNC:
             return collect_make<BuiltinCallExpr>(kind, std::move(args), double_type, loc);
@@ -7934,9 +7962,22 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::CBRTF:
         case BuiltinKind::SINF:
         case BuiltinKind::COSF:
+        case BuiltinKind::TANF:
+        case BuiltinKind::ASINF:
+        case BuiltinKind::ACOSF:
+        case BuiltinKind::ATANF:
+        case BuiltinKind::ATAN2F:
+        case BuiltinKind::SINHF:
+        case BuiltinKind::COSHF:
+        case BuiltinKind::TANHF:
+        case BuiltinKind::ASINHF:
+        case BuiltinKind::ACOSHF:
+        case BuiltinKind::ATANHF:
         case BuiltinKind::LOGF:
         case BuiltinKind::LOG2F:
         case BuiltinKind::LOG10F:
+        case BuiltinKind::LOG1PF:
+        case BuiltinKind::LOGBF:
         case BuiltinKind::EXPF:
         case BuiltinKind::EXP2F:
         case BuiltinKind::EXPM1F:
@@ -7947,10 +7988,23 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::CEILF:
         case BuiltinKind::FLOORF:
         case BuiltinKind::ROUNDF:
+        case BuiltinKind::RINTF:
+        case BuiltinKind::NEARBYINTF:
         case BuiltinKind::COPYSIGNF:
         case BuiltinKind::HYPOTF:
         case BuiltinKind::FMINF:
         case BuiltinKind::FMAXF:
+        case BuiltinKind::FDIMF:
+        case BuiltinKind::FMAF:
+        case BuiltinKind::FMODF:
+        case BuiltinKind::REMAINDERF:
+        case BuiltinKind::REMQUOF:
+        case BuiltinKind::NEXTAFTERF:
+        case BuiltinKind::NEXTTOWARDF:
+        case BuiltinKind::ERFF:
+        case BuiltinKind::ERFCF:
+        case BuiltinKind::LGAMMAF:
+        case BuiltinKind::TGAMMAF:
         case BuiltinKind::MODFF:
         case BuiltinKind::TRUNCF:
             return collect_make<BuiltinCallExpr>(kind, std::move(args), float_type, loc);
@@ -7964,6 +8018,24 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::POWL:
         case BuiltinKind::SQRTL:
         case BuiltinKind::CBRTL:
+        case BuiltinKind::SINL:
+        case BuiltinKind::COSL:
+        case BuiltinKind::TANL:
+        case BuiltinKind::ASINL:
+        case BuiltinKind::ACOSL:
+        case BuiltinKind::ATANL:
+        case BuiltinKind::ATAN2L:
+        case BuiltinKind::SINHL:
+        case BuiltinKind::COSHL:
+        case BuiltinKind::TANHL:
+        case BuiltinKind::ASINHL:
+        case BuiltinKind::ACOSHL:
+        case BuiltinKind::ATANHL:
+        case BuiltinKind::LOGL:
+        case BuiltinKind::LOG2L:
+        case BuiltinKind::LOG10L:
+        case BuiltinKind::LOG1PL:
+        case BuiltinKind::LOGBL:
         case BuiltinKind::EXPL:
         case BuiltinKind::EXP2L:
         case BuiltinKind::EXPM1L:
@@ -7971,17 +8043,46 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_fixed_cases(
         case BuiltinKind::LDEXPL:
         case BuiltinKind::SCALBNL:
         case BuiltinKind::SCALBLNL:
+        case BuiltinKind::CEILL:
+        case BuiltinKind::FLOORL:
+        case BuiltinKind::ROUNDL:
+        case BuiltinKind::RINTL:
+        case BuiltinKind::NEARBYINTL:
         case BuiltinKind::COPYSIGNL:
         case BuiltinKind::HYPOTL:
         case BuiltinKind::FMINL:
         case BuiltinKind::FMAXL:
+        case BuiltinKind::FDIML:
+        case BuiltinKind::FMAL:
+        case BuiltinKind::FMODL:
+        case BuiltinKind::REMAINDERL:
+        case BuiltinKind::REMQUOL:
+        case BuiltinKind::NEXTAFTERL:
+        case BuiltinKind::NEXTTOWARDL:
+        case BuiltinKind::ERFL:
+        case BuiltinKind::ERFCL:
+        case BuiltinKind::LGAMMAL:
+        case BuiltinKind::TGAMMAL:
         case BuiltinKind::MODFL:
+        case BuiltinKind::TRUNCL:
             return collect_make<BuiltinCallExpr>(kind, std::move(args), long_double_type, loc);
         case BuiltinKind::CEXPI:
             return collect_make<BuiltinCallExpr>(kind, std::move(args), complex_double_type, loc);
         case BuiltinKind::LABS:
+        case BuiltinKind::LRINT:
+        case BuiltinKind::LRINTF:
+        case BuiltinKind::LRINTL:
+        case BuiltinKind::LROUND:
+        case BuiltinKind::LROUNDF:
+        case BuiltinKind::LROUNDL:
             return collect_make<BuiltinCallExpr>(kind, std::move(args), long_type, loc);
         case BuiltinKind::LLABS:
+        case BuiltinKind::LLRINT:
+        case BuiltinKind::LLRINTF:
+        case BuiltinKind::LLRINTL:
+        case BuiltinKind::LLROUND:
+        case BuiltinKind::LLROUNDF:
+        case BuiltinKind::LLROUNDL:
             return collect_make<BuiltinCallExpr>(kind, std::move(args), longlong_type, loc);
         default:
             return nullptr;
