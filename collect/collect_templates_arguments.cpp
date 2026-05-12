@@ -97,9 +97,15 @@ std::shared_ptr<FunctionType> strip_implicit_object_parameter_from_method_type(
 
     auto rebuilt = std::make_shared<FunctionType>();
     rebuilt->ret_type = fn_type->ret_type;
-    rebuilt->parameters.assign(
-        fn_type->parameters.begin() + param_start,
-        fn_type->parameters.end());
+    rebuilt->parameters.reserve(fn_type->parameters.size() - param_start);
+    rebuilt->parameter_pack_flags.reserve(
+        fn_type->parameters.size() - param_start);
+    for (size_t index = param_start; index < fn_type->parameters.size();
+         ++index) {
+        rebuilt->push_parameter(
+            fn_type->parameters[index],
+            fn_type->parameter_is_pack(index));
+    }
     rebuilt->is_variadic = fn_type->is_variadic;
     rebuilt->has_prototype = fn_type->has_prototype;
     rebuilt->member_ref_qualifier = fn_type->member_ref_qualifier;

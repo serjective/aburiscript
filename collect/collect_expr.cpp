@@ -1075,9 +1075,7 @@ QualType build_lambda_call_operator_type(const CppLambdaExpr& lambda,
         this_object_quals);
     QualType this_type(
         std::make_shared<PointerType>(qualified_owner_type));
-    call_operator_type->parameters.insert(
-        call_operator_type->parameters.begin(),
-        this_type);
+    call_operator_type->insert_parameter(0, this_type);
     return QualType(call_operator_type);
 }
 
@@ -1149,10 +1147,10 @@ QualType build_block_invoke_type(const BlockExpr& block,
         invoke_type->parameters.front() &&
         invoke_type->parameters.front()->isVoid() &&
         !invoke_type->is_variadic) {
-        invoke_type->parameters.clear();
+        invoke_type->clear_parameters();
     }
-    invoke_type->parameters.insert(
-        invoke_type->parameters.begin(),
+    invoke_type->insert_parameter(
+        0,
         QualType(std::make_shared<PointerType>(literal_type)));
     return QualType(invoke_type);
 }
@@ -2169,9 +2167,15 @@ bool Collect::finalize_cpp_lambda_semantics(
     if (!lambda.is_generic && !has_syntactic_captures) {
         auto invoker_type = std::make_shared<FunctionType>();
         invoker_type->ret_type = function_type->ret_type;
-        invoker_type->parameters.assign(
-            function_type->parameters.begin() + 1,
-            function_type->parameters.end());
+        invoker_type->parameters.reserve(function_type->parameters.size() - 1);
+        invoker_type->parameter_pack_flags.reserve(
+            function_type->parameters.size() - 1);
+        for (size_t index = 1; index < function_type->parameters.size();
+             ++index) {
+            invoker_type->push_parameter(
+                function_type->parameters[index],
+                function_type->parameter_is_pack(index));
+        }
         invoker_type->is_variadic = function_type->is_variadic;
         invoker_type->has_prototype = function_type->has_prototype;
         invoker_type->has_explicit_exception_spec =
@@ -4682,11 +4686,11 @@ std::shared_ptr<Symbol> Collect::make_default_allocation_like_operator_symbol(
     if (operator_name == "operatornew" || operator_name == "operatornew[]") {
         fn_type->ret_type =
             QualType(std::make_shared<PointerType>(QualType(get_builtin_void())));
-        fn_type->parameters.push_back(QualType(get_builtin_ulong()));
+        fn_type->push_parameter(QualType(get_builtin_ulong()));
     } else if (operator_name == "operatordelete" ||
                operator_name == "operatordelete[]") {
         fn_type->ret_type = QualType(get_builtin_void());
-        fn_type->parameters.push_back(
+        fn_type->push_parameter(
             QualType(std::make_shared<PointerType>(QualType(get_builtin_void()))));
     } else {
         return nullptr;

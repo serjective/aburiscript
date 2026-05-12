@@ -417,6 +417,10 @@ inline bool cpp_out_of_line_type_matches(QualType lhs,
             return false;
         }
         for (size_t idx = 0; idx < lhs_func->parameters.size(); ++idx) {
+            if (lhs_func->parameter_is_pack(idx) !=
+                rhs_func->parameter_is_pack(idx)) {
+                return false;
+            }
             if (!cpp_out_of_line_type_matches(
                     lhs_func->parameters[idx],
                     rhs_func->parameters[idx],

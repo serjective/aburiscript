@@ -141,13 +141,18 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
             if (!fn_type || !fn_type->has_prototype) {
                 return;
             }
-            for (const auto& param_type : fn_type->parameters) {
+            for (size_t index = 0; index < fn_type->parameters.size(); ++index) {
+                const auto& param_type = fn_type->parameters[index];
                 auto param_decl = collect_->collect_parameter_declaration(
                     param_type,
                     "",
                     nullptr,
                     StorageClass::NONE,
                     loc);
+                if (auto* typed_param = dyn_cast<ParamDecl>(param_decl.get())) {
+                    typed_param->is_parameter_pack =
+                        fn_type->parameter_is_pack(index);
+                }
                 decl->parameters.push_back(std::move(param_decl));
             }
         };
@@ -514,6 +519,8 @@ void Parser::parse_kr_declaration_list(DeclarationParser *decl_parser, FuncDecl 
     // definition's callable type to avoid caller/callee ABI mismatches.
     if (func_ty) {
         func_ty->parameters = std::move(param_types);
+        func_ty->parameter_pack_flags.clear();
+        func_ty->normalize_parameter_pack_flags();
         func_ty->has_prototype = use_visible_prototype;
     }
 }

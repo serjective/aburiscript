@@ -1121,12 +1121,21 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                         break;
                     }
                     if (parse_ok && mgnt->gentle_check_and_consume(TokenType::RIGHT_PAREN)) {
+                        std::vector<uint8_t> parameter_pack_flags;
+                        parameter_pack_flags.reserve(local_args.size());
+                        for (const auto& local_arg : local_args) {
+                            parameter_pack_flags.push_back(
+                                local_arg && local_arg->is_parameter_pack ? 1 : 0);
+                        }
                         if (!captured_func_args) {
                             func_args = std::move(local_args);
                             captured_func_args = true;
                         }
                         auto func_type = std::make_shared<FunctionType>();
                         func_type->parameters = std::move(args);
+                        func_type->parameter_pack_flags =
+                            std::move(parameter_pack_flags);
+                        func_type->normalize_parameter_pack_flags();
                         func_type->is_variadic = found_ellipsis;
                         func_type->has_prototype = true;
                         func_type->ret_type = QualType(placeholder_type);
@@ -1544,12 +1553,27 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                         }
                     }
                 }
+                std::vector<uint8_t> parameter_pack_flags;
                 if (!captured_func_args) {
+                    parameter_pack_flags.reserve(local_args.size());
+                    for (const auto& local_arg : local_args) {
+                        parameter_pack_flags.push_back(
+                            local_arg && local_arg->is_parameter_pack ? 1 : 0);
+                    }
                     func_args = std::move(local_args);
                     captured_func_args = true;
+                } else {
+                    parameter_pack_flags.reserve(func_args.size());
+                    for (const auto& func_arg : func_args) {
+                        parameter_pack_flags.push_back(
+                            func_arg && func_arg->is_parameter_pack ? 1 : 0);
+                    }
                 }
                 auto func_type = std::make_shared<FunctionType>();
                 func_type->parameters = args;
+                func_type->parameter_pack_flags =
+                    std::move(parameter_pack_flags);
+                func_type->normalize_parameter_pack_flags();
                 func_type->is_variadic = found_ellipsis;
                 func_type->has_prototype = has_prototype;
                 if (new_type == nullptr) {

@@ -884,6 +884,8 @@ QualType remap_template_parameter_types_in_type(
         auto rewritten = std::make_shared<FunctionType>();
         rewritten->ret_type = remapped_ret;
         rewritten->parameters = std::move(remapped_parameters);
+        rewritten->parameter_pack_flags = func->parameter_pack_flags;
+        rewritten->normalize_parameter_pack_flags();
         rewritten->is_variadic = func->is_variadic;
         rewritten->has_prototype = func->has_prototype;
         rewritten->member_ref_qualifier = func->member_ref_qualifier;
@@ -1349,21 +1351,7 @@ bool clone_function_parameters_for_specialization(
             return false;
         }
 
-        std::optional<size_t> pack_index;
-        if (!find_unique_parameter_pack_index_in_type(
-                pattern_param->type,
-                template_parameters,
-                pack_index)) {
-            if (error_out) {
-                *error_out =
-                    failure_context +
-                    " parameter pack substitution currently supports only one pack per parameter type";
-            }
-            return false;
-        }
-        bool is_pack_parameter =
-            pattern_param->is_parameter_pack || pack_index.has_value();
-        if (!is_pack_parameter) {
+        if (!pattern_param->is_parameter_pack) {
             auto pick_parameter_substitution_pattern =
                 [](const ParamDecl* param_decl) -> QualType {
                     if (!param_decl) {
@@ -1450,6 +1438,18 @@ bool clone_function_parameters_for_specialization(
             continue;
         }
 
+        std::optional<size_t> pack_index;
+        if (!find_unique_parameter_pack_index_in_type(
+                pattern_param->type,
+                template_parameters,
+                pack_index)) {
+            if (error_out) {
+                *error_out =
+                    failure_context +
+                    " parameter pack substitution currently supports only one pack per parameter type";
+            }
+            return false;
+        }
         if (!pack_index.has_value() || *pack_index >= specialization_bindings.size()) {
             if (error_out) {
                 *error_out =
@@ -1688,14 +1688,18 @@ bool clone_function_parameters_for_specialization(
         }
     }
 
-    rebuilt_function_type->parameters.clear();
+    rebuilt_function_type->clear_parameters();
     rebuilt_function_type->parameters.reserve(specialization->parameters.size());
+    rebuilt_function_type->parameter_pack_flags.reserve(
+        specialization->parameters.size());
     for (const auto& parameter_decl : specialization->parameters) {
         auto* param_decl = dyn_cast<ParamDecl>(parameter_decl.get());
         if (!param_decl) {
             continue;
         }
-        rebuilt_function_type->parameters.push_back(param_decl->type);
+        rebuilt_function_type->push_parameter(
+            param_decl->type,
+            param_decl->is_parameter_pack);
     }
     specialization->type = rebuilt_function_type;
 

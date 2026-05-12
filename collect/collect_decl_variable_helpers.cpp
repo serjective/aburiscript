@@ -102,6 +102,8 @@ QualType replace_auto_placeholder_qualtype(QualType pattern, QualType deduced) {
             rebuilt->parameters.push_back(
                 replace_auto_placeholder_qualtype(param, deduced));
         }
+        rebuilt->parameter_pack_flags = func->parameter_pack_flags;
+        rebuilt->normalize_parameter_pack_flags();
         rebuilt->is_variadic = func->is_variadic;
         rebuilt->has_prototype = func->has_prototype;
         rebuilt->member_ref_qualifier = func->member_ref_qualifier;

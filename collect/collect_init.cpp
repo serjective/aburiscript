@@ -219,6 +219,8 @@ std::shared_ptr<CType> Collect::replace_auto_type(const std::shared_ptr<CType>& 
                 replace_auto_type(param.get_shared(), deduced),
                 param.get_qualifiers()));
         }
+        rebuilt->parameter_pack_flags = func->parameter_pack_flags;
+        rebuilt->normalize_parameter_pack_flags();
         rebuilt->is_variadic = func->is_variadic;
         rebuilt->has_prototype = func->has_prototype;
         rebuilt->member_ref_qualifier = func->member_ref_qualifier;

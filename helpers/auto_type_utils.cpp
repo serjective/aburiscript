@@ -110,6 +110,8 @@ std::shared_ptr<CType> retag_cxx_auto_placeholders(
                 retag_cxx_auto_placeholders(param.get_shared(), new_flavor),
                 param.get_qualifiers()));
         }
+        rebuilt->parameter_pack_flags = func->parameter_pack_flags;
+        rebuilt->normalize_parameter_pack_flags();
         rebuilt->is_variadic = func->is_variadic;
         rebuilt->has_prototype = func->has_prototype;
         rebuilt->member_ref_qualifier = func->member_ref_qualifier;
@@ -248,6 +250,8 @@ std::shared_ptr<CType> replace_auto_placeholder(
                 replace_auto_placeholder(param.get_shared(), deduced),
                 param.get_qualifiers()));
         }
+        rebuilt->parameter_pack_flags = func->parameter_pack_flags;
+        rebuilt->normalize_parameter_pack_flags();
         rebuilt->is_variadic = func->is_variadic;
         rebuilt->has_prototype = func->has_prototype;
         rebuilt->member_ref_qualifier = func->member_ref_qualifier;
@@ -364,6 +368,8 @@ std::shared_ptr<CType> replace_cxx_auto_placeholders_with_callback(
                     next_placeholder_index),
                 param.get_qualifiers()));
         }
+        rebuilt->parameter_pack_flags = func->parameter_pack_flags;
+        rebuilt->normalize_parameter_pack_flags();
         rebuilt->is_variadic = func->is_variadic;
         rebuilt->has_prototype = func->has_prototype;
         rebuilt->member_ref_qualifier = func->member_ref_qualifier;

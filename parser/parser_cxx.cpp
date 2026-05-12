@@ -3080,7 +3080,9 @@ Parser::parse_cpp_deduction_guide_declaration(
                     "internal error: deduction guide parameter did not produce ParamDecl",
                     guide_name_tok.loc);
             }
-            function_type->parameters.push_back(param_decl->type);
+            function_type->push_parameter(
+                param_decl->type,
+                param_decl->is_parameter_pack);
             guide_parameters.push_back(std::move(parameter));
             if (!gentle_check_and_consume(TokenType::COMMA)) {
                 break;
@@ -5852,6 +5854,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
 
     std::vector<std::unique_ptr<Decl>> params;
     std::vector<QualType> param_types;
+    std::vector<uint8_t> parameter_pack_flags;
     bool is_variadic = false;
     bool has_prototype = true;
     bool saw_default_argument = false;
@@ -5897,6 +5900,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
 
             params.push_back(std::move(param_decl));
             param_types.push_back(param_type);
+            parameter_pack_flags.push_back(
+                param_parser.is_parameter_pack ? 1 : 0);
 
             bool has_default_argument = false;
             if (gentle_check(TokenType::ASSIGN)) {
@@ -6079,6 +6084,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     auto ctor_fn_type = std::make_shared<FunctionType>();
     ctor_fn_type->ret_type = QualType(type_ctx->get_builtin(BuiltinTypes::Void));
     ctor_fn_type->parameters = param_types;
+    ctor_fn_type->parameter_pack_flags = parameter_pack_flags;
+    ctor_fn_type->normalize_parameter_pack_flags();
     ctor_fn_type->is_variadic = is_variadic;
     ctor_fn_type->has_prototype = has_prototype;
     ctor_fn_type->has_explicit_exception_spec = ctor_has_exception_spec;
@@ -6146,7 +6153,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
             ctor_decl->parameters.begin(), std::move(this_param));
         auto fn_type = dyn_cast_shared<FunctionType>(ctor_decl->type);
         if (fn_type) {
-            fn_type->parameters.insert(fn_type->parameters.begin(), this_type);
+            fn_type->insert_parameter(0, this_type);
             fn_type->has_prototype = true;
         }
     }
@@ -6428,7 +6435,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
             dtor_decl->parameters.begin(), std::move(this_param));
         auto fn_type = dyn_cast_shared<FunctionType>(dtor_decl->type);
         if (fn_type) {
-            fn_type->parameters.insert(fn_type->parameters.begin(), this_type);
+            fn_type->insert_parameter(0, this_type);
             fn_type->has_prototype = true;
         }
     }

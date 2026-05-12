@@ -2048,6 +2048,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             auto rebuilt = std::make_shared<FunctionType>(*function_type);
             rebuilt->ret_type = rewritten_ret;
             rebuilt->parameters = std::move(rewritten_params);
+            rebuilt->parameter_pack_flags = function_type->parameter_pack_flags;
+            rebuilt->normalize_parameter_pack_flags();
             return QualType(rebuilt, quals);
         }
 
@@ -2830,7 +2832,7 @@ void Collect::collect_record_synthesize_implicit_members(
 
         QualType this_param_type(
             std::make_shared<PointerType>(owner_type));
-        ctor_type->parameters.push_back(this_param_type);
+        ctor_type->push_parameter(this_param_type);
 
         std::vector<std::unique_ptr<Decl>> parameters;
         parameters.push_back(collect_make<ParamDecl>(
@@ -2852,7 +2854,7 @@ void Collect::collect_record_synthesize_implicit_members(
             QualType rhs_param_type(std::make_shared<ReferenceType>(
                 rhs_record_type,
                 *source_ref_kind));
-            ctor_type->parameters.push_back(rhs_param_type);
+            ctor_type->push_parameter(rhs_param_type);
             parameters.push_back(collect_make<ParamDecl>(
                 rhs_param_type,
                 "__rhs",
@@ -2954,8 +2956,8 @@ void Collect::collect_record_synthesize_implicit_members(
             rhs_record_type,
             rhs_ref_kind));
 
-        method_type->parameters.push_back(this_param_type);
-        method_type->parameters.push_back(rhs_param_type);
+        method_type->push_parameter(this_param_type);
+        method_type->push_parameter(rhs_param_type);
 
         std::vector<std::unique_ptr<Decl>> parameters;
         parameters.push_back(collect_make<ParamDecl>(
@@ -3090,8 +3092,8 @@ void Collect::collect_record_synthesize_implicit_members(
         QualType rhs_param_type(std::make_shared<ReferenceType>(
             const_owner,
             ReferenceKind::LValue));
-        method_type->parameters.push_back(this_param_type);
-        method_type->parameters.push_back(rhs_param_type);
+        method_type->push_parameter(this_param_type);
+        method_type->push_parameter(rhs_param_type);
 
         std::vector<std::unique_ptr<Decl>> parameters;
         parameters.push_back(collect_make<ParamDecl>(
@@ -3320,7 +3322,7 @@ void Collect::collect_record_synthesize_implicit_members(
         implicit_dtor_type->has_prototype = true;
         QualType this_param_type(
             std::make_shared<PointerType>(QualType(ctx.record_type)));
-        implicit_dtor_type->parameters.push_back(this_param_type);
+        implicit_dtor_type->push_parameter(this_param_type);
 
         RecordSemanticState::Destructor implicit_dtor;
         implicit_dtor.name = "~" + ctx.record_name;

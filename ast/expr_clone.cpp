@@ -271,6 +271,8 @@ QualType remap_lambda_template_parameter_types(
         auto rebuilt = std::make_shared<FunctionType>(*function);
         rebuilt->ret_type = rewritten_ret;
         rebuilt->parameters = std::move(rewritten_params);
+        rebuilt->parameter_pack_flags = function->parameter_pack_flags;
+        rebuilt->normalize_parameter_pack_flags();
         return QualType(rebuilt, quals);
     }
 

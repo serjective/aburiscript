@@ -419,6 +419,10 @@ bool function_templates_have_same_structural_lookup_identity(
     }
 
     for (size_t idx = 0; idx < lhs_type->parameters.size(); ++idx) {
+        if (lhs_type->parameter_is_pack(idx) !=
+            rhs_type->parameter_is_pack(idx)) {
+            return false;
+        }
         if (!template_parameter_types_have_same_lookup_shape(
                 lhs_type->parameters[idx],
                 rhs_type->parameters[idx])) {

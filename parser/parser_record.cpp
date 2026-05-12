@@ -3389,7 +3389,7 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                 out_of_line_method->parameters.begin(), std::move(this_param));
             if (auto fn_type =
                     dyn_cast_shared<FunctionType>(out_of_line_method->type)) {
-                fn_type->parameters.insert(fn_type->parameters.begin(), this_type);
+                fn_type->insert_parameter(0, this_type);
                 fn_type->has_prototype = true;
             }
         }
@@ -4420,6 +4420,17 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             }
             member_params.push_back(std::move(param_decl));
         }
+        if (auto* func_ty = dyn_cast<FunctionType>(function_type.get())) {
+            func_ty->parameter_pack_flags.clear();
+            func_ty->parameter_pack_flags.reserve(member_params.size());
+            for (const auto& member_param : member_params) {
+                const auto* typed_param =
+                    dyn_cast<ParamDecl>(member_param.get());
+                func_ty->parameter_pack_flags.push_back(
+                    typed_param && typed_param->is_parameter_pack ? 1 : 0);
+            }
+            func_ty->normalize_parameter_pack_flags();
+        }
         if (seen_void_param) {
             auto* func_ty = dyn_cast<FunctionType>(function_type.get());
             if (func_ty && func_ty->is_variadic) {
@@ -4894,7 +4905,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                         ctor_decl->parameters.insert(
                             ctor_decl->parameters.begin(), std::move(this_param));
                         if (auto fn_type = dyn_cast_shared<FunctionType>(ctor_decl->type)) {
-                            fn_type->parameters.insert(fn_type->parameters.begin(), this_type);
+                            fn_type->insert_parameter(0, this_type);
                             fn_type->has_prototype = true;
                         }
                     }
@@ -5175,7 +5186,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                         cpp_method->parameters.begin(), std::move(this_param));
                     auto fn_type = dyn_cast_shared<FunctionType>(cpp_method->type);
                     if (fn_type) {
-                        fn_type->parameters.insert(fn_type->parameters.begin(), this_type);
+                        fn_type->insert_parameter(0, this_type);
                         fn_type->has_prototype = true;
                     }
                 }

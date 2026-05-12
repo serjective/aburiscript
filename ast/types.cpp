@@ -337,6 +337,10 @@ bool template_parameter_types_have_same_lookup_shape_impl(QualType lhs,
             return false;
         }
         for (size_t idx = 0; idx < lhs_function->parameters.size(); ++idx) {
+            if (lhs_function->parameter_is_pack(idx) !=
+                rhs_function->parameter_is_pack(idx)) {
+                return false;
+            }
             if (!template_parameter_types_have_same_lookup_shape_impl(
                     lhs_function->parameters[idx],
                     rhs_function->parameters[idx])) {
@@ -1295,6 +1299,10 @@ bool template_template_parameter_types_match(QualType formal_type,
             return false;
         }
         for (size_t idx = 0; idx < formal_fn->parameters.size(); ++idx) {
+            if (formal_fn->parameter_is_pack(idx) !=
+                actual_fn->parameter_is_pack(idx)) {
+                return false;
+            }
             if (!template_template_parameter_types_match(
                     formal_fn->parameters[idx],
                     actual_fn->parameters[idx])) {
@@ -2636,7 +2644,9 @@ QualType cpp_written_method_type(QualType method_type,
     rebuilt->ret_type = fn_type->ret_type;
     rebuilt->parameters.reserve(fn_type->parameters.size() - 1);
     for (size_t i = 1; i < fn_type->parameters.size(); ++i) {
-        rebuilt->parameters.push_back(fn_type->parameters[i]);
+        rebuilt->push_parameter(
+            fn_type->parameters[i],
+            fn_type->parameter_is_pack(i));
     }
     rebuilt->is_variadic = fn_type->is_variadic;
     rebuilt->has_prototype = fn_type->has_prototype;
@@ -3412,6 +3422,9 @@ bool FunctionType::equals(const CType &other) {
     if (parameters.size() != other1.parameters.size()) return false;
     if (is_variadic != other1.is_variadic) return false;
     for (size_t i = 0; i < parameters.size(); ++i) {
+        if (parameter_is_pack(i) != other1.parameter_is_pack(i)) {
+            return false;
+        }
         // In C, parameter types are adjusted for function type compatibility:
         // - array parameters become pointers to element type
         // - function parameters become pointers to function
@@ -3704,6 +3717,9 @@ QualType desugar_type(QualType type, const ASTContext* ast_ctx) {
             auto rebuilt_func = std::make_shared<FunctionType>();
             rebuilt_func->ret_type = ret;
             rebuilt_func->parameters = std::move(params);
+            rebuilt_func->parameter_pack_flags =
+                func->parameter_pack_flags;
+            rebuilt_func->normalize_parameter_pack_flags();
             rebuilt_func->is_variadic = func->is_variadic;
             rebuilt_func->has_prototype = func->has_prototype;
             rebuilt_func->member_ref_qualifier = func->member_ref_qualifier;

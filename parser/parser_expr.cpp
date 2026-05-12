@@ -1471,8 +1471,9 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
                     lambda_loc);
         }
 
-        lambda_function_type->parameters.clear();
+        lambda_function_type->clear_parameters();
         lambda_function_type->parameters.reserve(parameters.size());
+        lambda_function_type->parameter_pack_flags.reserve(parameters.size());
         for (const auto& parameter : parameters) {
             auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
             if (!param_decl) {
@@ -1480,7 +1481,9 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
                     "internal error: lambda parameter did not produce ParamDecl",
                     lambda_loc);
             }
-            lambda_function_type->parameters.push_back(param_decl->type);
+            lambda_function_type->push_parameter(
+                param_decl->type,
+                param_decl->is_parameter_pack);
         }
 
         while (true) {
@@ -1583,9 +1586,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
                 this_object_quals);
             QualType this_type(
                 std::make_shared<PointerType>(qualified_owner_type));
-            call_operator_type->parameters.insert(
-                call_operator_type->parameters.begin(),
-                this_type);
+            call_operator_type->insert_parameter(0, this_type);
         }
 
         func_type = QualType(call_operator_type).get_shared();
@@ -1700,12 +1701,13 @@ std::unique_ptr<Expr> Parser::parse_block_literal_expression() {
         }
     }
 
-    block_function_type->parameters.clear();
+    block_function_type->clear_parameters();
     if (parameters.empty()) {
-        block_function_type->parameters.push_back(
+        block_function_type->push_parameter(
             QualType(type_ctx->get_builtin(BuiltinTypes::Void)));
     } else {
         block_function_type->parameters.reserve(parameters.size());
+        block_function_type->parameter_pack_flags.reserve(parameters.size());
         for (const auto& parameter : parameters) {
             auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
             if (!param_decl) {
@@ -1713,7 +1715,9 @@ std::unique_ptr<Expr> Parser::parse_block_literal_expression() {
                     "internal error: block parameter did not produce ParamDecl",
                     block_loc);
             }
-            block_function_type->parameters.push_back(param_decl->type);
+            block_function_type->push_parameter(
+                param_decl->type,
+                param_decl->is_parameter_pack);
         }
     }
 

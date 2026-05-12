@@ -1257,15 +1257,29 @@ QualType Collect::substitute_template_type_with_bindings(
         bool changed = !substituted_ret.equals_qualified(func->ret_type);
         std::vector<QualType> substituted_parameters;
         substituted_parameters.reserve(func->parameters.size());
-        // For each FunctionType parameter, check for pack expansion references.
-        // find_unique_parameter_pack_index_in_type returns:
-        //   false → multiple distinct packs in one parameter type (unsupported)
-        //   true, pack_index has value → single pack at that parameter list index
-        //   true, pack_index empty → no packs in this parameter type
-        // When a pack is found and its binding is_pack(), we expand element-by-
-        // element: for arity N, this parameter produces N output parameters.
-        // When the binding is NOT a pack (single element), we substitute normally.
-        for (const auto& parameter : func->parameters) {
+        std::vector<uint8_t> substituted_parameter_pack_flags;
+        substituted_parameter_pack_flags.reserve(func->parameters.size());
+        // A function parameter expands only when the declarator wrote a
+        // syntactic parameter pack. Nested expansions such as tuple<Args...>
+        // still substitute inside the parameter type but remain one parameter.
+        for (size_t parameter_index = 0;
+             parameter_index < func->parameters.size();
+             ++parameter_index) {
+            const auto& parameter = func->parameters[parameter_index];
+            if (!func->parameter_is_pack(parameter_index)) {
+                auto substituted_parameter = substitute_template_type_with_bindings(
+                    parameter,
+                    parameters,
+                    argument_bindings,
+                    loc,
+                    allow_unsubstituted_parameters);
+                changed |= !substituted_parameter.equals_qualified(parameter);
+                substituted_parameters.push_back(std::move(substituted_parameter));
+                substituted_parameter_pack_flags.push_back(0);
+                continue;
+            }
+
+            changed = true;
             std::optional<size_t> pack_index;
             if (!find_unique_parameter_pack_index_in_type(
                     parameter,
@@ -1285,6 +1299,7 @@ QualType Collect::substitute_template_type_with_bindings(
                     allow_unsubstituted_parameters);
                 changed |= !substituted_parameter.equals_qualified(parameter);
                 substituted_parameters.push_back(std::move(substituted_parameter));
+                substituted_parameter_pack_flags.push_back(0);
                 continue;
             }
 
@@ -1304,9 +1319,9 @@ QualType Collect::substitute_template_type_with_bindings(
                     allow_unsubstituted_parameters);
                 changed |= !substituted_parameter.equals_qualified(parameter);
                 substituted_parameters.push_back(std::move(substituted_parameter));
+                substituted_parameter_pack_flags.push_back(0);
                 continue;
             }
-            changed = true;
             for (size_t element_index = 0;
                  element_index < pack_binding.arguments.size();
                  ++element_index) {
@@ -1332,6 +1347,7 @@ QualType Collect::substitute_template_type_with_bindings(
                     loc,
                     allow_unsubstituted_parameters);
                 substituted_parameters.push_back(std::move(substituted_parameter));
+                substituted_parameter_pack_flags.push_back(0);
             }
         }
         FunctionExceptionSpecKind substituted_exception_spec =
@@ -1432,6 +1448,9 @@ QualType Collect::substitute_template_type_with_bindings(
         auto rewritten = std::make_shared<FunctionType>();
         rewritten->ret_type = substituted_ret;
         rewritten->parameters = std::move(substituted_parameters);
+        rewritten->parameter_pack_flags =
+            std::move(substituted_parameter_pack_flags);
+        rewritten->normalize_parameter_pack_flags();
         rewritten->is_variadic = func->is_variadic;
         rewritten->has_prototype = func->has_prototype;
         rewritten->member_ref_qualifier = func->member_ref_qualifier;

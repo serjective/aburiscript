@@ -399,6 +399,7 @@ void append_type_semantic_fingerprint(std::string& out, QualType type) {
                 if (idx > 0) {
                     out += ",";
                 }
+                out += func->parameter_is_pack(idx) ? "P:" : "S:";
                 append_type_semantic_fingerprint(out, func->parameters[idx]);
             }
             out += ")";

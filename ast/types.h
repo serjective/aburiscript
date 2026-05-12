@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <queue>
 #include "constexpr/const_value.h"
@@ -799,6 +800,7 @@ struct FunctionType: CType {
     FunctionType(): CType(TypeKind::Function) {};
     QualType ret_type;
     std::vector<QualType> parameters;
+    std::vector<uint8_t> parameter_pack_flags;
     bool is_variadic = false;
     // true = proper prototype with typed params or (void); false = K&R ()
     bool has_prototype = true;
@@ -812,6 +814,35 @@ struct FunctionType: CType {
     // , exception_spec_expr is the expression in the noexcept
     std::shared_ptr<Expr> exception_spec_expr = nullptr;
     bool equals(const CType &other) override;
+    bool parameter_is_pack(size_t index) const {
+        return index < parameter_pack_flags.size() &&
+               parameter_pack_flags[index] != 0;
+    }
+    void normalize_parameter_pack_flags() {
+        parameter_pack_flags.resize(parameters.size(), 0);
+    }
+    void push_parameter(QualType parameter, bool is_parameter_pack = false) {
+        parameters.push_back(std::move(parameter));
+        parameter_pack_flags.push_back(is_parameter_pack ? 1 : 0);
+    }
+    void insert_parameter(size_t index,
+                          QualType parameter,
+                          bool is_parameter_pack = false) {
+        if (index > parameters.size()) {
+            index = parameters.size();
+        }
+        parameters.insert(parameters.begin() + index, std::move(parameter));
+        if (parameter_pack_flags.size() < parameters.size() - 1) {
+            parameter_pack_flags.resize(parameters.size() - 1, 0);
+        }
+        parameter_pack_flags.insert(
+            parameter_pack_flags.begin() + index,
+            is_parameter_pack ? 1 : 0);
+    }
+    void clear_parameters() {
+        parameters.clear();
+        parameter_pack_flags.clear();
+    }
     int64_t getWidth() override {
         return 8; // for sizeof gcc extension
     }
