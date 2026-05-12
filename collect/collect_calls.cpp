@@ -1059,6 +1059,38 @@ std::unique_ptr<Expr> Collect::collect_function_call(
                 break;
             }
         }
+        auto callee_can_use_concrete_template_overload_resolution =
+            [&](Expr* candidate) {
+                auto* callee_ref =
+                    dyn_cast<VarRef>(strip_implicit_casts(candidate));
+                if (!callee_ref) {
+                    return false;
+                }
+                const auto* qualified_info =
+                    callee_ref->get_cpp_qualified_info();
+                if (qualified_info && qualified_info->is_type_qualified &&
+                    analyze_cpp_qualified_expr_owner(
+                        qualified_info,
+                        ast_ctx_.get()).is_dependent_context()) {
+                    return false;
+                }
+                auto current_decl_context = get_current_decl_context();
+                auto template_candidates =
+                    qualified_info
+                        ? lookup_qualified_function_templates(
+                              callee_ref->get_name(),
+                              *qualified_info,
+                              current_decl_context.get())
+                        : lookup_unqualified_function_templates(
+                              callee_ref->get_name(),
+                              session_.current_scope_,
+                              current_decl_context);
+                return !template_candidates.empty();
+            };
+        if (callee_is_dependent && !any_arg_is_dependent &&
+            callee_can_use_concrete_template_overload_resolution(callee.get())) {
+            callee_is_dependent = false;
+        }
         if (callee_is_dependent || any_arg_is_dependent) {
             if (auto typed_dependent_call =
                     try_collect_typed_dependent_function_template_call(
