@@ -2743,6 +2743,65 @@ bool Collect::resolve_dependent_expr_after_substitution(
     std::unique_ptr<Expr>& expr,
     QualType implicit_this_type,
     std::string* error_out) {
+    auto implicit_cast_kind_can_be_stripped_after_substitution =
+        [](ImplicitCastTypes kind) {
+            switch (kind) {
+                case ImplicitCastTypes::LVALUE_TO_RVALUE:
+                case ImplicitCastTypes::FUNCTION_TO_POINTER:
+                case ImplicitCastTypes::ARRAY_TO_POINTER:
+                case ImplicitCastTypes::LAMBDA_TO_FUNCTION_POINTER:
+                case ImplicitCastTypes::ARITH_CAST:
+                case ImplicitCastTypes::RAW_CAST:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+
+    auto strip_stale_dependent_implicit_casts =
+        [&](std::unique_ptr<Expr>& candidate) {
+            while (auto* cast = dyn_cast<ImplicitCast>(candidate.get())) {
+                if (!cast->expr ||
+                    !implicit_cast_kind_can_be_stripped_after_substitution(
+                        cast->kind)) {
+                    return;
+                }
+                if (cast->ctype &&
+                    contains_deferred_semantic_type(
+                        cast->ctype.get_shared())) {
+                    QualType realized_type =
+                        try_realize_deferred_semantic_type(cast->ctype);
+                    if (realized_type) {
+                        cast->ctype = realized_type;
+                    }
+                }
+                bool cast_type_stale =
+                    cast->ctype &&
+                    (type_depends_on_template_parameters(
+                         cast->ctype,
+                         ast_ctx_.get()) ||
+                     contains_deferred_semantic_type(
+                         cast->ctype.get_shared()) ||
+                     auto_type_utils::auto_type_flavors_in(
+                         cast->ctype.get_shared()) != 0);
+                QualType source_type = cast->expr->get_type();
+                bool source_still_dependent =
+                    expression_depends_on_template_parameters(cast->expr.get()) ||
+                    type_depends_on_template_parameters(
+                        source_type,
+                        ast_ctx_.get()) ||
+                    (source_type &&
+                     contains_deferred_semantic_type(
+                         source_type.get_shared()));
+                if (!cast_type_stale || source_still_dependent) {
+                    return;
+                }
+                auto owned_cast = std::unique_ptr<ImplicitCast>(
+                    static_cast<ImplicitCast*>(candidate.release()));
+                candidate = std::move(owned_cast->expr);
+            }
+        };
+
     if (auto* implicit_cast = dyn_cast<ImplicitCast>(expr.get())) {
         if (implicit_cast->expr &&
             !resolve_dependent_expr_after_substitution(
@@ -2762,6 +2821,11 @@ bool Collect::resolve_dependent_expr_after_substitution(
             if (realized_type) {
                 implicit_cast->ctype = realized_type;
             }
+        }
+        strip_stale_dependent_implicit_casts(expr);
+        implicit_cast = dyn_cast<ImplicitCast>(expr.get());
+        if (!implicit_cast) {
+            return true;
         }
         QualType concrete_cast_type =
             implicit_cast->ctype
@@ -2891,6 +2955,9 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 error_out)) {
             return false;
         }
+        strip_stale_dependent_implicit_casts(cond->condition);
+        strip_stale_dependent_implicit_casts(cond->true_expr);
+        strip_stale_dependent_implicit_casts(cond->false_expr);
         if (!cond->condition || !cond->false_expr) {
             return true;
         }
@@ -3133,40 +3200,6 @@ bool Collect::resolve_dependent_expr_after_substitution(
         expr = std::move(rewritten);
         return true;
     }
-
-    auto strip_stale_dependent_implicit_casts =
-        [&](std::unique_ptr<Expr>& candidate) {
-            while (auto* cast = dyn_cast<ImplicitCast>(candidate.get())) {
-                if (!cast->expr) {
-                    return;
-                }
-                bool cast_type_still_dependent =
-                    type_depends_on_template_parameters(
-                        cast->ctype,
-                        ast_ctx_.get());
-                bool source_type_still_dependent =
-                    type_depends_on_template_parameters(
-                        cast->expr->get_type(),
-                        ast_ctx_.get());
-                if (!cast_type_still_dependent || source_type_still_dependent) {
-                    return;
-                }
-                switch (cast->kind) {
-                    case ImplicitCastTypes::LVALUE_TO_RVALUE:
-                    case ImplicitCastTypes::FUNCTION_TO_POINTER:
-                    case ImplicitCastTypes::ARRAY_TO_POINTER:
-                    case ImplicitCastTypes::LAMBDA_TO_FUNCTION_POINTER:
-                    case ImplicitCastTypes::ARITH_CAST:
-                    case ImplicitCastTypes::RAW_CAST:
-                        break;
-                    default:
-                        return;
-                }
-                auto owned_cast = std::unique_ptr<ImplicitCast>(
-                    static_cast<ImplicitCast*>(candidate.release()));
-                candidate = std::move(owned_cast->expr);
-            }
-        };
 
     auto unresolved_member_still_dependent =
         [&](const UnresolvedMemberExpr* unresolved_member) -> bool {
