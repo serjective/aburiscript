@@ -589,6 +589,13 @@ private:
         const std::vector<TemplateArgument>& component_arguments,
         bool component_has_template_argument_list,
         SrcLoc component_loc);
+    std::optional<std::vector<TemplateArgument>>
+    build_cpp_current_instantiation_arguments(
+        const ClassTemplateDecl* class_template,
+        SrcLoc loc);
+    QualType try_build_cpp_injected_current_instantiation_type(
+        std::string_view type_name,
+        SrcLoc loc);
     QualType lookup_cpp_current_record_nested_type(
         const std::string& component_name) const;
     const Decl* lookup_cpp_unqualified_type_template_decl(

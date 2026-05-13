@@ -111,6 +111,115 @@ QualType Parser::lookup_cpp_current_record_nested_type(
         component_name);
 }
 
+std::optional<std::vector<TemplateArgument>>
+Parser::build_cpp_current_instantiation_arguments(
+    const ClassTemplateDecl* class_template,
+    SrcLoc loc) {
+    if (!class_template) {
+        return std::nullopt;
+    }
+
+    const std::vector<const TemplateParameterDecl*>* active_parameters = nullptr;
+    for (auto stack_it = active_template_parameter_stack_.rbegin();
+         stack_it != active_template_parameter_stack_.rend();
+         ++stack_it) {
+        if (stack_it->size() != class_template->parameters.size()) {
+            continue;
+        }
+        bool compatible = true;
+        for (size_t idx = 0; idx < class_template->parameters.size(); ++idx) {
+            const auto* active_parameter = (*stack_it)[idx];
+            const auto* canonical_parameter =
+                class_template->parameters[idx].get();
+            if (!active_parameter || !canonical_parameter ||
+                active_parameter->get_kind() != canonical_parameter->get_kind() ||
+                active_parameter->name != canonical_parameter->name ||
+                active_parameter->is_parameter_pack !=
+                    canonical_parameter->is_parameter_pack) {
+                compatible = false;
+                break;
+            }
+        }
+        if (compatible) {
+            active_parameters = &(*stack_it);
+            break;
+        }
+    }
+    if (!active_parameters) {
+        return std::nullopt;
+    }
+
+    std::vector<TemplateArgument> arguments;
+    arguments.reserve(active_parameters->size());
+    for (const auto* active_parameter : *active_parameters) {
+        if (auto* type_parameter =
+                dyn_cast<TemplateTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(active_parameter))) {
+            arguments.emplace_back(QualType(type_parameter->type));
+            continue;
+        }
+        if (auto* non_type_parameter =
+                dyn_cast<TemplateNonTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(active_parameter))) {
+            if (!collect_ || !non_type_parameter->sym) {
+                return std::nullopt;
+            }
+            auto expr = collect_->collect_identifier_reference(
+                non_type_parameter->name,
+                non_type_parameter->sym,
+                loc);
+            std::shared_ptr<Expr> shared_expr(expr.release());
+            arguments.push_back(
+                TemplateArgument::dependent_value_argument(
+                    non_type_parameter->type,
+                    std::move(shared_expr),
+                    non_type_parameter->name,
+                    non_type_parameter));
+            continue;
+        }
+        if (auto* template_parameter =
+                dyn_cast<TemplateTemplateParmDecl>(
+                    const_cast<TemplateParameterDecl*>(active_parameter))) {
+            arguments.push_back(
+                TemplateArgument::dependent_template_argument(
+                    template_parameter->name,
+                    template_parameter));
+            continue;
+        }
+        return std::nullopt;
+    }
+    return arguments;
+}
+
+QualType Parser::try_build_cpp_injected_current_instantiation_type(
+    std::string_view type_name,
+    SrcLoc loc) {
+    if (!is_in_template_pattern_context() ||
+        cxx_record_parse_stack_.empty() ||
+        type_name.empty()) {
+        return QualType();
+    }
+
+    const auto& current_record = cxx_record_parse_stack_.back();
+    if (current_record.name != type_name ||
+        !current_record.primary_class_template) {
+        return QualType();
+    }
+
+    auto current_arguments = build_cpp_current_instantiation_arguments(
+        current_record.primary_class_template,
+        loc);
+    if (!current_arguments) {
+        return QualType();
+    }
+
+    return QualType(std::make_shared<TemplateSpecializationType>(
+        std::string(type_name),
+        current_record.primary_class_template,
+        *current_arguments,
+        /*is_dependent=*/true));
+}
+
 QualType Parser::resolve_cpp_unqualified_type_component(
     const std::string& component_name,
     const std::vector<TemplateArgument>& component_arguments,
@@ -120,6 +229,12 @@ QualType Parser::resolve_cpp_unqualified_type_component(
         if (auto typedef_symbol =
                 collect_->collect_lookup_typedef_symbol(component_name, true)) {
             return typedef_symbol->type;
+        }
+        if (auto current_instantiation =
+                try_build_cpp_injected_current_instantiation_type(
+                    component_name,
+                    component_loc)) {
+            return current_instantiation;
         }
         if (auto tag_type =
                 collect_->collect_lookup_tag_type(component_name, true)) {
@@ -359,86 +474,6 @@ Parser::resolve_cpp_qualified_owner_chain(
                 allow_enclosing_lookup);
         };
 
-    auto build_current_instantiation_arguments =
-        [&](const ClassTemplateDecl* class_template)
-            -> std::optional<std::vector<TemplateArgument>> {
-            if (!class_template) {
-                return std::nullopt;
-            }
-
-            const std::vector<const TemplateParameterDecl*>* active_parameters =
-                nullptr;
-            for (auto stack_it = active_template_parameter_stack_.rbegin();
-                 stack_it != active_template_parameter_stack_.rend();
-                 ++stack_it) {
-                if (stack_it->size() != class_template->parameters.size()) {
-                    continue;
-                }
-                bool compatible = true;
-                for (size_t idx = 0; idx < class_template->parameters.size(); ++idx) {
-                    const auto* active_parameter = (*stack_it)[idx];
-                    const auto* canonical_parameter =
-                        class_template->parameters[idx].get();
-                    if (!active_parameter || !canonical_parameter ||
-                        active_parameter->get_kind() != canonical_parameter->get_kind() ||
-                        active_parameter->name != canonical_parameter->name ||
-                        active_parameter->is_parameter_pack !=
-                            canonical_parameter->is_parameter_pack) {
-                        compatible = false;
-                        break;
-                    }
-                }
-                if (compatible) {
-                    active_parameters = &(*stack_it);
-                    break;
-                }
-            }
-            if (!active_parameters) {
-                return std::nullopt;
-            }
-
-            std::vector<TemplateArgument> arguments;
-            arguments.reserve(active_parameters->size());
-            for (const auto* active_parameter : *active_parameters) {
-                if (auto* type_parameter =
-                        dyn_cast<TemplateTypeParmDecl>(
-                            const_cast<TemplateParameterDecl*>(active_parameter))) {
-                    arguments.emplace_back(QualType(type_parameter->type));
-                    continue;
-                }
-                if (auto* non_type_parameter =
-                        dyn_cast<TemplateNonTypeParmDecl>(
-                            const_cast<TemplateParameterDecl*>(active_parameter))) {
-                    if (!non_type_parameter->sym) {
-                        return std::nullopt;
-                    }
-                    auto expr = collect_->collect_identifier_reference(
-                        non_type_parameter->name,
-                        non_type_parameter->sym,
-                        start_loc);
-                    std::shared_ptr<Expr> shared_expr(expr.release());
-                    arguments.push_back(
-                        TemplateArgument::dependent_value_argument(
-                            non_type_parameter->type,
-                            std::move(shared_expr),
-                            non_type_parameter->name,
-                            non_type_parameter));
-                    continue;
-                }
-                if (auto* template_parameter =
-                        dyn_cast<TemplateTemplateParmDecl>(
-                            const_cast<TemplateParameterDecl*>(active_parameter))) {
-                    arguments.push_back(
-                        TemplateArgument::dependent_template_argument(
-                            template_parameter->name,
-                            template_parameter));
-                    continue;
-                }
-                return std::nullopt;
-            }
-            return arguments;
-        };
-
     auto current_record_owner_decl =
         [&](std::string_view record_name) -> const ObjectDecl* {
             if (!record_name.empty() &&
@@ -624,8 +659,9 @@ Parser::resolve_cpp_qualified_owner_chain(
                                         allow_enclosing_lookup,
                                         component.name)))) {
                         if (auto current_arguments =
-                                build_current_instantiation_arguments(
-                                    current_class_template)) {
+                                build_cpp_current_instantiation_arguments(
+                                    current_class_template,
+                                    component.loc)) {
                             resolution.owner_type =
                                 QualType(std::make_shared<TemplateSpecializationType>(
                                     component.name,
@@ -672,8 +708,9 @@ Parser::resolve_cpp_qualified_owner_chain(
                                     allow_enclosing_lookup,
                                     component.name)));
                     if (auto current_arguments =
-                            build_current_instantiation_arguments(
-                                current_class_template)) {
+                            build_cpp_current_instantiation_arguments(
+                                current_class_template,
+                                component.loc)) {
                         resolution.owner_type =
                             QualType(std::make_shared<TemplateSpecializationType>(
                                 component.name,

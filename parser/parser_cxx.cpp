@@ -1142,7 +1142,7 @@ Parser::try_parse_cpp_named_type_specifier() {
                 return false;
             };
 
-        auto lookup_type_in_scope =
+        auto lookup_typedef_type_in_scope =
             [&](const std::shared_ptr<Scope>& scope,
                 bool allow_enclosing_lookup,
                 const std::string& name,
@@ -1162,6 +1162,13 @@ Parser::try_parse_cpp_named_type_specifier() {
                     }
                     return typedef_symbol->type;
                 }
+                return QualType();
+            };
+
+        auto lookup_tag_type_in_scope =
+            [&](const std::shared_ptr<Scope>& scope,
+                bool allow_enclosing_lookup,
+                const std::string& name) -> QualType {
                 if (auto tag_type = LookupEngine::lookup_tag_type(
                         name, scope, allow_enclosing_lookup)) {
                     return QualType(tag_type);
@@ -1236,15 +1243,27 @@ Parser::try_parse_cpp_named_type_specifier() {
 
                     std::shared_ptr<Symbol> typedef_symbol = nullptr;
                     if (!resolved_type) {
-                        resolved_type = lookup_type_in_scope(
+                        resolved_type = lookup_typedef_type_in_scope(
                             lookup_scope,
                             allow_enclosing_lookup,
                             component.name,
                             &typedef_symbol);
                     }
+                    if (!resolved_type && !has_global_qualifier && idx == 0) {
+                        resolved_type =
+                            try_build_cpp_injected_current_instantiation_type(
+                                component.name,
+                                component.loc);
+                    }
                     if (!resolved_type) {
                         resolved_type =
                             lookup_cpp_current_record_nested_type(component.name);
+                    }
+                    if (!resolved_type) {
+                        resolved_type = lookup_tag_type_in_scope(
+                            lookup_scope,
+                            allow_enclosing_lookup,
+                            component.name);
                     }
                     if (!resolved_type &&
                         is_last_component &&

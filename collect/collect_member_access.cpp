@@ -588,7 +588,12 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
 
     if (is_arrow) {
         base = collect_apply_standard_conversions(std::move(base), ExprUseContext::RValue);
-        if (lang_opts_.is_cxx_mode() && base) {
+        bool defer_dependent_arrow =
+            lang_opts_.is_cxx_mode() &&
+            base &&
+            (expression_depends_on_template_parameters(base.get()) ||
+             type_depends_on_template_parameters(base->get_type(), ast_ctx_.get()));
+        if (lang_opts_.is_cxx_mode() && base && !defer_dependent_arrow) {
             size_t arrow_rewrite_depth = 0;
             bool saw_overloaded_arrow = false;
             while (base) {
