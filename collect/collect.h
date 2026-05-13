@@ -1470,6 +1470,14 @@ private:
         Expr* operator_explicit_arg = nullptr;
     };
 
+    enum class ExplicitTemplateCandidateProbeResult : uint8_t {
+        InvalidTemplate,
+        ExplicitArgumentsRejected,
+        DeductionArgumentsUnavailable,
+        SpecializationRejected,
+        CandidateAdded
+    };
+
     enum class OverloadCandidateKind : uint8_t {
         Function,
         ConversionConstructor,
@@ -1817,6 +1825,17 @@ private:
         std::shared_ptr<Symbol>& specialization_symbol_out,
         const TemplateArgumentBindings* initial_bindings = nullptr,
         std::vector<TemplateArgument>* specialization_arguments_out = nullptr) ;
+    std::unique_ptr<Expr> append_explicit_function_template_overload_candidate(
+        const FunctionTemplateDecl* function_template,
+        const std::vector<TemplateArgument>& explicit_template_args,
+        const std::function<bool(
+            std::vector<Expr*>&,
+            std::unique_ptr<Expr>&)>& build_deduction_args,
+        OverloadImplicitObjectArgKind implicit_object_arg_kind,
+        std::vector<OverloadCallCandidate>& candidates_out,
+        SrcLoc loc,
+        ExplicitTemplateCandidateProbeResult& result_out,
+        std::string* binding_error_out = nullptr) ;
 
     enum class TemplatePartialOrderingResult : uint8_t {
         Unordered,

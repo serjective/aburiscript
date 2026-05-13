@@ -1659,6 +1659,23 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
         bool saw_private_method = false;
         bool saw_protected_method = false;
         bool saw_instantiation = false;
+        bool saw_explicit_binding_success = false;
+        bool saw_explicit_binding_failure = false;
+        std::string first_binding_template_name;
+        std::string first_binding_error;
+        auto remember_binding_failure =
+            [&](const FunctionTemplateDecl* function_template,
+                std::string binding_error) {
+            if (saw_explicit_binding_failure) {
+                return;
+            }
+            saw_explicit_binding_failure = true;
+            const auto* failed_pattern =
+                function_template ? function_template->function_decl() : nullptr;
+            first_binding_template_name =
+                failed_pattern ? failed_pattern->name : member_callee->get_member_name();
+            first_binding_error = std::move(binding_error);
+        };
         for (const auto& method_template_match : method_templates) {
             const auto* method_template = method_template_match.method_template;
             const auto* function_template =
@@ -1688,79 +1705,86 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                 }
             }
 
-            TemplateArgumentBindings explicit_bindings;
-            std::string binding_error;
-            if (!bind_explicit_template_arguments_prefix_to_parameters(
-                    function_template->parameters,
-                    explicit_template_args,
-                    explicit_bindings,
-                    &binding_error)) {
-                report_error(
-                    "function template '" + pattern->name +
-                        "' template arguments do not match the parameter list" +
-                        (binding_error.empty() ? std::string() : ": " + binding_error),
-                    loc);
-                continue;
-            }
-
             std::unique_ptr<Expr> deduction_object_arg;
-            std::vector<Expr*> deduction_args;
-            deduction_args.reserve(args.size() + (method_template->is_static ? 0 : 1));
-            if (!method_template->is_static) {
-                std::string clone_error;
-                auto cloned_base = clone_expr_tree(
-                    member_callee->base.get(),
-                    ast_ctx_.get(),
-                    &clone_error);
-                if (!cloned_base) {
-                    std::string message = clone_error.empty()
-                        ? "member template implicit object argument is not clonable"
-                        : "member template implicit object argument is not clonable: " +
-                            clone_error;
-                    report_error(message, loc);
-                    return collect_make<ErrorExpr>(
-                        "unsupported member template implicit object argument",
+            auto build_deduction_args =
+                [&](std::vector<Expr*>& deduction_args,
+                    std::unique_ptr<Expr>& build_error) -> bool {
+                deduction_args.reserve(
+                    args.size() + (method_template->is_static ? 0 : 1));
+                if (!method_template->is_static) {
+                    std::string clone_error;
+                    auto cloned_base = clone_expr_tree(
+                        member_callee->base.get(),
+                        ast_ctx_.get(),
+                        &clone_error);
+                    if (!cloned_base) {
+                        std::string message = clone_error.empty()
+                            ? "member template implicit object argument is not clonable"
+                            : "member template implicit object argument is not clonable: " +
+                                clone_error;
+                        report_error(message, loc);
+                        build_error = collect_make<ErrorExpr>(
+                            "unsupported member template implicit object argument",
+                            loc);
+                        return false;
+                    }
+                    deduction_object_arg = build_overload_implicit_object_arg(
+                        OverloadImplicitObjectArgKind::MemberObject,
+                        std::move(cloned_base),
+                        member_callee->isArrow,
                         loc);
+                    if (!deduction_object_arg) {
+                        report_error(
+                            "failed to build member template implicit object argument",
+                            loc);
+                        build_error = collect_make<ErrorExpr>(
+                            "invalid member template implicit object argument",
+                            loc);
+                        return false;
+                    }
+                    if (isa<ErrorExpr>(deduction_object_arg.get())) {
+                        build_error = std::move(deduction_object_arg);
+                        return false;
+                    }
+                    deduction_args.push_back(deduction_object_arg.get());
                 }
-                deduction_object_arg = build_overload_implicit_object_arg(
-                    OverloadImplicitObjectArgKind::MemberObject,
-                    std::move(cloned_base),
-                    member_callee->isArrow,
-                    loc);
-                if (!deduction_object_arg) {
-                    report_error(
-                        "failed to build member template implicit object argument",
-                        loc);
-                    return collect_make<ErrorExpr>(
-                        "invalid member template implicit object argument",
-                        loc);
+                for (const auto& arg : args) {
+                    deduction_args.push_back(arg.get());
                 }
-                if (isa<ErrorExpr>(deduction_object_arg.get())) {
-                    return std::move(deduction_object_arg);
-                }
-                deduction_args.push_back(deduction_object_arg.get());
-            }
-            for (const auto& arg : args) {
-                deduction_args.push_back(arg.get());
+                return true;
+            };
+
+            ExplicitTemplateCandidateProbeResult probe_result =
+                ExplicitTemplateCandidateProbeResult::InvalidTemplate;
+            std::string binding_error;
+            if (auto build_error =
+                    append_explicit_function_template_overload_candidate(
+                    function_template,
+                    explicit_template_args,
+                    build_deduction_args,
+                    method_template->is_static
+                        ? OverloadImplicitObjectArgKind::None
+                        : OverloadImplicitObjectArgKind::MemberObject,
+                    overload_candidates,
+                    loc,
+                    probe_result,
+                    &binding_error)) {
+                return build_error;
             }
 
-            std::shared_ptr<Symbol> specialization_symbol = nullptr;
-            if (!probe_function_template_call_specialization(
-                    function_template,
-                    deduction_args,
-                    loc,
-                    specialization_symbol,
-                    &explicit_bindings)) {
+            if (probe_result ==
+                ExplicitTemplateCandidateProbeResult::ExplicitArgumentsRejected) {
+                remember_binding_failure(function_template, std::move(binding_error));
                 continue;
             }
-            saw_instantiation = true;
-
-            OverloadCallCandidate candidate;
-            candidate.symbol = std::move(specialization_symbol);
-            candidate.implicit_object_arg_kind = method_template->is_static
-                ? OverloadImplicitObjectArgKind::None
-                : OverloadImplicitObjectArgKind::MemberObject;
-            overload_candidates.push_back(std::move(candidate));
+            if (probe_result !=
+                ExplicitTemplateCandidateProbeResult::InvalidTemplate) {
+                saw_explicit_binding_success = true;
+            }
+            if (probe_result ==
+                ExplicitTemplateCandidateProbeResult::CandidateAdded) {
+                saw_instantiation = true;
+            }
         }
 
         if (overload_candidates.empty()) {
@@ -1771,7 +1795,15 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                     loc)) {
                 return inaccessible_error;
             }
-            if (!saw_instantiation) {
+            if (!saw_explicit_binding_success && saw_explicit_binding_failure) {
+                report_error(
+                    "function template '" + first_binding_template_name +
+                        "' template arguments do not match the parameter list" +
+                        (first_binding_error.empty()
+                            ? std::string()
+                            : ": " + first_binding_error),
+                    loc);
+            } else if (!saw_instantiation) {
                 report_error(
                     "no matching member function template specialization for '" +
                         member_callee->get_member_name() + "'",
@@ -1914,10 +1946,27 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
         bool saw_private_method = false;
         bool saw_protected_method = false;
         bool saw_instantiation = false;
+        bool saw_explicit_binding_success = false;
+        bool saw_explicit_binding_failure = false;
+        std::string first_binding_template_name;
+        std::string first_binding_error;
         bool saw_nonstatic_method = false;
         bool attempted_qualified_object_expr = false;
         std::unique_ptr<Expr> qualified_object_expr;
         std::unique_ptr<Expr> qualified_object_error;
+        auto remember_binding_failure =
+            [&](const FunctionTemplateDecl* function_template,
+                std::string binding_error) {
+            if (saw_explicit_binding_failure) {
+                return;
+            }
+            saw_explicit_binding_failure = true;
+            const auto* failed_pattern =
+                function_template ? function_template->function_decl() : nullptr;
+            first_binding_template_name =
+                failed_pattern ? failed_pattern->name : display_name;
+            first_binding_error = std::move(binding_error);
+        };
         auto ensure_qualified_object_expr = [&]() -> Expr* {
             if (attempted_qualified_object_expr) {
                 return qualified_object_expr.get();
@@ -1981,52 +2030,56 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                 }
             }
 
-            TemplateArgumentBindings explicit_bindings;
-            std::string binding_error;
-            if (!bind_explicit_template_arguments_prefix_to_parameters(
-                    function_template->parameters,
-                    explicit_template_args,
-                    explicit_bindings,
-                    &binding_error)) {
-                report_error(
-                    "function template '" + pattern->name +
-                        "' template arguments do not match the parameter list" +
-                        (binding_error.empty() ? std::string() : ": " + binding_error),
-                    loc);
-                continue;
-            }
-
-            std::vector<Expr*> deduction_args;
-            deduction_args.reserve(args.size() + (method_template->is_static ? 0 : 1));
-            if (!method_template->is_static) {
-                saw_nonstatic_method = true;
-                Expr* qualified_object_arg = ensure_qualified_object_expr();
-                if (!qualified_object_arg) {
-                    continue;
+            auto build_deduction_args =
+                [&](std::vector<Expr*>& deduction_args,
+                    std::unique_ptr<Expr>&) -> bool {
+                deduction_args.reserve(
+                    args.size() + (method_template->is_static ? 0 : 1));
+                if (!method_template->is_static) {
+                    saw_nonstatic_method = true;
+                    Expr* qualified_object_arg = ensure_qualified_object_expr();
+                    if (!qualified_object_arg) {
+                        return false;
+                    }
+                    deduction_args.push_back(qualified_object_arg);
                 }
-                deduction_args.push_back(qualified_object_arg);
-            }
-            for (const auto& arg : args) {
-                deduction_args.push_back(arg.get());
+                for (const auto& arg : args) {
+                    deduction_args.push_back(arg.get());
+                }
+                return true;
+            };
+
+            ExplicitTemplateCandidateProbeResult probe_result =
+                ExplicitTemplateCandidateProbeResult::InvalidTemplate;
+            std::string binding_error;
+            if (auto build_error =
+                    append_explicit_function_template_overload_candidate(
+                    function_template,
+                    explicit_template_args,
+                    build_deduction_args,
+                    method_template->is_static
+                        ? OverloadImplicitObjectArgKind::None
+                        : OverloadImplicitObjectArgKind::MemberObject,
+                    overload_candidates,
+                    loc,
+                    probe_result,
+                    &binding_error)) {
+                return build_error;
             }
 
-            std::shared_ptr<Symbol> specialization_symbol = nullptr;
-            if (!probe_function_template_call_specialization(
-                    function_template,
-                    deduction_args,
-                    loc,
-                    specialization_symbol,
-                    &explicit_bindings)) {
+            if (probe_result ==
+                ExplicitTemplateCandidateProbeResult::ExplicitArgumentsRejected) {
+                remember_binding_failure(function_template, std::move(binding_error));
                 continue;
             }
-            saw_instantiation = true;
-
-            OverloadCallCandidate candidate;
-            candidate.symbol = std::move(specialization_symbol);
-            candidate.implicit_object_arg_kind = method_template->is_static
-                ? OverloadImplicitObjectArgKind::None
-                : OverloadImplicitObjectArgKind::MemberObject;
-            overload_candidates.push_back(std::move(candidate));
+            if (probe_result !=
+                ExplicitTemplateCandidateProbeResult::InvalidTemplate) {
+                saw_explicit_binding_success = true;
+            }
+            if (probe_result ==
+                ExplicitTemplateCandidateProbeResult::CandidateAdded) {
+                saw_instantiation = true;
+            }
         }
 
         if (overload_candidates.empty()) {
@@ -2040,7 +2093,15 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
             if (!saw_instantiation && saw_nonstatic_method && qualified_object_error) {
                 return std::move(qualified_object_error);
             }
-            if (!saw_instantiation) {
+            if (!saw_explicit_binding_success && saw_explicit_binding_failure) {
+                report_error(
+                    "function template '" + first_binding_template_name +
+                        "' template arguments do not match the parameter list" +
+                        (first_binding_error.empty()
+                            ? std::string()
+                            : ": " + first_binding_error),
+                    loc);
+            } else if (!saw_instantiation) {
                 report_error(
                     "no matching member function template specialization for '" +
                         display_name + "'",
@@ -2145,46 +2206,77 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
     std::vector<OverloadCallCandidate> overload_candidates;
     overload_candidates.reserve(template_candidates.size());
     bool saw_instantiation = false;
+    bool saw_explicit_binding_success = false;
+    bool saw_explicit_binding_failure = false;
+    std::string first_binding_template_name;
+    std::string first_binding_error;
+    auto remember_binding_failure =
+        [&](const FunctionTemplateDecl* function_template,
+            std::string binding_error) {
+        if (saw_explicit_binding_failure) {
+            return;
+        }
+        saw_explicit_binding_failure = true;
+        const auto* failed_pattern =
+            function_template ? function_template->function_decl() : nullptr;
+        first_binding_template_name =
+            failed_pattern ? failed_pattern->name : display_name;
+        first_binding_error = std::move(binding_error);
+    };
     std::vector<Expr*> raw_args;
     raw_args.reserve(args.size());
     for (const auto& arg : args) {
         raw_args.push_back(arg.get());
     }
     for (const auto* function_template : template_candidates) {
-        TemplateArgumentBindings explicit_bindings;
+        auto build_deduction_args =
+            [&](std::vector<Expr*>& deduction_args,
+                std::unique_ptr<Expr>&) -> bool {
+            deduction_args = raw_args;
+            return true;
+        };
+
+        ExplicitTemplateCandidateProbeResult probe_result =
+            ExplicitTemplateCandidateProbeResult::InvalidTemplate;
         std::string binding_error;
-        if (!bind_explicit_template_arguments_prefix_to_parameters(
-                function_template->parameters,
+        if (auto build_error =
+                append_explicit_function_template_overload_candidate(
+                function_template,
                 explicit_template_args,
-                explicit_bindings,
+                build_deduction_args,
+                OverloadImplicitObjectArgKind::None,
+                overload_candidates,
+                loc,
+                probe_result,
                 &binding_error)) {
-            const auto* pattern = function_template->function_decl();
-            report_error(
-                "function template '" +
-                    std::string(pattern ? pattern->name : display_name) +
-                    "' template arguments do not match the parameter list" +
-                    (binding_error.empty() ? std::string() : ": " + binding_error),
-                loc);
-            continue;
+            return build_error;
         }
 
-        std::shared_ptr<Symbol> specialization_symbol = nullptr;
-        if (!probe_function_template_call_specialization(
-                function_template,
-                raw_args,
-                loc,
-                specialization_symbol,
-                &explicit_bindings)) {
+        if (probe_result ==
+            ExplicitTemplateCandidateProbeResult::ExplicitArgumentsRejected) {
+            remember_binding_failure(function_template, std::move(binding_error));
             continue;
         }
-        saw_instantiation = true;
-        OverloadCallCandidate candidate;
-        candidate.symbol = std::move(specialization_symbol);
-        overload_candidates.push_back(std::move(candidate));
+        if (probe_result !=
+            ExplicitTemplateCandidateProbeResult::InvalidTemplate) {
+            saw_explicit_binding_success = true;
+        }
+        if (probe_result ==
+            ExplicitTemplateCandidateProbeResult::CandidateAdded) {
+            saw_instantiation = true;
+        }
     }
 
     if (overload_candidates.empty()) {
-        if (!saw_instantiation) {
+        if (!saw_explicit_binding_success && saw_explicit_binding_failure) {
+            report_error(
+                "function template '" + first_binding_template_name +
+                    "' template arguments do not match the parameter list" +
+                    (first_binding_error.empty()
+                        ? std::string()
+                        : ": " + first_binding_error),
+                loc);
+        } else if (!saw_instantiation) {
             report_error(
                 "no matching function template specialization for '" +
                     display_name + "'",

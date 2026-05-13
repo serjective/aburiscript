@@ -763,6 +763,69 @@ bool Collect::probe_function_template_call_specialization(
     return true;
 }
 
+std::unique_ptr<Expr> Collect::append_explicit_function_template_overload_candidate(
+    const FunctionTemplateDecl* function_template,
+    const std::vector<TemplateArgument>& explicit_template_args,
+    const std::function<bool(
+        std::vector<Expr*>&,
+        std::unique_ptr<Expr>&)>& build_deduction_args,
+    OverloadImplicitObjectArgKind implicit_object_arg_kind,
+    std::vector<OverloadCallCandidate>& candidates_out,
+    SrcLoc loc,
+    ExplicitTemplateCandidateProbeResult& result_out,
+    std::string* binding_error_out) {
+
+    result_out = ExplicitTemplateCandidateProbeResult::InvalidTemplate;
+    if (binding_error_out) {
+        binding_error_out->clear();
+    }
+    if (!function_template) {
+        return nullptr;
+    }
+
+    TemplateArgumentBindings explicit_bindings;
+    std::string binding_error;
+    if (!bind_explicit_template_arguments_prefix_to_parameters(
+            function_template->parameters,
+            explicit_template_args,
+            explicit_bindings,
+            &binding_error)) {
+        result_out =
+            ExplicitTemplateCandidateProbeResult::ExplicitArgumentsRejected;
+        if (binding_error_out) {
+            *binding_error_out = std::move(binding_error);
+        }
+        return nullptr;
+    }
+
+    std::vector<Expr*> deduction_args;
+    std::unique_ptr<Expr> build_error;
+    if (!build_deduction_args(deduction_args, build_error)) {
+        result_out =
+            ExplicitTemplateCandidateProbeResult::DeductionArgumentsUnavailable;
+        return build_error;
+    }
+
+    std::shared_ptr<Symbol> specialization_symbol = nullptr;
+    if (!probe_function_template_call_specialization(
+            function_template,
+            deduction_args,
+            loc,
+            specialization_symbol,
+            &explicit_bindings)) {
+        result_out =
+            ExplicitTemplateCandidateProbeResult::SpecializationRejected;
+        return nullptr;
+    }
+
+    OverloadCallCandidate candidate;
+    candidate.symbol = std::move(specialization_symbol);
+    candidate.implicit_object_arg_kind = implicit_object_arg_kind;
+    candidates_out.push_back(std::move(candidate));
+    result_out = ExplicitTemplateCandidateProbeResult::CandidateAdded;
+    return nullptr;
+}
+
 
 std::unique_ptr<Expr> Collect::select_overload_candidate(
     std::string_view callee_name,
