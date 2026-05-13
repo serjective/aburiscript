@@ -732,6 +732,55 @@ void Parser::consume_cpp_template_argument_list_close() {
                   current_token().loc);
 }
 
+bool Parser::try_consume_cpp_decltype_specifier_for_lookahead() {
+    if (!gentle_check(TokenType::DECLTYPE_KW)) {
+        return false;
+    }
+    advance(); // 'decltype'
+    if (!gentle_check_and_consume(TokenType::LEFT_PAREN)) {
+        return false;
+    }
+
+    size_t paren_depth = 1;
+    while (paren_depth > 0) {
+        TokenType type = current_token().type;
+        if (type == TokenType::Eof) {
+            return false;
+        }
+        if (type == TokenType::LEFT_PAREN) {
+            ++paren_depth;
+        } else if (type == TokenType::RIGHT_PAREN) {
+            --paren_depth;
+        }
+        advance();
+    }
+    return true;
+}
+
+QualType Parser::parse_cpp_decltype_type_specifier() {
+    Token decltype_tok = current_token();
+    if (!is_cxx_mode_active()) {
+        error_custloc("'decltype' is only available in C++ mode",
+                      decltype_tok.loc);
+    }
+    check_and_consume(TokenType::DECLTYPE_KW);
+    check_and_consume(TokenType::LEFT_PAREN);
+    bool use_declared_type_rule =
+        current_token().type != TokenType::LEFT_PAREN;
+    Collect::UnevaluatedContextScope unevaluated_scope(
+        collect_.get(),
+        "decltype");
+    auto decltype_expr = parse_expression();
+    if (!decltype_expr) {
+        error("Error parsing expression in decltype");
+    }
+    QualType decltype_type(std::make_shared<DecltypeExprType>(
+        std::shared_ptr<Expr>(decltype_expr.release()),
+        use_declared_type_rule));
+    check_and_consume(TokenType::RIGHT_PAREN);
+    return decltype_type;
+}
+
 bool Parser::is_cpp_template_argument_boundary_here() {
     return gentle_check(TokenType::COMMA) ||
            gentle_check(TokenType::GREATER_THAN) ||
@@ -1015,6 +1064,7 @@ Parser::try_parse_cpp_named_type_specifier() {
 
     Token start_tok = current_token();
     if (!(start_tok.type == TokenType::TYPENAME ||
+          start_tok.type == TokenType::DECLTYPE_KW ||
           start_tok.type == TokenType::IDENTIFIER ||
           start_tok.type == TokenType::SCOPE_RESOLUTION ||
           (start_tok.type == TokenType::COLON &&
@@ -1309,7 +1359,164 @@ Parser::try_parse_cpp_named_type_specifier() {
         return result;
     };
 
+    auto try_parse_decltype_qualified_type =
+        [&](bool saw_typename_keyword)
+            -> std::optional<ParsedCppTypeNameSpecifier> {
+        if (!gentle_check(TokenType::DECLTYPE_KW)) {
+            return std::nullopt;
+        }
+        {
+            RevertingTentativeParsingAction tentative(*this);
+            if (!try_consume_cpp_decltype_specifier_for_lookahead() ||
+                !is_cpp_scope_resolution_here()) {
+                return std::nullopt;
+            }
+        }
+
+        SrcLoc decltype_loc = current_token().loc;
+        QualType owner_type = parse_cpp_decltype_type_specifier();
+        if (!is_cpp_scope_resolution_here()) {
+            restore();
+            return std::nullopt;
+        }
+
+        CppQualifiedOwnerSeed seed;
+        seed.owner_type = owner_type;
+        seed.spelling = "decltype(<expr>)";
+        seed.loc = decltype_loc;
+        seed.is_dependent =
+            type_depends_on_template_parameters(owner_type, ast_ctx.get());
+        seed.requires_class_or_enum = true;
+
+        auto parse_component =
+            [&](bool preceded_by_template_keyword)
+                -> CppQualifiedNameComponent {
+            if (!gentle_check(TokenType::IDENTIFIER)) {
+                error_custloc(
+                    "expected identifier after '::' in qualified type name",
+                    current_token().loc);
+            }
+            CppQualifiedNameComponent component;
+            component.name = current_token().value;
+            component.loc = current_token().loc;
+            component.preceded_by_template_keyword =
+                preceded_by_template_keyword;
+            advance();
+            if (gentle_check(TokenType::LESS_THAN)) {
+                component.has_template_argument_list = true;
+                component.template_arguments =
+                    parse_cpp_template_argument_list();
+            }
+            if (component.preceded_by_template_keyword &&
+                !component.has_template_argument_list) {
+                error_custloc(
+                    "expected template-id after 'template' keyword",
+                    component.loc);
+            }
+            return component;
+        };
+
+        std::vector<CppQualifiedNameComponent> components;
+        consume_cpp_scope_resolution();
+        bool preceded_by_template_keyword =
+            gentle_check_and_consume(TokenType::TEMPLATE);
+        components.push_back(parse_component(preceded_by_template_keyword));
+        while (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            preceded_by_template_keyword =
+                gentle_check_and_consume(TokenType::TEMPLATE);
+            components.push_back(parse_component(preceded_by_template_keyword));
+        }
+
+        if (components.empty()) {
+            restore();
+            return std::nullopt;
+        }
+
+        std::vector<CppQualifiedNameComponent> qualifiers(
+            components.begin(),
+            components.end() - 1);
+        const auto& terminal_component = components.back();
+        auto owner_chain = resolve_cpp_qualified_owner_chain(
+            qualifiers,
+            /*has_global_qualifier=*/false,
+            decltype_loc,
+            /*diagnose_dependent_names=*/true,
+            seed);
+        if (owner_chain.lookup_failed || !owner_chain.owner_type) {
+            restore();
+            return std::nullopt;
+        }
+
+        if (terminal_component.has_template_argument_list &&
+            owner_chain.requires_template_keyword() &&
+            !terminal_component.preceded_by_template_keyword) {
+            diagnose_missing_cpp_template_keyword(
+                owner_chain.qualifier_chain_spelling,
+                terminal_component.name,
+                terminal_component.loc);
+        }
+
+        QualType resolved_type;
+        if (terminal_component.has_template_argument_list) {
+            if (owner_chain.is_dependent_context()) {
+                resolved_type = QualType(std::make_shared<DependentNameType>(
+                    owner_chain.owner_type,
+                    terminal_component.name,
+                    terminal_component.template_arguments,
+                    owner_chain.is_current_instantiation,
+                    saw_typename_keyword,
+                    true));
+            } else {
+                resolved_type =
+                    collect_->collect_lookup_record_nested_template_type(
+                        owner_chain.owner_type,
+                        terminal_component.name,
+                        terminal_component.template_arguments,
+                        terminal_component.loc);
+            }
+        } else {
+            if (owner_chain.is_dependent_context()) {
+                if (!saw_typename_keyword &&
+                    owner_chain.requires_typename_keyword()) {
+                    diagnose_missing_cpp_typename_keyword(
+                        owner_chain.qualifier_chain_spelling,
+                        terminal_component.name,
+                        terminal_component.loc);
+                }
+                resolved_type = QualType(std::make_shared<DependentNameType>(
+                    owner_chain.owner_type,
+                    terminal_component.name,
+                    std::vector<TemplateArgument>{},
+                    owner_chain.is_current_instantiation,
+                    saw_typename_keyword,
+                    false));
+            } else {
+                resolved_type =
+                    collect_->collect_lookup_record_nested_type(
+                        owner_chain.owner_type,
+                        terminal_component.name);
+            }
+        }
+
+        if (!resolved_type) {
+            restore();
+            return std::nullopt;
+        }
+
+        ParsedCppTypeNameSpecifier result;
+        result.type = resolved_type;
+        result.spelling =
+            owner_chain.qualifier_chain_spelling + "::" +
+            terminal_component.spelling();
+        return result;
+    };
+
     if (start_tok.type != TokenType::TYPENAME) {
+        if (auto decltype_qualified =
+                try_parse_decltype_qualified_type(false)) {
+            return decltype_qualified;
+        }
         if (auto concrete = try_parse_concrete_named_type()) {
             return concrete;
         }
@@ -1317,6 +1524,12 @@ Parser::try_parse_cpp_named_type_specifier() {
     }
 
     bool saw_typename_keyword = gentle_check_and_consume(TokenType::TYPENAME);
+    if (saw_typename_keyword) {
+        if (auto decltype_qualified =
+                try_parse_decltype_qualified_type(true)) {
+            return decltype_qualified;
+        }
+    }
     if (consume_cpp_scope_resolution()) {
         if (saw_typename_keyword) {
             error_custloc(
@@ -4082,6 +4295,12 @@ bool Parser::is_cpp_qualified_id_start() {
     }
     RevertingTentativeParsingAction tentative(*this);
     try {
+        if (gentle_check(TokenType::DECLTYPE_KW)) {
+            if (!try_consume_cpp_decltype_specifier_for_lookahead()) {
+                return false;
+            }
+            return is_cpp_scope_resolution_here();
+        }
         bool has_global_qualifier = consume_cpp_scope_resolution();
         if (!gentle_check(TokenType::IDENTIFIER)) {
             return false;
@@ -5735,9 +5954,22 @@ Parser::TPResult Parser::try_parse_cpp_qualified_id() {
             return true;
         };
 
-        bool saw_scope = consume_cpp_scope_resolution();
-        if (!parse_component()) {
-            return TPResult::Error;
+        bool saw_scope = false;
+        if (gentle_check(TokenType::DECLTYPE_KW)) {
+            if (!try_consume_cpp_decltype_specifier_for_lookahead() ||
+                !consume_cpp_scope_resolution()) {
+                return TPResult::Error;
+            }
+            saw_scope = true;
+            gentle_check_and_consume(TokenType::TEMPLATE);
+            if (!parse_component()) {
+                return TPResult::Error;
+            }
+        } else {
+            saw_scope = consume_cpp_scope_resolution();
+            if (!parse_component()) {
+                return TPResult::Error;
+            }
         }
 
         while (consume_cpp_scope_resolution()) {

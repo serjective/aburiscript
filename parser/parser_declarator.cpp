@@ -427,23 +427,10 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     continue; // don't advance, we already consumed
                 }
                 case TokenType::DECLTYPE_KW: {
-                    if (!pars->is_cxx_mode_active()) {
-                        error_custloc("'decltype' is only available in C++ mode", t.loc);
-                    }
-                    mgnt->advance(); // consume decltype
-                    mgnt->check_and_consume(TokenType::LEFT_PAREN);
-                    bool use_declared_type_rule =
-                        mgnt->current_token().type != TokenType::LEFT_PAREN;
-                    Collect::UnevaluatedContextScope unevaluated_scope(
-                        pars->collect_.get(), "decltype");
-                    auto decltype_expr = pars->parse_expression();
-                    if (!decltype_expr) {
-                        error("Error parsing expression in decltype");
-                    }
-                    typedef_resolved_type = std::make_shared<DecltypeExprType>(
-                        std::shared_ptr<Expr>(decltype_expr.release()),
-                        use_declared_type_rule);
-                    mgnt->check_and_consume(TokenType::RIGHT_PAREN);
+                    QualType decltype_type =
+                        pars->parse_cpp_decltype_type_specifier();
+                    typedef_resolved_type = decltype_type.get_shared();
+                    typedef_resolved_qualifiers = decltype_type.get_qualifiers();
                     continue; // don't advance, we already consumed
                 }
                 case TokenType::ATTRIBUTE_KW: {

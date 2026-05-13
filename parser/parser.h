@@ -155,6 +155,19 @@ private:
         bool requires_template_keyword() const {
             return is_dependent && !is_current_instantiation;
         }
+
+        bool requires_typename_keyword() const {
+            return is_dependent && !is_current_instantiation;
+        }
+    };
+
+    struct CppQualifiedOwnerSeed {
+        QualType owner_type = nullptr;
+        std::string spelling;
+        SrcLoc loc;
+        bool is_current_instantiation = false;
+        bool is_dependent = false;
+        bool requires_class_or_enum = false;
     };
 
     struct PendingCppExplicitSpecializationInfo {
@@ -530,6 +543,8 @@ private:
     TemplateArgument parse_cpp_template_argument();
     std::vector<TemplateArgument> parse_cpp_template_argument_list();
     void consume_cpp_template_argument_list_close();
+    bool try_consume_cpp_decltype_specifier_for_lookahead();
+    QualType parse_cpp_decltype_type_specifier();
     std::optional<ParsedCppTypeNameSpecifier> try_parse_cpp_named_type_specifier();
     std::unique_ptr<Expr> try_parse_cpp_constraint_name_expression(
         bool append_placeholder_type_argument,
@@ -557,7 +572,8 @@ private:
         const std::vector<CppQualifiedNameComponent>& qualifiers,
         bool has_global_qualifier,
         SrcLoc start_loc,
-        bool diagnose_dependent_names = true);
+        bool diagnose_dependent_names = true,
+        std::optional<CppQualifiedOwnerSeed> initial_owner = std::nullopt);
     CppDependentOwnerAnalysis analyze_cpp_member_access_base(
         QualType base_type,
         bool is_arrow) const;

@@ -570,12 +570,6 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
     auto current_scope = collect_->collect_current_scope();
     auto current_context = collect_->get_current_decl_context();
 
-    bool has_global_qualifier = consume_cpp_scope_resolution();
-    if (!gentle_check(TokenType::IDENTIFIER)) {
-        error_custloc("expected identifier after '::' in qualified-id expression",
-            current_token().loc);
-    }
-
     auto parse_component =
         [&](bool preceded_by_template_keyword) -> CppQualifiedNameComponent {
             if (!gentle_check(TokenType::IDENTIFIER)) {
@@ -601,13 +595,50 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             return component;
         };
 
+    bool has_global_qualifier = false;
+    std::optional<CppQualifiedOwnerSeed> initial_owner;
     std::vector<CppQualifiedNameComponent> components;
-    components.push_back(parse_component(false));
-    while (is_cpp_scope_resolution_here()) {
+    if (gentle_check(TokenType::DECLTYPE_KW)) {
+        SrcLoc decltype_loc = current_token().loc;
+        QualType owner_type = parse_cpp_decltype_type_specifier();
+        if (!is_cpp_scope_resolution_here()) {
+            error_custloc(
+                "expected '::' after decltype-specifier in qualified-id expression",
+                current_token().loc);
+        }
+        CppQualifiedOwnerSeed seed;
+        seed.owner_type = owner_type;
+        seed.spelling = "decltype(<expr>)";
+        seed.loc = decltype_loc;
+        seed.is_dependent =
+            type_depends_on_template_parameters(owner_type, ast_ctx.get());
+        seed.requires_class_or_enum = true;
+        initial_owner = std::move(seed);
+
         consume_cpp_scope_resolution();
         bool preceded_by_template_keyword =
             gentle_check_and_consume(TokenType::TEMPLATE);
         components.push_back(parse_component(preceded_by_template_keyword));
+        while (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            preceded_by_template_keyword =
+                gentle_check_and_consume(TokenType::TEMPLATE);
+            components.push_back(parse_component(preceded_by_template_keyword));
+        }
+    } else {
+        has_global_qualifier = consume_cpp_scope_resolution();
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            error_custloc("expected identifier after '::' in qualified-id expression",
+                current_token().loc);
+        }
+
+        components.push_back(parse_component(false));
+        while (is_cpp_scope_resolution_here()) {
+            consume_cpp_scope_resolution();
+            bool preceded_by_template_keyword =
+                gentle_check_and_consume(TokenType::TEMPLATE);
+            components.push_back(parse_component(preceded_by_template_keyword));
+        }
     }
 
     std::vector<CppQualifiedNameComponent> qualifiers;
@@ -651,7 +682,8 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
         };
     Parser::CppQualifiedOwnerChainResolution owner_chain;
     bool used_single_qualifier_record_compat = false;
-    if (!has_global_qualifier &&
+    if (!initial_owner &&
+        !has_global_qualifier &&
         qualifiers.size() == 1 &&
         !qualifiers.front().has_template_argument_list &&
         current_context) {
@@ -681,7 +713,9 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
         owner_chain = resolve_cpp_qualified_owner_chain(
             qualifiers,
             has_global_qualifier,
-            qualified_loc);
+            qualified_loc,
+            /*diagnose_dependent_names=*/true,
+            initial_owner);
     }
     auto current_function_owner_type =
         [&]() -> QualType {

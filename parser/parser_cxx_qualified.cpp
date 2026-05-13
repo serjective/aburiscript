@@ -205,7 +205,8 @@ Parser::resolve_cpp_qualified_owner_chain(
     const std::vector<CppQualifiedNameComponent>& qualifiers,
     bool has_global_qualifier,
     SrcLoc start_loc,
-    bool diagnose_dependent_names) {
+    bool diagnose_dependent_names,
+    std::optional<CppQualifiedOwnerSeed> initial_owner) {
     CppQualifiedOwnerChainResolution resolution;
 
     auto current_scope = collect_->collect_current_scope();
@@ -236,6 +237,54 @@ Parser::resolve_cpp_qualified_owner_chain(
     resolution.lookup_scope = has_global_qualifier ? global_scope : current_scope;
     resolution.lookup_context =
         has_global_qualifier ? tu_context.get() : current_context.get();
+
+    auto typed_owner_names_class_or_enum =
+        [&](QualType owner_type) -> bool {
+            auto semantic_owner = desugar_type(owner_type, ast_ctx.get());
+            return static_cast<bool>(semantic_owner.as_shared<ObjectType>()) ||
+                   static_cast<bool>(semantic_owner.as_shared<EnumType>());
+        };
+
+    if (initial_owner && initial_owner->owner_type) {
+        resolution.owner_type = initial_owner->owner_type;
+        resolution.is_current_instantiation =
+            initial_owner->is_current_instantiation;
+        resolution.is_dependent =
+            initial_owner->is_dependent ||
+            type_depends_on_template_parameters(
+                resolution.owner_type,
+                ast_ctx.get());
+
+        if (!resolution.is_dependent_context()) {
+            if (auto realized_owner =
+                    collect_->collect_try_realize_deferred_semantic_type(
+                        resolution.owner_type)) {
+                resolution.owner_type = realized_owner;
+            }
+            resolution.is_dependent =
+                type_depends_on_template_parameters(
+                    resolution.owner_type,
+                    ast_ctx.get());
+        }
+
+        if (!initial_owner->spelling.empty()) {
+            resolution.qualifier_spellings.push_back(initial_owner->spelling);
+            resolution.qualifier_chain_spelling = initial_owner->spelling;
+        }
+
+        if (initial_owner->requires_class_or_enum &&
+            !resolution.is_dependent_context() &&
+            !typed_owner_names_class_or_enum(resolution.owner_type)) {
+            if (diagnose_dependent_names) {
+                error_custloc(
+                    "decltype-specifier in nested-name-specifier must name a class or enumeration type",
+                    initial_owner->loc);
+            }
+            resolution.lookup_failed = true;
+            resolution.failed_prefix_spelling = initial_owner->spelling;
+            return resolution;
+        }
+    }
 
     auto template_arguments_are_dependent =
         [&](const std::vector<TemplateArgument>& arguments) {
