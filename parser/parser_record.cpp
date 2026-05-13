@@ -16,21 +16,49 @@
 bool is_c23_family_standard(const std::string& std_name);
 
 namespace {
-bool is_valid_fixed_enum_underlying_type(const std::shared_ptr<CType>& type) {
-    auto builtin = dyn_cast_shared<BuiltinType>(type);
-    return builtin && builtin->isInteger();
+std::shared_ptr<BuiltinType> fixed_enum_integer_underlying_type(
+    const std::shared_ptr<CType>& type,
+    const ASTContext* ast_ctx = nullptr) {
+    QualType resolved = desugar_type(QualType(type), ast_ctx);
+    for (int depth = 0; depth < 8 && resolved; ++depth) {
+        auto transform = dyn_cast_shared<BuiltinTypeTransformType>(
+            resolved.get_shared());
+        if (!transform) {
+            break;
+        }
+        resolved = desugar_type(
+            apply_builtin_type_transform(
+                transform->transform_kind,
+                transform->operand_type,
+                ast_ctx),
+            ast_ctx);
+    }
+
+    auto builtin = dyn_cast_shared<BuiltinType>(resolved.get_shared());
+    if (!builtin || !builtin->isInteger()) {
+        return nullptr;
+    }
+    return builtin;
+}
+
+bool is_valid_fixed_enum_underlying_type(
+    const std::shared_ptr<CType>& type,
+    const ASTContext* ast_ctx = nullptr) {
+    return fixed_enum_integer_underlying_type(type, ast_ctx) != nullptr;
 }
 
 bool fixed_enum_value_fits_underlying(
-    int64_t value, const std::shared_ptr<CType>& underlying) {
-    auto builtin = dyn_cast_shared<BuiltinType>(underlying);
+    int64_t value,
+    const std::shared_ptr<CType>& underlying,
+    const ASTContext* ast_ctx = nullptr) {
+    auto builtin = fixed_enum_integer_underlying_type(underlying, ast_ctx);
     if (!builtin) {
         return false;
     }
     if (builtin->builtin_kind == BuiltinTypes::Bool) {
         return value == 0 || value == 1;
     }
-    int64_t bits = underlying->getWidth();
+    int64_t bits = builtin->getWidth();
     if (bits <= 0) {
         return false;
     }
@@ -5747,6 +5775,21 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
 
     bool has_fixed_underlying = false;
     std::shared_ptr<CType> fixed_underlying = nullptr;
+    std::shared_ptr<CType> fixed_underlying_validation = nullptr;
+    auto realize_enum_underlying_for_validation =
+        [&](const std::shared_ptr<CType>& underlying) -> std::shared_ptr<CType> {
+        if (!underlying) {
+            return nullptr;
+        }
+        QualType realized(underlying);
+        if (collect_) {
+            if (auto collect_realized =
+                    collect_->try_realize_deferred_semantic_type(realized)) {
+                realized = collect_realized;
+            }
+        }
+        return realized.get_shared();
+    };
     if (gentle_check(TokenType::COLON)) {
         if (!is_cxx_mode_active() &&
             !lang_opts.standard.empty() &&
@@ -5757,10 +5800,16 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
         advance(); // consume ':'
         DeclarationParser underlying_parser(this);
         fixed_underlying = underlying_parser.parse_declaration(false);
-        if (!fixed_underlying || !is_valid_fixed_enum_underlying_type(fixed_underlying)) {
+        fixed_underlying_validation =
+            realize_enum_underlying_for_validation(fixed_underlying);
+        if (!fixed_underlying ||
+            !is_valid_fixed_enum_underlying_type(
+                fixed_underlying_validation,
+                ast_ctx.get())) {
             diag_engine->report_error(
                 "invalid fixed underlying type for enum", current_token().loc);
             fixed_underlying = type_ctx->get_builtin(BuiltinTypes::Int);
+            fixed_underlying_validation = fixed_underlying;
         }
         has_fixed_underlying = true;
     }
@@ -5788,6 +5837,16 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
         [&]() -> std::shared_ptr<CType> {
         if (has_fixed_underlying) {
             return fixed_underlying;
+        }
+        if (is_cxx_mode_active() && is_scoped) {
+            return type_ctx->get_builtin(BuiltinTypes::Int);
+        }
+        return nullptr;
+    };
+    auto expected_underlying_validation_type =
+        [&]() -> std::shared_ptr<CType> {
+        if (has_fixed_underlying) {
+            return fixed_underlying_validation;
         }
         if (is_cxx_mode_active() && is_scoped) {
             return type_ctx->get_builtin(BuiltinTypes::Int);
@@ -5905,9 +5964,16 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
             }
             enum_has_negative_values = existing_state.has_negative_values;
         }
+        std::shared_ptr<CType> enum_underlying_validation =
+            existing_enum_decl
+                ? realize_enum_underlying_for_validation(enum_underlying)
+                : expected_underlying_validation_type();
         bool validate_against_fixed_underlying =
             has_fixed_underlying || (is_cxx_mode_active() && is_scoped);
-        if (enum_underlying && enum_underlying->isUnsigned()) {
+        auto enum_underlying_builtin = fixed_enum_integer_underlying_type(
+            enum_underlying_validation,
+            ast_ctx.get());
+        if (enum_underlying_builtin && enum_underlying_builtin->isUnsigned()) {
             enum_has_negative_values = false;
         }
 
@@ -5968,7 +6034,10 @@ std::unique_ptr<Decl> Parser::parse_enum_specifier() {
                 }
 
                 if (validate_against_fixed_underlying &&
-                    !fixed_enum_value_fits_underlying(enum_value, enum_underlying)) {
+                    !fixed_enum_value_fits_underlying(
+                        enum_value,
+                        enum_underlying_validation,
+                        ast_ctx.get())) {
                     diag_engine->report_error(
                         "enumerator value is not representable in fixed underlying enum type", loc);
                 }

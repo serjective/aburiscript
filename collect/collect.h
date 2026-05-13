@@ -1346,6 +1346,9 @@ public:
         const DependentNameType* type) const;
     void query_publish_dependent_name_resolved_type(QualType type,
                                                     QualType resolved_type);
+    // Best-effort, non-diagnostic realization for parser validation paths that
+    // need concrete aliases without finalizing a declaration.
+    QualType try_realize_deferred_semantic_type(QualType type);
 
 private:
     void collect_record_publish_state(ObjectDecl* semantic_decl,
@@ -1676,8 +1679,6 @@ private:
     };
 
     bool contains_deferred_semantic_type(const std::shared_ptr<CType>& type) const ;
-
-    QualType try_realize_deferred_semantic_type(QualType type) ;
 
     QualType finalize_deferred_semantic_type(QualType type,
                                              SrcLoc loc = SrcLoc()) ;

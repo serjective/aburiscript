@@ -472,6 +472,7 @@ static bool is_builtin_defined_name(const std::string& name) {
            name == "__has_extension" ||
            name == "__has_feature" ||
            name == "__has_warning" ||
+           name == "__is_identifier" ||
            name == "__has_include" ||
            name == "__has_include_next";
 }
@@ -575,6 +576,29 @@ static std::optional<HasQueryOperand> extract_has_query_operand(const std::vecto
     return operand;
 }
 
+static std::optional<Token> extract_identifier_query_operand(
+    const std::vector<Token>& tokens) {
+    auto skip_whitespace = [&](size_t& index) {
+        while (index < tokens.size() &&
+               tokens[index].type == TokenType::Whitespace) {
+            ++index;
+        }
+    };
+
+    size_t index = 0;
+    skip_whitespace(index);
+    if (index >= tokens.size() || !tokens[index].isIdentifierLike()) {
+        return std::nullopt;
+    }
+
+    Token operand = tokens[index++];
+    skip_whitespace(index);
+    if (index != tokens.size()) {
+        return std::nullopt;
+    }
+    return operand;
+}
+
 static std::string canonicalize_attribute_namespace(const std::string& ns) {
     if (ns == "__gnu__") {
         return "gnu";
@@ -652,7 +676,33 @@ static bool has_feature_name(const std::string& name,
     if (name == "cxx_concepts") {
         return lang_opts.is_cxx20_or_later();
     }
+    if (name == "cxx_atomic") {
+        return lang_opts.is_cxx_mode();
+    }
+    if (name == "c_atomic") {
+        if (!lang_opts.is_c_mode()) {
+            return false;
+        }
+        if (lang_opts.standard.empty()) {
+            return true;
+        }
+        return lang_opts.standard == "c11" || lang_opts.standard == "gnu11" ||
+               lang_opts.standard == "c17" || lang_opts.standard == "gnu17" ||
+               is_c23_family_standard(lang_opts.standard);
+    }
     return false;
+}
+
+static bool has_extension_name(const std::string& name,
+                               const LangOptions& lang_opts,
+                               const TargetInfo* target_info) {
+    if (name == "c_atomic") {
+        return true;
+    }
+    if (name == "cxx_atomic") {
+        return lang_opts.is_cxx_mode();
+    }
+    return has_feature_name(name, lang_opts, target_info);
 }
 
 inline bool is_hspace(char c) {
@@ -3414,7 +3464,7 @@ void PreProcess::emit_macro_definitions(std::ostream& out) {
 }
 
 bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
-    // 1. Handle __has_* builtins
+    // 1. Handle preprocessor query builtins.
     std::vector<Token> after_has;
     for (size_t i = 0; i < tokens.size(); ++i) {
         if (tokens[i].type == TokenType::IDENTIFIER) {
@@ -3422,6 +3472,7 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
             bool is_has = (name == "__has_attribute" || name == "__has_builtin" ||
                 name == "__has_cpp_attribute" || name == "__has_extension" ||
                 name == "__has_feature" || name == "__has_warning" ||
+                name == "__is_identifier" ||
                 name == "__has_include" || name == "__has_include_next");
             if (is_has) {
                 if (i + 1 >= tokens.size() || tokens[i + 1].type != TokenType::LEFT_PAREN) {
@@ -3462,8 +3513,13 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                         sm.get(), curr_file, header, is_system, name == "__has_include_next");
                     result = found ? 1 : 0;
                 } else {
-                    auto arg_name = extract_has_query_operand(arg_tokens);
-                    if (arg_name.has_value()) {
+                    if (name == "__is_identifier") {
+                        auto operand = extract_identifier_query_operand(arg_tokens);
+                        if (!operand.has_value()) {
+                            error("Invalid argument to " + name, tokens[i].loc);
+                        }
+                        result = operand->type == TokenType::IDENTIFIER ? 1 : 0;
+                    } else if (auto arg_name = extract_has_query_operand(arg_tokens)) {
                         const std::string& query = arg_name->query;
                         if (name == "__has_attribute") {
                             const std::string canon = canonicalize_attribute_name(query);
@@ -3473,7 +3529,7 @@ bool PreProcess::evaluateConstantExpression(std::vector<Token> tokens) {
                         } else if (name == "__has_feature") {
                             result = has_feature_name(query, lang_opts, target_info.get()) ? 1 : 0;
                         } else if (name == "__has_extension") {
-                            result = has_feature_name(query, lang_opts, target_info.get()) ? 1 : 0;
+                            result = has_extension_name(query, lang_opts, target_info.get()) ? 1 : 0;
                         } else if (name == "__has_builtin") {
                             bool builtin_available = BuiltinRegistry::instance().is_builtin(query);
                             if (builtin_available && target_info) {
