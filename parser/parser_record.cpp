@@ -3888,6 +3888,23 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
         collect_->collect_set_current_cpp_record_lookup_type(
             QualType(qualified_declarator.owner_record_decl->get_record_type()));
     }
+    if (is_cxx_mode_active() &&
+        !qualified_declarator.owner_record_decl &&
+        !is_variable_template_specialization_declarator &&
+        !decl_parser.has_explicit_specialization_argument_list) {
+        try_publish_pending_primary_variable_template_pattern(
+            decl_parser.name,
+            declared_type,
+            declared_sym,
+            storage_class,
+            decl_parser.is_inline,
+            declaration_is_constexpr,
+            decl_parser.is_thread_local,
+            decl_parser.is_block_byref,
+            decl_parser.asm_label,
+            declaration_language_linkage,
+            declarator_token.loc);
+    }
     std::unique_ptr<Expr> init_expr;
     bool is_copy_initialization = false;
     bool is_cxx_object_decl =

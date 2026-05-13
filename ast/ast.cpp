@@ -243,6 +243,9 @@ bool template_decl_defines_lookup_entity(const TemplateDecl* decl) {
     }
     if (auto* variable_template =
             dyn_cast<VariableTemplateDecl>(const_cast<TemplateDecl*>(decl))) {
+        if (!variable_template->is_pattern_complete) {
+            return false;
+        }
         auto* variable = variable_template->variable_decl();
         return variable &&
                (variable->init ||

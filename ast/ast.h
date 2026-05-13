@@ -3178,6 +3178,8 @@ struct CppDeductionGuideDecl : TemplateDecl {
 };
 
 struct VariableTemplateDecl : TemplateDecl {
+    bool is_pattern_complete = true;
+
     VariableTemplateDecl(TemplateParameterList parameters,
                          std::unique_ptr<Decl> templated_decl,
                          SrcLoc loc = SrcLoc())

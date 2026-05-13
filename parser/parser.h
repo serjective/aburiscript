@@ -526,6 +526,38 @@ private:
         TemplateParameterList template_parameters = {},
         std::unique_ptr<Expr> leading_requires_clause = nullptr,
         SrcLoc template_loc = SrcLoc());
+    bool cpp_template_parameter_lists_match_for_redeclaration(
+        const TemplateParameterList& lhs,
+        const TemplateParameterList& rhs) const;
+    bool cpp_template_decls_match_for_redeclaration(
+        const TemplateDecl* existing,
+        const TemplateDecl* current) const;
+    const TemplateDecl* resolve_matching_primary_template_redeclaration(
+        const std::string& template_name,
+        LookupNamespace lookup_namespace,
+        const TemplateDecl* current_template) const;
+    void set_primary_template_canonical_identity(
+        TemplateDecl* template_decl,
+        const std::string& template_name,
+        LookupNamespace lookup_namespace);
+    void validate_template_default_argument_rules(
+        const TemplateDecl* template_decl);
+    void finalize_primary_template_decl(
+        TemplateDecl* template_decl,
+        const std::string& template_name,
+        LookupNamespace lookup_namespace);
+    VariableTemplateDecl* try_publish_pending_primary_variable_template_pattern(
+        const std::string& name,
+        QualType declared_type,
+        const std::shared_ptr<Symbol>& declared_sym,
+        StorageClass storage_class,
+        bool is_inline,
+        bool is_constexpr,
+        bool is_thread_local,
+        bool is_block_byref,
+        const std::optional<std::string>& asm_label,
+        LanguageLinkage language_linkage,
+        SrcLoc loc);
     TemplateParameterList parse_cpp_template_parameter_list(uint32_t depth);
     std::unique_ptr<Expr> parse_cpp_constraint_expression();
     std::unique_ptr<Expr> parse_cpp_constraint_logical_or_expression();
@@ -773,6 +805,17 @@ private:
         active_template_parameter_stack_;
     std::optional<PendingCppExplicitSpecializationInfo>
         pending_cpp_explicit_specialization_info_;
+    struct PendingPrimaryVariableTemplatePattern {
+        TemplateParameterList* parameters = nullptr;
+        std::unique_ptr<Expr>* leading_requires_clause = nullptr;
+        SrcLoc template_loc;
+        bool member_template_declaration = false;
+        bool consumed = false;
+        std::string name;
+        std::unique_ptr<VariableTemplateDecl> provisional_template;
+    };
+    PendingPrimaryVariableTemplatePattern*
+        pending_primary_variable_template_pattern_ = nullptr;
     struct CppRecordParseFrame {
         CppRecordKind kind = CppRecordKind::Class;
         std::string name;

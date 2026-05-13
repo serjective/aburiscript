@@ -107,7 +107,8 @@ struct Collect::VariableTemplateSpecializationInstantiator {
         specialization_is_dependent =
             template_arguments_depend_on_template_parameters(normalized_arguments);
         if (entry->is_instantiated || entry->is_instantiating ||
-            specialization_is_dependent) {
+            specialization_is_dependent ||
+            !variable_template->is_pattern_complete) {
             return entry->specialization_decl.get();
         }
         return instantiate_entry_definition();
