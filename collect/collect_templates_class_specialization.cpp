@@ -1471,6 +1471,62 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         }
     }
 
+    bool handle_compile_time_only_member(const Decl* member) {
+        if (isa<NopDecl>(member)) {
+            return true;
+        }
+
+        auto* static_assert_decl = dyn_cast<StaticAssertDecl>(member);
+        if (!static_assert_decl) {
+            return false;
+        }
+
+        std::string clone_error;
+        auto cloned_decl = clone_pass.clone_decl(static_assert_decl, &clone_error);
+        if (!cloned_decl) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to clone class template static_assert"
+                    : clone_error,
+                static_assert_decl->location);
+        }
+
+        auto resolution_pass =
+            clone_pass_builder.build_dependent_resolution_pass(
+                clone_pass,
+                [this](std::unique_ptr<Expr>& expr, std::string* error_out)
+                    -> bool {
+                    return collect.resolve_dependent_expr_after_substitution(
+                        expr,
+                        QualType(),
+                        error_out);
+                });
+
+        std::string resolution_error;
+        if (!resolution_pass.resolve_decl_in_place(
+                cloned_decl,
+                &resolution_error)) {
+            return fail_instantiation(
+                resolution_error.empty()
+                    ? "failed to resolve class template static_assert after substitution"
+                    : resolution_error,
+                static_assert_decl->location);
+        }
+
+        std::string finalize_error;
+        if (!template_sema_internal::finalize_specialized_decl_semantics(
+                collect,
+                cloned_decl,
+                &finalize_error)) {
+            return fail_instantiation(
+                finalize_error.empty()
+                    ? "failed to finalize class template static_assert after substitution"
+                    : finalize_error,
+                static_assert_decl->location);
+        }
+        return true;
+    }
+
     bool instantiate_members() {
         reserve_member_storage();
 
@@ -1493,6 +1549,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     }
 
     bool instantiate_member(const Decl* member, RecordMemberAccess declared_access) {
+        if (isa<NopDecl>(member) || isa<StaticAssertDecl>(member)) {
+            return handle_compile_time_only_member(member);
+        }
         if (auto* nested_record = dyn_cast<CppRecordDecl>(member)) {
             return handle_nested_record_member(nested_record, declared_access);
         }

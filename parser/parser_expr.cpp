@@ -963,6 +963,14 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             return collect_->collect_error_expression(
                 "ambiguous member reference", qualified_loc);
         }
+        if (total_matches == 0) {
+            diag_engine->report_error(
+                "no member named '" + terminal_name + "' in '" +
+                    qualified_owner_type->to_string() + "'",
+                qualified_loc);
+            return collect_->collect_error_expression(
+                "missing qualified member", qualified_loc);
+        }
 
         if (static_data_matches.size() == 1) {
             const auto* static_data = static_data_matches.front().first;
