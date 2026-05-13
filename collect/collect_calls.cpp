@@ -1,5 +1,6 @@
 #include "collect.h"
 #include "collect_internal.h"
+#include "collect_templates_internal.h"
 #include "../helpers/auto_type_utils.h"
 #include "../ast/expr_clone.h"
 #include "../ast/special_members.h"
@@ -2932,6 +2933,60 @@ bool Collect::resolve_dependent_expr_after_substitution(
             }
         };
 
+    auto materialize_constant_after_substitution =
+        [&](std::unique_ptr<Expr>& candidate) -> bool {
+        if (!candidate) {
+            return false;
+        }
+        // Stale dependent references to specialized constexpr members can be
+        // constant after substitution even when the dependency predicate is
+        // conservative. Do not fold operators such as dependent sizeof here.
+        Expr* materialization_root = strip_implicit_casts(candidate.get());
+        if (!materialization_root ||
+            !(isa<VarRef>(materialization_root) ||
+              isa<QualifiedVarRef>(materialization_root) ||
+              isa<MemberExpr>(materialization_root) ||
+              isa<BuiltinCallExpr>(materialization_root) ||
+              isa<ConceptSpecializationExpr>(materialization_root))) {
+            return false;
+        }
+        QualType candidate_type = finalize_deferred_semantic_type(
+            candidate->get_type(),
+            candidate->location);
+        if (!candidate_type ||
+            type_depends_on_template_parameters(
+                candidate_type,
+                ast_ctx_.get()) ||
+            contains_deferred_semantic_type(candidate_type.get_shared()) ||
+            !expression_depends_on_template_parameters(candidate.get())) {
+            return false;
+        }
+
+        ConstEvalResult eval = evaluate_with_consteval_compat(
+            candidate.get(),
+            ConstEvalMode::cpp_core_constant_expression());
+        if (eval.status != ConstEvalStatus::Constant ||
+            !eval.value.has_value()) {
+            return false;
+        }
+
+        auto argument = TemplateArgument::value_argument(
+            candidate_type,
+            *eval.value,
+            {},
+            nullptr);
+        auto replacement =
+            template_sema_internal::make_constant_expr_for_template_argument(
+                argument,
+                ast_ctx_.get(),
+                candidate->location);
+        if (!replacement) {
+            return false;
+        }
+        candidate = std::move(replacement);
+        return true;
+    };
+
     if (auto* implicit_cast = dyn_cast<ImplicitCast>(expr.get())) {
         if (implicit_cast->expr &&
             !resolve_dependent_expr_after_substitution(
@@ -3549,6 +3604,15 @@ bool Collect::resolve_dependent_expr_after_substitution(
 
     if (auto* dependent_unary = dyn_cast<DependentUnaryExpr>(expr.get())) {
         strip_stale_dependent_implicit_casts(dependent_unary->operand);
+        if (dependent_unary->operand &&
+            !resolve_dependent_expr_after_substitution(
+                dependent_unary->operand,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        strip_stale_dependent_implicit_casts(dependent_unary->operand);
+        materialize_constant_after_substitution(dependent_unary->operand);
         if (!dependent_unary->operand ||
             type_depends_on_template_parameters(
                 dependent_unary->operand->get_type(),
@@ -3593,6 +3657,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
         }
         strip_stale_dependent_implicit_casts(dependent_binary->left);
         strip_stale_dependent_implicit_casts(dependent_binary->right);
+        materialize_constant_after_substitution(dependent_binary->left);
+        materialize_constant_after_substitution(dependent_binary->right);
         if (!dependent_binary->left ||
             !dependent_binary->right ||
             expression_depends_on_template_parameters(
