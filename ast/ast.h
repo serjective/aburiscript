@@ -2206,9 +2206,15 @@ struct ImplicitCast: Expr {
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::ImplicitCast; }
 };
+enum class ExplicitCastKind : uint8_t {
+    General,
+    CppConstCast
+};
+
 struct ExplicitCast: Expr {
     std::unique_ptr<Expr> expr;
     QualType ctype;
+    ExplicitCastKind cast_kind = ExplicitCastKind::General;
     QualType get_type() override {
         return ctype;
     }
@@ -2218,9 +2224,12 @@ struct ExplicitCast: Expr {
         return ref && ref->isLValueReference();
     }
 
-    ExplicitCast(std::unique_ptr<Expr> expr, QualType ctype, SrcLoc loc = SrcLoc())
+    ExplicitCast(std::unique_ptr<Expr> expr,
+                 QualType ctype,
+                 SrcLoc loc = SrcLoc(),
+                 ExplicitCastKind cast_kind = ExplicitCastKind::General)
         : Expr(StmtKind::ExplicitCast, loc), expr(std::move(expr)),
-          ctype(std::move(ctype)) {
+          ctype(std::move(ctype)), cast_kind(cast_kind) {
     }
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::ExplicitCast; }
@@ -3595,6 +3604,7 @@ struct MemberExpr: Expr {
     std::unique_ptr<Expr> base;     // Base expression (the struct or pointer-to-struct)
     const std::string* member_name; // Name of the member being accessed (interned pointer)
     QualType member_type; // Type of the member
+    QualType declared_member_type; // Declared member type before object cv-qualification
     const ObjectDecl* virtual_base_record_decl = nullptr; // Resolved virtual-base root, if lookup crossed one
     uint32_t field_index;           // Index of field in the struct (for codegen)
     std::vector<uint32_t> field_path; // Path of field indices for nested/anonymous members
@@ -3607,29 +3617,31 @@ struct MemberExpr: Expr {
                bool suppress_virtual_dispatch = false, SrcLoc loc = SrcLoc())
         : Expr(StmtKind::MemberExpr, loc), base(std::move(base)),
           member_name(intern_fallback(std::move(member_name))),
-          member_type(nullptr), field_index(0), isArrow(isArrow), is_bitfield(false),
+          member_type(nullptr), declared_member_type(nullptr), field_index(0), isArrow(isArrow), is_bitfield(false),
           suppress_virtual_dispatch(suppress_virtual_dispatch) {}
 
     MemberExpr(std::unique_ptr<Expr> base, const std::string* member_name, bool isArrow = false,
                bool suppress_virtual_dispatch = false, SrcLoc loc = SrcLoc())
         : Expr(StmtKind::MemberExpr, loc), base(std::move(base)), member_name(member_name),
-          member_type(nullptr), field_index(0), isArrow(isArrow), is_bitfield(false),
+          member_type(nullptr), declared_member_type(nullptr), field_index(0), isArrow(isArrow), is_bitfield(false),
           suppress_virtual_dispatch(suppress_virtual_dispatch) {}
 
     MemberExpr(std::unique_ptr<Expr> base, std::string member_name,
-               QualType member_type, size_t field_index, bool isArrow = false,
+               QualType member_type_arg, size_t field_index, bool isArrow = false,
                bool suppress_virtual_dispatch = false, SrcLoc loc = SrcLoc())
         : Expr(StmtKind::MemberExpr, loc), base(std::move(base)),
           member_name(intern_fallback(std::move(member_name))),
-          member_type(std::move(member_type)), field_index(static_cast<uint32_t>(field_index)),
+          member_type(member_type_arg), declared_member_type(std::move(member_type_arg)),
+          field_index(static_cast<uint32_t>(field_index)),
           isArrow(isArrow), is_bitfield(false),
           suppress_virtual_dispatch(suppress_virtual_dispatch) {}
 
     MemberExpr(std::unique_ptr<Expr> base, const std::string* member_name,
-               QualType member_type, size_t field_index, bool isArrow = false,
+               QualType member_type_arg, size_t field_index, bool isArrow = false,
                bool suppress_virtual_dispatch = false, SrcLoc loc = SrcLoc())
         : Expr(StmtKind::MemberExpr, loc), base(std::move(base)), member_name(member_name),
-          member_type(std::move(member_type)), field_index(static_cast<uint32_t>(field_index)),
+          member_type(member_type_arg), declared_member_type(std::move(member_type_arg)),
+          field_index(static_cast<uint32_t>(field_index)),
           isArrow(isArrow), is_bitfield(false),
           suppress_virtual_dispatch(suppress_virtual_dispatch) {}
 
@@ -3665,6 +3677,7 @@ struct UnresolvedMemberExpr : Expr {
     std::unique_ptr<Expr> base;
     std::string member_name;
     QualType member_type;
+    QualType declared_member_type;
     std::optional<std::vector<TemplateArgument>> explicit_template_arguments;
     uint8_t isArrow : 1;
     uint8_t is_current_instantiation : 1;
@@ -3684,6 +3697,7 @@ struct UnresolvedMemberExpr : Expr {
           base(std::move(base)),
           member_name(std::move(member_name)),
           member_type(nullptr),
+          declared_member_type(nullptr),
           isArrow(isArrow),
           is_current_instantiation(is_current_instantiation),
           names_dependent_base(names_dependent_base),
@@ -3693,7 +3707,7 @@ struct UnresolvedMemberExpr : Expr {
     UnresolvedMemberExpr(
         std::unique_ptr<Expr> base,
         std::string member_name,
-        QualType member_type,
+        QualType member_type_arg,
         std::optional<std::vector<TemplateArgument>> explicit_template_arguments = std::nullopt,
         bool isArrow = false,
         bool is_current_instantiation = false,
@@ -3704,7 +3718,8 @@ struct UnresolvedMemberExpr : Expr {
         : Expr(StmtKind::UnresolvedMemberExpr, loc),
           base(std::move(base)),
           member_name(std::move(member_name)),
-          member_type(std::move(member_type)),
+          member_type(member_type_arg),
+          declared_member_type(std::move(member_type_arg)),
           explicit_template_arguments(std::move(explicit_template_arguments)),
           isArrow(isArrow),
           is_current_instantiation(is_current_instantiation),

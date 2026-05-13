@@ -4322,38 +4322,91 @@ std::unique_ptr<Expr> Collect::named_cast_error(
     return collect_error_expression(message, loc);
 }
 
-std::unique_ptr<Expr> Collect::cpp_const_named_cast(
-    std::unique_ptr<Expr> expr,
+Collect::CppConstCastCheckResult Collect::check_cpp_const_cast(
+    Expr* expr,
     QualType target_type,
-    QualType target_no_ref,
-    SrcLoc loc) const {
-    auto source_type = desugar_type(expr->get_type());
+    std::string* error_out) const {
+    auto set_error = [&](const std::string& message) {
+        if (error_out) {
+            *error_out = message;
+        }
+        return CppConstCastCheckResult::Invalid;
+    };
+
+    auto type_needs_deferred_check = [&](QualType type) {
+        return type &&
+               (type_depends_on_template_parameters(type, ast_ctx_.get()) ||
+                contains_deferred_semantic_type(type.get_shared()));
+    };
+
+    bool target_dependent = type_needs_deferred_check(target_type);
+    bool expr_dependent =
+        expr && expression_depends_on_template_parameters(expr);
+
+    if (!expr) {
+        return target_dependent
+            ? CppConstCastCheckResult::Dependent
+            : set_error("const_cast operand has unknown type");
+    }
+
+    auto source_type = desugar_type(expr->get_type(), ast_ctx_.get());
+    bool source_dependent =
+        expr_dependent || type_needs_deferred_check(source_type);
     if (!source_type) {
-        return named_cast_error("const_cast operand has unknown type", loc);
+        return source_dependent || target_dependent
+            ? CppConstCastCheckResult::Dependent
+            : set_error("const_cast operand has unknown type");
+    }
+
+    auto target_no_ref =
+        remove_reference_and_desugar(target_type, ast_ctx_.get());
+    if (!target_no_ref) {
+        return target_dependent
+            ? CppConstCastCheckResult::Dependent
+            : set_error("named cast requires a valid target type");
     }
 
     auto source_no_ref =
         remove_reference_and_desugar(source_type, ast_ctx_.get());
     if (!source_no_ref) {
-        return named_cast_error("const_cast operand has unknown type", loc);
+        return source_dependent || target_dependent
+            ? CppConstCastCheckResult::Dependent
+            : set_error("const_cast operand has unknown type");
     }
 
-    bool target_is_pointer = canonical_type_kind(target_type) == TypeKind::Pointer;
-    bool source_is_pointer = canonical_type_kind(source_type) == TypeKind::Pointer;
-    bool target_is_reference = canonical_type_kind(target_type) == TypeKind::Reference;
-    bool source_is_reference = canonical_type_kind(source_type) == TypeKind::Reference;
+    bool target_is_pointer =
+        canonical_type_kind(target_type) == TypeKind::Pointer;
+    bool source_is_pointer =
+        canonical_type_kind(source_type) == TypeKind::Pointer;
+    bool target_is_reference =
+        canonical_type_kind(target_type) == TypeKind::Reference;
+    bool source_is_reference =
+        canonical_type_kind(source_type) == TypeKind::Reference;
+
+    if (!(target_is_pointer || target_is_reference)) {
+        return target_dependent
+            ? CppConstCastCheckResult::Dependent
+            : set_error("const_cast requires pointer or reference operand types");
+    }
+    if (!(source_is_pointer || source_is_reference)) {
+        return source_dependent
+            ? CppConstCastCheckResult::Dependent
+            : set_error("const_cast requires pointer or reference operand types");
+    }
     if (!((target_is_pointer && source_is_pointer) ||
           (target_is_reference && source_is_reference))) {
-        return named_cast_error(
-            "const_cast requires pointer or reference operand types", loc);
+        return target_dependent || source_dependent
+            ? CppConstCastCheckResult::Dependent
+            : set_error("const_cast requires pointer or reference operand types");
     }
 
     if (!same_type_ignoring_all_qualifiers(
             target_no_ref,
             source_no_ref,
             ast_ctx_.get())) {
-        return named_cast_error(
-            "const_cast target type is not similar to source type", loc);
+        return target_dependent || source_dependent
+            ? CppConstCastCheckResult::Dependent
+            : set_error("const_cast target type is not similar to source type");
     }
 
     if (target_is_reference && source_is_reference) {
@@ -4361,14 +4414,48 @@ std::unique_ptr<Expr> Collect::cpp_const_named_cast(
         auto source_ref = desugar_type(source_type).as_shared<ReferenceType>();
         if (!target_ref || !source_ref ||
             target_ref->reference_kind != source_ref->reference_kind) {
-            return named_cast_error("const_cast target/reference kind mismatch", loc);
+            return target_dependent || source_dependent
+                ? CppConstCastCheckResult::Dependent
+                : set_error("const_cast target/reference kind mismatch");
         }
-        return collect_make<ImplicitCast>(
-            ImplicitCastTypes::RAW_CAST, std::move(expr), target_type);
     }
 
-    expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
-    return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
+    if (target_dependent || source_dependent) {
+        return CppConstCastCheckResult::Dependent;
+    }
+
+    return CppConstCastCheckResult::Valid;
+}
+
+std::unique_ptr<Expr> Collect::cpp_const_named_cast(
+    std::unique_ptr<Expr> expr,
+    QualType target_type,
+    QualType target_no_ref,
+    SrcLoc loc) const {
+    (void)target_no_ref;
+    std::string error;
+    auto check = check_cpp_const_cast(expr.get(), target_type, &error);
+    if (check == CppConstCastCheckResult::Invalid) {
+        return named_cast_error(error, loc);
+    }
+    if (check == CppConstCastCheckResult::Dependent) {
+        return collect_make<ExplicitCast>(
+            std::move(expr),
+            target_type,
+            loc,
+            ExplicitCastKind::CppConstCast);
+    }
+
+    if (canonical_type_kind(target_type) == TypeKind::Pointer) {
+        expr = collect_apply_standard_conversions(
+            std::move(expr),
+            ExprUseContext::RValue);
+    }
+    return collect_make<ExplicitCast>(
+        std::move(expr),
+        target_type,
+        loc,
+        ExplicitCastKind::CppConstCast);
 }
 
 std::unique_ptr<Expr> Collect::cpp_dynamic_named_cast(

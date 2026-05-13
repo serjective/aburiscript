@@ -1145,6 +1145,8 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
                 return false;
             }
             member->member_type = rewrite_type(member->member_type, ctx);
+            member->declared_member_type =
+                rewrite_type(member->declared_member_type, ctx);
             if (ctx.rewrite_member_expr &&
                 !ctx.rewrite_member_expr(member, error_out)) {
                 return false;
@@ -1158,6 +1160,8 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
                 return false;
             }
             member->member_type = rewrite_type(member->member_type, ctx);
+            member->declared_member_type =
+                rewrite_type(member->declared_member_type, ctx);
             if (!rewrite_optional_template_arguments(
                     member->explicit_template_arguments,
                     ctx,

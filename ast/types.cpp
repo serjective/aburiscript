@@ -767,7 +767,8 @@ bool expr_structurally_matches(const Expr* lhs, const Expr* rhs) {
         case StmtKind::ExplicitCast: {
             const auto* lhs_cast = static_cast<const ExplicitCast*>(lhs);
             const auto* rhs_cast = static_cast<const ExplicitCast*>(rhs);
-            return lhs_cast->ctype.equals_qualified(rhs_cast->ctype) &&
+            return lhs_cast->cast_kind == rhs_cast->cast_kind &&
+                   lhs_cast->ctype.equals_qualified(rhs_cast->ctype) &&
                    expr_structurally_matches(
                        lhs_cast->expr.get(),
                        rhs_cast->expr.get());
@@ -1007,9 +1008,12 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
                        ast_ctx);
         }
         case StmtKind::ExplicitCast:
-            return expr_depends_on_template_parameters_for_type(
-                static_cast<const ExplicitCast*>(expr)->expr.get(),
-                ast_ctx);
+            return type_depends_on_template_parameters(
+                       static_cast<const ExplicitCast*>(expr)->ctype,
+                       ast_ctx) ||
+                   expr_depends_on_template_parameters_for_type(
+                       static_cast<const ExplicitCast*>(expr)->expr.get(),
+                       ast_ctx);
         case StmtKind::ArraySubscriptExpr: {
             const auto* subscript =
                 static_cast<const ArraySubscriptExpr*>(expr);

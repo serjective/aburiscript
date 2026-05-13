@@ -1245,7 +1245,10 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
                 return {};
             }
             auto result = std::make_unique<ExplicitCast>(
-                std::move(cloned_expr), explicit_cast->ctype, explicit_cast->location);
+                std::move(cloned_expr),
+                explicit_cast->ctype,
+                explicit_cast->location,
+                explicit_cast->cast_kind);
             assign_node_id(result.get(), ast_ctx);
             return result;
         }
@@ -1340,6 +1343,7 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
                 member_expr->location);
             assign_node_id(result.get(), ast_ctx);
             result->member_type = member_expr->member_type;
+            result->declared_member_type = member_expr->declared_member_type;
             result->virtual_base_record_decl =
                 member_expr->virtual_base_record_decl;
             result->field_index = member_expr->field_index;
@@ -1373,6 +1377,7 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
                 member_expr->requires_template_keyword != 0,
                 member_expr->suppress_virtual_dispatch != 0,
                 member_expr->location);
+            result->declared_member_type = member_expr->declared_member_type;
             assign_node_id(result.get(), ast_ctx);
             return result;
         }

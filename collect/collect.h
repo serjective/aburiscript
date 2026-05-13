@@ -1736,7 +1736,8 @@ private:
         QualType base_type,
         bool is_arrow,
         const std::string& member_name,
-        SrcLoc loc) ;
+        SrcLoc loc,
+        QualType* declared_member_type_out = nullptr) ;
 
     std::unique_ptr<Expr> collect_typed_dependent_call_expression(
         std::unique_ptr<Expr> callee,
@@ -2148,6 +2149,17 @@ private:
     std::unique_ptr<Expr> named_cast_error(
         const std::string& message,
         SrcLoc loc) const ;
+
+    enum class CppConstCastCheckResult : uint8_t {
+        Valid,
+        Invalid,
+        Dependent
+    };
+
+    CppConstCastCheckResult check_cpp_const_cast(
+        Expr* expr,
+        QualType target_type,
+        std::string* error_out) const ;
 
     std::unique_ptr<Expr> cpp_const_named_cast(
         std::unique_ptr<Expr> expr,

@@ -300,10 +300,13 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                        active_variable_symbols);
         }
         case StmtKind::ExplicitCast:
-            return expr_depends_on_template_parameters_impl(
-                static_cast<const ExplicitCast*>(stripped)->expr.get(),
-                ast_ctx,
-                active_variable_symbols);
+            return type_depends_on_template_parameters(
+                       static_cast<const ExplicitCast*>(stripped)->ctype,
+                       ast_ctx) ||
+                   expr_depends_on_template_parameters_impl(
+                       static_cast<const ExplicitCast*>(stripped)->expr.get(),
+                       ast_ctx,
+                       active_variable_symbols);
         case StmtKind::ArraySubscriptExpr: {
             const auto* subscript =
                 static_cast<const ArraySubscriptExpr*>(stripped);
@@ -744,10 +747,29 @@ QualType Collect::resolve_decltype_expression_type(
     if (decltype_uses_declared_entity_rule(
             use_declared_type_rule,
             stripped_expr)) {
+        QualType declared_type = expr_type;
+        if (auto* member = dyn_cast<MemberExpr>(stripped_expr)) {
+            if (member->declared_member_type) {
+                declared_type = resolve_deferred_semantic_type_impl(
+                    member->declared_member_type,
+                    loc,
+                    mode);
+            }
+        } else if (auto* member = dyn_cast<UnresolvedMemberExpr>(stripped_expr)) {
+            if (member->declared_member_type) {
+                declared_type = resolve_deferred_semantic_type_impl(
+                    member->declared_member_type,
+                    loc,
+                    mode);
+            }
+        }
+        if (!declared_type) {
+            declared_type = expr_type;
+        }
         return QualType(
-            expr_type.get_shared(),
+            declared_type.get_shared(),
             static_cast<uint8_t>(
-                original_type.get_qualifiers() | expr_type.get_qualifiers()));
+                original_type.get_qualifiers() | declared_type.get_qualifiers()));
     }
 
     switch (classify_value_category(stripped_expr)) {

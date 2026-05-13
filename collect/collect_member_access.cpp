@@ -25,7 +25,11 @@ QualType Collect::try_synthesize_dependent_member_type(
     QualType base_type,
     bool is_arrow,
     const std::string& member_name,
-    SrcLoc loc) {
+    SrcLoc loc,
+    QualType* declared_member_type_out) {
+    if (declared_member_type_out) {
+        *declared_member_type_out = QualType(nullptr);
+    }
     if (!base_type) {
         return QualType(nullptr);
     }
@@ -136,6 +140,9 @@ QualType Collect::try_synthesize_dependent_member_type(
             class_template->parameters,
             specialization->arguments,
             loc);
+    }
+    if (declared_member_type_out) {
+        *declared_member_type_out = member_type;
     }
 
     uint8_t base_quals = QUAL_NONE;
@@ -738,6 +745,7 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
 
     if (lang_opts_.is_cxx_mode() &&
         (dependent_base_expr || dependent_base_type || names_dependent_base)) {
+        QualType dependent_declared_member_type;
         QualType dependent_member_type =
             names_dependent_base
                 ? QualType(nullptr)
@@ -745,7 +753,8 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
                       base_type,
                       is_arrow,
                       member_name,
-                      loc);
+                      loc,
+                      &dependent_declared_member_type);
         auto unresolved_member = collect_make<UnresolvedMemberExpr>(
             std::move(member->base),
             member_name,
@@ -757,6 +766,8 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
             requires_template_keyword,
             suppress_virtual_dispatch,
             loc);
+        unresolved_member->declared_member_type =
+            dependent_declared_member_type;
         return unresolved_member;
     }
 
@@ -925,6 +936,7 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
     }
 
     member->member_type = lookup.field->type;
+    member->declared_member_type = lookup.field->type;
     member->virtual_base_record_decl = lookup.virtual_base_record_decl;
     member->field_index = static_cast<uint32_t>(lookup.path.empty() ? 0 : lookup.path.back());
     member->field_path = lookup.path;

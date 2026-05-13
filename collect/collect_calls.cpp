@@ -1474,6 +1474,8 @@ std::unique_ptr<Expr> Collect::build_dependent_explicit_template_call(
             /*requires_template_keyword=*/true,
             owned_member->suppress_virtual_dispatch != 0,
             owned_member->location);
+        unresolved_member->declared_member_type =
+            owned_member->declared_member_type;
         return collect_make<DependentCallExpr>(
             std::move(unresolved_member),
             std::move(args),
@@ -2387,6 +2389,8 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
                 /*requires_template_keyword=*/true,
                 owned_member->suppress_virtual_dispatch != 0,
                 owned_member->location);
+            unresolved_member->declared_member_type =
+                owned_member->declared_member_type;
             return unresolved_member;
         }
 
@@ -3053,6 +3057,38 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 implicit_this_type,
                 error_out)) {
             return false;
+        }
+        if (explicit_cast->ctype &&
+            (contains_deferred_semantic_type(
+                 explicit_cast->ctype.get_shared()) ||
+             type_depends_on_template_parameters(
+                 explicit_cast->ctype,
+                 ast_ctx_.get()))) {
+            QualType realized_type =
+                try_realize_deferred_semantic_type(explicit_cast->ctype);
+            if (realized_type) {
+                explicit_cast->ctype = realized_type;
+            }
+        }
+        if (explicit_cast->cast_kind == ExplicitCastKind::CppConstCast) {
+            std::string error;
+            auto check =
+                check_cpp_const_cast(
+                    explicit_cast->expr.get(),
+                    explicit_cast->ctype,
+                    &error);
+            if (check == CppConstCastCheckResult::Invalid) {
+                if (error_out) {
+                    *error_out = error;
+                }
+                return false;
+            }
+            if (check == CppConstCastCheckResult::Valid &&
+                canonical_type_kind(explicit_cast->ctype) == TypeKind::Pointer) {
+                explicit_cast->expr = collect_apply_standard_conversions(
+                    std::move(explicit_cast->expr),
+                    ExprUseContext::RValue);
+            }
         }
         return true;
     }
