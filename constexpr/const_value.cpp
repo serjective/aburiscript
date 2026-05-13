@@ -70,10 +70,14 @@ int64_t ConstIntValue::to_signed_i64() const {
 ConstIntValue ConstIntValue::cast(uint16_t new_width, bool new_unsigned) const {
     new_width = normalize_width(new_width);
 
-    if (new_unsigned) {
-        return from_unsigned(to_unsigned_u64(), new_width);
-    }
-    return from_signed(to_signed_i64(), new_width);
+    ConstIntValue out;
+    out.bit_width = new_width;
+    out.is_unsigned = new_unsigned;
+    uint64_t source_value = is_unsigned
+        ? to_unsigned_u64()
+        : static_cast<uint64_t>(to_signed_i64());
+    out.bits = source_value & width_mask(out.bit_width);
+    return out;
 }
 
 ConstValue ConstValue::object(ConstObjectValueKind object_kind,

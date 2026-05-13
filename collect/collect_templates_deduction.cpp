@@ -367,13 +367,17 @@ bool deduce_class_template_argument_binding(
            normalized_pattern.equals(normalized_argument);
 }
 
-bool deduce_class_template_specialization_argument_list(
+bool deduce_class_template_specialization_argument_list_into_existing_bindings(
     const std::vector<TemplateArgument>& pattern_arguments,
     const TemplatePatternLayout& pattern_layout,
     const TemplateParameterList& parameters,
     const std::vector<TemplateArgument>& actual_arguments,
-    TemplateArgumentBindings& deduced_bindings_out) {
+    TemplateArgumentBindings& deduced_bindings,
+    bool finalize_bindings) {
     if (!pattern_layout.valid) {
+        return false;
+    }
+    if (deduced_bindings.size() < parameters.size()) {
         return false;
     }
 
@@ -385,20 +389,18 @@ bool deduce_class_template_specialization_argument_list(
         return false;
     }
 
-    deduced_bindings_out.clear();
-    deduced_bindings_out.resize(parameters.size());
-
     if (!pattern_layout.pack_index.has_value()) {
         for (size_t idx = 0; idx < pattern_arguments.size(); ++idx) {
             if (!deduce_class_template_argument_binding(
                     pattern_arguments[idx],
                     actual_arguments[idx],
                     parameters,
-                    deduced_bindings_out)) {
+                    deduced_bindings)) {
                 return false;
             }
         }
-        return finalize_deduced_template_bindings(parameters, deduced_bindings_out);
+        return !finalize_bindings ||
+            finalize_deduced_template_bindings(parameters, deduced_bindings);
     }
 
     for (size_t idx = 0; idx < pattern_layout.leading_count; ++idx) {
@@ -406,7 +408,7 @@ bool deduce_class_template_specialization_argument_list(
                 pattern_arguments[idx],
                 actual_arguments[idx],
                 parameters,
-                deduced_bindings_out)) {
+                deduced_bindings)) {
             return false;
         }
     }
@@ -422,7 +424,7 @@ bool deduce_class_template_specialization_argument_list(
                     pack_pattern_argument,
                     actual_arguments[pattern_layout.leading_count + idx],
                     parameters,
-                    deduced_bindings_out)) {
+                    deduced_bindings)) {
                 return false;
             }
         }
@@ -437,12 +439,30 @@ bool deduce_class_template_specialization_argument_list(
                 pattern_arguments[pattern_index],
                 actual_arguments[argument_index],
                 parameters,
-                deduced_bindings_out)) {
+                deduced_bindings)) {
             return false;
         }
     }
 
-    return finalize_deduced_template_bindings(parameters, deduced_bindings_out);
+    return !finalize_bindings ||
+        finalize_deduced_template_bindings(parameters, deduced_bindings);
+}
+
+bool deduce_class_template_specialization_argument_list(
+    const std::vector<TemplateArgument>& pattern_arguments,
+    const TemplatePatternLayout& pattern_layout,
+    const TemplateParameterList& parameters,
+    const std::vector<TemplateArgument>& actual_arguments,
+    TemplateArgumentBindings& deduced_bindings_out) {
+    deduced_bindings_out.clear();
+    deduced_bindings_out.resize(parameters.size());
+    return deduce_class_template_specialization_argument_list_into_existing_bindings(
+        pattern_arguments,
+        pattern_layout,
+        parameters,
+        actual_arguments,
+        deduced_bindings_out,
+        true);
 }
 
 bool expand_partial_specialization_argument_pattern(
@@ -948,68 +968,17 @@ bool deduce_template_argument_types_impl(
                 return false;
             }
         }
-        if (pattern_specialization->arguments.size() !=
-            argument_specialization->arguments->size()) {
-            return false;
-        }
-        for (size_t idx = 0; idx < pattern_specialization->arguments.size(); ++idx) {
-            const auto& pattern_argument = pattern_specialization->arguments[idx];
-            const auto& argument_argument =
-                (*argument_specialization->arguments)[idx];
-            if (pattern_argument.kind != argument_argument.kind) {
-                return false;
-            }
-            if (pattern_argument.kind == TemplateArgumentKind::Type) {
-                if (!deduce_template_argument_types_impl(
-                        pattern_argument.type,
-                        argument_argument.type,
-                        parameters,
-                        deduced_arguments,
-                        deduction_mode)) {
-                    return false;
-                }
-                continue;
-            }
-            if (pattern_argument.is_dependent &&
-                pattern_argument.referenced_parameter) {
-                auto parameter_index = template_sema_internal::
-                    find_template_parameter_index_by_decl(
-                        pattern_argument.referenced_parameter,
-                        parameters);
-                if (!parameter_index ||
-                    *parameter_index >= deduced_arguments.size()) {
-                    return false;
-                }
-                auto& existing = deduced_arguments[*parameter_index];
-                if (existing.is_unbound()) {
-                    existing = TemplateArgumentBinding::single(argument_argument);
-                } else {
-                    const auto* existing_single = existing.single_argument();
-                    if (!existing_single ||
-                        !existing_single->equals(argument_argument)) {
-                        return false;
-                    }
-                }
-                continue;
-            }
-            TemplateArgument normalized_pattern = pattern_argument;
-            TemplateArgument normalized_argument = argument_argument;
-            QualType target_type = normalized_argument.value_type
-                ? normalized_argument.value_type
-                : normalized_pattern.value_type;
-            if (!template_sema_internal::normalize_concrete_template_value_argument(
-                    normalized_pattern,
-                    target_type,
-                    nullptr) ||
-                !template_sema_internal::normalize_concrete_template_value_argument(
-                    normalized_argument,
-                    target_type,
-                    nullptr) ||
-                !normalized_pattern.equals(normalized_argument)) {
-                return false;
-            }
-        }
-        return true;
+        TemplatePatternLayout pattern_layout =
+            analyze_template_argument_pattern_layout(
+                pattern_specialization->arguments,
+                &parameters);
+        return deduce_class_template_specialization_argument_list_into_existing_bindings(
+            pattern_specialization->arguments,
+            pattern_layout,
+            parameters,
+            *argument_specialization->arguments,
+            deduced_arguments,
+            false);
     }
 
     auto canonical_pattern = desugar_type(spelled_pattern);
