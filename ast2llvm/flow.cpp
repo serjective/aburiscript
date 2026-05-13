@@ -742,19 +742,19 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
 
     // Keep local value bindings function-scoped. The same AST body can be
     // emitted multiple times for C++ ctor/dtor complete/base variants; if we
-    // retain locals globally, repeated emission of the same local UID collides.
-    struct NamedValuesRestoreGuard {
+    // retain locals globally, repeated emission of the same symbol collides.
+    struct SymbolValuesRestoreGuard {
         ASTToLLVM* owner = nullptr;
-        std::map<std::string, llvm::Value*> saved;
-        explicit NamedValuesRestoreGuard(ASTToLLVM* self)
-            : owner(self), saved(self ? self->named_values
-                                      : std::map<std::string, llvm::Value*>{}) {}
-        ~NamedValuesRestoreGuard() {
+        std::unordered_map<const Symbol*, llvm::Value*> saved;
+        explicit SymbolValuesRestoreGuard(ASTToLLVM* self)
+            : owner(self), saved(self ? self->symbol_values
+                                      : std::unordered_map<const Symbol*, llvm::Value*>{}) {}
+        ~SymbolValuesRestoreGuard() {
             if (owner) {
-                owner->named_values = std::move(saved);
+                owner->symbol_values = std::move(saved);
             }
         }
-    } named_values_guard(this);
+    } symbol_values_guard(this);
 
     // From here on out, we assume we have function body
     vla_size_cache.clear();
@@ -824,7 +824,7 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
 
             if (canonical_type_kind(paramDecl->type, ast_ctx.get()) == TypeKind::Reference) {
                 // Reference parameters are already incoming addresses.
-                named_values[mangled] = &arg;
+                bind_symbol_value(sym.get(), &arg);
                 idx++;
                 continue;
             }
@@ -832,7 +832,7 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
             if (allow_byref_aggregate_params && pass_aggregate_by_reference(paramDecl->type)) {
                 // Large aggregate params are represented as indirect pointers.
                 // The caller materializes the by-value copy before the call.
-                named_values[mangled] = &arg;
+                bind_symbol_value(sym.get(), &arg);
                 idx++;
                 continue;
             }
@@ -860,7 +860,7 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
                     paramDecl->type,
                     paramDecl->location,
                     "emit_function_body()");
-                named_values[mangled] = alloca;
+                bind_symbol_value(sym.get(), alloca);
                 idx++;
                 continue;
             }
@@ -872,8 +872,7 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
             auto *store = builder.CreateStore(incoming, alloca);
             apply_store_qualifiers(store, paramDecl->type, module->getDataLayout());
 
-            // Register in named_values map
-            named_values[mangled] = alloca;
+            bind_symbol_value(sym.get(), alloca);
         }
         idx++;
     }
@@ -2452,13 +2451,12 @@ llvm::Value* ASTToLLVM::get_block_byref_cell_address(const Symbol* sym,
         error(std::string(context_name) + ": missing __block symbol", loc);
         return nullptr;
     }
-    std::string mangled = mangleCIdentifier(sym->uid);
-    auto it = named_values.find(mangled);
-    if (it == named_values.end() || !it->second) {
+    llvm::Value* cell_addr = lookup_symbol_value(sym);
+    if (!cell_addr) {
         error(std::string(context_name) + ": __block variable not allocated", loc);
         return nullptr;
     }
-    return it->second;
+    return cell_addr;
 }
 
 llvm::Value* ASTToLLVM::get_block_byref_forwarding_cell(llvm::Value* cell_addr,

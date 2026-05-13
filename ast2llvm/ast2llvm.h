@@ -78,7 +78,7 @@ public:
     std::unique_ptr<llvm::LLVMContext> context;
     std::unique_ptr<llvm::Module> module;
     llvm::IRBuilder<> builder;
-    std::map<std::string, llvm::Value*> named_values;
+    std::unordered_map<const Symbol*, llvm::Value*> symbol_values;
     std::set<std::string> is_global_defined;
     std::vector<FuncDecl*> deferred_inline_defs;
     std::set<const FuncDecl*> deferred_inline_set;
@@ -198,6 +198,9 @@ public:
       //  std::cout << info << std::endl;
     }
     static std::string mangleCIdentifier(const std::string& original);
+    void bind_symbol_value(const Symbol* sym, llvm::Value* value);
+    llvm::Value* lookup_symbol_value(const Symbol* sym) const;
+    bool has_symbol_value(const Symbol* sym) const;
     // Get the LLVM IR name for an asm label. Prepends \01 to prevent LLVM from
     // adding the Mach-O underscore prefix, since asm labels are exact symbol names.
     static std::string get_asm_label_name(const std::string& label);

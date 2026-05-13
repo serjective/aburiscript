@@ -181,7 +181,7 @@ void ASTToLLVM::convert_cpp_try_statement(CppTryStmt *stmt) {
                         clause.location);
                     return;
                 }
-                named_values[mangled] = payload_addr;
+                bind_symbol_value(clause.exception_symbol.get(), payload_addr);
                 return;
             }
 
@@ -206,7 +206,7 @@ void ASTToLLVM::convert_cpp_try_statement(CppTryStmt *stmt) {
                     payload_llvm_type, payload_addr, "catch.payload");
             }
             builder.CreateStore(payload_value, catch_slot);
-            named_values[mangled] = catch_slot;
+            bind_symbol_value(clause.exception_symbol.get(), catch_slot);
         };
 
     auto emit_handler_body = [&](const CatchLoweringInfo& catch_info) {

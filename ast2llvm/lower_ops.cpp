@@ -455,8 +455,8 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
             error("get_lvalue(): Enum constant is not an lvalue", expr->location);
             return {};
         }
-        std::string mangled = mangleCIdentifier(sym->uid);
-        if (!named_values.contains(mangled)) {
+        llvm::Value* bound_value = lookup_symbol_value(sym.get());
+        if (!bound_value) {
             // If this is a function type, look up or create the function in the module
             if (auto func_ctype = sym->type.as_shared<FunctionType>()) {
                 llvm::Function* func =
@@ -474,18 +474,18 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
                  sym->linkage == VariableLinkage::INTERNAL)) {
                 deal_global_variable_declaration(
                     const_cast<VariableDecl*>(sym->variable_definition));
-                mangled = mangleCIdentifier(sym->uid);
+                bound_value = lookup_symbol_value(sym.get());
             }
         }
         if (sym->kind == SymbolKind::FUNCTION &&
             sym->type.as_shared<FunctionType>()) {
             mark_function_symbol_odr_used(sym);
         }
-        if (!named_values.contains(mangled)) {
+        if (!bound_value) {
             error("get_lvalue(): variable not allocated", expr->location);
             return {};
         }
-        ptr = named_values[mangled];
+        ptr = bound_value;
         ctype = sym->type.get_shared();
 
         if (sym->is_block_byref) {

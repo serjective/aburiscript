@@ -1009,10 +1009,8 @@ llvm::Constant* ASTToLLVM::emit_constant_initializer(Expr* expr) {
             }
         }
         if (!varRef->symref) return nullptr;
-        std::string mangled = mangleCIdentifier(varRef->symref->uid);
-        auto it = named_values.find(mangled);
-        if (it != named_values.end()) {
-            if (auto* gVar = llvm::dyn_cast<llvm::GlobalVariable>(it->second)) {
+        if (auto* bound_value = lookup_symbol_value(varRef->symref.get())) {
+            if (auto* gVar = llvm::dyn_cast<llvm::GlobalVariable>(bound_value)) {
                 if (gVar->hasInitializer() && gVar->isConstant()) {
                     return gVar->getInitializer();
                 }

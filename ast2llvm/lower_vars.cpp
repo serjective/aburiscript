@@ -735,7 +735,7 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
         };
     if (llvm::GlobalValue* weak_alias =
             get_or_create_variable_weakref_alias(*this, varDecl, varType)) {
-        named_values[mangled] = weak_alias;
+        bind_symbol_value(sym.get(), weak_alias);
         return;
     }
     std::string var_name_get = get_variable_llvm_name(*varDecl);
@@ -774,9 +774,9 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
         oldGVar->eraseFromParent();
     }
     configure_variable_global_linkage(*this, varDecl, gVar);
-    named_values[mangled] = gVar;
+    bind_symbol_value(sym.get(), gVar);
 
-    // Now evaluate the initializer (the variable is already in named_values)
+    // Now evaluate the initializer (the variable is already bound for lookup).
     const CppConstructExpr* ctor_init = varDecl->get_cpp_construct_init();
     bool needs_dynamic_ctor_thunk = false;
     llvm::Constant* initVal = nullptr;
@@ -890,7 +890,7 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
                     }
                 } else {
                     val = convert_string_literal(strLit);
-                    named_values[mangled] = val;
+                    bind_symbol_value(sym.get(), val);
                     return;
                 }
             } else {
@@ -1338,11 +1338,10 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
         return;
     }
     std::string mangled = mangleCIdentifier(sym->uid);
-    if (named_values.count(mangled) && sym->linkage == VariableLinkage::NONE) {
-        // any variable with no variabloe linkage will have a static or extern
-        // unless for gloal variables, but we handle those already
+    if (has_symbol_value(sym.get()) && sym->linkage == VariableLinkage::NONE) {
+        // A local symbol must only be allocated once within the active function.
         error("convert_variable_declaration(): "
-              "already declared this mangled variable: " + mangled, varDecl->location);
+              "already declared this local variable: " + sym->name, varDecl->location);
         return;
     }
     auto arr_type = varDecl->type.as_shared<ArrayType>();
@@ -1432,7 +1431,7 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                   varDecl->location);
             return;
         }
-        named_values[mangled] = bound_addr;
+        bind_symbol_value(sym.get(), bound_addr);
         return;
     }
 
@@ -1462,7 +1461,7 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
         };
     if (llvm::GlobalValue* weak_alias =
             get_or_create_variable_weakref_alias(*this, varDecl, varType)) {
-        named_values[mangled] = weak_alias;
+        bind_symbol_value(sym.get(), weak_alias);
         return;
     }
 
@@ -1498,7 +1497,7 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
         if (varDecl->is_thread_local) {
             gVar->setThreadLocalMode(llvm::GlobalVariable::GeneralDynamicTLSModel);
         }
-        named_values[mangled] = gVar;
+        bind_symbol_value(sym.get(), gVar);
     }
 
     // For local variables, allocate BEFORE evaluating the initializer so the variable
@@ -1617,7 +1616,7 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                     "block.byref.destroy");
             }
         }
-        named_values[mangled] = localAlloca;
+        bind_symbol_value(sym.get(), localAlloca);
     }
 
     llvm::Value* localStorageAddr = localAlloca;
@@ -1732,7 +1731,7 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                 // String literal used as pointer (e.g. char *p = "str")
                 initVal = convert_string_literal(strLit);
                 if (!isLocal) {
-                    named_values[mangled] = initVal;
+                    bind_symbol_value(sym.get(), initVal);
                     return;
                 }
             }
@@ -1874,8 +1873,7 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                     break;
             }
         }
-        // We map the UID to the global variable
-        named_values[mangled] = gVar;
+        bind_symbol_value(sym.get(), gVar);
 
         if (!varDecl->is_thread_local &&
             canonical_type_kind(varDecl->type, ast_ctx.get()) == TypeKind::Object &&

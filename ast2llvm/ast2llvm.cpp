@@ -669,7 +669,7 @@ int ASTToLLVM::run() {
     module = std::make_unique<llvm::Module>("aburi_module", *context);
     builder.~IRBuilder();
     new (&builder) llvm::IRBuilder<>(*context);
-    named_values.clear();
+    symbol_values.clear();
     struct_type_cache.clear();
     cpp_vtable_cache.clear();
     cpp_vtable_group_cache.clear();
@@ -1045,9 +1045,7 @@ llvm::Function* ASTToLLVM::get_or_create_function_symbol(
 
     std::string fn_name = get_function_llvm_name(sym, fallback_spelling);
     if (llvm::Function* fn = module->getFunction(fn_name)) {
-        if (!sym->uid.empty()) {
-            named_values[mangleCIdentifier(sym->uid)] = fn;
-        }
+        bind_symbol_value(sym.get(), fn);
         mark_function_symbol_odr_used(sym);
         return fn;
     }
@@ -1078,11 +1076,31 @@ llvm::Function* ASTToLLVM::get_or_create_function_symbol(
     apply_indirect_result_attributes(fn, 0, func_ctype->ret_type);
     configure_odr_function_linkage(fn);
 
-    if (!sym->uid.empty()) {
-        named_values[mangleCIdentifier(sym->uid)] = fn;
-    }
+    bind_symbol_value(sym.get(), fn);
     mark_function_symbol_odr_used(sym);
     return fn;
+}
+
+void ASTToLLVM::bind_symbol_value(const Symbol* sym, llvm::Value* value) {
+    if (!sym || !value) {
+        return;
+    }
+    symbol_values[sym] = value;
+}
+
+llvm::Value* ASTToLLVM::lookup_symbol_value(const Symbol* sym) const {
+    if (!sym) {
+        return nullptr;
+    }
+    auto it = symbol_values.find(sym);
+    if (it == symbol_values.end()) {
+        return nullptr;
+    }
+    return it->second;
+}
+
+bool ASTToLLVM::has_symbol_value(const Symbol* sym) const {
+    return lookup_symbol_value(sym) != nullptr;
 }
 
 std::string ASTToLLVM::mangleCIdentifier(const std::string& original) {
