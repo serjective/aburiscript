@@ -1283,37 +1283,75 @@ Parser::try_parse_cpp_named_type_specifier() {
                         lookup_scope,
                         allow_enclosing_lookup,
                         component.name);
-                    if (!primary_template) {
+                    if (!primary_template && collect_) {
+                        QualType owner_lookup_type =
+                            collect_->collect_current_cpp_record_lookup_type();
+                        const auto* nested_template =
+                            collect_->collect_lookup_record_nested_template(
+                                owner_lookup_type,
+                                component.name);
+                        if (nested_template && nested_template->decl) {
+                            bool is_dependent =
+                                type_depends_on_template_parameters(
+                                    owner_lookup_type,
+                                    ast_ctx.get()) ||
+                                template_arguments_are_dependent(
+                                    component.template_arguments);
+                            if (nested_template->kind ==
+                                    RecordSemanticState::NestedTemplateKind::Class &&
+                                is_dependent) {
+                                resolved_type = QualType(
+                                    std::make_shared<TemplateSpecializationType>(
+                                        component.name,
+                                        nested_template->decl,
+                                        component.template_arguments,
+                                        true));
+                            } else {
+                                bool matched_nested_template = false;
+                                resolved_type =
+                                    collect_->collect_lookup_record_nested_template_type(
+                                        owner_lookup_type,
+                                        component.name,
+                                        component.template_arguments,
+                                        component.loc,
+                                        &matched_nested_template);
+                            }
+                        }
+                    }
+                    if (!primary_template && !resolved_type) {
                         restore();
                         return std::nullopt;
                     }
 
-                    bool is_dependent =
-                        isa<TemplateTemplateParmDecl>(primary_template) ||
-                        template_arguments_are_dependent(component.template_arguments);
-                    QualType specialization_type =
-                        QualType(std::make_shared<TemplateSpecializationType>(
-                            qualified_name_utils::format_cpp_qualified_name(
-                                has_global_qualifier,
-                                resolved_prefix,
-                                component.name),
-                            primary_template,
-                            component.template_arguments,
-                            is_dependent));
-                    if (is_last_component || is_dependent) {
-                        resolved_type = specialization_type;
-                    } else {
-                        auto concrete_specialization =
-                            collect_->collect_try_realize_deferred_semantic_type(
-                                specialization_type);
-                        if (!concrete_specialization ||
-                            type_depends_on_template_parameters(
-                                concrete_specialization,
-                                ast_ctx.get())) {
-                            restore();
-                            return std::nullopt;
+                    if (primary_template) {
+                        bool is_dependent =
+                            isa<TemplateTemplateParmDecl>(primary_template) ||
+                            template_arguments_are_dependent(
+                                component.template_arguments);
+                        QualType specialization_type =
+                            QualType(std::make_shared<TemplateSpecializationType>(
+                                qualified_name_utils::format_cpp_qualified_name(
+                                    has_global_qualifier,
+                                    resolved_prefix,
+                                    component.name),
+                                primary_template,
+                                component.template_arguments,
+                                is_dependent));
+                        if (is_last_component || is_dependent) {
+                            resolved_type = specialization_type;
+                        } else {
+                            auto concrete_specialization =
+                                collect_->collect_try_realize_deferred_semantic_type(
+                                    specialization_type);
+                            if (!concrete_specialization ||
+                                type_depends_on_template_parameters(
+                                    concrete_specialization,
+                                    ast_ctx.get())) {
+                                restore();
+                                return std::nullopt;
+                            }
+                            resolved_type = concrete_specialization;
                         }
-                        resolved_type = concrete_specialization;
                     }
                 }
             } else {
@@ -3987,31 +4025,48 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                 }
                 prepare_cpp_template_pattern_record(*prepared_class_template);
             } else {
-                if (member_template_declaration) {
-                    fail_cpp_unsupported(
-                        "member class template partial specialization",
-                        record_decl->location);
-                }
-                auto lookup_scope = collect_->collect_current_scope();
-                while (lookup_scope &&
-                       scope_flags_contains(
-                           lookup_scope->flags,
-                           ScopeFlags::TemplateParameterScope)) {
-                    lookup_scope = lookup_scope->parent;
-                }
-                const DeclBinding* template_binding =
-                    LookupEngine::lookup_unqualified_template_binding(
-                        prepared_class_template_name,
-                        lookup_scope ? lookup_scope : collect_->collect_current_scope(),
-                        true,
-                        LookupNamespace::Tag);
                 const Decl* primary_template = nullptr;
-                if (template_binding) {
-                    primary_template = template_binding->template_decl;
-                    if (!primary_template &&
-                        template_binding->template_overload_candidates.size() == 1) {
-                        primary_template =
-                            template_binding->template_overload_candidates.front();
+                if (member_template_declaration) {
+                    QualType owner_lookup_type =
+                        collect_->collect_current_cpp_record_lookup_type();
+                    if (!owner_lookup_type &&
+                        !cxx_record_parse_stack_.empty() &&
+                        cxx_record_parse_stack_.back().semantic_owner) {
+                        owner_lookup_type = QualType(
+                            cxx_record_parse_stack_.back()
+                                .semantic_owner
+                                ->get_record_type());
+                    }
+                    const auto* nested_template =
+                        collect_->collect_lookup_record_nested_template(
+                            owner_lookup_type,
+                            prepared_class_template_name);
+                    if (nested_template &&
+                        nested_template->kind ==
+                            RecordSemanticState::NestedTemplateKind::Class) {
+                        primary_template = nested_template->decl;
+                    }
+                } else {
+                    auto lookup_scope = collect_->collect_current_scope();
+                    while (lookup_scope &&
+                           scope_flags_contains(
+                               lookup_scope->flags,
+                               ScopeFlags::TemplateParameterScope)) {
+                        lookup_scope = lookup_scope->parent;
+                    }
+                    const DeclBinding* template_binding =
+                        LookupEngine::lookup_unqualified_template_binding(
+                            prepared_class_template_name,
+                            lookup_scope ? lookup_scope : collect_->collect_current_scope(),
+                            true,
+                            LookupNamespace::Tag);
+                    if (template_binding) {
+                        primary_template = template_binding->template_decl;
+                        if (!primary_template &&
+                            template_binding->template_overload_candidates.size() == 1) {
+                            primary_template =
+                                template_binding->template_overload_candidates.front();
+                        }
                     }
                 }
                 auto* primary_class_template =
@@ -7411,6 +7466,27 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 if (templated_ctor) {
                     state.definition_data.has_user_declared_constructor = true;
                 }
+                changed = true;
+            } else if (auto* class_template_decl =
+                           dyn_cast<ClassTemplateDecl>(member_decl)) {
+                auto* nested_record = class_template_decl->record_decl();
+                if (!nested_record || nested_record->name.empty()) {
+                    return;
+                }
+                for (const auto& existing_nested_template :
+                     state.nested_templates) {
+                    if (existing_nested_template.decl == class_template_decl) {
+                        return;
+                    }
+                }
+
+                RecordSemanticState::NestedTemplate nested_template;
+                nested_template.name = nested_record->name;
+                nested_template.declared_access = member_access;
+                nested_template.kind =
+                    RecordSemanticState::NestedTemplateKind::Class;
+                nested_template.decl = class_template_decl;
+                state.nested_templates.push_back(std::move(nested_template));
                 changed = true;
             } else if (auto* method_decl = dyn_cast<CppMethodDecl>(member_decl)) {
                 for (const auto& existing_method : state.methods) {

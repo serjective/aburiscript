@@ -426,6 +426,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     std::vector<RecordSemanticState::EnumeratorMember> enumerator_members;
     std::unordered_map<const FuncDecl*, std::shared_ptr<Symbol>>
         specialized_member_symbols;
+    std::unordered_map<const ClassTemplateDecl*, ClassTemplateDecl*>
+        specialized_nested_class_templates;
     std::vector<PendingMethodTemplateClone> pending_method_template_clones;
     std::vector<PendingFunctionBodyClone> pending_body_clones;
     std::vector<std::pair<const CppConstructorDecl*, CppConstructorDecl*>>
@@ -1378,6 +1380,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         friend_functions.clear();
         enumerator_members.clear();
         specialized_member_symbols.clear();
+        specialized_nested_class_templates.clear();
         pending_method_template_clones.clear();
         pending_body_clones.clear();
         pending_ctor_init_clones.clear();
@@ -1393,6 +1396,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         friend_functions.reserve(pattern->members.size());
         enumerator_members.reserve(pattern->members.size());
         specialized_member_symbols.reserve(pattern->members.size());
+        specialized_nested_class_templates.reserve(pattern->members.size());
         pending_method_template_clones.reserve(pattern->members.size());
         pending_body_clones.reserve(pattern->members.size());
         pending_ctor_init_clones.reserve(pattern->members.size());
@@ -1569,6 +1573,16 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         }
         if (auto* alias_template_decl = dyn_cast<AliasTemplateDecl>(member)) {
             return handle_alias_template_member(alias_template_decl, declared_access);
+        }
+        if (auto* class_template_decl = dyn_cast<ClassTemplateDecl>(member)) {
+            return handle_class_template_member(
+                class_template_decl,
+                declared_access);
+        }
+        if (auto* class_partial_decl =
+                dyn_cast<ClassTemplatePartialSpecializationDecl>(member)) {
+            return handle_class_template_partial_specialization_member(
+                class_partial_decl);
         }
         if (auto* friend_decl = dyn_cast<FriendDecl>(member)) {
             return handle_friend_member(friend_decl);
@@ -2086,6 +2100,548 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
         entry->member_decls.push_back(std::move(cloned_decl));
         return true;
+    }
+
+    bool clone_template_parameters_into(
+        const TemplateParameterList& pattern_parameters,
+        TemplateParameterList& cloned_parameters,
+        TemplateSubstitutionPass& template_clone_pass,
+        std::unordered_map<const TemplateParameterDecl*,
+                           const TemplateParameterDecl*>& parameter_rebinds,
+        const std::string& failure_context,
+        SrcLoc fallback_loc) {
+        cloned_parameters.clear();
+        cloned_parameters.reserve(pattern_parameters.size());
+
+        for (const auto& parameter : pattern_parameters) {
+            if (!parameter) {
+                return fail_instantiation(
+                    "internal error: missing " + failure_context +
+                        " template parameter",
+                    fallback_loc);
+            }
+
+            if (auto* type_parameter =
+                    dyn_cast<TemplateTypeParmDecl>(parameter.get())) {
+                auto cloned_parameter_type =
+                    std::make_shared<TemplateTypeParmType>(
+                        type_parameter->name,
+                        type_parameter->depth,
+                        type_parameter->index,
+                        type_parameter->is_parameter_pack);
+                auto cloned_parameter =
+                    collect.collect_make<TemplateTypeParmDecl>(
+                        type_parameter->name,
+                        type_parameter->depth,
+                        type_parameter->index,
+                        cloned_parameter_type,
+                        type_parameter->is_parameter_pack,
+                        type_parameter->location);
+                cloned_parameter_type->parameter_decl = cloned_parameter.get();
+                parameter_rebinds.emplace(
+                    type_parameter,
+                    cloned_parameter.get());
+                cloned_parameters.push_back(std::move(cloned_parameter));
+                continue;
+            }
+
+            if (auto* non_type_parameter =
+                    dyn_cast<TemplateNonTypeParmDecl>(parameter.get())) {
+                auto rewritten_parameter_type =
+                    remap_template_parameter_types_in_type(
+                        template_clone_pass.rewrite_type(
+                            non_type_parameter->type),
+                        parameter_rebinds);
+                std::shared_ptr<Symbol> cloned_parameter_symbol = nullptr;
+                if (non_type_parameter->sym) {
+                    cloned_parameter_symbol =
+                        clone_symbol_shallow_for_specialization(
+                            non_type_parameter->sym,
+                            remap_template_parameter_types_in_type(
+                                template_clone_pass.rewrite_type(
+                                    non_type_parameter->sym->type),
+                                parameter_rebinds));
+                    template_clone_pass.context().symbol_remap.emplace(
+                        non_type_parameter->sym.get(),
+                        cloned_parameter_symbol);
+                }
+
+                auto cloned_parameter =
+                    collect.collect_make<TemplateNonTypeParmDecl>(
+                        non_type_parameter->name,
+                        non_type_parameter->depth,
+                        non_type_parameter->index,
+                        rewritten_parameter_type,
+                        cloned_parameter_symbol,
+                        non_type_parameter->is_parameter_pack,
+                        non_type_parameter->location);
+                parameter_rebinds.emplace(
+                    non_type_parameter,
+                    cloned_parameter.get());
+                cloned_parameters.push_back(std::move(cloned_parameter));
+                continue;
+            }
+
+            return fail_instantiation(
+                failure_context +
+                    " instantiation for this template parameter kind is not supported yet",
+                parameter->location);
+        }
+        return true;
+    }
+
+    bool clone_template_parameter_defaults(
+        const TemplateDecl* pattern_template,
+        TemplateDecl* cloned_template,
+        TemplateSubstitutionPass& template_clone_pass,
+        const std::unordered_map<const TemplateParameterDecl*,
+                                 const TemplateParameterDecl*>& parameter_rebinds,
+        const std::string& failure_context) {
+        if (!pattern_template || !cloned_template) {
+            return false;
+        }
+        for (size_t index = 0;
+             index < pattern_template->parameters.size() &&
+             index < cloned_template->parameters.size();
+             ++index) {
+            const auto* default_argument = get_template_parameter_default_argument(
+                pattern_template->parameters[index].get());
+            if (!default_argument) {
+                continue;
+            }
+
+            auto rewritten_defaults =
+                collect.substitute_template_arguments_with_bindings(
+                    {*default_argument},
+                    *selected_parameters,
+                    specialization_bindings,
+                    loc);
+            if (rewritten_defaults.size() != 1) {
+                return fail_instantiation(
+                    "internal error: failed to rewrite " + failure_context +
+                        " default argument",
+                    pattern_template->location);
+            }
+
+            auto rewritten_default = std::move(rewritten_defaults.front());
+            std::string default_error;
+            if (!remap_template_argument_after_outer_substitution(
+                    rewritten_default,
+                    parameter_rebinds,
+                    template_clone_pass.context(),
+                    &default_error)) {
+                return fail_instantiation(
+                    default_error.empty()
+                        ? failure_context +
+                              " default argument cloning is not supported"
+                        : default_error,
+                    pattern_template->location);
+            }
+            set_template_parameter_default_argument(
+                cloned_template->parameters[index].get(),
+                std::move(rewritten_default));
+        }
+
+        if (!merge_template_decl_default_arguments(cloned_template, nullptr)) {
+            return fail_instantiation(
+                "internal error: failed to register " + failure_context +
+                    " defaults",
+                pattern_template->location);
+        }
+        return true;
+    }
+
+    bool clone_template_associated_constraint(
+        const TemplateDecl* pattern_template,
+        TemplateDecl* cloned_template,
+        TemplateSubstitutionPass& template_clone_pass,
+        const std::string& failure_context) {
+        if (!pattern_template || !cloned_template ||
+            !pattern_template->associated_constraint) {
+            return true;
+        }
+
+        std::string clone_error;
+        auto cloned_constraint = template_clone_pass.clone_expr(
+            pattern_template->associated_constraint.get(),
+            &clone_error);
+        if (!cloned_constraint) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to clone " + failure_context + " constraint"
+                    : clone_error,
+                pattern_template->associated_constraint->location);
+        }
+        cloned_template->associated_constraint = std::move(cloned_constraint);
+        return true;
+    }
+
+    bool rewrite_nested_template_pattern_argument(
+        TemplateArgument& argument,
+        TemplateSubstitutionPass& template_clone_pass,
+        const std::unordered_map<const TemplateParameterDecl*,
+                                 const TemplateParameterDecl*>& parameter_rebinds,
+        SrcLoc argument_loc,
+        const std::string& failure_context) {
+        switch (argument.kind) {
+            case TemplateArgumentKind::Type:
+                argument.type = template_clone_pass.rewrite_type(argument.type);
+                break;
+            case TemplateArgumentKind::Template:
+                if (argument.referenced_parameter) {
+                    auto it = parameter_rebinds.find(argument.referenced_parameter);
+                    if (it != parameter_rebinds.end()) {
+                        argument.referenced_parameter = it->second;
+                    }
+                }
+                if (argument.dependent_template_qualifier_type) {
+                    argument.dependent_template_qualifier_type =
+                        template_clone_pass.rewrite_type(
+                            argument.dependent_template_qualifier_type);
+                }
+                break;
+            case TemplateArgumentKind::Value:
+                argument.value_type =
+                    template_clone_pass.rewrite_type(argument.value_type);
+                {
+                    std::string remap_error;
+                    if (!remap_template_argument_after_outer_substitution(
+                            argument,
+                            parameter_rebinds,
+                            template_clone_pass.context(),
+                            &remap_error)) {
+                        return fail_instantiation(
+                            remap_error.empty()
+                                ? "failed to rewrite " + failure_context +
+                                      " argument"
+                                : remap_error,
+                            argument_loc);
+                    }
+                }
+                break;
+        }
+        argument.is_dependent = template_argument_depends_on_template_parameters(
+            argument,
+            ast_ctx());
+        return true;
+    }
+
+    bool publish_cloned_class_template_pattern_semantics(
+        TemplateDecl* cloned_template,
+        const std::string& failure_context) {
+        if (!cloned_template) {
+            return false;
+        }
+
+        CppRecordDecl* cloned_record = nullptr;
+        if (auto* class_template = dyn_cast<ClassTemplateDecl>(cloned_template)) {
+            cloned_record = class_template->record_decl();
+        } else if (auto* partial =
+                       dyn_cast<ClassTemplatePartialSpecializationDecl>(
+                           cloned_template)) {
+            cloned_record = partial->record_decl();
+        }
+        if (!cloned_record || cloned_record->name.empty()) {
+            return fail_instantiation(
+                "internal error: missing " + failure_context + " pattern record",
+                cloned_template->location);
+        }
+
+        bool is_union_record = cloned_record->record_kind == CppRecordKind::Union;
+        auto record_type = std::make_shared<ObjectType>(
+            cloned_record->name,
+            is_union_record,
+            !cloned_record->is_definition);
+        auto semantic_decl = collect.collect_record_declaration(
+            cloned_record->name,
+            record_type,
+            is_union_record,
+            cloned_record->location);
+        if (!semantic_decl) {
+            return fail_instantiation(
+                "failed to build semantic owner for " + failure_context,
+                cloned_record->location);
+        }
+
+        ObjectDecl* semantic_owner = semantic_decl.get();
+        if (auto* class_template = dyn_cast<ClassTemplateDecl>(cloned_template)) {
+            class_template->set_pattern_semantic_decl(std::move(semantic_decl));
+        } else if (auto* partial =
+                       dyn_cast<ClassTemplatePartialSpecializationDecl>(
+                           cloned_template)) {
+            partial->set_pattern_semantic_decl(std::move(semantic_decl));
+        }
+
+        Collect::CollectRecordBuildContext ctx;
+        ctx.record = cloned_record;
+        ctx.loc = cloned_record->location;
+        ctx.record_name = cloned_record->name;
+        ctx.tag = cloned_record->name;
+        ctx.is_union_record = is_union_record;
+        ctx.record_type = record_type;
+        ctx.semantic_decl = semantic_owner;
+        ctx.transient_decls_out = &entry->member_decls;
+        ctx.semantic_state.is_incomplete = !cloned_record->is_definition;
+        ctx.semantic_state.alignment = 1;
+        ctx.semantic_state.non_virtual_alignment = 1;
+        if (const auto* definition_data = cloned_record->get_definition_data()) {
+            ctx.semantic_state.definition_data = *definition_data;
+        }
+
+        std::string alignment_error;
+        SrcLoc alignment_error_loc = cloned_record->location;
+        size_t requested_alignment = requested_alignment_from_decl_attrs(
+            collect,
+            ast_ctx(),
+            cloned_record->node_id,
+            cloned_record->location,
+            &alignment_error,
+            &alignment_error_loc);
+        if (!alignment_error.empty()) {
+            return fail_instantiation(alignment_error, alignment_error_loc);
+        }
+        if (requested_alignment > record_type->requested_alignment) {
+            record_type->requested_alignment = requested_alignment;
+        }
+
+        if (cloned_record->is_definition) {
+            collect.collect_record_resolve_bases(ctx);
+            collect.collect_record_collect_members(ctx);
+            ctx.semantic_state.fields = std::move(ctx.fields);
+        }
+        collect.collect_record_publish_semantics(ctx);
+
+        if (ast_ctx() && ast_ctx()->has_attrs(cloned_record->node_id)) {
+            std::vector<ParsedAttribute> copied_attrs(
+                ast_ctx()->get_attrs(cloned_record->node_id).attrs.begin(),
+                ast_ctx()->get_attrs(cloned_record->node_id).attrs.end());
+            ast_ctx()->append_attrs(semantic_owner->node_id, std::move(copied_attrs));
+        }
+        return true;
+    }
+
+    std::unique_ptr<ClassTemplatePartialSpecializationDecl>
+    clone_class_template_partial_specialization_member(
+        const ClassTemplatePartialSpecializationDecl* partial_decl,
+        ClassTemplateDecl* cloned_primary) {
+        if (!partial_decl || !cloned_primary) {
+            fail_instantiation(
+                "internal error: missing class template partial specialization clone input",
+                partial_decl ? partial_decl->location : loc);
+            return nullptr;
+        }
+
+        std::unordered_map<const TemplateParameterDecl*, const TemplateParameterDecl*>
+            parameter_rebinds;
+        parameter_rebinds.reserve(partial_decl->parameters.size());
+        std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_remap;
+
+        auto partial_builder = make_nested_template_clone_pass_builder(
+            clone_pass_builder,
+            clone_pass,
+            [this](const std::vector<TemplateArgument>& template_arguments)
+                -> std::vector<TemplateArgument> {
+                return rewrite_class_template_arguments(
+                    template_arguments,
+                    specialization_bindings);
+            },
+            parameter_rebinds,
+            symbol_remap);
+        auto partial_clone_pass = partial_builder.build_substitution_pass();
+
+        TemplateParameterList cloned_parameters;
+        if (!clone_template_parameters_into(
+                partial_decl->parameters,
+                cloned_parameters,
+                partial_clone_pass,
+                parameter_rebinds,
+                "class template partial specialization",
+                partial_decl->location)) {
+            return nullptr;
+        }
+
+        std::string clone_error;
+        auto cloned_record_base =
+            partial_clone_pass.clone_decl(partial_decl->record_decl(), &clone_error);
+        auto* cloned_record = dyn_cast<CppRecordDecl>(cloned_record_base.get());
+        if (!cloned_record_base || !cloned_record) {
+            fail_instantiation(
+                clone_error.empty()
+                    ? "failed to clone member class template partial specialization record"
+                    : clone_error,
+                partial_decl->location);
+            return nullptr;
+        }
+
+        std::vector<TemplateArgument> cloned_specialization_arguments =
+            partial_decl->specialization_arguments;
+        for (auto& argument : cloned_specialization_arguments) {
+            if (!rewrite_nested_template_pattern_argument(
+                    argument,
+                    partial_clone_pass,
+                    parameter_rebinds,
+                    partial_decl->location,
+                    "class template partial specialization")) {
+                return nullptr;
+            }
+        }
+
+        auto cloned_partial =
+            collect.collect_make<ClassTemplatePartialSpecializationDecl>(
+                cloned_primary,
+                std::move(cloned_parameters),
+                std::move(cloned_specialization_arguments),
+                std::move(cloned_record_base),
+                partial_decl->location);
+        set_template_decl_canonical_decl(
+            cloned_partial.get(),
+            cloned_partial.get());
+        cloned_partial->set_pattern_template_decl(partial_decl);
+
+        if (!clone_template_parameter_defaults(
+                partial_decl,
+                cloned_partial.get(),
+                partial_clone_pass,
+                parameter_rebinds,
+                "class template partial specialization") ||
+            !clone_template_associated_constraint(
+                partial_decl,
+                cloned_partial.get(),
+                partial_clone_pass,
+                "class template partial specialization") ||
+            !publish_cloned_class_template_pattern_semantics(
+                cloned_partial.get(),
+                "class template partial specialization")) {
+            return nullptr;
+        }
+
+        cloned_primary->add_partial_specialization(cloned_partial.get());
+        return cloned_partial;
+    }
+
+    bool handle_class_template_member(
+        const ClassTemplateDecl* class_template_decl,
+        RecordMemberAccess declared_access) {
+        auto* record_decl = class_template_decl->record_decl();
+        if (!record_decl || record_decl->name.empty()) {
+            return fail_instantiation(
+                "internal error: missing class template member pattern record",
+                class_template_decl->location);
+        }
+
+        std::unordered_map<const TemplateParameterDecl*, const TemplateParameterDecl*>
+            parameter_rebinds;
+        parameter_rebinds.reserve(class_template_decl->parameters.size());
+        std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_remap;
+
+        auto class_template_builder = make_nested_template_clone_pass_builder(
+            clone_pass_builder,
+            clone_pass,
+            [this](const std::vector<TemplateArgument>& template_arguments)
+                -> std::vector<TemplateArgument> {
+                return rewrite_class_template_arguments(
+                    template_arguments,
+                    specialization_bindings);
+            },
+            parameter_rebinds,
+            symbol_remap);
+        auto class_template_clone_pass =
+            class_template_builder.build_substitution_pass();
+
+        TemplateParameterList cloned_parameters;
+        if (!clone_template_parameters_into(
+                class_template_decl->parameters,
+                cloned_parameters,
+                class_template_clone_pass,
+                parameter_rebinds,
+                "member class template",
+                class_template_decl->location)) {
+            return false;
+        }
+
+        std::string clone_error;
+        auto cloned_record_base =
+            class_template_clone_pass.clone_decl(record_decl, &clone_error);
+        auto* cloned_record = dyn_cast<CppRecordDecl>(cloned_record_base.get());
+        if (!cloned_record_base || !cloned_record) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to clone member class template record"
+                    : clone_error,
+                record_decl->location);
+        }
+
+        auto cloned_template_decl = collect.collect_make<ClassTemplateDecl>(
+            std::move(cloned_parameters),
+            std::move(cloned_record_base),
+            class_template_decl->location);
+        set_template_decl_canonical_decl(
+            cloned_template_decl.get(),
+            cloned_template_decl.get());
+        cloned_template_decl->set_pattern_template_decl(class_template_decl);
+
+        if (!clone_template_parameter_defaults(
+                class_template_decl,
+                cloned_template_decl.get(),
+                class_template_clone_pass,
+                parameter_rebinds,
+                "member class template") ||
+            !clone_template_associated_constraint(
+                class_template_decl,
+                cloned_template_decl.get(),
+                class_template_clone_pass,
+                "member class template") ||
+            !publish_cloned_class_template_pattern_semantics(
+                cloned_template_decl.get(),
+                "member class template")) {
+            return false;
+        }
+
+        ClassTemplateDecl* cloned_template_ptr = cloned_template_decl.get();
+        specialized_nested_class_templates.emplace(
+            class_template_decl,
+            cloned_template_ptr);
+
+        for (const auto* partial_decl :
+             class_template_decl->partial_specializations()) {
+            auto cloned_partial =
+                clone_class_template_partial_specialization_member(
+                    partial_decl,
+                    cloned_template_ptr);
+            if (!cloned_partial) {
+                return false;
+            }
+            entry->member_decls.push_back(std::move(cloned_partial));
+        }
+
+        RecordSemanticState::NestedTemplate nested_template;
+        nested_template.name = record_decl->name;
+        nested_template.declared_access = declared_access;
+        nested_template.kind = RecordSemanticState::NestedTemplateKind::Class;
+        nested_template.decl = cloned_template_ptr;
+        nested_templates.push_back(std::move(nested_template));
+        publish_provisional_nested_members();
+
+        entry->member_decls.push_back(std::move(cloned_template_decl));
+        return true;
+    }
+
+    bool handle_class_template_partial_specialization_member(
+        const ClassTemplatePartialSpecializationDecl* partial_decl) {
+        if (!partial_decl || !partial_decl->primary_template()) {
+            return fail_instantiation(
+                "internal error: member class template partial specialization is missing its primary template",
+                partial_decl ? partial_decl->location : loc);
+        }
+
+        if (specialized_nested_class_templates.contains(
+                partial_decl->primary_template())) {
+            return true;
+        }
+
+        return fail_instantiation(
+            "member class template partial specialization appeared before its primary template was specialized",
+            partial_decl->location);
     }
 
     bool handle_alias_template_member(

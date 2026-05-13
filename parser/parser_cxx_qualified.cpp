@@ -694,6 +694,49 @@ Parser::resolve_cpp_qualified_owner_chain(
                 resolution.lookup_scope,
                 allow_enclosing_lookup,
                 component.name);
+            if (!primary_template && allow_enclosing_lookup && collect_) {
+                QualType owner_lookup_type =
+                    collect_->collect_current_cpp_record_lookup_type();
+                const auto* nested_template =
+                    collect_->collect_lookup_record_nested_template(
+                        owner_lookup_type,
+                        component.name);
+                if (nested_template && nested_template->decl) {
+                    bool is_dependent =
+                        type_depends_on_template_parameters(
+                            owner_lookup_type,
+                            ast_ctx.get()) ||
+                        template_arguments_are_dependent(
+                            component.template_arguments);
+                    if (nested_template->kind ==
+                            RecordSemanticState::NestedTemplateKind::Class &&
+                        is_dependent) {
+                        resolution.owner_type = QualType(
+                            std::make_shared<TemplateSpecializationType>(
+                                component.name,
+                                nested_template->decl,
+                                component.template_arguments,
+                                true));
+                    } else {
+                        resolution.owner_type =
+                            collect_->collect_lookup_record_nested_template_type(
+                                owner_lookup_type,
+                                component.name,
+                                component.template_arguments,
+                                component.loc);
+                    }
+                    if (resolution.owner_type) {
+                        resolution.is_current_instantiation = false;
+                        resolution.is_dependent =
+                            is_dependent ||
+                            type_depends_on_template_parameters(
+                                resolution.owner_type,
+                                ast_ctx.get());
+                        append_qualifier_component(component);
+                        continue;
+                    }
+                }
+            }
             if (!primary_template) {
                 fail_lookup(component);
                 return resolution;
