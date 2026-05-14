@@ -2315,6 +2315,11 @@ private:
         const std::shared_ptr<Symbol>& symbol,
         SrcLoc loc) const ;
 
+    bool materialize_class_template_member_body(
+        ClassTemplateSpecializationEntry& entry,
+        const Decl* primary_member_decl,
+        SrcLoc loc) ;
+
     void configure_call_parameter_counts(
         Expr* raw_member_pointer_callee,
         CallFinalizationContext& context_out,

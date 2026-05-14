@@ -244,7 +244,8 @@ std::string make_method_virtual_slot_key(const std::string& method_name,
 
 bool rebind_member_expr_for_specialized_record(MemberExpr* member,
                                                ASTContext* ast_ctx,
-                                               std::string* error_out);
+                                               std::string* error_out,
+                                               QualType fallback_record_type = QualType());
 
 bool clone_function_parameters_for_specialization(
     Collect& collect,

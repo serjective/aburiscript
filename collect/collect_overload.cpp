@@ -2016,7 +2016,8 @@ Collect::evaluate_overload_implicit_object_conversion(
     // Dot-call member candidates lower to a hidden object-pointer argument.
     // Ranking must still model object/pointer compatibility even when the
     // source object is a temporary (materialized later during rewriting).
-    QualType object_type = remove_reference(object_arg->get_type(), ast_ctx_.get());
+    QualType object_type =
+        remove_reference_and_desugar(object_arg->get_type(), ast_ctx_.get());
     if (!object_type) {
         return seq;
     }

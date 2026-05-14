@@ -500,7 +500,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         }
         if (!resolve_static_data_members() ||
             !clone_pending_member_templates() ||
-            !clone_pending_member_bodies()) {
+            !prepare_pending_member_body_instantiations()) {
             return entry->specialization_decl.get();
         }
 
@@ -1019,7 +1019,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 return rebind_member_expr_for_specialized_record(
                     member_expr,
                     ast_ctx(),
-                    error_out);
+                    error_out,
+                    owner_type);
             };
 
         clone_pass_builder = make_template_binding_clone_pass_builder(
@@ -1105,7 +1106,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 return rebind_member_expr_for_specialized_record(
                     member_expr,
                     ast_ctx(),
-                    error_out);
+                    error_out,
+                    owner_type);
             };
 
         expanded_out.clear();
@@ -4016,7 +4018,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 return rebind_member_expr_for_specialized_record(
                     member_expr,
                     ast_ctx(),
-                    error_out);
+                    error_out,
+                    owner_type);
             };
 
         for (const auto& pending_method_template : pending_method_template_clones) {
@@ -4437,7 +4440,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return true;
     }
 
-    bool clone_pending_member_bodies() {
+    bool prepare_pending_member_body_instantiations() {
         for (const auto& pending_body_clone : pending_body_clones) {
             const FuncDecl* pattern_func = pending_body_clone.pattern_func;
             FuncDecl* specialized_func = pending_body_clone.specialized_func;
@@ -4484,39 +4487,6 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     pattern_func ? pattern_func->location : loc);
             }
             member_resolution_pass.sync_from_substitution_pass(clone_pass);
-
-            auto pattern_ctor = dyn_cast<CppConstructorDecl>(pattern_func);
-            auto specialized_ctor = dyn_cast<CppConstructorDecl>(specialized_func);
-            if (pattern_ctor && specialized_ctor) {
-                if (!clone_ctor_initializers_for_specialization(
-                        pattern_ctor,
-                        specialized_ctor,
-                        clone_pass,
-                        member_resolution_pass,
-                        &clone_error)) {
-                    return fail_instantiation(clone_error, pattern_ctor->location);
-                }
-                if (!finalize_specialized_ctor_initializers(
-                        collect,
-                        specialized_ctor,
-                        &clone_error)) {
-                    return fail_instantiation(clone_error, pattern_ctor->location);
-                }
-            }
-
-            if (!clone_function_body_for_specialization(
-                    collect,
-                    pattern_func,
-                    specialized_func,
-                    clone_pass,
-                    member_resolution_pass,
-                    "class template member",
-                    true,
-                    &clone_error)) {
-                return fail_instantiation(
-                    clone_error,
-                    pattern_func ? pattern_func->location : loc);
-            }
 
             std::shared_ptr<Symbol> specialized_symbol = nullptr;
             auto specialized_symbol_it =
@@ -4573,10 +4543,165 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     specialized_symbol.get(),
                     default_arguments,
                     nullptr);
+            }
+
+            bool needs_lazy_body = pattern_func &&
+                (pattern_func->body ||
+                 (isa<CppConstructorDecl>(pattern_func) &&
+                  !static_cast<const CppConstructorDecl*>(pattern_func)
+                       ->ctor_initializers.empty()));
+            if (needs_lazy_body) {
+                ClassTemplateSpecializationEntry::PendingMemberBodyInstantiation
+                    body_instantiation;
+                body_instantiation.pattern_function = pattern_func;
+                body_instantiation.specialized_function = specialized_func;
+                body_instantiation.specialized_symbol = specialized_symbol;
+                body_instantiation.use_implicit_this =
+                    pending_body_clone.use_implicit_this;
+                body_instantiation.symbol_remap =
+                    clone_pass.context().symbol_remap;
+                body_instantiation.scope_remap =
+                    clone_pass.context().scope_remap;
+                body_instantiation.record_type_remap =
+                    clone_pass.context().record_type_remap;
+                body_instantiation.template_parameter_remap =
+                    clone_pass.context().template_parameter_remap;
+                body_instantiation.template_decl_remap =
+                    clone_pass.context().template_decl_remap;
+                entry->record_pending_member_body_instantiation(
+                    pattern_func,
+                    std::move(body_instantiation));
+                if (specialized_symbol) {
+                    specialized_symbol->is_defined = false;
+                    specialized_symbol->function_definition = nullptr;
+                }
+                bool eager_virtual_body = false;
+                if (auto* method = dyn_cast<CppMethodDecl>(specialized_func)) {
+                    eager_virtual_body = method->is_virtual;
+                } else if (auto* dtor =
+                               dyn_cast<CppDestructorDecl>(specialized_func)) {
+                    eager_virtual_body = dtor->is_virtual;
+                }
+                if (eager_virtual_body &&
+                    !materialize_pending_member_body(pattern_func)) {
+                    return false;
+                }
+            } else if (specialized_symbol) {
                 specialized_symbol->is_defined =
                     function_decl_defines_entity(specialized_func);
-                specialized_symbol->function_definition = specialized_func;
+                if (specialized_symbol->is_defined) {
+                    specialized_symbol->function_definition = specialized_func;
+                }
             }
+        }
+        return true;
+    }
+
+    bool materialize_pending_member_body(const Decl* primary_member_decl) {
+        if (!entry || !primary_member_decl) {
+            return true;
+        }
+        auto* pending_body =
+            entry->lookup_pending_member_body_instantiation(primary_member_decl);
+        if (!pending_body) {
+            return true;
+        }
+        if (pending_body->is_materialized) {
+            return true;
+        }
+        if (pending_body->failed) {
+            return false;
+        }
+        if (pending_body->is_materializing) {
+            return true;
+        }
+
+        pending_body->is_materializing = true;
+        struct MaterializationGuard {
+            ClassTemplateSpecializationEntry::PendingMemberBodyInstantiation&
+                pending_body;
+            ~MaterializationGuard() { pending_body.is_materializing = false; }
+        } materialization_guard{*pending_body};
+
+        clone_pass.context().symbol_remap = pending_body->symbol_remap;
+        clone_pass.context().scope_remap = pending_body->scope_remap;
+        clone_pass.context().record_type_remap = pending_body->record_type_remap;
+        clone_pass.context().template_parameter_remap =
+            pending_body->template_parameter_remap;
+        clone_pass.context().template_decl_remap =
+            pending_body->template_decl_remap;
+        clone_pass.refresh_callbacks();
+
+        FuncDecl* specialized_func = pending_body->specialized_function;
+        const FuncDecl* pattern_func = pending_body->pattern_function;
+        QualType specialized_this_type =
+            pending_body->use_implicit_this
+                ? template_sema_internal::implicit_this_type_for_specialized_function(
+                      specialized_func)
+                : QualType();
+        auto member_resolution_pass =
+            clone_pass_builder.build_dependent_resolution_pass(
+                clone_pass,
+                [&](std::unique_ptr<Expr>& expr,
+                    std::string* error_out) -> bool {
+                    return collect.resolve_dependent_expr_after_substitution(
+                        expr,
+                        specialized_this_type,
+                        error_out);
+                });
+        member_resolution_pass.sync_from_substitution_pass(clone_pass);
+
+        std::string clone_error;
+        auto pattern_ctor = dyn_cast<CppConstructorDecl>(pattern_func);
+        auto specialized_ctor = dyn_cast<CppConstructorDecl>(specialized_func);
+        if (pattern_ctor && specialized_ctor) {
+            if (!clone_ctor_initializers_for_specialization(
+                    pattern_ctor,
+                    specialized_ctor,
+                    clone_pass,
+                    member_resolution_pass,
+                    &clone_error) ||
+                !finalize_specialized_ctor_initializers(
+                    collect,
+                    specialized_ctor,
+                    &clone_error)) {
+                pending_body->failed = true;
+                collect.report_error(
+                    clone_error.empty()
+                        ? "class template constructor initializer materialization failed"
+                        : clone_error,
+                    pattern_ctor->location);
+                return false;
+            }
+        }
+
+        if (!clone_function_body_for_specialization(
+                collect,
+                pattern_func,
+                specialized_func,
+                clone_pass,
+                member_resolution_pass,
+                "class template member",
+                true,
+                &clone_error)) {
+            pending_body->failed = true;
+            collect.report_error(
+                clone_error.empty()
+                    ? "class template member body materialization failed"
+                    : clone_error,
+                pattern_func ? pattern_func->location : loc);
+            return false;
+        }
+
+        pending_body->is_materialized = true;
+        if (pending_body->specialized_symbol) {
+            pending_body->specialized_symbol->type =
+                QualType(specialized_func->type);
+            pending_body->specialized_symbol->is_defined =
+                function_decl_defines_entity(specialized_func);
+            pending_body->specialized_symbol->function_definition =
+                pending_body->specialized_symbol->is_defined ? specialized_func
+                                                             : nullptr;
         }
         return true;
     }
@@ -4592,6 +4717,72 @@ ObjectDecl* Collect::instantiate_class_template_specialization(
         arguments,
         loc}
         .run();
+}
+
+bool Collect::materialize_class_template_member_body(
+    ClassTemplateSpecializationEntry& entry,
+    const Decl* primary_member_decl,
+    SrcLoc loc) {
+    if (!ast_ctx_ || !entry.primary_template || !primary_member_decl) {
+        return true;
+    }
+    auto* pending_body =
+        entry.lookup_pending_member_body_instantiation(primary_member_decl);
+    if (!pending_body || pending_body->is_materialized ||
+        pending_body->is_materializing) {
+        return true;
+    }
+    if (pending_body->failed) {
+        return false;
+    }
+
+    std::string specialization_name =
+        make_class_template_specialization_name(
+            entry.primary_template,
+            entry.arguments);
+    if (!ast_ctx_->push_template_instantiation_frame()) {
+        report_error(
+            "template instantiation depth exceeded while instantiating class template '" +
+                specialization_name + "'",
+            loc);
+        entry.instantiation_failed = true;
+        return false;
+    }
+    struct DepthGuard {
+        ASTContext* ast_ctx = nullptr;
+        ~DepthGuard() {
+            if (ast_ctx) {
+                ast_ctx->pop_template_instantiation_frame();
+            }
+        }
+    } depth_guard{ast_ctx_.get()};
+
+    ClassTemplateSpecializationInstantiator instantiator{
+        *this,
+        entry.primary_template,
+        entry.arguments,
+        loc};
+    instantiator.primary_pattern = entry.primary_template->record_decl();
+    if (!instantiator.primary_pattern) {
+        report_error(
+            "internal error: missing class template pattern for member body materialization",
+            loc);
+        return false;
+    }
+    if (!instantiator.bind_and_select_pattern()) {
+        return false;
+    }
+    instantiator.entry = &entry;
+    instantiator.specialization_name = std::move(specialization_name);
+    instantiator.is_union =
+        instantiator.pattern &&
+        instantiator.pattern->record_kind == CppRecordKind::Union;
+    instantiator.build_pattern_symbol_maps();
+    instantiator.owner_type = QualType(entry.specialization_type);
+    if (!instantiator.initialize_clone_pass()) {
+        return false;
+    }
+    return instantiator.materialize_pending_member_body(primary_member_decl);
 }
 
 ObjectDecl* Collect::collect_instantiate_class_template_specialization(

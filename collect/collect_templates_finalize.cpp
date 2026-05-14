@@ -804,6 +804,18 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         SrcLoc loc = expr->location;
         auto owned_expr = std::unique_ptr<Expr>(static_cast<Expr*>(stmt.release()));
         strip_redundant_specialization_casts(owned_expr);
+        auto cpp_this_context = collect.collect_current_cpp_this_context();
+        if (owned_expr &&
+            !collect.resolve_dependent_expr_after_substitution(
+                owned_expr,
+                cpp_this_context.this_type,
+                error_out)) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to resolve dependent expression statement after template substitution";
+            }
+            return false;
+        }
         auto rebuilt =
             collect.collect_expression_statement(std::move(owned_expr), loc);
         if (!rebuilt) {

@@ -118,6 +118,7 @@ void TemplateDependentResolutionPass::sync_from_substitution_pass(
     ctx.lookup_pack_size = substitution_pass.context().lookup_pack_size;
     ctx.symbol_remap = substitution_pass.context().symbol_remap;
     ctx.scope_remap = substitution_pass.context().scope_remap;
+    ctx.record_type_remap = substitution_pass.context().record_type_remap;
     ctx.template_parameter_remap =
         substitution_pass.context().template_parameter_remap;
     ctx.template_decl_remap = substitution_pass.context().template_decl_remap;
@@ -192,6 +193,10 @@ TemplateClonePassBuilder::build_dependent_resolution_pass(
     pass.ctx.lookup_pack_size = substitution_pass.context().lookup_pack_size;
     pass.ctx.symbol_remap = substitution_pass.context().symbol_remap;
     pass.ctx.scope_remap = substitution_pass.context().scope_remap;
+    pass.ctx.record_type_remap = substitution_pass.context().record_type_remap;
+    pass.ctx.template_parameter_remap =
+        substitution_pass.context().template_parameter_remap;
+    pass.ctx.template_decl_remap = substitution_pass.context().template_decl_remap;
     return pass;
 }
 
@@ -1097,18 +1102,34 @@ std::string make_method_virtual_slot_key(const std::string& method_name,
 
 bool rebind_member_expr_for_specialized_record(MemberExpr* member,
                                                ASTContext* ast_ctx,
-                                               std::string* error_out) {
-    if (!member || !member->base) {
+                                               std::string* error_out,
+                                               QualType fallback_record_type) {
+    if (!member) {
         return true;
     }
 
-    QualType base_type = member->base->get_type();
+    QualType base_type =
+        member->base ? member->base->get_type() : fallback_record_type;
     if (!base_type) {
         return true;
     }
+    bool use_fallback_record =
+        fallback_record_type &&
+        (!member->base ||
+         isa<CppThisExpr>(Collect::strip_implicit_casts(member->base.get())) ||
+         type_depends_on_template_parameters(base_type, ast_ctx));
+    if (use_fallback_record) {
+        base_type = fallback_record_type;
+        if (auto* this_expr = dyn_cast<CppThisExpr>(
+                Collect::strip_implicit_casts(member->base.get()))) {
+            this_expr->this_type =
+                QualType(std::make_shared<PointerType>(fallback_record_type));
+        }
+    }
+    bool treat_as_arrow = member->base && member->isArrow && !use_fallback_record;
 
     std::shared_ptr<ObjectType> record_type = nullptr;
-    if (member->isArrow) {
+    if (treat_as_arrow) {
         auto ptr_type =
             remove_reference(desugar_type(base_type)).as_shared<PointerType>();
         if (!ptr_type) {
@@ -1158,7 +1179,7 @@ bool rebind_member_expr_for_specialized_record(MemberExpr* member,
         }
 
         uint8_t base_quals = QUAL_NONE;
-        if (member->isArrow) {
+        if (treat_as_arrow) {
             auto ptr_type =
                 remove_reference(desugar_type(base_type)).as_shared<PointerType>();
             if (ptr_type) {
@@ -1572,6 +1593,12 @@ bool clone_function_parameters_for_specialization(
     auto specialized_function_type =
         std::make_shared<FunctionType>(*rebuilt_function_type);
     rebuilt_function_type = specialized_function_type;
+    QualType realized_return_type =
+        collect.collect_try_realize_deferred_semantic_type(
+            rebuilt_function_type->ret_type);
+    if (realized_return_type) {
+        rebuilt_function_type->ret_type = realized_return_type;
+    }
 
     auto pattern_function_type =
         desugar_type(QualType(pattern->type), substitution_pass.context().ast_ctx)

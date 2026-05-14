@@ -72,6 +72,10 @@ void Collect::note_specialization_use_for_symbol(
     owner_entry->note_primary_member_first_required_loc(
         primary_member_decl,
         loc);
+    const_cast<Collect*>(this)->materialize_class_template_member_body(
+        *owner_entry,
+        primary_member_decl,
+        loc);
 }
 
 QualType Collect::instantiate_alias_template_specialization(

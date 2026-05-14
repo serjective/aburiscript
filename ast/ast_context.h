@@ -32,6 +32,7 @@ struct VariableTemplateDecl;
 struct ConceptDecl;
 struct TemplateParameterDecl;
 struct EnumDecl;
+struct Scope;
 class CollectSemanticStore;
 
 // Bitfield layout info stored in the side table, keyed by MemberExpr node_id.
@@ -100,6 +101,22 @@ struct TemplateSpecializationSemanticKeyHash {
 };
 
 struct ClassTemplateSpecializationEntry {
+    struct PendingMemberBodyInstantiation {
+        const FuncDecl* pattern_function = nullptr;
+        FuncDecl* specialized_function = nullptr;
+        std::shared_ptr<Symbol> specialized_symbol = nullptr;
+        bool use_implicit_this = true;
+        bool is_materialized = false;
+        bool is_materializing = false;
+        bool failed = false;
+        std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_remap;
+        std::unordered_map<const Scope*, std::shared_ptr<Scope>> scope_remap;
+        std::unordered_map<const ObjectDecl*, QualType> record_type_remap;
+        std::unordered_map<const TemplateParameterDecl*, TemplateParameterDecl*>
+            template_parameter_remap;
+        std::unordered_map<const TemplateDecl*, TemplateDecl*> template_decl_remap;
+    };
+
     const ClassTemplateDecl* primary_template = nullptr;
     TemplateSpecializationSemanticKey semantic_key;
     std::vector<TemplateArgument> arguments;
@@ -114,6 +131,8 @@ struct ClassTemplateSpecializationEntry {
         specialized_member_symbol_to_primary_member_decl;
     std::unordered_map<const Decl*, const FunctionTemplateDecl*>
         primary_member_owner_specialized_templates;
+    std::unordered_map<const Decl*, PendingMemberBodyInstantiation>
+        pending_member_body_instantiations;
     bool is_instantiating = false;
     bool is_instantiated = false;
     bool instantiation_failed = false;
@@ -215,6 +234,41 @@ struct ClassTemplateSpecializationEntry {
             return nullptr;
         }
         return it->second;
+    }
+
+    void record_pending_member_body_instantiation(
+        const Decl* primary_member_decl,
+        PendingMemberBodyInstantiation instantiation) {
+        if (!primary_member_decl || !instantiation.specialized_function) {
+            return;
+        }
+        pending_member_body_instantiations[primary_member_decl] =
+            std::move(instantiation);
+    }
+
+    PendingMemberBodyInstantiation*
+    lookup_pending_member_body_instantiation(const Decl* primary_member_decl) {
+        if (!primary_member_decl) {
+            return nullptr;
+        }
+        auto it = pending_member_body_instantiations.find(primary_member_decl);
+        if (it == pending_member_body_instantiations.end()) {
+            return nullptr;
+        }
+        return &it->second;
+    }
+
+    const PendingMemberBodyInstantiation*
+    lookup_pending_member_body_instantiation(
+        const Decl* primary_member_decl) const {
+        if (!primary_member_decl) {
+            return nullptr;
+        }
+        auto it = pending_member_body_instantiations.find(primary_member_decl);
+        if (it == pending_member_body_instantiations.end()) {
+            return nullptr;
+        }
+        return &it->second;
     }
 };
 
