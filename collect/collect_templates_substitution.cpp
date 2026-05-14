@@ -247,6 +247,21 @@ void remap_template_argument_symbols_for_substitution(
         *clone_context);
 }
 
+bool substituted_value_argument_depends_on_template_parameters(
+    const Collect& collect,
+    const TemplateArgument& argument,
+    const ASTContext* ast_ctx) {
+    if (argument.kind != TemplateArgumentKind::Value) {
+        return false;
+    }
+    if (template_argument_depends_on_template_parameters(argument, ast_ctx)) {
+        return true;
+    }
+    return argument.value_expr &&
+           collect.expression_depends_on_template_parameters(
+               argument.value_expr.get());
+}
+
 bool append_integer_pack_template_arguments(
     Collect& collect,
     ASTContext* ast_ctx,
@@ -1989,28 +2004,43 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                         new_argument.value_type = resolved_value_type;
                     }
 
-                    ConstEvalResult eval = evaluate_with_consteval_compat(
-                        cloned_expr.get(),
-                        ConstEvalMode::cpp_non_type_template_argument());
-                    if (eval.status == ConstEvalStatus::Constant &&
-                        eval.value.has_value()) {
-                        std::shared_ptr<Expr> concrete_expr = nullptr;
-                        if (eval.value->kind == ConstValueKind::Object) {
-                            concrete_expr = std::shared_ptr<Expr>(
-                                cloned_expr.release());
-                        }
-                        new_argument = TemplateArgument::value_argument(
-                            new_argument.value_type,
-                            *eval.value,
-                            {},
-                            std::move(concrete_expr));
-                    } else {
-                        new_argument.is_dependent =
-                            template_arguments_depend_on_template_parameters(
-                                std::vector<TemplateArgument>{new_argument});
+                    bool cloned_expr_is_dependent =
+                        expression_depends_on_template_parameters(
+                            cloned_expr.get()) ||
+                        type_depends_on_template_parameters(
+                            cloned_expr->get_type(),
+                            ast_ctx_.get());
+                    if (cloned_expr_is_dependent) {
                         new_argument.value_expr =
                             std::shared_ptr<Expr>(cloned_expr.release());
                         new_argument.referenced_parameter = nullptr;
+                        new_argument.is_dependent = true;
+                    } else {
+                        ConstEvalResult eval = evaluate_with_consteval_compat(
+                            cloned_expr.get(),
+                            ConstEvalMode::cpp_non_type_template_argument());
+                        if (eval.status == ConstEvalStatus::Constant &&
+                            eval.value.has_value()) {
+                            std::shared_ptr<Expr> concrete_expr = nullptr;
+                            if (eval.value->kind == ConstValueKind::Object) {
+                                concrete_expr = std::shared_ptr<Expr>(
+                                    cloned_expr.release());
+                            }
+                            new_argument = TemplateArgument::value_argument(
+                                new_argument.value_type,
+                                *eval.value,
+                                {},
+                                std::move(concrete_expr));
+                        } else {
+                            new_argument.value_expr =
+                                std::shared_ptr<Expr>(cloned_expr.release());
+                            new_argument.referenced_parameter = nullptr;
+                            new_argument.is_dependent =
+                                substituted_value_argument_depends_on_template_parameters(
+                                    *this,
+                                    new_argument,
+                                    ast_ctx_.get());
+                        }
                     }
                 }
 
