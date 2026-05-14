@@ -452,9 +452,16 @@ bool template_decls_share_lookup_identity(const Decl* lhs, const Decl* rhs) {
     if (lhs_identity && rhs_identity && lhs_identity == rhs_identity) {
         return true;
     }
+    const FunctionTemplateDecl* lhs_function_template =
+        function_template_from_decl_for_lookup(lhs);
+    const FunctionTemplateDecl* rhs_function_template =
+        function_template_from_decl_for_lookup(rhs);
+    if (!lhs_function_template || !rhs_function_template) {
+        return false;
+    }
     return function_templates_have_same_structural_lookup_identity(
-        function_template_from_decl_for_lookup(lhs),
-        function_template_from_decl_for_lookup(rhs));
+        lhs_function_template,
+        rhs_function_template);
 }
 
 bool template_decl_is_preferred_lookup_representative(

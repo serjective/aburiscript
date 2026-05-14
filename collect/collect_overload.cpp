@@ -3,6 +3,7 @@
 #include "../ast/expr_clone.h"
 #include "../ast/special_members.h"
 #include "lookup_engine.h"
+#include <algorithm>
 #include <cstdlib>
 #include <cstdint>
 #include <functional>
@@ -275,6 +276,358 @@ const FunctionTemplateDecl* function_template_primary_for_symbol(
     const auto* specialization_info =
         symbol ? get_symbol_function_template_specialization(symbol.get()) : nullptr;
     return specialization_info ? specialization_info->primary_template : nullptr;
+}
+
+bool overload_symbols_refer_to_same_candidate(
+    const std::shared_ptr<Symbol>& lhs,
+    const std::shared_ptr<Symbol>& rhs) {
+    if (!lhs || !rhs) {
+        return false;
+    }
+    if (lhs == rhs) {
+        return true;
+    }
+    const auto* lhs_template = function_template_primary_for_symbol(lhs);
+    const auto* rhs_template = function_template_primary_for_symbol(rhs);
+    return lhs_template &&
+           rhs_template &&
+           template_decls_share_lookup_identity(lhs_template, rhs_template);
+}
+
+const DeclContext* canonical_adl_decl_context(const DeclContext* context) {
+    if (!context) {
+        return nullptr;
+    }
+    return context->primary_context() ? context->primary_context() : context;
+}
+
+bool binding_references_decl(const DeclBinding& binding, const Decl* decl) {
+    if (!decl) {
+        return false;
+    }
+    if (binding.ast_decl == decl || binding.template_decl == decl) {
+        return true;
+    }
+    return std::find(
+               binding.template_overload_candidates.begin(),
+               binding.template_overload_candidates.end(),
+               decl) != binding.template_overload_candidates.end();
+}
+
+const DeclContext* find_decl_context_for_decl(const DeclContext* root,
+                                              const Decl* decl) {
+    if (!root || !decl) {
+        return nullptr;
+    }
+    root = canonical_adl_decl_context(root);
+    if (!root) {
+        return nullptr;
+    }
+    if (root->owner_decl() == decl) {
+        return root;
+    }
+    for (const auto& binding : root->declarations()) {
+        if (binding_references_decl(binding, decl)) {
+            return root;
+        }
+    }
+    for (const auto& child : root->lexical_children()) {
+        if (const auto* found = find_decl_context_for_decl(child.get(), decl)) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+const DeclContext* enclosing_non_inline_namespace_context(
+    const DeclContext* context) {
+    for (const DeclContext* current = canonical_adl_decl_context(context);
+         current;
+         current = current->semantic_parent()) {
+        current = canonical_adl_decl_context(current);
+        if (!current) {
+            return nullptr;
+        }
+        if (current->kind() != DeclContextKind::Namespace &&
+            current->kind() != DeclContextKind::TranslationUnit) {
+            continue;
+        }
+        while (current &&
+               current->kind() == DeclContextKind::Namespace &&
+               current->is_inline_namespace()) {
+            current = current->inline_enclosing_namespace()
+                          ? current->inline_enclosing_namespace()
+                          : current->semantic_parent();
+            current = canonical_adl_decl_context(current);
+        }
+        return current;
+    }
+    return nullptr;
+}
+
+struct AdlAssociatedEntities {
+    std::vector<const ObjectDecl*> records;
+    std::vector<const DeclContext*> namespaces;
+    std::unordered_set<const ObjectDecl*> seen_records;
+    std::unordered_set<const DeclContext*> seen_namespaces;
+    std::unordered_set<const CType*> active_types;
+
+    void append_namespace(const DeclContext* context) {
+        context = canonical_adl_decl_context(context);
+        if (!context || seen_namespaces.contains(context)) {
+            return;
+        }
+        seen_namespaces.insert(context);
+        namespaces.push_back(context);
+    }
+
+    void append_record(const ObjectDecl* record_decl) {
+        record_decl = canonical_record_decl(record_decl);
+        if (!record_decl || seen_records.contains(record_decl)) {
+            return;
+        }
+        seen_records.insert(record_decl);
+        records.push_back(record_decl);
+    }
+};
+
+struct AdlActiveTypeGuard {
+    AdlAssociatedEntities& entities;
+    const CType* active = nullptr;
+    bool inserted = false;
+
+    AdlActiveTypeGuard(AdlAssociatedEntities& entities, const CType* active)
+        : entities(entities), active(active) {
+        inserted = active && entities.active_types.insert(active).second;
+    }
+
+    ~AdlActiveTypeGuard() {
+        if (inserted) {
+            entities.active_types.erase(active);
+        }
+    }
+};
+
+void collect_adl_associated_entities_for_type(
+    QualType type,
+    const ASTContext* ast_ctx,
+    const DeclContext* translation_unit_context,
+    AdlAssociatedEntities& entities);
+
+void append_associated_namespace_for_decl(
+    const Decl* decl,
+    const DeclContext* translation_unit_context,
+    AdlAssociatedEntities& entities) {
+    const auto* decl_context =
+        find_decl_context_for_decl(translation_unit_context, decl);
+    entities.append_namespace(enclosing_non_inline_namespace_context(decl_context));
+}
+
+void collect_adl_associated_entities_for_template_arguments(
+    const std::vector<TemplateArgument>& arguments,
+    const ASTContext* ast_ctx,
+    const DeclContext* translation_unit_context,
+    AdlAssociatedEntities& entities) {
+    for (const auto& argument : arguments) {
+        if (argument.expands_parameter_pack) {
+            continue;
+        }
+        switch (argument.kind) {
+            case TemplateArgumentKind::Type:
+                collect_adl_associated_entities_for_type(
+                    argument.type,
+                    ast_ctx,
+                    translation_unit_context,
+                    entities);
+                break;
+            case TemplateArgumentKind::Template:
+                if (!argument.is_dependent && argument.template_decl) {
+                    append_associated_namespace_for_decl(
+                        argument.template_decl,
+                        translation_unit_context,
+                        entities);
+                }
+                break;
+            case TemplateArgumentKind::Value:
+                break;
+        }
+    }
+}
+
+void collect_adl_associated_entities_for_record(
+    const ObjectDecl* record_decl,
+    const ASTContext* ast_ctx,
+    const DeclContext* translation_unit_context,
+    AdlAssociatedEntities& entities) {
+    record_decl = canonical_record_decl(record_decl);
+    if (!record_decl) {
+        return;
+    }
+    entities.append_record(record_decl);
+    append_associated_namespace_for_decl(
+        record_decl,
+        translation_unit_context,
+        entities);
+
+    const auto* state = record_semantics_cache_lookup(record_decl, ast_ctx);
+    if (!state || state->is_incomplete) {
+        return;
+    }
+    for (const auto& base : state->bases) {
+        collect_adl_associated_entities_for_record(
+            base.record_decl,
+            ast_ctx,
+            translation_unit_context,
+            entities);
+    }
+    for (const auto& base : state->virtual_bases) {
+        collect_adl_associated_entities_for_record(
+            base.record_decl,
+            ast_ctx,
+            translation_unit_context,
+            entities);
+    }
+}
+
+void collect_adl_associated_entities_for_type(
+    QualType type,
+    const ASTContext* ast_ctx,
+    const DeclContext* translation_unit_context,
+    AdlAssociatedEntities& entities) {
+    if (!type) {
+        return;
+    }
+
+    QualType no_ref = remove_reference(type, ast_ctx);
+    if (!no_ref) {
+        no_ref = type;
+    }
+    auto raw = no_ref.get_shared().get();
+    AdlActiveTypeGuard type_guard(entities, raw);
+    if (raw && !type_guard.inserted) {
+        return;
+    }
+
+    if (auto specialization =
+            no_ref.as_shared<TemplateSpecializationType>()) {
+        append_associated_namespace_for_decl(
+            specialization->primary_template,
+            translation_unit_context,
+            entities);
+        collect_adl_associated_entities_for_template_arguments(
+            specialization->arguments,
+            ast_ctx,
+            translation_unit_context,
+            entities);
+    }
+
+    QualType semantic_type = desugar_type(no_ref, ast_ctx);
+    if (!semantic_type) {
+        return;
+    }
+
+    if (auto object_type = semantic_type.as_shared<ObjectType>()) {
+        if (const auto* primary_template =
+                object_type->get_primary_class_template()) {
+            append_associated_namespace_for_decl(
+                primary_template,
+                translation_unit_context,
+                entities);
+            collect_adl_associated_entities_for_template_arguments(
+                object_type->get_template_specialization_arguments(),
+                ast_ctx,
+                translation_unit_context,
+                entities);
+        }
+        collect_adl_associated_entities_for_record(
+            dyn_cast<ObjectDecl>(object_type->get_decl()),
+            ast_ctx,
+            translation_unit_context,
+            entities);
+        return;
+    }
+
+    if (auto enum_type = semantic_type.as_shared<EnumType>()) {
+        append_associated_namespace_for_decl(
+            enum_type->get_decl(),
+            translation_unit_context,
+            entities);
+        return;
+    }
+
+    if (auto pointer_type = semantic_type.as_shared<PointerType>()) {
+        collect_adl_associated_entities_for_type(
+            pointer_type->pointed_type,
+            ast_ctx,
+            translation_unit_context,
+            entities);
+        return;
+    }
+
+    if (auto block_pointer = semantic_type.as_shared<BlockPointerType>()) {
+        collect_adl_associated_entities_for_type(
+            block_pointer->pointed_type,
+            ast_ctx,
+            translation_unit_context,
+            entities);
+        return;
+    }
+
+    if (auto array_type = semantic_type.as_shared<ArrayType>()) {
+        collect_adl_associated_entities_for_type(
+            array_type->element_type,
+            ast_ctx,
+            translation_unit_context,
+            entities);
+        return;
+    }
+
+    if (auto member_pointer = semantic_type.as_shared<MemberPointerType>()) {
+        collect_adl_associated_entities_for_type(
+            member_pointer->class_type,
+            ast_ctx,
+            translation_unit_context,
+            entities);
+        collect_adl_associated_entities_for_type(
+            member_pointer->member_type,
+            ast_ctx,
+            translation_unit_context,
+            entities);
+        return;
+    }
+
+    if (auto function_type = semantic_type.as_shared<FunctionType>()) {
+        collect_adl_associated_entities_for_type(
+            function_type->ret_type,
+            ast_ctx,
+            translation_unit_context,
+            entities);
+        for (const auto& parameter : function_type->parameters) {
+            collect_adl_associated_entities_for_type(
+                parameter,
+                ast_ctx,
+                translation_unit_context,
+                entities);
+        }
+    }
+}
+
+AdlAssociatedEntities collect_adl_associated_entities(
+    const std::vector<Expr*>& associated_args,
+    const ASTContext* ast_ctx,
+    const DeclContext* translation_unit_context) {
+    AdlAssociatedEntities entities;
+    for (auto* arg : associated_args) {
+        if (!arg) {
+            continue;
+        }
+        collect_adl_associated_entities_for_type(
+            arg->get_type(),
+            ast_ctx,
+            translation_unit_context,
+            entities);
+    }
+    return entities;
 }
 } // namespace
 
@@ -555,41 +908,11 @@ void Collect::append_adl_friend_overload_candidates(
         return;
     }
 
-    std::unordered_set<const ObjectDecl*> associated_records;
-    std::vector<const ObjectDecl*> ordered_records;
-    auto append_associated_record = [&](const ObjectDecl* record_decl) {
-        record_decl = canonical_record_decl(record_decl);
-        if (!record_decl || associated_records.contains(record_decl)) {
-            return;
-        }
-        associated_records.insert(record_decl);
-        ordered_records.push_back(record_decl);
-    };
-    std::function<void(QualType)> collect_associated_records =
-        [&](QualType type) {
-        if (!type) {
-            return;
-        }
-        QualType semantic_type =
-            remove_reference_and_desugar(type, ast_ctx_.get());
-        if (auto object_type = semantic_type.as_shared<ObjectType>()) {
-            append_associated_record(
-                dyn_cast<ObjectDecl>(object_type->get_decl()));
-            return;
-        }
-        if (auto pointer_type =
-                desugar_type(semantic_type, ast_ctx_.get())
-                    .as_shared<PointerType>()) {
-            collect_associated_records(pointer_type->pointed_type);
-        }
-    };
-    for (auto* arg : associated_args) {
-        if (!arg) {
-            continue;
-        }
-        collect_associated_records(arg->get_type());
-    }
-    if (ordered_records.empty()) {
+    auto entities = collect_adl_associated_entities(
+        associated_args,
+        ast_ctx_.get(),
+        get_translation_unit_decl_context().get());
+    if (entities.records.empty()) {
         return;
     }
 
@@ -599,7 +922,7 @@ void Collect::append_adl_friend_overload_candidates(
             existing_symbols.insert(candidate.symbol.get());
         }
     }
-    for (const auto* record_decl : ordered_records) {
+    for (const auto* record_decl : entities.records) {
         const auto* state =
             record_semantics_cache_lookup(record_decl, ast_ctx_.get());
         if (!state) {
@@ -616,6 +939,168 @@ void Collect::append_adl_friend_overload_candidates(
             call_candidate.symbol = friend_function.symbol;
             call_candidate.implicit_object_arg_kind = implicit_arg_kind;
             candidates_out.push_back(std::move(call_candidate));
+            existing_symbols.insert(friend_function.symbol.get());
+        }
+    }
+}
+
+void Collect::append_adl_overload_candidates(
+    std::string_view function_name,
+    Expr* implicit_object_arg,
+    OverloadImplicitObjectArgKind implicit_arg_kind,
+    const std::vector<Expr*>& explicit_args,
+    std::vector<OverloadCallCandidate>& candidates_out,
+    SrcLoc loc) {
+
+    if (!lang_opts_.is_cxx_mode()) {
+        return;
+    }
+
+    std::vector<Expr*> associated_args;
+    associated_args.reserve(
+        explicit_args.size() +
+        (implicit_arg_kind == OverloadImplicitObjectArgKind::None ? 0u : 1u));
+    if (implicit_arg_kind != OverloadImplicitObjectArgKind::None &&
+        implicit_object_arg) {
+        associated_args.push_back(implicit_object_arg);
+    }
+    for (Expr* arg : explicit_args) {
+        associated_args.push_back(arg);
+    }
+
+    auto entities = collect_adl_associated_entities(
+        associated_args,
+        ast_ctx_.get(),
+        get_translation_unit_decl_context().get());
+    if (entities.namespaces.empty() && entities.records.empty()) {
+        return;
+    }
+
+    std::unordered_set<const Symbol*> existing_symbols;
+    for (const auto& candidate : candidates_out) {
+        if (candidate.symbol) {
+            existing_symbols.insert(candidate.symbol.get());
+        }
+    }
+
+    auto candidate_already_present =
+        [&](const std::shared_ptr<Symbol>& symbol) {
+        for (const auto& candidate : candidates_out) {
+            if (overload_symbols_refer_to_same_candidate(
+                    candidate.symbol,
+                    symbol)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto append_symbol_candidate =
+        [&](const std::shared_ptr<Symbol>& symbol) {
+        if (!symbol ||
+            symbol->kind != SymbolKind::FUNCTION ||
+            symbol->is_hidden_friend ||
+            get_symbol_owner_record_type(symbol.get()) ||
+            existing_symbols.contains(symbol.get()) ||
+            candidate_already_present(symbol)) {
+            return;
+        }
+        OverloadCallCandidate candidate;
+        candidate.symbol = symbol;
+        candidate.implicit_object_arg_kind = implicit_arg_kind;
+        candidates_out.push_back(std::move(candidate));
+        existing_symbols.insert(symbol.get());
+    };
+
+    std::vector<const FunctionTemplateDecl*> template_candidates;
+    auto append_template_candidates_from_binding =
+        [&](const DeclBinding* binding) {
+        if (!binding) {
+            return;
+        }
+        append_unique_function_template_candidate(
+            template_candidates,
+            binding->template_decl);
+        for (const auto* decl : binding->template_overload_candidates) {
+            append_unique_function_template_candidate(
+                template_candidates,
+                decl);
+        }
+    };
+
+    for (const auto* namespace_context : entities.namespaces) {
+        auto binding_matches =
+            LookupEngine::lookup_qualified_ordinary_bindings(
+                std::string(function_name),
+                namespace_context,
+                nullptr,
+                LookupEngine::OrdinaryFilter::Any,
+                LookupEngine::NamespaceReachability::InlineVisible);
+        for (const auto& match : binding_matches) {
+            const auto* binding = match.binding;
+            if (!binding) {
+                continue;
+            }
+            append_symbol_candidate(binding->symbol);
+            for (const auto& overload : binding->overload_candidates) {
+                append_symbol_candidate(overload);
+            }
+            append_template_candidates_from_binding(binding);
+        }
+    }
+
+    std::vector<Expr*> deduction_args;
+    deduction_args.reserve(associated_args.size());
+    if (implicit_arg_kind != OverloadImplicitObjectArgKind::None) {
+        deduction_args.push_back(implicit_object_arg);
+    }
+    for (Expr* arg : explicit_args) {
+        deduction_args.push_back(arg);
+    }
+
+    for (const auto* function_template : template_candidates) {
+        if (!function_template) {
+            continue;
+        }
+
+        std::shared_ptr<Symbol> specialization_symbol = nullptr;
+        if (!probe_function_template_call_specialization(
+                function_template,
+                deduction_args,
+                loc,
+                specialization_symbol)) {
+            continue;
+        }
+        if (!specialization_symbol ||
+            existing_symbols.contains(specialization_symbol.get()) ||
+            candidate_already_present(specialization_symbol)) {
+            continue;
+        }
+
+        OverloadCallCandidate candidate;
+        candidate.symbol = std::move(specialization_symbol);
+        candidate.implicit_object_arg_kind = implicit_arg_kind;
+        existing_symbols.insert(candidate.symbol.get());
+        candidates_out.push_back(std::move(candidate));
+    }
+
+    for (const auto* record_decl : entities.records) {
+        const auto* state =
+            record_semantics_cache_lookup(record_decl, ast_ctx_.get());
+        if (!state) {
+            continue;
+        }
+        for (const auto& friend_function : state->friend_functions) {
+            if (friend_function.name != function_name ||
+                !friend_function.symbol ||
+                friend_function.symbol->kind != SymbolKind::FUNCTION ||
+                existing_symbols.contains(friend_function.symbol.get())) {
+                continue;
+            }
+            OverloadCallCandidate candidate;
+            candidate.symbol = friend_function.symbol;
+            candidate.implicit_object_arg_kind = implicit_arg_kind;
+            candidates_out.push_back(std::move(candidate));
             existing_symbols.insert(friend_function.symbol.get());
         }
     }

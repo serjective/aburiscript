@@ -3968,6 +3968,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         ctx.friend_functions = std::move(friend_functions);
         ctx.enumerator_members = std::move(enumerator_members);
         ctx.semantic_state = semantic_state;
+        collect.collect_record_synthesize_implicit_members(ctx);
         collect.collect_record_compute_layout(ctx);
         collect.collect_record_infer_constexpr_special_members(ctx);
         collect.collect_record_publish_semantics(ctx);

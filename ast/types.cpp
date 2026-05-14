@@ -1365,6 +1365,191 @@ bool template_template_parameter_types_match(QualType formal_type,
     return canonical_formal.equals_qualified(canonical_actual);
 }
 
+bool template_argument_equivalent_after_type_canonicalization_impl(
+    const TemplateArgument& lhs,
+    const TemplateArgument& rhs,
+    const ASTContext* ast_ctx,
+    unsigned depth);
+
+bool class_template_specialization_objects_equivalent_impl(
+    const ObjectType* lhs,
+    const ObjectType* rhs,
+    const ASTContext* ast_ctx,
+    unsigned depth) {
+    if (!lhs || !rhs) {
+        return false;
+    }
+    if (lhs->get_decl() && rhs->get_decl() &&
+        lhs->get_decl() == rhs->get_decl()) {
+        return true;
+    }
+    const auto* lhs_primary = lhs->get_primary_class_template();
+    const auto* rhs_primary = rhs->get_primary_class_template();
+    if (!lhs_primary ||
+        !rhs_primary ||
+        !template_decls_share_lookup_identity(lhs_primary, rhs_primary)) {
+        return false;
+    }
+    const auto& lhs_args = lhs->get_template_specialization_arguments();
+    const auto& rhs_args = rhs->get_template_specialization_arguments();
+    if (lhs_args.size() != rhs_args.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < lhs_args.size(); ++idx) {
+        if (!template_argument_equivalent_after_type_canonicalization_impl(
+                lhs_args[idx],
+                rhs_args[idx],
+                ast_ctx,
+                depth + 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool template_specialization_types_equivalent_impl(
+    const TemplateSpecializationType* lhs,
+    const TemplateSpecializationType* rhs,
+    const ASTContext* ast_ctx,
+    unsigned depth) {
+    if (!lhs || !rhs) {
+        return false;
+    }
+    if (lhs->primary_template &&
+        rhs->primary_template &&
+        !template_decls_share_lookup_identity(lhs->primary_template,
+                                              rhs->primary_template)) {
+        return false;
+    }
+    if ((!lhs->primary_template || !rhs->primary_template) &&
+        lhs->template_name != rhs->template_name) {
+        return false;
+    }
+    if (lhs->arguments.size() != rhs->arguments.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < lhs->arguments.size(); ++idx) {
+        if (!template_argument_equivalent_after_type_canonicalization_impl(
+                lhs->arguments[idx],
+                rhs->arguments[idx],
+                ast_ctx,
+                depth + 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool types_equivalent_after_template_argument_canonicalization_impl(
+    QualType lhs,
+    QualType rhs,
+    const ASTContext* ast_ctx,
+    bool ignore_top_level_qualifiers,
+    unsigned depth) {
+    if (!lhs || !rhs) {
+        return lhs.get_shared() == rhs.get_shared();
+    }
+    if (depth > 16) {
+        return false;
+    }
+    if (ignore_top_level_qualifiers) {
+        if (lhs.equals_unqualified(rhs)) {
+            return true;
+        }
+    } else if (lhs.equals_qualified(rhs)) {
+        return true;
+    }
+
+    QualType lhs_canonical = desugar_type(lhs, ast_ctx);
+    QualType rhs_canonical = desugar_type(rhs, ast_ctx);
+    if (!lhs_canonical || !rhs_canonical) {
+        return false;
+    }
+    if (ignore_top_level_qualifiers) {
+        if (lhs_canonical.equals_unqualified(rhs_canonical)) {
+            return true;
+        }
+        lhs_canonical = lhs_canonical.without_qualifiers();
+        rhs_canonical = rhs_canonical.without_qualifiers();
+    } else {
+        if (lhs_canonical.equals_qualified(rhs_canonical)) {
+            return true;
+        }
+        if (lhs_canonical.get_qualifiers() != rhs_canonical.get_qualifiers()) {
+            return false;
+        }
+    }
+
+    if (auto lhs_object = lhs_canonical.as_shared<ObjectType>()) {
+        auto rhs_object = rhs_canonical.as_shared<ObjectType>();
+        return rhs_object &&
+               class_template_specialization_objects_equivalent_impl(
+                   lhs_object.get(),
+                   rhs_object.get(),
+                   ast_ctx,
+                   depth + 1);
+    }
+
+    if (auto lhs_specialization =
+            lhs_canonical.as_shared<TemplateSpecializationType>()) {
+        auto rhs_specialization =
+            rhs_canonical.as_shared<TemplateSpecializationType>();
+        return rhs_specialization &&
+               template_specialization_types_equivalent_impl(
+                   lhs_specialization.get(),
+                   rhs_specialization.get(),
+                   ast_ctx,
+                   depth + 1);
+    }
+
+    return false;
+}
+
+bool template_argument_equivalent_after_type_canonicalization_impl(
+    const TemplateArgument& lhs,
+    const TemplateArgument& rhs,
+    const ASTContext* ast_ctx,
+    unsigned depth) {
+    if (lhs.equals(rhs)) {
+        return true;
+    }
+    if (lhs.kind != rhs.kind ||
+        lhs.expands_parameter_pack != rhs.expands_parameter_pack ||
+        lhs.pack_expansion_parameters.size() !=
+            rhs.pack_expansion_parameters.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < lhs.pack_expansion_parameters.size(); ++idx) {
+        if (lhs.pack_expansion_parameters[idx] !=
+            rhs.pack_expansion_parameters[idx]) {
+            return false;
+        }
+    }
+    switch (lhs.kind) {
+        case TemplateArgumentKind::Type:
+            return types_equivalent_after_template_argument_canonicalization_impl(
+                lhs.type,
+                rhs.type,
+                ast_ctx,
+                /*ignore_top_level_qualifiers=*/false,
+                depth + 1);
+        case TemplateArgumentKind::Template:
+            if (lhs.is_dependent || rhs.is_dependent) {
+                return false;
+            }
+            if (lhs.template_decl && rhs.template_decl) {
+                return template_decls_share_lookup_identity(
+                    lhs.template_decl,
+                    rhs.template_decl);
+            }
+            return !lhs.template_name.empty() &&
+                   lhs.template_name == rhs.template_name;
+        case TemplateArgumentKind::Value:
+            return false;
+    }
+    return false;
+}
+
 const TemplateParameterList* template_template_argument_parameter_list(
     const TemplateArgument& argument) {
     if (argument.kind != TemplateArgumentKind::Template) {
@@ -1687,6 +1872,19 @@ bool template_arguments_have_same_lookup_shape(
     const std::vector<TemplateArgument>& lhs,
     const std::vector<TemplateArgument>& rhs) {
     return template_arguments_have_same_lookup_shape_impl(lhs, rhs);
+}
+
+bool types_equivalent_after_template_argument_canonicalization(
+    QualType lhs,
+    QualType rhs,
+    const ASTContext* ast_ctx,
+    bool ignore_top_level_qualifiers) {
+    return types_equivalent_after_template_argument_canonicalization_impl(
+        lhs,
+        rhs,
+        effective_ast_context(ast_ctx),
+        ignore_top_level_qualifiers,
+        0);
 }
 
 bool DecltypeExprType::equals(const CType& other) {

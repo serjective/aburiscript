@@ -785,6 +785,7 @@ void cpp_recompute_special_member_definition_data(
     RecordSemanticState::DefinitionData& definition_data,
     QualType owner_type,
     const std::vector<RecordSemanticState::Constructor>& constructors,
+    const std::vector<RecordSemanticState::MethodTemplate>& method_templates,
     const std::vector<RecordSemanticState::Method>& methods,
     const std::vector<RecordSemanticState::Destructor>& destructors,
     const ASTContext* ast_ctx) {
@@ -803,6 +804,14 @@ void cpp_recompute_special_member_definition_data(
     definition_data.has_deleted_destructor = false;
 
     cpp_recompute_default_constructor_traits(definition_data, constructors);
+
+    for (const auto& method_template : method_templates) {
+        const auto* templated_function =
+            method_template.decl ? method_template.decl->function_decl() : nullptr;
+        if (templated_function && isa<CppConstructorDecl>(templated_function)) {
+            definition_data.has_user_declared_constructor = true;
+        }
+    }
 
     for (const auto& ctor : constructors) {
         if (!ctor.is_implicit) {

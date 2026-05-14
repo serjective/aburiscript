@@ -2402,6 +2402,13 @@ private:
         OverloadImplicitObjectArgKind implicit_arg_kind,
         const std::vector<Expr*>& associated_args,
         std::vector<OverloadCallCandidate>& candidates_out) ;
+    void append_adl_overload_candidates(
+        std::string_view function_name,
+        Expr* implicit_object_arg,
+        OverloadImplicitObjectArgKind implicit_arg_kind,
+        const std::vector<Expr*>& explicit_args,
+        std::vector<OverloadCallCandidate>& candidates_out,
+        SrcLoc loc) ;
 
     void append_unqualified_function_template_overload_candidates(
         std::string_view function_name,

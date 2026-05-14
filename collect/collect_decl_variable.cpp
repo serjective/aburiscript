@@ -92,7 +92,12 @@ bool should_use_implicit_special_member_constructor_overload(
            canonical_source &&
            canonical_target->kind == TypeKind::Object &&
            canonical_source->kind == TypeKind::Object &&
-           canonical_source.equals_unqualified(canonical_target);
+           (canonical_source.equals_unqualified(canonical_target) ||
+            types_equivalent_after_template_argument_canonicalization(
+                source_type,
+                target_type,
+                ast_ctx,
+                /*ignore_top_level_qualifiers=*/true));
 }
 
 bool is_same_type_object_prvalue_initializer(
@@ -115,8 +120,18 @@ bool is_same_type_object_prvalue_initializer(
     if (!canonical_target ||
         !canonical_source ||
         canonical_target->kind != TypeKind::Object ||
-        canonical_source->kind != TypeKind::Object ||
-        !canonical_source.equals_unqualified(canonical_target)) {
+        canonical_source->kind != TypeKind::Object) {
+        return false;
+    }
+
+    bool same_object_type =
+        canonical_source.equals_unqualified(canonical_target) ||
+        types_equivalent_after_template_argument_canonicalization(
+            source_type,
+            target_type,
+            ast_ctx,
+            /*ignore_top_level_qualifiers=*/true);
+    if (!same_object_type) {
         return false;
     }
 

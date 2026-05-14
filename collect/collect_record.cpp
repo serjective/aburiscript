@@ -2791,6 +2791,7 @@ void Collect::collect_record_synthesize_implicit_members(
         ctx.semantic_state.definition_data,
         owner_type,
         ctx.constructors,
+        ctx.method_templates,
         ctx.methods,
         ctx.destructors,
         ast_ctx_.get());
@@ -3480,6 +3481,7 @@ void Collect::collect_record_synthesize_implicit_members(
         ctx.semantic_state.definition_data,
         owner_type,
         ctx.constructors,
+        ctx.method_templates,
         ctx.methods,
         ctx.destructors,
         ast_ctx_.get());
@@ -3711,6 +3713,7 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
         ctx.semantic_state.definition_data,
         QualType(ctx.record_type),
         ctx.constructors,
+        ctx.method_templates,
         ctx.methods,
         ctx.destructors,
         ast_ctx_.get());

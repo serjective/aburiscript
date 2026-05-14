@@ -566,6 +566,11 @@ bool template_argument_has_same_lookup_shape(const TemplateArgument& lhs,
 bool template_arguments_have_same_lookup_shape(
     const std::vector<TemplateArgument>& lhs,
     const std::vector<TemplateArgument>& rhs);
+bool types_equivalent_after_template_argument_canonicalization(
+    QualType lhs,
+    QualType rhs,
+    const ASTContext* ast_ctx,
+    bool ignore_top_level_qualifiers = false);
 
 struct TemplateEnvironmentFrame {
     std::vector<const TemplateParameterDecl*> parameters;

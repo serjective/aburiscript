@@ -89,6 +89,7 @@ void cpp_recompute_special_member_definition_data(
     RecordSemanticState::DefinitionData& definition_data,
     QualType owner_type,
     const std::vector<RecordSemanticState::Constructor>& constructors,
+    const std::vector<RecordSemanticState::MethodTemplate>& method_templates,
     const std::vector<RecordSemanticState::Method>& methods,
     const std::vector<RecordSemanticState::Destructor>& destructors,
     const ASTContext* ast_ctx = nullptr);

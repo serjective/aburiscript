@@ -2836,7 +2836,12 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                 source_type.equals_qualified(target_type) ||
                 (canonical_source_type &&
                  canonical_target_type &&
-                 canonical_source_type.equals_qualified(canonical_target_type));
+                 canonical_source_type.equals_qualified(canonical_target_type)) ||
+                types_equivalent_after_template_argument_canonicalization(
+                    source_type,
+                    target_type,
+                    ast_ctx_.get(),
+                    /*ignore_top_level_qualifiers=*/false);
             if (same_qualified_type) {
                 return true;
             }
@@ -2844,7 +2849,12 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                 source_type.equals_unqualified(target_type) ||
                 (canonical_source_type &&
                  canonical_target_type &&
-                 canonical_source_type.equals_unqualified(canonical_target_type));
+                 canonical_source_type.equals_unqualified(canonical_target_type)) ||
+                types_equivalent_after_template_argument_canonicalization(
+                    source_type,
+                    target_type,
+                    ast_ctx_.get(),
+                    /*ignore_top_level_qualifiers=*/true);
             if (same_unqualified_type &&
                 target_type.has_all_qualifiers_of(source_type)) {
                 return true;
@@ -7019,12 +7029,14 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
         }
 
         std::vector<OverloadCallCandidate> adl_not_equal_candidates;
-        std::vector<Expr*> associated_args{first_operand, second_operand};
-        append_adl_friend_overload_candidates(
+        std::vector<Expr*> explicit_not_equal_args{second_operand};
+        append_adl_overload_candidates(
             "operator!=",
+            first_operand,
             OverloadImplicitObjectArgKind::Regular,
-            associated_args,
-            adl_not_equal_candidates);
+            explicit_not_equal_args,
+            adl_not_equal_candidates,
+            loc);
         for (const auto& adl_candidate : adl_not_equal_candidates) {
             if (candidate_corresponds_to_symbol(
                     candidate, adl_candidate.symbol)) {
@@ -7117,12 +7129,14 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
             second_operand);
 
         start = overload_candidates.size();
-        std::vector<Expr*> adl_args{first_operand, second_operand};
-        append_adl_friend_overload_candidates(
+        std::vector<Expr*> adl_explicit_args{second_operand};
+        append_adl_overload_candidates(
             candidate_name,
+            first_operand,
             OverloadImplicitObjectArgKind::Regular,
-            adl_args,
-            overload_candidates);
+            adl_explicit_args,
+            overload_candidates,
+            loc);
         tag_candidates(
             start,
             rewrite_kind,
@@ -7240,6 +7254,47 @@ std::unique_ptr<Expr> Collect::try_cpp_binary_operator_overload(
             return candidate_error;
         }
     }
+
+    auto operator_candidates_are_duplicate =
+        [&](const OverloadCallCandidate& lhs_candidate,
+            const OverloadCallCandidate& rhs_candidate) {
+        if (lhs_candidate.operator_rewrite_kind !=
+                rhs_candidate.operator_rewrite_kind ||
+            lhs_candidate.is_synthesized_reversed_operator_candidate !=
+                rhs_candidate.is_synthesized_reversed_operator_candidate ||
+            lhs_candidate.operator_implicit_object_arg !=
+                rhs_candidate.operator_implicit_object_arg ||
+            lhs_candidate.operator_explicit_arg !=
+                rhs_candidate.operator_explicit_arg) {
+            return false;
+        }
+        if (lhs_candidate.symbol == rhs_candidate.symbol) {
+            return true;
+        }
+        const auto* lhs_template =
+            function_template_primary(lhs_candidate.symbol);
+        const auto* rhs_template =
+            function_template_primary(rhs_candidate.symbol);
+        return lhs_template &&
+               rhs_template &&
+               template_decls_share_lookup_identity(lhs_template, rhs_template);
+    };
+
+    std::vector<OverloadCallCandidate> unique_operator_candidates;
+    unique_operator_candidates.reserve(overload_candidates.size());
+    for (auto& candidate : overload_candidates) {
+        bool duplicate = false;
+        for (const auto& existing : unique_operator_candidates) {
+            if (operator_candidates_are_duplicate(existing, candidate)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            unique_operator_candidates.push_back(std::move(candidate));
+        }
+    }
+    overload_candidates = std::move(unique_operator_candidates);
 
     if (overload_candidates.empty()) {
         if (had_member_match) {
@@ -8737,7 +8792,12 @@ Collect::build_cpp_overload_reference_conversion_sequence(
             source_type.equals_qualified(target_type) ||
             (canonical_source_type &&
              canonical_target_type &&
-             canonical_source_type.equals_qualified(canonical_target_type));
+             canonical_source_type.equals_qualified(canonical_target_type)) ||
+            types_equivalent_after_template_argument_canonicalization(
+                source_type,
+                target_type,
+                ast_ctx_.get(),
+                /*ignore_top_level_qualifiers=*/false);
         if (same_qualified_type) {
             seq.kind = ConversionSequenceKind::Identity;
             seq.rank = ConversionSequenceRank::ExactMatch;
@@ -8749,7 +8809,12 @@ Collect::build_cpp_overload_reference_conversion_sequence(
             source_type.equals_unqualified(target_type) ||
             (canonical_source_type &&
              canonical_target_type &&
-             canonical_source_type.equals_unqualified(canonical_target_type));
+             canonical_source_type.equals_unqualified(canonical_target_type)) ||
+            types_equivalent_after_template_argument_canonicalization(
+                source_type,
+                target_type,
+                ast_ctx_.get(),
+                /*ignore_top_level_qualifiers=*/true);
         if (same_unqualified_type &&
             target_type.has_all_qualifiers_of(source_type)) {
             seq.kind = ConversionSequenceKind::Qualification;
@@ -8888,7 +8953,12 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
         from_for_conversion.equals_qualified(to) ||
         (from_canonical &&
          to_canonical &&
-         from_canonical.equals_qualified(to_canonical));
+         from_canonical.equals_qualified(to_canonical)) ||
+        types_equivalent_after_template_argument_canonicalization(
+            from_for_conversion,
+            to,
+            ast_ctx_.get(),
+            /*ignore_top_level_qualifiers=*/false);
     if (same_qualified_type) {
         seq.kind = ConversionSequenceKind::Identity;
         seq.rank = ConversionSequenceRank::ExactMatch;
@@ -8898,7 +8968,12 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
         from_for_conversion.equals_unqualified(to) ||
         (from_canonical &&
          to_canonical &&
-         from_canonical.equals_unqualified(to_canonical));
+         from_canonical.equals_unqualified(to_canonical)) ||
+        types_equivalent_after_template_argument_canonicalization(
+            from_for_conversion,
+            to,
+            ast_ctx_.get(),
+            /*ignore_top_level_qualifiers=*/true);
     if (same_unqualified_type) {
         seq.kind = ConversionSequenceKind::Qualification;
         seq.rank = ConversionSequenceRank::ExactMatch;

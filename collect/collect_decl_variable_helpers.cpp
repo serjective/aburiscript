@@ -459,10 +459,17 @@ Collect::evaluate_variable_constructor_candidate(
                     ? desugar_type(ref_type->referred_type, ast_ctx_.get())
                           .as_shared<ObjectType>()
                     : nullptr;
+            QualType record_type_for_copy =
+                record_decl ? QualType(record_decl->get_record_type()) : QualType();
             if (ref_type &&
                 ref_type->isLValueReference() &&
                 referred_record &&
-                referred_record->get_decl() == record_decl) {
+                (referred_record->get_decl() == record_decl ||
+                 types_equivalent_after_template_argument_canonicalization(
+                     ref_type->referred_type,
+                     record_type_for_copy,
+                     ast_ctx_.get(),
+                     /*ignore_top_level_qualifiers=*/true))) {
                 eval.is_synthesized_implicit_copy = true;
             }
         }
