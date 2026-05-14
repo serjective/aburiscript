@@ -609,6 +609,9 @@ private:
         SrcLoc loc);
     QualType lookup_cpp_current_record_nested_type(
         const std::string& component_name) const;
+    QualType prepare_cpp_qualified_type_owner(
+        QualType owner_type,
+        bool is_current_instantiation = false);
     const Decl* lookup_cpp_unqualified_type_template_decl(
         const std::string& component_name,
         const std::shared_ptr<Scope>& start_scope,

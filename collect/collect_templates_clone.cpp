@@ -118,6 +118,9 @@ void TemplateDependentResolutionPass::sync_from_substitution_pass(
     ctx.lookup_pack_size = substitution_pass.context().lookup_pack_size;
     ctx.symbol_remap = substitution_pass.context().symbol_remap;
     ctx.scope_remap = substitution_pass.context().scope_remap;
+    ctx.template_parameter_remap =
+        substitution_pass.context().template_parameter_remap;
+    ctx.template_decl_remap = substitution_pass.context().template_decl_remap;
 }
 
 bool TemplateDependentResolutionPass::resolve_expr_in_place(
@@ -372,6 +375,31 @@ bool materialize_specialized_fold_expression(
     return true;
 }
 
+void remap_template_argument_symbol_references(
+    TemplateArgument& argument,
+    ASTCloneContext& clone_ctx) {
+    if (argument.kind != TemplateArgumentKind::Value) {
+        return;
+    }
+    if (argument.value.kind == ConstValueKind::Address &&
+        argument.value.address_value.symbol) {
+        if (auto remapped = lookup_symbol_remap_in_clone_context(
+                argument.value.address_value.symbol,
+                clone_ctx)) {
+            argument.value.address_value.symbol = remapped;
+        }
+        return;
+    }
+    if (argument.value.kind == ConstValueKind::MemberPointer &&
+        argument.value.member_pointer_value.method_symbol) {
+        if (auto remapped = lookup_symbol_remap_in_clone_context(
+                argument.value.member_pointer_value.method_symbol,
+                clone_ctx)) {
+            argument.value.member_pointer_value.method_symbol = remapped;
+        }
+    }
+}
+
 TemplateClonePassBuilder make_template_binding_clone_pass_builder(
     ASTContext* ast_ctx,
     Collect* collect,
@@ -402,11 +430,9 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
     SrcLoc fallback_loc = loc;
     builder.rewrite_var_ref =
         [parameters_ptr,
-         collect,
          argument_bindings_ptr,
          clone_ast_ctx,
          fallback_loc,
-         rewrite_template_arguments_fn = rewrite_template_arguments,
          rewrite_type_fn = rewrite_type,
          value_error_message = std::move(value_error_message)](
             const VarRef* var_ref,
@@ -447,42 +473,6 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
         if (literal) {
             return literal;
         }
-        if (collect && var_ref && var_ref->symref) {
-            if (const auto* specialization_info =
-                    get_symbol_variable_template_specialization(
-                        var_ref->symref.get())) {
-                std::vector<TemplateArgument> rewritten_arguments =
-                    rewrite_template_arguments_fn
-                        ? rewrite_template_arguments_fn(
-                              specialization_info->arguments)
-                        : specialization_info->arguments;
-                std::shared_ptr<Symbol> specialization_symbol = nullptr;
-                auto* specialization_decl =
-                    collect->instantiate_variable_template_specialization_for_clone(
-                        specialization_info->primary_template,
-                        rewritten_arguments,
-                        var_ref->location,
-                        &specialization_symbol);
-                if (!specialization_decl || !specialization_symbol) {
-                    if (error_out && error_out->empty()) {
-                        *error_out =
-                            "failed to rewrite variable template specialization reference";
-                    }
-                    return nullptr;
-                }
-                auto rewritten_ref = collect->collect_identifier_reference(
-                    var_ref->get_name(),
-                    std::move(specialization_symbol),
-                    var_ref->location);
-                if (const auto* qualified_info =
-                        var_ref->get_cpp_qualified_info()) {
-                    rewritten_ref = attach_cpp_qualified_info_to_expr(
-                        std::move(rewritten_ref),
-                        *qualified_info);
-                }
-                return rewritten_ref;
-            }
-        }
         return nullptr;
     };
     builder.rewrite_symbol =
@@ -511,6 +501,9 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
             rewrite_template_arguments_fn
                 ? rewrite_template_arguments_fn(specialization_info->arguments)
                 : specialization_info->arguments;
+        for (auto& argument : rewritten_arguments) {
+            remap_template_argument_symbol_references(argument, clone_ctx);
+        }
         std::shared_ptr<Symbol> specialization_symbol = nullptr;
         auto* specialization_decl =
             collect->instantiate_variable_template_specialization_for_clone(
@@ -558,21 +551,7 @@ bool remap_template_argument_after_outer_substitution(
             argument.referenced_parameter = parameter_it->second;
         }
     }
-    if (argument.value.kind == ConstValueKind::Address &&
-        argument.value.address_value.symbol) {
-        if (auto remapped = lookup_symbol_remap_in_clone_context(
-                argument.value.address_value.symbol,
-                clone_ctx)) {
-            argument.value.address_value.symbol = remapped;
-        }
-    } else if (argument.value.kind == ConstValueKind::MemberPointer &&
-               argument.value.member_pointer_value.method_symbol) {
-        if (auto remapped = lookup_symbol_remap_in_clone_context(
-                argument.value.member_pointer_value.method_symbol,
-                clone_ctx)) {
-            argument.value.member_pointer_value.method_symbol = remapped;
-        }
-    }
+    remap_template_argument_symbol_references(argument, clone_ctx);
     if (!argument.value_expr) {
         return true;
     }

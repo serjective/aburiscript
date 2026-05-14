@@ -1461,6 +1461,12 @@ Parser::try_parse_cpp_named_type_specifier() {
             }
 
             if (!is_last_component) {
+                resolved_type =
+                    prepare_cpp_qualified_type_owner(resolved_type);
+                if (!resolved_type) {
+                    restore();
+                    return std::nullopt;
+                }
                 if (type_depends_on_template_parameters(
                         resolved_type,
                         ast_ctx.get())) {
@@ -1866,6 +1872,15 @@ Parser::try_parse_cpp_named_type_specifier() {
                     nested_type,
                     ast_ctx.get());
                 state.is_current_instantiation = false;
+            }
+        }
+
+        if (!is_terminal_component && !state.is_dependent_context()) {
+            state.qualifier_type =
+                prepare_cpp_qualified_type_owner(state.qualifier_type);
+            if (!state.qualifier_type) {
+                restore();
+                return std::nullopt;
             }
         }
 

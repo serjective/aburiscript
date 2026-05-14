@@ -111,6 +111,38 @@ QualType Parser::lookup_cpp_current_record_nested_type(
         component_name);
 }
 
+QualType Parser::prepare_cpp_qualified_type_owner(
+    QualType owner_type,
+    bool is_current_instantiation) {
+    if (!owner_type) {
+        return QualType();
+    }
+    if (!collect_) {
+        return QualType();
+    }
+
+    if (is_current_instantiation) {
+        return owner_type;
+    }
+
+    QualType realized_owner =
+        collect_->collect_try_realize_deferred_semantic_type(owner_type);
+    if (!realized_owner) {
+        return QualType();
+    }
+
+    if (type_depends_on_template_parameters(realized_owner, ast_ctx.get())) {
+        return realized_owner;
+    }
+
+    QualType lookup_owner = desugar_type(realized_owner, ast_ctx.get());
+    if (!lookup_owner.as_shared<ObjectType>()) {
+        return QualType();
+    }
+
+    return lookup_owner;
+}
+
 std::optional<std::vector<TemplateArgument>>
 Parser::build_cpp_current_instantiation_arguments(
     const ClassTemplateDecl* class_template,
@@ -335,6 +367,15 @@ Parser::analyze_cpp_qualified_type_owner(
         type_depends_on_template_parameters(
             qualifier_type,
             ast_ctx.get());
+    if (!analysis.is_dependent_context()) {
+        qualifier_type = prepare_cpp_qualified_type_owner(
+            qualifier_type,
+            analysis.is_current_instantiation);
+        if (!qualifier_type) {
+            return std::nullopt;
+        }
+        analysis.owner_type = qualifier_type;
+    }
     return analysis;
 }
 

@@ -1030,18 +1030,6 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             },
             register_specialized_member_symbol,
             rewrite_specialized_record_member_expr);
-        clone_pass_builder.rewrite_symbol =
-            [](const std::shared_ptr<Symbol>& sym,
-               ASTCloneContext& clone_ctx) -> std::shared_ptr<Symbol> {
-                if (!sym) {
-                    return nullptr;
-                }
-                if (auto remapped =
-                        lookup_symbol_remap_in_clone_context(sym, clone_ctx)) {
-                    return remapped;
-                }
-                return sym;
-            };
         clone_pass_ptr = nullptr;
         clone_pass_builder.expand_pack_expansion =
             [this](const Expr* pattern_expr,
@@ -1444,12 +1432,13 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                                                std::move(provisional_state));
     }
 
-    void try_finalize_static_member_for_later_members(
-        std::unique_ptr<Decl>& member_decl) {
+    bool try_finalize_static_member_for_later_members(
+        std::unique_ptr<Decl>& member_decl,
+        std::string* error_out) {
         auto* static_member = dyn_cast<VariableDecl>(member_decl.get());
         if (!static_member || !static_member->init ||
             static_member->get_cpp_construct_init()) {
-            return;
+            return true;
         }
 
         auto resolution_pass =
@@ -1463,16 +1452,16 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                         error_out);
                 });
 
-        std::string ignored_error;
-        if (!resolution_pass.resolve_decl_in_place(member_decl, &ignored_error)) {
-            return;
+        if (!resolution_pass.resolve_decl_in_place(member_decl, error_out)) {
+            return false;
         }
         if (!template_sema_internal::finalize_specialized_decl_semantics(
                 collect,
                 member_decl,
-                &ignored_error)) {
-            return;
+                error_out)) {
+            return false;
         }
+        return true;
     }
 
     bool handle_compile_time_only_member(const Decl* member) {
@@ -2042,7 +2031,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_symbol->is_constexpr = cloned_decl->is_constexpr;
         }
 
-        try_finalize_static_member_for_later_members(cloned_decl_base);
+        if (!try_finalize_static_member_for_later_members(
+                cloned_decl_base,
+                &clone_error)) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to finalize class template static data member after substitution"
+                    : clone_error,
+                static_member->location);
+        }
         cloned_decl = dyn_cast<VariableDecl>(cloned_decl_base.get());
         if (!cloned_decl) {
             return fail_instantiation(
@@ -2073,6 +2070,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         const TypedefDecl* typedef_decl,
         RecordMemberAccess declared_access) {
         auto rewritten_type = clone_pass.rewrite_type(typedef_decl->type);
+        rewritten_type = collect.finalize_deferred_semantic_type(
+            rewritten_type,
+            typedef_decl->location);
+        if (!rewritten_type) {
+            return fail_instantiation(
+                "failed to resolve class template typedef member after substitution",
+                typedef_decl->location);
+        }
         std::shared_ptr<Symbol> cloned_symbol = nullptr;
         if (typedef_decl->sym) {
             cloned_symbol = clone_symbol_shallow_for_specialization(
@@ -2585,13 +2590,17 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 cloned_template_decl.get(),
                 class_template_clone_pass,
                 parameter_rebinds,
-                "member class template") ||
-            !clone_template_associated_constraint(
+                "member class template")) {
+            return false;
+        }
+        if (!clone_template_associated_constraint(
                 class_template_decl,
                 cloned_template_decl.get(),
                 class_template_clone_pass,
-                "member class template") ||
-            !publish_cloned_class_template_pattern_semantics(
+                "member class template")) {
+            return false;
+        }
+        if (!publish_cloned_class_template_pattern_semantics(
                 cloned_template_decl.get(),
                 "member class template")) {
             return false;

@@ -72,14 +72,12 @@ std::unique_ptr<Expr> make_pack_size_integer_literal(size_t pack_size,
 }
 
 QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
-    // Cloned lambdas synthesize fresh closure record types. If surrounding
-    // rewritten types still mention the pattern lambda's closure owner, walk
-    // through pointer/reference/function/array wrappers and swap those record
-    // references over to the cloned closure type so the closure object and its
-    // synthesized operator() stay type-consistent.
-    auto apply_record_type_remap =
+    // Cloned lambdas and nested templates synthesize fresh semantic owners.
+    // Walk composite types after the caller's rewrite hook so references to
+    // those fresh declarations stay internally consistent.
+    auto apply_clone_type_remaps =
         [&](auto&& self, QualType current_type) -> QualType {
-            if (!current_type || ctx.record_type_remap.empty()) {
+            if (!current_type) {
                 return current_type;
             }
 
@@ -89,7 +87,147 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                 return current_type;
             }
 
+            auto remap_template_argument =
+                [&](const TemplateArgument& argument) -> TemplateArgument {
+                TemplateArgument remapped = argument;
+                switch (argument.kind) {
+                    case TemplateArgumentKind::Type:
+                        remapped.type = self(self, argument.type);
+                        break;
+                    case TemplateArgumentKind::Template:
+                        if (argument.referenced_parameter) {
+                            auto it = ctx.template_parameter_remap.find(
+                                argument.referenced_parameter);
+                            if (it != ctx.template_parameter_remap.end()) {
+                                remapped.referenced_parameter = it->second;
+                            }
+                        }
+                        break;
+                    case TemplateArgumentKind::Value:
+                        remapped.value_type = self(self, argument.value_type);
+                        if (argument.referenced_parameter) {
+                            auto it = ctx.template_parameter_remap.find(
+                                argument.referenced_parameter);
+                            if (it != ctx.template_parameter_remap.end()) {
+                                remapped.referenced_parameter = it->second;
+                            }
+                        }
+                        break;
+                }
+                remapped.is_dependent =
+                    template_argument_depends_on_template_parameters(
+                        remapped,
+                        ctx.ast_ctx);
+                return remapped;
+            };
+
+            if (auto parm_type = dyn_cast_shared<TemplateTypeParmType>(raw)) {
+                if (!parm_type->parameter_decl) {
+                    return current_type;
+                }
+                auto it = ctx.template_parameter_remap.find(
+                    parm_type->parameter_decl);
+                if (it == ctx.template_parameter_remap.end() || !it->second) {
+                    return current_type;
+                }
+                auto* rebound = dyn_cast<TemplateTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(it->second));
+                if (!rebound || !rebound->type) {
+                    return current_type;
+                }
+                return QualType(rebound->type, quals);
+            }
+            if (auto typedef_type = dyn_cast_shared<TypedefType>(raw)) {
+                auto rewritten = self(self, typedef_type->underlying_type);
+                if (rewritten.equals_qualified(typedef_type->underlying_type)) {
+                    return current_type;
+                }
+                return QualType(
+                    std::make_shared<TypedefType>(
+                        typedef_type->name,
+                        rewritten,
+                        typedef_type->typedef_decl),
+                    quals);
+            }
+            if (auto specialization =
+                    dyn_cast_shared<TemplateSpecializationType>(raw)) {
+                bool changed = false;
+                const Decl* primary_template = specialization->primary_template;
+                const TemplateDecl* template_decl = nullptr;
+                if (primary_template) {
+                    switch (primary_template->get_kind()) {
+                        case DeclKind::AliasTemplateDecl:
+                        case DeclKind::FunctionTemplateDecl:
+                        case DeclKind::VariableTemplateDecl:
+                        case DeclKind::ClassTemplateDecl:
+                        case DeclKind::VariableTemplatePartialSpecializationDecl:
+                        case DeclKind::ClassTemplatePartialSpecializationDecl:
+                            template_decl =
+                                static_cast<const TemplateDecl*>(
+                                    primary_template);
+                            break;
+                        default:
+                            break;
+                    }
+                }
+                if (template_decl) {
+                    auto it = ctx.template_decl_remap.find(template_decl);
+                    if (it != ctx.template_decl_remap.end() && it->second) {
+                        primary_template = it->second;
+                        changed = true;
+                    }
+                }
+
+                std::vector<TemplateArgument> rewritten_arguments;
+                rewritten_arguments.reserve(specialization->arguments.size());
+                for (const auto& argument : specialization->arguments) {
+                    auto rewritten_argument = remap_template_argument(argument);
+                    changed = changed || !rewritten_argument.equals(argument);
+                    rewritten_arguments.push_back(std::move(rewritten_argument));
+                }
+                if (!changed) {
+                    return current_type;
+                }
+                return QualType(
+                    std::make_shared<TemplateSpecializationType>(
+                        specialization->template_name,
+                        primary_template,
+                        std::move(rewritten_arguments),
+                        specialization->is_dependent,
+                        specialization->is_class_template_placeholder),
+                    quals);
+            }
+            if (auto dependent_name =
+                    dyn_cast_shared<DependentNameType>(raw)) {
+                auto rewritten_qualifier =
+                    self(self, dependent_name->qualifier_type);
+                bool changed = !rewritten_qualifier.equals_qualified(
+                    dependent_name->qualifier_type);
+                std::vector<TemplateArgument> rewritten_arguments;
+                rewritten_arguments.reserve(
+                    dependent_name->template_arguments.size());
+                for (const auto& argument : dependent_name->template_arguments) {
+                    auto rewritten_argument = remap_template_argument(argument);
+                    changed = changed || !rewritten_argument.equals(argument);
+                    rewritten_arguments.push_back(std::move(rewritten_argument));
+                }
+                if (!changed) {
+                    return current_type;
+                }
+                return QualType(
+                    std::make_shared<DependentNameType>(
+                        rewritten_qualifier,
+                        dependent_name->member_name,
+                        std::move(rewritten_arguments),
+                        dependent_name->is_current_instantiation,
+                        dependent_name->requires_typename_keyword,
+                        dependent_name->requires_template_keyword),
+                    quals);
+            }
             if (auto object = dyn_cast_shared<ObjectType>(raw)) {
+                if (ctx.record_type_remap.empty()) {
+                    return current_type;
+                }
                 auto remap_it = ctx.record_type_remap.find(
                     dyn_cast<ObjectDecl>(object->get_decl()));
                 if (remap_it == ctx.record_type_remap.end() || !remap_it->second) {
@@ -140,6 +278,18 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                     std::make_shared<BlockPointerType>(rewritten),
                     quals);
             }
+            if (auto transform =
+                    dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
+                auto rewritten = self(self, transform->operand_type);
+                if (rewritten.equals_qualified(transform->operand_type)) {
+                    return current_type;
+                }
+                return QualType(
+                    std::make_shared<BuiltinTypeTransformType>(
+                        transform->transform_kind,
+                        rewritten),
+                    quals);
+            }
             if (auto array = dyn_cast_shared<ArrayType>(raw)) {
                 auto rewritten = self(self, array->element_type);
                 if (rewritten.equals_qualified(array->element_type)) {
@@ -180,19 +330,8 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                 std::vector<TemplateArgument> rewritten_args;
                 rewritten_args.reserve(pack_element->arguments.size());
                 for (const auto& argument : pack_element->arguments) {
-                    TemplateArgument rewritten_argument = argument;
-                    if (argument.kind == TemplateArgumentKind::Type) {
-                        rewritten_argument.type = self(self, argument.type);
-                        changed = changed ||
-                            !rewritten_argument.type.equals_qualified(
-                                argument.type);
-                    } else if (argument.kind == TemplateArgumentKind::Value) {
-                        rewritten_argument.value_type =
-                            self(self, argument.value_type);
-                        changed = changed ||
-                            !rewritten_argument.value_type.equals_qualified(
-                                argument.value_type);
-                    }
+                    auto rewritten_argument = remap_template_argument(argument);
+                    changed = changed || !rewritten_argument.equals(argument);
                     rewritten_args.push_back(std::move(rewritten_argument));
                 }
                 if (!changed) {
@@ -204,13 +343,10 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                     quals);
             }
             return current_type;
-        };
+    };
 
     QualType rewritten = ctx.rewrite_type ? ctx.rewrite_type(type) : type;
-    if (!ctx.record_type_remap.empty()) {
-        rewritten = apply_record_type_remap(apply_record_type_remap, rewritten);
-    }
-    return rewritten;
+    return apply_clone_type_remaps(apply_clone_type_remaps, rewritten);
 }
 
 bool clone_attribute_list(const AttributeList& source,
@@ -316,6 +452,162 @@ bool rewrite_optional_template_arguments(
     }
     arguments = std::move(rewritten);
     return true;
+}
+
+std::shared_ptr<Symbol> clone_symbol_shallow(const std::shared_ptr<Symbol>& sym,
+                                             QualType cloned_type);
+void register_symbol(const std::shared_ptr<Symbol>& sym, ASTCloneContext& ctx);
+
+TemplateParameterList clone_template_parameter_list(
+    const TemplateParameterList& parameters,
+    ASTCloneContext& ctx,
+    std::string* error_out) {
+    TemplateParameterList cloned_parameters;
+    cloned_parameters.reserve(parameters.size());
+
+    auto clone_default_argument =
+        [&](const TemplateParameterDecl* source,
+            TemplateParameterDecl* destination) -> bool {
+        const auto* default_argument =
+            get_template_parameter_default_argument(source);
+        if (!default_argument) {
+            return true;
+        }
+        auto rewritten_defaults =
+            rewrite_template_arguments({*default_argument}, ctx, error_out);
+        if (rewritten_defaults.size() != 1) {
+            if (error_out && error_out->empty()) {
+                *error_out = "failed to clone template parameter default argument";
+            }
+            return false;
+        }
+        set_template_parameter_default_argument(
+            destination,
+            std::move(rewritten_defaults.front()));
+        return true;
+    };
+
+    for (const auto& parameter : parameters) {
+        if (!parameter) {
+            if (error_out && error_out->empty()) {
+                *error_out = "missing template parameter";
+            }
+            return {};
+        }
+
+        if (auto* type_parameter =
+                dyn_cast<TemplateTypeParmDecl>(parameter.get())) {
+            auto cloned_parameter_type =
+                std::make_shared<TemplateTypeParmType>(
+                    type_parameter->name,
+                    type_parameter->depth,
+                    type_parameter->index,
+                    type_parameter->is_parameter_pack);
+            auto cloned_parameter =
+                std::make_unique<TemplateTypeParmDecl>(
+                    type_parameter->name,
+                    type_parameter->depth,
+                    type_parameter->index,
+                    cloned_parameter_type,
+                    type_parameter->is_parameter_pack,
+                    type_parameter->location);
+            assign_node_id(cloned_parameter.get(), ctx.ast_ctx);
+            cloned_parameter_type->parameter_decl = cloned_parameter.get();
+            if (type_parameter->type_constraint) {
+                cloned_parameter->type_constraint =
+                    clone_expr_with_substitution(
+                        type_parameter->type_constraint.get(),
+                        ctx,
+                        error_out);
+                if (!cloned_parameter->type_constraint) {
+                    return {};
+                }
+            }
+            ctx.template_parameter_remap[type_parameter] =
+                cloned_parameter.get();
+            if (!clone_default_argument(
+                    type_parameter,
+                    cloned_parameter.get())) {
+                return {};
+            }
+            cloned_parameters.push_back(std::move(cloned_parameter));
+            continue;
+        }
+
+        if (auto* non_type_parameter =
+                dyn_cast<TemplateNonTypeParmDecl>(parameter.get())) {
+            auto cloned_type = rewrite_type(non_type_parameter->type, ctx);
+            std::shared_ptr<Symbol> cloned_symbol = nullptr;
+            if (non_type_parameter->sym) {
+                cloned_symbol = clone_symbol_shallow(
+                    non_type_parameter->sym,
+                    rewrite_type(non_type_parameter->sym->type, ctx));
+                ctx.symbol_remap[non_type_parameter->sym.get()] =
+                    cloned_symbol;
+                register_symbol(cloned_symbol, ctx);
+            }
+            auto cloned_parameter =
+                std::make_unique<TemplateNonTypeParmDecl>(
+                    non_type_parameter->name,
+                    non_type_parameter->depth,
+                    non_type_parameter->index,
+                    cloned_type,
+                    cloned_symbol,
+                    non_type_parameter->is_parameter_pack,
+                    non_type_parameter->location);
+            assign_node_id(cloned_parameter.get(), ctx.ast_ctx);
+            ctx.template_parameter_remap[non_type_parameter] =
+                cloned_parameter.get();
+            if (!clone_default_argument(
+                    non_type_parameter,
+                    cloned_parameter.get())) {
+                return {};
+            }
+            cloned_parameters.push_back(std::move(cloned_parameter));
+            continue;
+        }
+
+        if (auto* template_parameter =
+                dyn_cast<TemplateTemplateParmDecl>(parameter.get())) {
+            auto inner_parameters =
+                clone_template_parameter_list(
+                    template_parameter->parameters,
+                    ctx,
+                    error_out);
+            if (inner_parameters.size() !=
+                template_parameter->parameters.size()) {
+                return {};
+            }
+            auto cloned_parameter =
+                std::make_unique<TemplateTemplateParmDecl>(
+                    std::move(inner_parameters),
+                    template_parameter->name,
+                    template_parameter->depth,
+                    template_parameter->index,
+                    template_parameter->uses_typename_keyword,
+                    template_parameter->is_parameter_pack,
+                    template_parameter->location);
+            assign_node_id(cloned_parameter.get(), ctx.ast_ctx);
+            ctx.template_parameter_remap[template_parameter] =
+                cloned_parameter.get();
+            if (!clone_default_argument(
+                    template_parameter,
+                    cloned_parameter.get())) {
+                return {};
+            }
+            cloned_parameters.push_back(std::move(cloned_parameter));
+            continue;
+        }
+
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "unsupported template parameter clone kind " +
+                std::to_string(static_cast<int>(parameter->get_kind()));
+        }
+        return {};
+    }
+
+    return cloned_parameters;
 }
 
 std::shared_ptr<Symbol> remap_symbol(const std::shared_ptr<Symbol>& sym,
@@ -2443,6 +2735,207 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 static_assert_decl->has_message != 0,
                 static_assert_decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::ClassTemplateDecl: {
+            const auto* class_template =
+                static_cast<const ClassTemplateDecl*>(decl);
+            auto cloned_parameters =
+                clone_template_parameter_list(
+                    class_template->parameters,
+                    ctx,
+                    error_out);
+            if (cloned_parameters.size() != class_template->parameters.size()) {
+                return nullptr;
+            }
+            auto cloned_templated_decl =
+                clone_decl_impl(
+                    class_template->get_templated_decl(),
+                    ctx,
+                    error_out);
+            if (class_template->get_templated_decl() &&
+                !cloned_templated_decl) {
+                return nullptr;
+            }
+            auto result = std::make_unique<ClassTemplateDecl>(
+                std::move(cloned_parameters),
+                std::move(cloned_templated_decl),
+                class_template->location);
+            assign_node_id(result.get(), ctx.ast_ctx);
+            result->canonical_decl = result.get();
+            result->set_pattern_template_decl(
+                class_template->get_pattern_template_decl());
+            if (class_template->associated_constraint) {
+                result->associated_constraint =
+                    clone_expr_with_substitution(
+                        class_template->associated_constraint.get(),
+                        ctx,
+                        error_out);
+                if (!result->associated_constraint) {
+                    return nullptr;
+                }
+            }
+            ctx.template_decl_remap[class_template] = result.get();
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::ClassTemplatePartialSpecializationDecl: {
+            const auto* partial =
+                static_cast<const ClassTemplatePartialSpecializationDecl*>(decl);
+            auto cloned_parameters =
+                clone_template_parameter_list(
+                    partial->parameters,
+                    ctx,
+                    error_out);
+            if (cloned_parameters.size() != partial->parameters.size()) {
+                return nullptr;
+            }
+            auto cloned_arguments =
+                rewrite_template_arguments(
+                    partial->specialization_arguments,
+                    ctx,
+                    error_out);
+            if (cloned_arguments.empty() &&
+                !partial->specialization_arguments.empty() &&
+                error_out && !error_out->empty()) {
+                return nullptr;
+            }
+            const ClassTemplateDecl* cloned_primary = partial->primary_template();
+            bool cloned_primary_is_remapped = false;
+            if (auto it = ctx.template_decl_remap.find(partial->primary_template());
+                it != ctx.template_decl_remap.end() && it->second) {
+                if (auto* remapped_primary =
+                        dyn_cast<ClassTemplateDecl>(it->second)) {
+                    cloned_primary = remapped_primary;
+                    cloned_primary_is_remapped = true;
+                }
+            }
+            auto cloned_templated_decl =
+                clone_decl_impl(partial->get_templated_decl(), ctx, error_out);
+            if (partial->get_templated_decl() && !cloned_templated_decl) {
+                return nullptr;
+            }
+            auto result =
+                std::make_unique<ClassTemplatePartialSpecializationDecl>(
+                    cloned_primary,
+                    std::move(cloned_parameters),
+                    std::move(cloned_arguments),
+                    std::move(cloned_templated_decl),
+                    partial->location);
+            assign_node_id(result.get(), ctx.ast_ctx);
+            result->canonical_decl = result.get();
+            result->set_pattern_template_decl(
+                partial->get_pattern_template_decl());
+            if (partial->associated_constraint) {
+                result->associated_constraint =
+                    clone_expr_with_substitution(
+                        partial->associated_constraint.get(),
+                        ctx,
+                        error_out);
+                if (!result->associated_constraint) {
+                    return nullptr;
+                }
+            }
+            ctx.template_decl_remap[partial] = result.get();
+            if (cloned_primary_is_remapped && cloned_primary) {
+                auto* mutable_primary =
+                    const_cast<ClassTemplateDecl*>(cloned_primary);
+                mutable_primary->add_partial_specialization(result.get());
+            }
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::AliasTemplateDecl: {
+            const auto* alias_template =
+                static_cast<const AliasTemplateDecl*>(decl);
+            auto cloned_parameters =
+                clone_template_parameter_list(
+                    alias_template->parameters,
+                    ctx,
+                    error_out);
+            if (cloned_parameters.size() != alias_template->parameters.size()) {
+                return nullptr;
+            }
+            auto cloned_templated_decl =
+                clone_decl_impl(
+                    alias_template->get_templated_decl(),
+                    ctx,
+                    error_out);
+            if (alias_template->get_templated_decl() && !cloned_templated_decl) {
+                return nullptr;
+            }
+            auto result = std::make_unique<AliasTemplateDecl>(
+                std::move(cloned_parameters),
+                std::move(cloned_templated_decl),
+                alias_template->location);
+            assign_node_id(result.get(), ctx.ast_ctx);
+            result->canonical_decl = result.get();
+            result->set_pattern_template_decl(
+                alias_template->get_pattern_template_decl());
+            if (alias_template->associated_constraint) {
+                result->associated_constraint =
+                    clone_expr_with_substitution(
+                        alias_template->associated_constraint.get(),
+                        ctx,
+                        error_out);
+                if (!result->associated_constraint) {
+                    return nullptr;
+                }
+            }
+            ctx.template_decl_remap[alias_template] = result.get();
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::VariableTemplateDecl: {
+            const auto* variable_template =
+                static_cast<const VariableTemplateDecl*>(decl);
+            auto cloned_parameters =
+                clone_template_parameter_list(
+                    variable_template->parameters,
+                    ctx,
+                    error_out);
+            if (cloned_parameters.size() != variable_template->parameters.size()) {
+                return nullptr;
+            }
+            auto cloned_templated_decl =
+                clone_decl_impl(
+                    variable_template->get_templated_decl(),
+                    ctx,
+                    error_out);
+            if (variable_template->get_templated_decl() &&
+                !cloned_templated_decl) {
+                return nullptr;
+            }
+            auto result = std::make_unique<VariableTemplateDecl>(
+                std::move(cloned_parameters),
+                std::move(cloned_templated_decl),
+                variable_template->location);
+            assign_node_id(result.get(), ctx.ast_ctx);
+            result->canonical_decl = result.get();
+            result->is_pattern_complete =
+                variable_template->is_pattern_complete;
+            result->set_pattern_template_decl(
+                variable_template->get_pattern_template_decl());
+            if (variable_template->associated_constraint) {
+                result->associated_constraint =
+                    clone_expr_with_substitution(
+                        variable_template->associated_constraint.get(),
+                        ctx,
+                        error_out);
+                if (!result->associated_constraint) {
+                    return nullptr;
+                }
+            }
+            ctx.template_decl_remap[variable_template] = result.get();
             if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
