@@ -1088,8 +1088,27 @@ bool Parser::cpp_qualifier_is_current_instantiation(
     if (!is_in_template_pattern_context() || cxx_record_parse_stack_.empty()) {
         return false;
     }
-    const std::string& current_record_name = cxx_record_parse_stack_.back().name;
-    if (current_record_name.empty() || qualifier_name != current_record_name) {
+
+    const auto& current_record = cxx_record_parse_stack_.back();
+    const std::string& current_record_name = current_record.name;
+    if (current_record_name.empty()) {
+        return false;
+    }
+
+    if (qualifier_type && current_record.current_instantiation_type) {
+        QualType qualifier_canonical =
+            desugar_type(qualifier_type, ast_ctx.get());
+        QualType current_canonical =
+            desugar_type(current_record.current_instantiation_type,
+                         ast_ctx.get());
+        if (qualifier_canonical &&
+            current_canonical &&
+            qualifier_canonical.equals_unqualified(current_canonical)) {
+            return true;
+        }
+    }
+
+    if (qualifier_name != current_record_name) {
         return false;
     }
     if (qualifier_type.as<ObjectType>()) {
