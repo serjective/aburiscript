@@ -111,6 +111,7 @@ std::unique_ptr<Expr> clone_substituted_fold_pattern_element(
     ASTContext* ast_ctx,
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& active_bindings,
+    ASTCloneContext* clone_context,
     size_t element_index,
     const Expr* pattern_expr,
     SrcLoc loc,
@@ -162,6 +163,10 @@ std::unique_ptr<Expr> clone_substituted_fold_pattern_element(
             rewrite_element_arguments,
             {},
             {});
+    if (clone_context) {
+        element_builder.symbol_remap = clone_context->symbol_remap;
+        element_builder.scope_remap = clone_context->scope_remap;
+    }
     auto element_clone_pass = element_builder.build_substitution_pass();
 
     std::string clone_error;
@@ -222,12 +227,33 @@ bool is_integer_pack_template_argument(const TemplateArgument& argument) {
     return integer_pack_size_operand_from_expr(argument.value_expr.get()) != nullptr;
 }
 
+void inherit_clone_context_symbol_remaps(TemplateClonePassBuilder& builder,
+                                         ASTCloneContext* clone_context) {
+    if (!clone_context) {
+        return;
+    }
+    builder.symbol_remap = clone_context->symbol_remap;
+    builder.scope_remap = clone_context->scope_remap;
+}
+
+void remap_template_argument_symbols_for_substitution(
+    TemplateArgument& argument,
+    ASTCloneContext* clone_context) {
+    if (!clone_context) {
+        return;
+    }
+    template_sema_internal::remap_template_argument_symbol_references(
+        argument,
+        *clone_context);
+}
+
 bool append_integer_pack_template_arguments(
     Collect& collect,
     ASTContext* ast_ctx,
     const TemplateArgument& argument,
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& active_bindings,
+    ASTCloneContext* clone_context,
     SrcLoc loc,
     bool allow_unsubstituted_parameters,
     const std::function<QualType(QualType)>& rewrite_type,
@@ -248,6 +274,7 @@ bool append_integer_pack_template_arguments(
             rewrite_template_arguments,
             {},
             {});
+    inherit_clone_context_symbol_remaps(clone_pass_builder, clone_context);
     auto clone_pass = clone_pass_builder.build_substitution_pass();
 
     std::string clone_error;
@@ -390,7 +417,8 @@ QualType Collect::substitute_template_type_with_bindings(
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& argument_bindings,
     SrcLoc loc,
-    bool allow_unsubstituted_parameters) {
+    bool allow_unsubstituted_parameters,
+    ASTCloneContext* clone_context) {
     if (!type) {
         return type;
     }
@@ -410,7 +438,8 @@ QualType Collect::substitute_template_type_with_bindings(
                         parameters,
                         argument_bindings,
                         loc,
-                        allow_unsubstituted_parameters);
+                        allow_unsubstituted_parameters,
+                        clone_context);
                 };
             auto rewrite_bound_template_arguments =
                 [&](const std::vector<TemplateArgument>& template_arguments)
@@ -420,7 +449,8 @@ QualType Collect::substitute_template_type_with_bindings(
                         parameters,
                         argument_bindings,
                         loc,
-                        allow_unsubstituted_parameters);
+                        allow_unsubstituted_parameters,
+                        clone_context);
                 };
 
             auto clone_pass_builder = make_template_binding_clone_pass_builder(
@@ -434,6 +464,7 @@ QualType Collect::substitute_template_type_with_bindings(
                 rewrite_bound_template_arguments,
                 {},
                 {});
+            inherit_clone_context_symbol_remaps(clone_pass_builder, clone_context);
             std::function<bool(std::unique_ptr<Expr>&,
                                const TemplateArgumentBindings&,
                                std::string*)>
@@ -526,7 +557,8 @@ QualType Collect::substitute_template_type_with_bindings(
                                     parameters,
                                     element_bindings,
                                     loc,
-                                    allow_unsubstituted_parameters);
+                                    allow_unsubstituted_parameters,
+                                    clone_context);
                             return finalize_deferred_semantic_type(
                                 rewritten_type,
                                 loc);
@@ -540,7 +572,8 @@ QualType Collect::substitute_template_type_with_bindings(
                                 parameters,
                                 element_bindings,
                                 loc,
-                                allow_unsubstituted_parameters);
+                                allow_unsubstituted_parameters,
+                                clone_context);
                         };
                     auto clone_fold_pattern_element =
                         [&](size_t element_index,
@@ -552,6 +585,7 @@ QualType Collect::substitute_template_type_with_bindings(
                                 ast_ctx_.get(),
                                 parameters,
                                 active_bindings,
+                                clone_context,
                                 element_index,
                                 pattern_expr,
                                 loc,
@@ -885,7 +919,8 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         if (substituted_underlying.equals_qualified(typedef_type->underlying_type)) {
             return type;
         }
@@ -944,7 +979,8 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         if (substituted_operand.equals_qualified(transform_type->operand_type)) {
             return type;
         }
@@ -962,7 +998,8 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         if (auto selected_type = apply_builtin_type_pack_element(
                 substituted_arguments,
                 ast_ctx_.get())) {
@@ -1033,7 +1070,8 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         bool dependent = isa<TemplateTemplateParmDecl>(rewritten_primary);
         for (const auto& argument : substituted_arguments) {
             if (template_argument_depends_on_template_parameters(
@@ -1058,13 +1096,15 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         auto substituted_arguments = substitute_template_arguments_with_bindings(
             dependent_name->template_arguments,
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         auto rewritten = std::make_shared<DependentNameType>(
             substituted_qualifier,
             dependent_name->member_name,
@@ -1081,7 +1121,8 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         if (substituted_pointed.equals_qualified(ptr->pointed_type)) {
             return type;
         }
@@ -1096,7 +1137,8 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         if (substituted_referred.equals_qualified(ref->referred_type)) {
             return type;
         }
@@ -1111,13 +1153,15 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         auto substituted_member = substitute_template_type_with_bindings(
             mem_ptr->member_type,
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         if (substituted_class.equals_qualified(mem_ptr->class_type) &&
             substituted_member.equals_qualified(mem_ptr->member_type)) {
             return type;
@@ -1135,7 +1179,8 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         if (substituted_pointed.equals_qualified(blk->pointed_type)) {
             return type;
         }
@@ -1150,7 +1195,8 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         bool needs_bound_rewrite =
             arr->size_kind == ArraySizeKind::Variable && arr->size_expr;
         if (substituted_element.equals_qualified(arr->element_type) &&
@@ -1166,7 +1212,8 @@ QualType Collect::substitute_template_type_with_bindings(
                             parameters,
                             argument_bindings,
                             loc,
-                            allow_unsubstituted_parameters);
+                            allow_unsubstituted_parameters,
+                            clone_context);
                     return finalize_deferred_semantic_type(
                         rewritten_type,
                         loc);
@@ -1179,7 +1226,8 @@ QualType Collect::substitute_template_type_with_bindings(
                         parameters,
                         argument_bindings,
                         loc,
-                        allow_unsubstituted_parameters);
+                        allow_unsubstituted_parameters,
+                        clone_context);
                 };
             auto clone_pass_builder = make_template_binding_clone_pass_builder(
                 ast_ctx_.get(),
@@ -1192,6 +1240,7 @@ QualType Collect::substitute_template_type_with_bindings(
                 rewrite_bound_template_arguments,
                 {},
                 {});
+            inherit_clone_context_symbol_remaps(clone_pass_builder, clone_context);
             auto clone_pass = clone_pass_builder.build_substitution_pass();
 
             std::string clone_error;
@@ -1253,7 +1302,8 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         bool changed = !substituted_ret.equals_qualified(func->ret_type);
         std::vector<QualType> substituted_parameters;
         substituted_parameters.reserve(func->parameters.size());
@@ -1272,7 +1322,8 @@ QualType Collect::substitute_template_type_with_bindings(
                     parameters,
                     argument_bindings,
                     loc,
-                    allow_unsubstituted_parameters);
+                    allow_unsubstituted_parameters,
+                    clone_context);
                 changed |= !substituted_parameter.equals_qualified(parameter);
                 substituted_parameters.push_back(std::move(substituted_parameter));
                 substituted_parameter_pack_flags.push_back(0);
@@ -1296,7 +1347,8 @@ QualType Collect::substitute_template_type_with_bindings(
                     parameters,
                     argument_bindings,
                     loc,
-                    allow_unsubstituted_parameters);
+                    allow_unsubstituted_parameters,
+                    clone_context);
                 changed |= !substituted_parameter.equals_qualified(parameter);
                 substituted_parameters.push_back(std::move(substituted_parameter));
                 substituted_parameter_pack_flags.push_back(0);
@@ -1316,7 +1368,8 @@ QualType Collect::substitute_template_type_with_bindings(
                     parameters,
                     argument_bindings,
                     loc,
-                    allow_unsubstituted_parameters);
+                    allow_unsubstituted_parameters,
+                    clone_context);
                 changed |= !substituted_parameter.equals_qualified(parameter);
                 substituted_parameters.push_back(std::move(substituted_parameter));
                 substituted_parameter_pack_flags.push_back(0);
@@ -1345,7 +1398,8 @@ QualType Collect::substitute_template_type_with_bindings(
                     parameters,
                     element_bindings,
                     loc,
-                    allow_unsubstituted_parameters);
+                    allow_unsubstituted_parameters,
+                    clone_context);
                 substituted_parameters.push_back(std::move(substituted_parameter));
                 substituted_parameter_pack_flags.push_back(0);
             }
@@ -1362,7 +1416,8 @@ QualType Collect::substitute_template_type_with_bindings(
                         parameters,
                         argument_bindings,
                         loc,
-                        allow_unsubstituted_parameters);
+                        allow_unsubstituted_parameters,
+                        clone_context);
                 };
             auto rewrite_bound_template_arguments =
                 [&](const std::vector<TemplateArgument>& template_arguments)
@@ -1372,7 +1427,8 @@ QualType Collect::substitute_template_type_with_bindings(
                         parameters,
                         argument_bindings,
                         loc,
-                        allow_unsubstituted_parameters);
+                        allow_unsubstituted_parameters,
+                        clone_context);
                 };
             auto clone_pass_builder = make_template_binding_clone_pass_builder(
                 ast_ctx_.get(),
@@ -1385,6 +1441,7 @@ QualType Collect::substitute_template_type_with_bindings(
                 rewrite_bound_template_arguments,
                 {},
                 {});
+            inherit_clone_context_symbol_remaps(clone_pass_builder, clone_context);
             auto clone_pass = clone_pass_builder.build_substitution_pass();
             std::string clone_error;
             auto cloned_exception_expr =
@@ -1467,7 +1524,8 @@ QualType Collect::substitute_template_type_with_bindings(
             parameters,
             argument_bindings,
             loc,
-            allow_unsubstituted_parameters);
+            allow_unsubstituted_parameters,
+            clone_context);
         if (substituted_element.equals_qualified(vec->element_type)) {
             return type;
         }
@@ -1512,7 +1570,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& argument_bindings,
     SrcLoc loc,
-    bool allow_unsubstituted_parameters) {
+    bool allow_unsubstituted_parameters,
+    ASTCloneContext* clone_context) {
     std::vector<TemplateArgument> rewritten;
     rewritten.reserve(arguments.size());
     // append_rewritten_argument handles pack expansion inline via recursion.
@@ -1538,7 +1597,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                             parameters,
                             active_bindings,
                             loc,
-                            allow_unsubstituted_parameters);
+                            allow_unsubstituted_parameters,
+                            clone_context);
                     return finalize_deferred_semantic_type(
                         rewritten_type,
                         loc);
@@ -1551,7 +1611,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                         parameters,
                         active_bindings,
                         loc,
-                        allow_unsubstituted_parameters);
+                        allow_unsubstituted_parameters,
+                        clone_context);
                 };
             return append_integer_pack_template_arguments(
                 *this,
@@ -1559,6 +1620,7 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                 argument,
                 parameters,
                 active_bindings,
+                clone_context,
                 loc,
                 allow_unsubstituted_parameters,
                 rewrite_integer_pack_type,
@@ -1643,7 +1705,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                     parameters,
                     active_bindings,
                     loc,
-                    allow_unsubstituted_parameters);
+                    allow_unsubstituted_parameters,
+                    clone_context);
                 break;
             case TemplateArgumentKind::Template:
                 if (argument.referenced_parameter) {
@@ -1654,7 +1717,11 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                             if (const auto* replacement =
                                     active_bindings[*parameter_index]
                                         .single_argument()) {
-                                rewritten.push_back(*replacement);
+                                auto substituted = *replacement;
+                                remap_template_argument_symbols_for_substitution(
+                                    substituted,
+                                    clone_context);
+                                rewritten.push_back(std::move(substituted));
                                 return true;
                             }
                         }
@@ -1667,7 +1734,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                             parameters,
                             active_bindings,
                             loc,
-                            allow_unsubstituted_parameters);
+                            allow_unsubstituted_parameters,
+                            clone_context);
                     new_argument.is_dependent =
                         type_depends_on_template_parameters(
                             new_argument.dependent_template_qualifier_type,
@@ -1736,7 +1804,11 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                             if (const auto* replacement =
                                     active_bindings[*parameter_index]
                                         .single_argument()) {
-                                rewritten.push_back(*replacement);
+                                auto substituted = *replacement;
+                                remap_template_argument_symbols_for_substitution(
+                                    substituted,
+                                    clone_context);
+                                rewritten.push_back(std::move(substituted));
                                 return true;
                             }
                         }
@@ -1748,7 +1820,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                     parameters,
                     active_bindings,
                     loc,
-                    allow_unsubstituted_parameters);
+                    allow_unsubstituted_parameters,
+                    clone_context);
                 new_argument.value_type =
                     finalize_deferred_semantic_type(new_argument.value_type, loc);
 
@@ -1761,7 +1834,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                     parameters,
                                     active_bindings,
                                     loc,
-                                    allow_unsubstituted_parameters);
+                                    allow_unsubstituted_parameters,
+                                    clone_context);
                             return finalize_deferred_semantic_type(
                                 rewritten_type,
                                 loc);
@@ -1774,7 +1848,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                 parameters,
                                 active_bindings,
                                 loc,
-                                allow_unsubstituted_parameters);
+                                allow_unsubstituted_parameters,
+                                clone_context);
                         };
                     auto clone_pass_builder =
                         make_template_binding_clone_pass_builder(
@@ -1788,6 +1863,9 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                             rewrite_bound_template_arguments,
                             {},
                             {});
+                    inherit_clone_context_symbol_remaps(
+                        clone_pass_builder,
+                        clone_context);
                     auto clone_pass = clone_pass_builder.build_substitution_pass();
 
                     std::string clone_error;
@@ -1815,7 +1893,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                     parameters,
                                     element_bindings,
                                     loc,
-                                    allow_unsubstituted_parameters);
+                                    allow_unsubstituted_parameters,
+                                    clone_context);
                             return finalize_deferred_semantic_type(
                                 rewritten_type,
                                 loc);
@@ -1829,7 +1908,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                 parameters,
                                 element_bindings,
                                 loc,
-                                allow_unsubstituted_parameters);
+                                allow_unsubstituted_parameters,
+                                clone_context);
                         };
                     std::function<std::unique_ptr<Expr>(
                         size_t,
@@ -1846,6 +1926,7 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                 ast_ctx_.get(),
                                 parameters,
                                 active_bindings,
+                                clone_context,
                                 element_index,
                                 pattern_expr,
                                 loc,
@@ -1937,6 +2018,9 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                     new_argument.value_type &&
                     auto_type_utils::auto_type_flavors_in(
                         new_argument.value_type.get_shared()) == 0) {
+                    remap_template_argument_symbols_for_substitution(
+                        new_argument,
+                        clone_context);
                     std::string normalize_error;
                     if (!normalize_concrete_template_value_argument(
                             new_argument,

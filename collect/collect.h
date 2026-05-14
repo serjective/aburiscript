@@ -25,6 +25,7 @@
 #include "lookup_engine.h"
 
 class CollectRecordBuilder;
+struct ASTCloneContext;
 
 // Bundles the boolean mode flags for collect_variable_declaration.
 // Using a struct avoids long chains of positional booleans at call sites.
@@ -1896,14 +1897,16 @@ private:
         const TemplateParameterList& parameters,
         const TemplateArgumentBindings& argument_bindings,
         SrcLoc loc,
-        bool allow_unsubstituted_parameters = false) ;
+        bool allow_unsubstituted_parameters = false,
+        ASTCloneContext* clone_context = nullptr) ;
 
     std::vector<TemplateArgument> substitute_template_arguments_with_bindings(
         const std::vector<TemplateArgument>& arguments,
         const TemplateParameterList& parameters,
         const TemplateArgumentBindings& argument_bindings,
         SrcLoc loc,
-        bool allow_unsubstituted_parameters = false) ;
+        bool allow_unsubstituted_parameters = false,
+        ASTCloneContext* clone_context = nullptr) ;
 
     QualType partially_substitute_template_type(
         QualType type,

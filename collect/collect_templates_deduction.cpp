@@ -51,7 +51,7 @@ QualType strip_top_level_qualifiers(QualType type) {
 struct TemplateSpecializationMatchInfo {
     const Decl* primary_template = nullptr;
     std::string_view template_name;
-    const std::vector<TemplateArgument>* arguments = nullptr;
+    std::vector<TemplateArgument> arguments;
 };
 
 struct TemplatePatternLayout {
@@ -87,10 +87,26 @@ std::optional<TemplateSpecializationMatchInfo> extract_template_specialization_m
     }
 
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
+        std::vector<TemplateArgument> arguments = specialization->arguments;
+        if (auto* class_template = dyn_cast<ClassTemplateDecl>(
+                const_cast<Decl*>(specialization->primary_template))) {
+            TemplateArgumentBindings bindings;
+            if (bind_explicit_template_arguments_prefix_to_parameters(
+                    class_template->parameters,
+                    specialization->arguments,
+                    bindings,
+                    nullptr) &&
+                complete_template_argument_bindings_with_defaults(
+                    class_template,
+                    bindings,
+                    nullptr)) {
+                arguments = flatten_template_argument_bindings(bindings);
+            }
+        }
         return TemplateSpecializationMatchInfo{
             specialization->primary_template,
             specialization->template_name,
-            &specialization->arguments};
+            std::move(arguments)};
     }
 
     auto object = desugar_type(spelled).as_shared<ObjectType>();
@@ -107,7 +123,7 @@ std::optional<TemplateSpecializationMatchInfo> extract_template_specialization_m
     return TemplateSpecializationMatchInfo{
         object->get_primary_class_template(),
         template_name,
-        &object->get_template_specialization_arguments()};
+        object->get_template_specialization_arguments()};
 }
 
 TemplatePatternLayout analyze_template_argument_pattern_layout(
@@ -941,8 +957,7 @@ bool deduce_template_argument_types_impl(
             dyn_cast_shared<TemplateSpecializationType>(pattern_raw)) {
         auto argument_specialization =
             extract_template_specialization_match_info(argument_type);
-        if (!argument_specialization.has_value() ||
-            !argument_specialization->arguments) {
+        if (!argument_specialization.has_value()) {
             return false;
         }
         if (auto* pattern_template_parameter = dyn_cast<TemplateTemplateParmDecl>(
@@ -976,7 +991,7 @@ bool deduce_template_argument_types_impl(
             pattern_specialization->arguments,
             pattern_layout,
             parameters,
-            *argument_specialization->arguments,
+            argument_specialization->arguments,
             deduced_arguments,
             false);
     }

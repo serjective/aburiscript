@@ -168,6 +168,10 @@ std::shared_ptr<Expr> clone_constexpr_variable_initializer_expr(
     const Symbol* sym,
     ASTContext* ast_ctx);
 
+void remap_template_argument_symbol_references(
+    TemplateArgument& argument,
+    ASTCloneContext& clone_ctx);
+
 QualType replace_record_decl_in_type(QualType type,
                                      const ObjectDecl* pattern_decl,
                                      QualType replacement_type,

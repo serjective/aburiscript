@@ -807,12 +807,16 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     QualType rewrite_class_template_type(
         QualType type,
         const TemplateArgumentBindings& active_bindings) const {
+        ASTCloneContext* active_clone_context = clone_pass_ptr
+            ? &clone_pass_ptr->context()
+            : nullptr;
         auto rewritten = collect.substitute_template_type_with_bindings(
             type,
             *selected_parameters,
             active_bindings,
             loc,
-            true);
+            true,
+            active_clone_context);
         rewritten = replace_record_decl_in_type(
             rewritten,
             pattern_semantic_decl,
@@ -824,19 +828,25 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         rewritten = remap_template_parameter_types_in_type(
             rewritten,
             kNoParameterRebinds,
-            &const_cast<TemplateSubstitutionPass&>(clone_pass).context());
+            active_clone_context
+                ? active_clone_context
+                : &const_cast<TemplateSubstitutionPass&>(clone_pass).context());
         return collect.finalize_deferred_semantic_type(rewritten, loc);
     }
 
     std::vector<TemplateArgument> rewrite_class_template_arguments(
         const std::vector<TemplateArgument>& template_arguments,
         const TemplateArgumentBindings& active_bindings) const {
+        ASTCloneContext* active_clone_context = clone_pass_ptr
+            ? &clone_pass_ptr->context()
+            : nullptr;
         return collect.substitute_template_arguments_with_bindings(
             template_arguments,
             *selected_parameters,
             active_bindings,
             loc,
-            true);
+            true,
+            active_clone_context);
     }
 
     bool instantiate_base_graph() {
