@@ -489,6 +489,9 @@ private:
         const CppRecordDecl& record;
         std::shared_ptr<ObjectType> record_type;
         RecordSemanticState semantic_state;
+        const ObjectDecl* semantic_owner = nullptr;
+        const ClassTemplateDecl* primary_class_template = nullptr;
+        QualType current_instantiation_type = nullptr;
     };
     void build_cpp_record_parse_deferred_bodies(
         const CppRecordDeferredParseContext& ctx);
@@ -589,9 +592,17 @@ private:
         const std::vector<TemplateArgument>& component_arguments,
         bool component_has_template_argument_list,
         SrcLoc component_loc);
+    QualType build_cpp_current_instantiation_type(
+        const ClassTemplateDecl* primary_template,
+        std::string_view type_name,
+        const std::vector<TemplateArgument>& arguments) const;
     std::optional<std::vector<TemplateArgument>>
     build_cpp_current_instantiation_arguments(
         const ClassTemplateDecl* class_template,
+        SrcLoc loc);
+    QualType build_cpp_primary_current_instantiation_type(
+        const ClassTemplateDecl* class_template,
+        std::string_view type_name,
         SrcLoc loc);
     QualType try_build_cpp_injected_current_instantiation_type(
         std::string_view type_name,
@@ -828,6 +839,7 @@ private:
         std::string name;
         const ObjectDecl* semantic_owner = nullptr;
         const ClassTemplateDecl* primary_class_template = nullptr;
+        QualType current_instantiation_type = nullptr;
     };
     std::vector<CppRecordParseFrame> cxx_record_parse_stack_;
     // Owns temporary semantic decls created during C++ class parsing before

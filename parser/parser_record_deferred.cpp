@@ -309,7 +309,12 @@ void Parser::build_cpp_record_parse_deferred_bodies(
         }
 
         cxx_record_parse_stack_.push_back(
-            CppRecordParseFrame{ctx.record.record_kind, ctx.record.name});
+            CppRecordParseFrame{
+                ctx.record.record_kind,
+                ctx.record.name,
+                ctx.semantic_owner,
+                ctx.primary_class_template,
+                ctx.current_instantiation_type});
         struct RecordParseScopeGuard {
             std::vector<CppRecordParseFrame>* stack = nullptr;
             ~RecordParseScopeGuard() {

@@ -191,6 +191,35 @@ Parser::build_cpp_current_instantiation_arguments(
     return arguments;
 }
 
+QualType Parser::build_cpp_current_instantiation_type(
+    const ClassTemplateDecl* primary_template,
+    std::string_view type_name,
+    const std::vector<TemplateArgument>& arguments) const {
+    if (!primary_template || type_name.empty()) {
+        return QualType();
+    }
+    return QualType(std::make_shared<TemplateSpecializationType>(
+        std::string(type_name),
+        primary_template,
+        arguments,
+        /*is_dependent=*/true));
+}
+
+QualType Parser::build_cpp_primary_current_instantiation_type(
+    const ClassTemplateDecl* class_template,
+    std::string_view type_name,
+    SrcLoc loc) {
+    auto current_arguments =
+        build_cpp_current_instantiation_arguments(class_template, loc);
+    if (!current_arguments) {
+        return QualType();
+    }
+    return build_cpp_current_instantiation_type(
+        class_template,
+        type_name,
+        *current_arguments);
+}
+
 QualType Parser::try_build_cpp_injected_current_instantiation_type(
     std::string_view type_name,
     SrcLoc loc) {
@@ -201,23 +230,17 @@ QualType Parser::try_build_cpp_injected_current_instantiation_type(
     }
 
     const auto& current_record = cxx_record_parse_stack_.back();
-    if (current_record.name != type_name ||
-        !current_record.primary_class_template) {
+    if (current_record.name != type_name) {
         return QualType();
     }
+    if (current_record.current_instantiation_type) {
+        return current_record.current_instantiation_type;
+    }
 
-    auto current_arguments = build_cpp_current_instantiation_arguments(
+    return build_cpp_primary_current_instantiation_type(
         current_record.primary_class_template,
+        type_name,
         loc);
-    if (!current_arguments) {
-        return QualType();
-    }
-
-    return QualType(std::make_shared<TemplateSpecializationType>(
-        std::string(type_name),
-        current_record.primary_class_template,
-        *current_arguments,
-        /*is_dependent=*/true));
 }
 
 QualType Parser::resolve_cpp_unqualified_type_component(

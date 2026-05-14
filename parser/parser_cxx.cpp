@@ -976,6 +976,71 @@ TemplateArgument Parser::parse_cpp_template_argument() {
         return TemplateArgument();
     };
 
+    auto try_parse_injected_current_instantiation_type_argument =
+        [&]() -> std::optional<TemplateArgument> {
+            if (!is_in_template_pattern_context() ||
+                cxx_record_parse_stack_.empty() ||
+                current_token().type != TokenType::IDENTIFIER) {
+                return std::nullopt;
+            }
+
+            Token name_tok = current_token();
+            const auto& current_record = cxx_record_parse_stack_.back();
+            if (current_record.name.empty() ||
+                name_tok.value != current_record.name) {
+                return std::nullopt;
+            }
+
+            TokenType after_name = peek_token().type;
+            if (after_name != TokenType::COMMA &&
+                after_name != TokenType::GREATER_THAN &&
+                after_name != TokenType::RIGHT_SHIFT &&
+                after_name != TokenType::ASSIGN_RSHIFT &&
+                after_name != TokenType::ELLIPSIS) {
+                return std::nullopt;
+            }
+
+            RevertingTentativeParsingAction tentative(*this);
+            try {
+                DeclarationParser type_parser(this);
+                auto parsed_type = type_parser.parse_declaration();
+                if (!parsed_type ||
+                    !type_parser.name.empty() ||
+                    type_parser.str_class != StorageClass::NONE ||
+                    !(is_cpp_template_argument_boundary_here() ||
+                      gentle_check(TokenType::ELLIPSIS))) {
+                    return std::nullopt;
+                }
+
+                QualType parsed_argument_type(
+                    parsed_type,
+                    type_parser.qualifiers);
+                if (!cpp_qualifier_is_current_instantiation(
+                        name_tok.value,
+                        parsed_argument_type)) {
+                    return std::nullopt;
+                }
+                if (current_record.current_instantiation_type &&
+                    !parsed_argument_type.equals_unqualified(
+                        current_record.current_instantiation_type)) {
+                    return std::nullopt;
+                }
+
+                tentative.commit();
+                return TemplateArgument(parsed_argument_type);
+            } catch (const ParseError&) {
+            } catch (const FatalErrorLimitReached&) {
+                throw;
+            }
+            return std::nullopt;
+        };
+
+    if (auto current_instantiation_argument =
+            try_parse_injected_current_instantiation_type_argument()) {
+        return finalize_template_argument(
+            std::move(*current_instantiation_argument));
+    }
+
     if (auto template_argument = try_parse_cpp_template_name_argument()) {
         return finalize_template_argument(std::move(*template_argument));
     }
@@ -7258,12 +7323,33 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
     }
     QualType semantic_owner_record_type =
         semantic_owner ? QualType(semantic_owner->get_record_type()) : QualType();
+    QualType current_instantiation_type;
+    if (primary_class_template && !name.empty()) {
+        bool has_record_specialization_argument_list =
+            has_specialization_argument_list_out &&
+            *has_specialization_argument_list_out &&
+            specialization_arguments_out;
+        if (has_record_specialization_argument_list) {
+            current_instantiation_type =
+                build_cpp_current_instantiation_type(
+                    primary_class_template,
+                    name,
+                    *specialization_arguments_out);
+        } else {
+            current_instantiation_type =
+                build_cpp_primary_current_instantiation_type(
+                    primary_class_template,
+                    name,
+                    key_tok.loc);
+        }
+    }
     cxx_record_parse_stack_.push_back(
         CppRecordParseFrame{
             record_kind,
             name,
             semantic_owner,
-            primary_class_template});
+            primary_class_template,
+            current_instantiation_type});
     struct CppRecordStackGuard {
         std::vector<Parser::CppRecordParseFrame>* stack = nullptr;
         ~CppRecordStackGuard() {

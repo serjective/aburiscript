@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <limits>
 #include <set>
+#include <type_traits>
 
 bool is_c23_family_standard(const std::string& std_name);
 
@@ -1437,6 +1438,25 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
     }
     collect_->query_publish_record_semantics(placeholder_decl,
                                              std::move(semantic_state));
+    const ClassTemplateDecl* current_instantiation_primary = nullptr;
+    QualType current_instantiation_type;
+    if constexpr (std::is_same_v<TemplateDeclT, ClassTemplateDecl>) {
+        current_instantiation_primary = &class_template;
+        current_instantiation_type =
+            build_cpp_primary_current_instantiation_type(
+                current_instantiation_primary,
+                record->name,
+                record->location);
+    } else if constexpr (
+        std::is_same_v<TemplateDeclT,
+                       ClassTemplatePartialSpecializationDecl>) {
+        current_instantiation_primary = class_template.primary_template();
+        current_instantiation_type =
+            build_cpp_current_instantiation_type(
+                current_instantiation_primary,
+                record->name,
+                class_template.specialization_arguments);
+    }
 
     struct DeferredInlineParserState {
         size_t token_idx = 0;
@@ -1654,7 +1674,12 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             }
 
             cxx_record_parse_stack_.push_back(
-                CppRecordParseFrame{record->record_kind, record->name});
+                CppRecordParseFrame{
+                    record->record_kind,
+                    record->name,
+                    placeholder_decl,
+                    current_instantiation_primary,
+                    current_instantiation_type});
             bool pop_record_parse_frame = true;
 
             try {
