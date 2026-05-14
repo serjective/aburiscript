@@ -452,6 +452,59 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
             bool followed_by_left_paren = false;
         } result;
 
+        auto skip_template_argument_list_at = [&](size_t& at) -> bool {
+            if (peek_token_shortcut(at).type != TokenType::LESS_THAN) {
+                return true;
+            }
+
+            std::vector<TokenType> close_stack;
+            close_stack.push_back(TokenType::GREATER_THAN);
+            ++at;
+            while (!close_stack.empty()) {
+                TokenType tok = peek_token_shortcut(at).type;
+                if (tok == TokenType::Eof) {
+                    return false;
+                }
+
+                TokenType expected_close = close_stack.back();
+                if (expected_close == TokenType::GREATER_THAN) {
+                    if (tok == TokenType::GREATER_THAN) {
+                        close_stack.pop_back();
+                        ++at;
+                        continue;
+                    }
+                    if (tok == TokenType::RIGHT_SHIFT) {
+                        close_stack.pop_back();
+                        if (!close_stack.empty() &&
+                            close_stack.back() == TokenType::GREATER_THAN) {
+                            close_stack.pop_back();
+                        }
+                        ++at;
+                        continue;
+                    }
+                    if (tok == TokenType::LESS_THAN) {
+                        close_stack.push_back(TokenType::GREATER_THAN);
+                        ++at;
+                        continue;
+                    }
+                } else if (tok == expected_close) {
+                    close_stack.pop_back();
+                    ++at;
+                    continue;
+                }
+
+                if (tok == TokenType::LEFT_PAREN) {
+                    close_stack.push_back(TokenType::RIGHT_PAREN);
+                } else if (tok == TokenType::LEFT_BRACKET) {
+                    close_stack.push_back(TokenType::RIGHT_BRACKET);
+                } else if (tok == TokenType::LEFT_BRACE) {
+                    close_stack.push_back(TokenType::RIGHT_BRACE);
+                }
+                ++at;
+            }
+            return true;
+        };
+
         size_t offset = 0;
         auto consume_scope_at = [&](size_t& at) -> bool {
             Token tok = peek_token_shortcut(at);
@@ -472,6 +525,9 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
             return result;
         }
         ++offset;
+        if (!skip_template_argument_list_at(offset)) {
+            return result;
+        }
         while (consume_scope_at(offset)) {
             saw_scope = true;
             if (peek_token_shortcut(offset).type == TokenType::TEMPLATE) {
@@ -481,6 +537,9 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
                 return result;
             }
             ++offset;
+            if (!skip_template_argument_list_at(offset)) {
+                return result;
+            }
         }
         result.is_qualified = saw_scope;
         TokenType following_token = peek_token_shortcut(offset).type;
@@ -500,8 +559,8 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
     }
     if (!qualified_scan.is_qualified &&
         current_token().type == TokenType::IDENTIFIER &&
-        peek_token().type != TokenType::LEFT_PAREN &&
-        peek_token().type != TokenType::LEFT_BRACE) {
+        !qualified_scan.followed_by_left_paren &&
+        !qualified_scan.followed_by_left_brace) {
         return nullptr;
     }
     if (starts_with_cpp_dependent_qualified_call_expression()) {

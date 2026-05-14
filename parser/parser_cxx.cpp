@@ -558,6 +558,23 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
         return std::nullopt;
     }
 
+    if (!has_global_qualifier && components.size() == 1 &&
+        !terminal_component.preceded_by_template_keyword) {
+        if (collect_->collect_lookup_typedef_symbol(
+                terminal_component.name,
+                true)) {
+            return std::nullopt;
+        }
+        QualType current_record_type =
+            collect_->collect_current_cpp_record_lookup_type();
+        if (current_record_type &&
+            collect_->collect_lookup_record_nested_type(
+                current_record_type,
+                terminal_component.name)) {
+            return std::nullopt;
+        }
+    }
+
     auto format_template_name_argument =
         [&](const std::vector<CppQualifiedNameComponent>& parts) {
             std::string spelled;
@@ -1301,31 +1318,6 @@ Parser::try_parse_cpp_named_type_specifier() {
                         continue;
                     }
 
-                    if (is_last_component &&
-                        !is_in_template_pattern_context() &&
-                        lang_opts.is_cxx17_or_later()) {
-                        const Decl* primary_template =
-                            lookup_type_template_in_scope(
-                                lookup_scope,
-                                allow_enclosing_lookup,
-                                component.name);
-                        const auto* class_template =
-                            dyn_cast<ClassTemplateDecl>(
-                                primary_template);
-                        if (class_template) {
-                            resolved_type =
-                                QualType(std::make_shared<TemplateSpecializationType>(
-                                    qualified_name_utils::format_cpp_qualified_name(
-                                        has_global_qualifier,
-                                        resolved_prefix,
-                                        component.name),
-                                    class_template,
-                                    std::vector<TemplateArgument>{},
-                                    false,
-                                    true));
-                        }
-                    }
-
                     std::shared_ptr<Symbol> typedef_symbol = nullptr;
                     if (!resolved_type) {
                         resolved_type = lookup_typedef_type_in_scope(
@@ -1343,12 +1335,6 @@ Parser::try_parse_cpp_named_type_specifier() {
                     if (!resolved_type) {
                         resolved_type =
                             lookup_cpp_current_record_nested_type(component.name);
-                    }
-                    if (!resolved_type) {
-                        resolved_type = lookup_tag_type_in_scope(
-                            lookup_scope,
-                            allow_enclosing_lookup,
-                            component.name);
                     }
                     if (!resolved_type &&
                         is_last_component &&
@@ -1374,6 +1360,12 @@ Parser::try_parse_cpp_named_type_specifier() {
                                     false,
                                     true));
                         }
+                    }
+                    if (!resolved_type) {
+                        resolved_type = lookup_tag_type_in_scope(
+                            lookup_scope,
+                            allow_enclosing_lookup,
+                            component.name);
                     }
                     if (!resolved_type) {
                         restore();

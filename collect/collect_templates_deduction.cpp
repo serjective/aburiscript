@@ -850,8 +850,13 @@ bool deduce_template_argument_types_impl(
             deduction_mode);
     }
 
+    auto spelled_argument = desugar_typedefs(argument_type);
+    if (deduction_mode != TemplateTypeDeductionMode::Call &&
+        spelled_pattern.get_qualifiers() != spelled_argument.get_qualifiers()) {
+        return false;
+    }
     spelled_pattern = strip_top_level_qualifiers(spelled_pattern);
-    auto spelled_argument = strip_top_level_qualifiers(desugar_typedefs(argument_type));
+    spelled_argument = strip_top_level_qualifiers(spelled_argument);
     auto argument_raw = spelled_argument.get_shared();
     if (!argument_raw) {
         return false;
