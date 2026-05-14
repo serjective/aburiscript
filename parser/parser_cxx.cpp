@@ -126,6 +126,26 @@ Parser::try_parse_cpp_overloadable_operator_function_id_name_after_operator_keyw
         return name;
     }
 
+    if (gentle_check(TokenType::STRING_LITERAL)) {
+        Token literal_token = current_token();
+        advance();
+        if (literal_token.literal_prefix != LiteralPrefix::None ||
+            !literal_token.value.empty()) {
+            error_custloc(
+                "literal operator name requires an empty string literal after 'operator'",
+                literal_token.loc);
+        }
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            error_custloc(
+                "expected identifier suffix in literal operator name",
+                current_token().loc);
+            return make_operator_name("\"\"");
+        }
+        std::string literal_suffix = current_token().value;
+        advance();
+        return make_operator_name("\"\"" + literal_suffix);
+    }
+
     if (gentle_check(TokenType::NEW)) {
         advance(); // consume 'new'
         if (auto name = consume_paired_operator(

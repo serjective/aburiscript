@@ -449,6 +449,7 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
         struct Result {
             bool is_qualified = false;
             bool followed_by_left_brace = false;
+            bool followed_by_left_paren = false;
         } result;
 
         size_t offset = 0;
@@ -482,16 +483,19 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
             ++offset;
         }
         result.is_qualified = saw_scope;
-        result.followed_by_left_brace =
-            peek_token_shortcut(offset).type == TokenType::LEFT_BRACE;
+        TokenType following_token = peek_token_shortcut(offset).type;
+        result.followed_by_left_brace = following_token == TokenType::LEFT_BRACE;
+        result.followed_by_left_paren = following_token == TokenType::LEFT_PAREN;
         return result;
     };
-    // Keep non-braced qualified-ids on the existing qualified-id expression
+    // Keep non-construction qualified-ids on the existing qualified-id expression
     // path. Tentative declaration parsing can diagnose or attach semantic
-    // state even when reverted, so only probe the qualified form needed here:
-    // qualified type list-initialization such as `N::T{}`.
+    // state even when reverted, so only probe qualified type construction
+    // forms such as `N::T{}` and `N::T(...)`.
     auto qualified_scan = qualified_id_brace_scan();
-    if (qualified_scan.is_qualified && !qualified_scan.followed_by_left_brace) {
+    if (qualified_scan.is_qualified &&
+        !qualified_scan.followed_by_left_brace &&
+        !qualified_scan.followed_by_left_paren) {
         return nullptr;
     }
     if (!qualified_scan.is_qualified &&
