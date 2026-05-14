@@ -51,6 +51,8 @@ struct ClassTemplateDecl;
 struct VariableTemplatePartialSpecializationDecl;
 struct ClassTemplatePartialSpecializationDecl;
 
+bool template_decls_share_lookup_identity(const Decl* lhs, const Decl* rhs);
+
 using TemplateParameterList = std::vector<std::unique_ptr<TemplateParameterDecl>>;
 
 enum class TypeKind {
@@ -1256,7 +1258,8 @@ struct TemplateSpecializationType : CType {
         }
         const auto& rhs = static_cast<const TemplateSpecializationType&>(other);
         if (primary_template && rhs.primary_template &&
-            primary_template != rhs.primary_template) {
+            !template_decls_share_lookup_identity(primary_template,
+                                                  rhs.primary_template)) {
             return false;
         }
         if (template_name != rhs.template_name ||

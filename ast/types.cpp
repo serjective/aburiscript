@@ -1327,8 +1327,9 @@ bool template_template_parameter_types_match(QualType formal_type,
         }
         if (formal_specialization->primary_template &&
             actual_specialization->primary_template &&
-            formal_specialization->primary_template !=
-                actual_specialization->primary_template) {
+            !template_decls_share_lookup_identity(
+                formal_specialization->primary_template,
+                actual_specialization->primary_template)) {
             return false;
         }
         if ((!formal_specialization->primary_template ||

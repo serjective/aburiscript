@@ -972,8 +972,9 @@ bool deduce_template_argument_types_impl(
         } else {
             if (pattern_specialization->primary_template &&
                 argument_specialization->primary_template &&
-                pattern_specialization->primary_template !=
-                    argument_specialization->primary_template) {
+                !template_decls_share_lookup_identity(
+                    pattern_specialization->primary_template,
+                    argument_specialization->primary_template)) {
                 return false;
             }
             if ((!pattern_specialization->primary_template ||

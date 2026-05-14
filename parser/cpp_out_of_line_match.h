@@ -440,8 +440,9 @@ inline bool cpp_out_of_line_type_matches(QualType lhs,
         }
         if (lhs_specialization->primary_template &&
             rhs_specialization->primary_template &&
-            lhs_specialization->primary_template !=
-                rhs_specialization->primary_template) {
+            !template_decls_share_lookup_identity(
+                lhs_specialization->primary_template,
+                rhs_specialization->primary_template)) {
             return false;
         }
         for (size_t idx = 0; idx < lhs_specialization->arguments.size(); ++idx) {
