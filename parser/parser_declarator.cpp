@@ -96,6 +96,7 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
         is_block_byref = false;
         is_constexpr = false;
         is_consteval = false;
+        is_mutable = false;
         is_inline = false;
         explicit_specifier = CppExplicitSpecifier{};
         bool parsing = true;
@@ -159,7 +160,9 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     if (!is_class_keyword) {
                         // Keep legacy anonymous struct/union declarators in the
                         // C-style parser path for now; named records use C++ parsing.
-                        {
+                        if (mgnt->peek_token().type == TokenType::IDENTIFIER) {
+                            cpp_record_obj = pars->parse_cpp_record_specifier();
+                        } else {
                             // Probe using C++ record parsing so named records get
                             // full semantic construction, but fall back cleanly to
                             // C-style handling for anonymous struct/union declarators.
@@ -293,6 +296,13 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     // Storage Class Specifiers
                 case TokenType::STATIC:   tally.static_count++; break;
                 case TokenType::EXTERN:   tally.extern_count++; break;
+                case TokenType::MUTABLE_KW:
+                    if (!pars->is_cxx_mode_active()) {
+                        parsing = false;
+                        continue;
+                    }
+                    tally.mutable_count++;
+                    break;
                 case TokenType::AUTO:
                     if (pars->is_cxx_mode_active()) {
                         tally.cxx_auto_count++;
@@ -579,6 +589,7 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
         is_inline = tally.inline_count > 0 || is_consteval;
         is_thread_local = tally.thread_local_count > 0;
         is_constexpr = tally.constexpr_count > 0 || is_consteval;
+        is_mutable = tally.mutable_count > 0;
         base_qualifiers = qualifiers; // save base qualifiers for multi-declarator lists
 
         // If we have a struct type, use it

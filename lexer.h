@@ -138,6 +138,7 @@ enum class TokenType {
     VIRTUAL_KW,
     FRIEND_KW,
     EXPLICIT_KW,
+    MUTABLE_KW,
     CONSTEXPR_KW,
     CONSTEVAL_KW,
     CONCEPT_KW,
@@ -303,6 +304,7 @@ struct Token {
             case TokenType::VIRTUAL_KW:
             case TokenType::FRIEND_KW:
             case TokenType::EXPLICIT_KW:
+            case TokenType::MUTABLE_KW:
             case TokenType::CONSTEXPR_KW:
             case TokenType::CONSTEVAL_KW:
             case TokenType::CONCEPT_KW:

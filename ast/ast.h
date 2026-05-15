@@ -2869,6 +2869,7 @@ private:
 struct FieldDecl : Decl {
     QualType type;
     std::string name;  // Empty for anonymous fields / anonymous bitfields
+    bool is_mutable = false;
 
     // Bitfield support: UINT32_MAX means "not a bitfield".
     static constexpr uint32_t k_no_bitfield_width = UINT32_MAX;
@@ -2880,13 +2881,13 @@ struct FieldDecl : Decl {
     // Regular field constructor
     FieldDecl(QualType type, const std::string &name, SrcLoc loc = SrcLoc())
         : Decl(DeclKind::FieldDecl, loc), type(std::move(type)), name(name),
-          bitfield_width(k_no_bitfield_width) {}
+          is_mutable(false), bitfield_width(k_no_bitfield_width) {}
 
     // Bitfield constructor
     FieldDecl(QualType type, const std::string &name,
               uint32_t bf_width, SrcLoc loc = SrcLoc())
         : Decl(DeclKind::FieldDecl, loc), type(std::move(type)), name(name),
-          bitfield_width(bf_width) {}
+          is_mutable(false), bitfield_width(bf_width) {}
 
     static bool classof(const Decl *d) { return d->get_kind() == DeclKind::FieldDecl; }
 };

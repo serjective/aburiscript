@@ -1188,6 +1188,9 @@ bool rebind_member_expr_for_specialized_record(MemberExpr* member,
         } else {
             base_quals = remove_reference(base_type).get_qualifiers();
         }
+        if (field.is_mutable) {
+            base_quals = static_cast<uint8_t>(base_quals & ~QUAL_CONST);
+        }
         if (base_quals != QUAL_NONE && member->member_type) {
             member->member_type = member->member_type.with_qualifiers(base_quals);
         }

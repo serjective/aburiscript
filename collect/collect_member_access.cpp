@@ -157,6 +157,9 @@ QualType Collect::try_synthesize_dependent_member_type(
         base_quals =
             remove_reference(base_type, ast_ctx_.get()).get_qualifiers();
     }
+    if (lookup.field->is_mutable) {
+        base_quals = static_cast<uint8_t>(base_quals & ~QUAL_CONST);
+    }
     if (base_quals != QUAL_NONE && member_type) {
         member_type = member_type.with_qualifiers(base_quals);
     }
@@ -971,6 +974,9 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
     } else {
         base_quals =
             remove_reference(member->base->get_type(), ast_ctx_.get()).get_qualifiers();
+    }
+    if (lookup.field->is_mutable) {
+        base_quals = static_cast<uint8_t>(base_quals & ~QUAL_CONST);
     }
     if (base_quals != QUAL_NONE && member->member_type) {
         member->member_type = member->member_type.with_qualifiers(base_quals);

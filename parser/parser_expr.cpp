@@ -271,6 +271,7 @@ bool Parser::is_lambda_declarator_parameter_clause_ahead() {
         after.type == TokenType::CONSTEXPR_KW ||
         after.type == TokenType::CONSTEVAL_KW ||
         after.type == TokenType::ARROW ||
+        after.type == TokenType::MUTABLE_KW ||
         after.type == TokenType::REQUIRES_KW) {
         return true;
     }
@@ -1592,8 +1593,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
         }
 
         while (true) {
-            if (gentle_check(TokenType::IDENTIFIER) &&
-                current_token().value == "mutable") {
+            if (gentle_check(TokenType::MUTABLE_KW)) {
                 if (is_mutable) {
                     error_custloc(
                         "duplicate 'mutable' in lambda declarator",

@@ -1100,6 +1100,12 @@ private:
                 case TokenType::EXTENSION_KW:
                 case TokenType::CONSTEXPR_KW:
                 case TokenType::CONSTEVAL_KW:
+                case TokenType::MUTABLE_KW:
+                    if (tok == TokenType::MUTABLE_KW && !cfg_.cxx_mode) {
+                        return saw_specifier
+                            ? SpecScanStatus::Matched
+                            : SpecScanStatus::NoMatch;
+                    }
                     saw_specifier = true;
                     advance();
                     continue;

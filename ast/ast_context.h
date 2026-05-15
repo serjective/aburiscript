@@ -64,6 +64,7 @@ struct CppMemberDeclInfo {
     bool is_pure = false;
     bool is_constexpr = false;
     bool is_consteval = false;
+    bool is_mutable = false;
     CppMemberRefQualifier ref_qualifier = CppMemberRefQualifier::None;
 };
 

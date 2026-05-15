@@ -2352,6 +2352,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 member_info.is_static = false;
                 member_info.is_constructor = false;
                 member_info.is_destructor = false;
+                member_info.is_mutable = field_decl->is_mutable;
                 ast_ctx_->set_cpp_member_decl_info(field_decl->node_id, member_info);
             }
             std::string alignment_error;
@@ -2374,14 +2375,16 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                     0,
                     field_decl->bitfield_width,
                     0,
-                    current_access);
+                    current_access,
+                    field_decl->is_mutable);
                 ctx.fields.back().forced_alignment = forced_alignment;
             } else {
                 ctx.fields.emplace_back(
                     field_decl->name,
                     field_decl->type,
                     0,
-                    current_access);
+                    current_access,
+                    field_decl->is_mutable);
                 ctx.fields.back().forced_alignment = forced_alignment;
             }
             bool requires_ctor_member_init =

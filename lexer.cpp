@@ -150,6 +150,7 @@ const std::unordered_map<std::string_view, TokenType>& cxx_keyword_table() {
         {"virtual", TokenType::VIRTUAL_KW},
         {"friend", TokenType::FRIEND_KW},
         {"explicit", TokenType::EXPLICIT_KW},
+        {"mutable", TokenType::MUTABLE_KW},
         {"constexpr", TokenType::CONSTEXPR_KW},
         {"consteval", TokenType::CONSTEVAL_KW},
     };
@@ -1440,6 +1441,7 @@ std::string token_type_to_string(TokenType type) {
         case TokenType::VIRTUAL_KW: return "'virtual'";
         case TokenType::FRIEND_KW: return "'friend'";
         case TokenType::EXPLICIT_KW: return "'explicit'";
+        case TokenType::MUTABLE_KW: return "'mutable'";
         case TokenType::CONSTEXPR_KW: return "'constexpr'";
         case TokenType::CONSTEVAL_KW: return "'consteval'";
         case TokenType::CONCEPT_KW: return "'concept'";

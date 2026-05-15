@@ -3408,10 +3408,17 @@ std::vector<ObjectType::Field> build_decl_record_fields(
                 0,
                 0,
                 field_decl->bitfield_width,
-                0);
+                0,
+                RecordMemberAccess::Public,
+                field_decl->is_mutable);
             continue;
         }
-        fields.emplace_back(field_decl->name, field_decl->type, 0);
+        fields.emplace_back(
+            field_decl->name,
+            field_decl->type,
+            0,
+            RecordMemberAccess::Public,
+            field_decl->is_mutable);
     }
     return fields;
 }

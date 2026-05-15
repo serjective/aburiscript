@@ -2557,6 +2557,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                     field_decl->name,
                     field_decl->location);
             }
+            result->is_mutable = field_decl->is_mutable;
             assign_node_id(result.get(), ctx.ast_ctx);
             if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;

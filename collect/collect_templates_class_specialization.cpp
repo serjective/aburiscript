@@ -1983,14 +1983,16 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                                      0,
                                      field_decl->bitfield_width,
                                      0,
-                                     declared_access);
+                                     declared_access,
+                                     field_decl->is_mutable);
             user_fields.back().forced_alignment = forced_alignment;
         } else {
             user_fields.emplace_back(
                 field_decl->name,
                 substituted_type,
                 0,
-                declared_access);
+                declared_access,
+                field_decl->is_mutable);
             user_fields.back().forced_alignment = forced_alignment;
         }
         return true;

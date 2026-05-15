@@ -3119,6 +3119,11 @@ Parser::DeclaratorHandlingResult Parser::handle_typedef_declarator(
             "'explicit' is only allowed on constructors and conversion functions",
             decl_parser.explicit_specifier.location);
     }
+    if (decl_parser.is_mutable) {
+        error_custloc(
+            "'mutable' cannot be applied to typedef declarations",
+            decl_parser.begin_loc);
+    }
     if (declaration_is_constexpr || declaration_is_consteval) {
         error("'constexpr' or 'consteval' cannot be combined with 'typedef'");
     }
@@ -3205,6 +3210,11 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                 ? "'explicit' is only allowed on declarations inside a class definition"
                 : "'explicit' is only allowed on constructors and conversion functions",
             decl_parser.explicit_specifier.location);
+    }
+    if (decl_parser.is_mutable) {
+        error_custloc(
+            "'mutable' cannot be applied to functions",
+            decl_parser.begin_loc);
     }
     if (qualified_declarator.owner_record_decl) {
         bool matched_member_template =
@@ -3800,6 +3810,11 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
         error_custloc(
             "'explicit' is only allowed on constructors and conversion functions",
             decl_parser.explicit_specifier.location);
+    }
+    if (decl_parser.is_mutable) {
+        error_custloc(
+            "'mutable' can only be applied to non-static data members",
+            decl_parser.begin_loc);
     }
     auto has_cxx_auto_type = [&](const std::shared_ptr<CType>& type) -> bool {
         return auto_type_utils::has_cxx_auto_type(type);
@@ -4403,6 +4418,9 @@ std::unique_ptr<Decl> Parser::parse_parameter_declaration() {
     if (decl_parser.explicit_specifier.is_present) {
         error("'explicit' is not valid for function parameter declarations");
     }
+    if (decl_parser.is_mutable) {
+        error("'mutable' is not valid for function parameter declarations");
+    }
     std::shared_ptr<Symbol> sym = nullptr;
     if (!name.empty()) {
         sym = collect_->collect_declare_variable_symbol(
@@ -4465,6 +4483,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             }
             if (param_parser->explicit_specifier.is_present) {
                 error("'explicit' is not valid for function parameter declarations");
+            }
+            if (param_parser->is_mutable) {
+                error("'mutable' is not valid for function parameter declarations");
             }
             if (param_parser->result_type &&
                 param_parser->result_type->isVoid()) {
@@ -4539,6 +4560,27 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
         CppExplicitSpecifier member_explicit_specifier =
             decl_parser.explicit_specifier;
         bool member_explicit = member_explicit_specifier.effective_value;
+        auto declared_field_type = [&]() {
+            return QualType(field_type, decl_parser.qualifiers);
+        };
+        auto validate_mutable_data_member = [&]() {
+            if (!decl_parser.is_mutable) {
+                return;
+            }
+            QualType field_qual_type = declared_field_type();
+            if (field_qual_type.is_const()) {
+                error_custloc(
+                    "'mutable' and 'const' cannot be mixed",
+                    decl_parser.begin_loc);
+            }
+            auto canonical_field_type =
+                desugar_type(field_qual_type, ast_ctx.get());
+            if (canonical_field_type.as_shared<ReferenceType>()) {
+                error_custloc(
+                    "'mutable' cannot be applied to references",
+                    decl_parser.begin_loc);
+            }
+        };
 
         // Parse attributes that appear right after the declarator.
         auto field_attrs_before_colon = try_parse_attributes();
@@ -4549,6 +4591,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             cxx_record_parse_stack_.back().kind != CppRecordKind::Union &&
             field_type &&
             canonical_type_kind(field_type) == TypeKind::Function) {
+            if (decl_parser.is_mutable) {
+                error_custloc(
+                    "'mutable' cannot be applied to functions",
+                    decl_parser.begin_loc);
+            }
             std::string record_name =
                 !cxx_record_parse_stack_.empty()
                     ? cxx_record_parse_stack_.back().name
@@ -5309,6 +5356,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
         bool is_static_data_member_decl =
             in_cpp_named_class_body &&
             decl_parser.str_class == StorageClass::STATIC;
+        if (decl_parser.is_mutable && is_static_data_member_decl) {
+            error_custloc(
+                "'mutable' cannot be applied to static data members",
+                decl_parser.begin_loc);
+        }
         if (in_cpp_named_class_body &&
             decl_parser.str_class != StorageClass::NONE &&
             decl_parser.str_class != StorageClass::STATIC &&
@@ -5317,6 +5369,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
         }
 
         if (is_typedef_member_decl) {
+            if (decl_parser.is_mutable) {
+                error_custloc(
+                    "'mutable' cannot be applied to typedef declarations",
+                    decl_parser.begin_loc);
+            }
             handle_typedef_declarator(
                 decl_parser,
                 t,
@@ -5349,6 +5406,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             if (is_static_data_member_decl) {
                 error("static data member declaration cannot be a bitfield");
             }
+            validate_mutable_data_member();
             auto width_expr = parse_conditional_expression();
             auto width_val = try_evaluate_with_consteval_compat(
                 width_expr.get(), ConstEvalMode::c_ice());
@@ -5375,6 +5433,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 field_name,
                 static_cast<uint32_t>(bitfield_width),
                 t.loc);
+            if (auto* parsed_field = dyn_cast<FieldDecl>(field_decl.get())) {
+                parsed_field->is_mutable = decl_parser.is_mutable;
+            }
             ast_ctx->append_attrs(field_decl->node_id, std::move(decl_parser.leading_attrs));
             ast_ctx->append_attrs(field_decl->node_id, std::move(field_attrs_before_colon));
             ast_ctx->append_attrs(field_decl->node_id, std::move(field_attrs_after_width));
@@ -5449,6 +5510,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 break;
             }
             // Not a bitfield - regular field
+            validate_mutable_data_member();
             // Check if we got a name - allow anonymous struct/union fields
             if (field_name.empty()) {
                 auto obj_type = dyn_cast_shared<ObjectType>(field_type);
@@ -5461,6 +5523,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 QualType(field_type, decl_parser.qualifiers),
                 field_name,
                 t.loc);
+            if (auto* parsed_field = dyn_cast<FieldDecl>(field_decl.get())) {
+                parsed_field->is_mutable = decl_parser.is_mutable;
+            }
             ast_ctx->append_attrs(field_decl->node_id, std::move(decl_parser.leading_attrs));
             ast_ctx->append_attrs(field_decl->node_id, std::move(field_attrs_before_colon));
             fields.push_back(std::move(field_decl));
@@ -6249,6 +6314,9 @@ bool Parser::isTokenDeclarationSpec(Token s) {
         return is_cxx_mode_active();
     }
     if (s.type == TokenType::EXPLICIT_KW) {
+        return is_cxx_mode_active();
+    }
+    if (s.type == TokenType::MUTABLE_KW) {
         return is_cxx_mode_active();
     }
     if ((s.type == TokenType::CONSTEXPR_KW) ||

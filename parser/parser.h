@@ -896,6 +896,7 @@ struct DeclarationParser {
     std::unique_ptr<Expr> default_argument = nullptr;
     bool is_kr_style = false;
     bool is_parameter_pack = false;
+    bool is_mutable = false;
     SrcLoc loc;
     bool arrays_are_pointers; // If this is true, then arrays are parsed as pointer types
     bool in_function_parameter; // Parsing a parameter declarator (enables C array-parameter forms)
@@ -912,6 +913,7 @@ struct DeclarationParser {
             signed_count = 0, unsigned_count = 0, complex_count = 0, int128_count = 0,
             float16_count = 0;
         int static_count = 0, extern_count = 0, auto_count = 0, register_count = 0, typedef_count = 0;
+        int mutable_count = 0;
         int constexpr_count = 0;
         int consteval_count = 0;
         int inline_count = 0;
@@ -1087,6 +1089,9 @@ struct DeclarationParser {
             } else {
                 error_custloc("Too many storage class specifiers", begin_loc);
             }
+        }
+        if (tally.mutable_count > 1) {
+            error_custloc("duplicate 'mutable' specifier", begin_loc);
         }
         // _Thread_local can only combine with static or extern
         if (tally.thread_local_count) {
