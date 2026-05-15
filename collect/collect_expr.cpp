@@ -1102,6 +1102,61 @@ QualType build_lambda_call_operator_type(const CppLambdaExpr& lambda,
     return QualType(call_operator_type);
 }
 
+const ObjectDecl* lambda_this_record_identity(QualType this_type,
+                                              const ASTContext* ast_ctx) {
+    auto this_ptr = desugar_type(this_type, ast_ctx).as_shared<PointerType>();
+    if (!this_ptr) {
+        return nullptr;
+    }
+
+    QualType pointee = desugar_type(this_ptr->pointed_type, ast_ctx);
+    if (auto object = pointee.as_shared<ObjectType>()) {
+        if (const ClassTemplateDecl* primary =
+                object->get_primary_class_template()) {
+            return canonical_record_decl(primary->pattern_semantic_decl());
+        }
+        return canonical_record_decl(dyn_cast<ObjectDecl>(object->get_decl()));
+    }
+
+    if (auto specialization =
+            pointee.as_shared<TemplateSpecializationType>()) {
+        auto* primary = dyn_cast<ClassTemplateDecl>(
+            const_cast<Decl*>(specialization->primary_template));
+        return primary
+            ? canonical_record_decl(primary->pattern_semantic_decl())
+            : nullptr;
+    }
+
+    return nullptr;
+}
+
+bool lambda_enclosing_this_types_match(QualType rewritten_this_type,
+                                       QualType lexical_this_type,
+                                       const ASTContext* ast_ctx) {
+    if (!rewritten_this_type || !lexical_this_type) {
+        return false;
+    }
+    if (rewritten_this_type.equals_unqualified(lexical_this_type)) {
+        return true;
+    }
+
+    QualType rewritten_canonical =
+        desugar_type(rewritten_this_type, ast_ctx);
+    QualType lexical_canonical =
+        desugar_type(lexical_this_type, ast_ctx);
+    if (rewritten_canonical &&
+        lexical_canonical &&
+        rewritten_canonical.equals_unqualified(lexical_canonical)) {
+        return true;
+    }
+
+    const ObjectDecl* rewritten_record =
+        lambda_this_record_identity(rewritten_this_type, ast_ctx);
+    const ObjectDecl* lexical_record =
+        lambda_this_record_identity(lexical_this_type, ast_ctx);
+    return rewritten_record && rewritten_record == lexical_record;
+}
+
 std::vector<BlockCapture> build_block_semantic_captures(
     const BlockExpr& block,
     const ASTContext* ast_ctx) {
@@ -1879,8 +1934,10 @@ bool Collect::finalize_cpp_lambda_semantics(
                 !this_expr->this_type) {
                 return true;
             }
-            if (!this_expr->this_type.equals_unqualified(
-                    lambda.semantic_info.lexical_this_context.this_type)) {
+            if (!lambda_enclosing_this_types_match(
+                    this_expr->this_type,
+                    lambda.semantic_info.lexical_this_context.this_type,
+                    ast_ctx_.get())) {
                 return true;
             }
 
