@@ -334,6 +334,44 @@ public:
         return finalize_deferred_semantic_type(type, loc);
     }
 
+    bool collect_has_diagnostic_engine() const {
+        return diag_engine_ != nullptr;
+    }
+
+    DiagnosticEngine::Checkpoint collect_diagnostic_checkpoint() const {
+        return diag_engine_ ? diag_engine_->checkpoint()
+                            : DiagnosticEngine::Checkpoint{};
+    }
+
+    bool collect_diagnostics_changed_since(
+        const DiagnosticEngine::Checkpoint& checkpoint) const {
+        return diag_engine_ &&
+            (diag_engine_->error_count > checkpoint.error_count ||
+             diag_engine_->warning_count > checkpoint.warning_count ||
+             diag_engine_->diagnostics.size() > checkpoint.diagnostics_size);
+    }
+
+    void collect_restore_diagnostic_checkpoint(
+        const DiagnosticEngine::Checkpoint& checkpoint) {
+        if (diag_engine_) {
+            diag_engine_->restore(checkpoint);
+        }
+    }
+
+    std::vector<TemplateArgument> collect_substitute_template_arguments_with_bindings(
+        const std::vector<TemplateArgument>& arguments,
+        const TemplateParameterList& parameters,
+        const TemplateArgumentBindings& argument_bindings,
+        SrcLoc loc,
+        bool allow_unsubstituted_parameters = false) {
+        return substitute_template_arguments_with_bindings(
+            arguments,
+            parameters,
+            argument_bindings,
+            loc,
+            allow_unsubstituted_parameters);
+    }
+
     std::unique_ptr<Expr> collect_process_initializer_for_type(
         std::unique_ptr<Expr> init,
         QualType declared_type,
@@ -1180,6 +1218,31 @@ public:
         Collect* collect_ = nullptr;
     };
 
+    void enter_function_template_requirement_note_suppression() ;
+    void leave_function_template_requirement_note_suppression() ;
+    bool function_template_requirement_notes_suppressed() const ;
+
+    class FunctionTemplateRequirementNoteSuppressionScope {
+    public:
+        explicit FunctionTemplateRequirementNoteSuppressionScope(Collect* collect)
+            : collect_(collect) {
+            if (collect_) {
+                collect_->enter_function_template_requirement_note_suppression();
+            }
+        }
+        ~FunctionTemplateRequirementNoteSuppressionScope() {
+            if (collect_) {
+                collect_->leave_function_template_requirement_note_suppression();
+            }
+        }
+        FunctionTemplateRequirementNoteSuppressionScope(
+            const FunctionTemplateRequirementNoteSuppressionScope&) = delete;
+        FunctionTemplateRequirementNoteSuppressionScope& operator=(
+            const FunctionTemplateRequirementNoteSuppressionScope&) = delete;
+    private:
+        Collect* collect_ = nullptr;
+    };
+
     void enter_immediate_function_context() ;
 
     void leave_immediate_function_context() ;
@@ -1259,6 +1322,20 @@ private:
 public:
     bool finalize_cpp_lambda_semantics(CppLambdaExpr& lambda,
                                        std::string* error_out = nullptr);
+
+    FuncDecl* instantiate_function_template_specialization_for_clone(
+        const FunctionTemplateDecl* function_template,
+        const std::vector<TemplateArgument>& arguments,
+        SrcLoc loc,
+        std::shared_ptr<Symbol>* specialization_symbol_out = nullptr,
+        bool instantiate_definition = true) {
+        return instantiate_function_template_specialization(
+            function_template,
+            arguments,
+            loc,
+            specialization_symbol_out,
+            instantiate_definition);
+    }
 
     VariableDecl* instantiate_variable_template_specialization_for_clone(
         const VariableTemplateDecl* variable_template,
@@ -1350,6 +1427,13 @@ public:
     // Best-effort, non-diagnostic realization for parser validation paths that
     // need concrete aliases without finalizing a declaration.
     QualType try_realize_deferred_semantic_type(QualType type);
+
+    bool complete_partial_specialization_primary_arguments(
+        const TemplateDecl* primary_template,
+        const std::vector<TemplateArgument>& written_arguments,
+        SrcLoc loc,
+        std::vector<TemplateArgument>& completed_arguments_out,
+        std::string* error_out = nullptr);
 
 private:
     void collect_record_publish_state(ObjectDecl* semantic_decl,
@@ -1861,6 +1945,10 @@ private:
         SrcLoc loc,
         std::shared_ptr<Symbol>* specialization_symbol_out = nullptr,
         bool instantiate_definition = true) ;
+    void note_function_template_specialization_required(
+        const FunctionTemplateSpecializationInfo& specialization_info,
+        SrcLoc loc) ;
+    void instantiate_pending_required_function_template_specializations() ;
 
     VariableDecl* instantiate_variable_template_specialization(
         const VariableTemplateDecl* variable_template,
@@ -2625,6 +2713,7 @@ private:
         std::shared_ptr<GlobalIdentTracker> current_global_scope_ = nullptr;
         FunctionDefinitionState func_state_;
         QualType current_cpp_record_lookup_type_ = nullptr;
+        int function_template_requirement_note_suppression_depth_ = 0;
         std::vector<TentativeSnapshot> tentative_snapshots_;
         std::vector<FunctionDefinitionState> function_definition_stack_;
         std::vector<std::vector<TentativeSnapshot>>

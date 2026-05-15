@@ -198,6 +198,18 @@ bool is_strictly_better_conversion_profile(
             }
         }
         if (lhs_conversions[i].rank == Collect::ConversionSequenceRank::Conversion) {
+            int derived_binding_order =
+                compare_derived_to_base_reference_binding_sequences(
+                    lhs_conversions[i],
+                    rhs_conversions[i],
+                    get_active_side_table_ast_context());
+            if (derived_binding_order < 0) {
+                strictly_better = true;
+                continue;
+            }
+            if (derived_binding_order > 0) {
+                return false;
+            }
             int lhs_tiebreak = conversion_rank_tiebreak(lhs_conversions[i]);
             int rhs_tiebreak = conversion_rank_tiebreak(rhs_conversions[i]);
             if (lhs_tiebreak > rhs_tiebreak) {
@@ -2897,6 +2909,14 @@ bool Collect::overload_note_order_less(
                 }
             }
             if (lhs.conversions[i].rank == ConversionSequenceRank::Conversion) {
+                int derived_binding_order =
+                    compare_derived_to_base_reference_binding_sequences(
+                        lhs.conversions[i],
+                        rhs.conversions[i],
+                        get_active_side_table_ast_context());
+                if (derived_binding_order != 0) {
+                    return derived_binding_order < 0;
+                }
                 int lhs_tiebreak = conversion_rank_tiebreak(lhs.conversions[i]);
                 int rhs_tiebreak = conversion_rank_tiebreak(rhs.conversions[i]);
                 if (lhs_tiebreak != rhs_tiebreak) {

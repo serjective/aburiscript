@@ -531,6 +531,24 @@ std::vector<const ConceptDecl*> lookup_qualified_concepts(
     return concept_candidates;
 }
 
+bool function_template_specialization_requires_definition_now(
+    const FunctionTemplateSpecializationInfo& specialization_info) {
+    const auto* function_template = specialization_info.primary_template;
+    const auto* pattern =
+        function_template ? function_template->function_decl() : nullptr;
+    if (!pattern) {
+        return false;
+    }
+    if (pattern->is_constexpr || pattern->is_consteval) {
+        return true;
+    }
+    auto function_type = QualType(pattern->type).as_shared<FunctionType>();
+    return function_type &&
+        (auto_type_utils::has_cxx_auto_type(function_type->ret_type.get_shared()) ||
+         dyn_cast_shared<DecltypeExprType>(
+             desugar_typedefs(function_type->ret_type).get_shared()));
+}
+
 } // namespace
 
 std::vector<const ConceptDecl*> Collect::collect_lookup_concepts(
@@ -562,7 +580,11 @@ Collect::complete_selected_function_template_specialization_symbol(
         return nullptr;
     }
 
-    bool instantiate_definition = !in_unevaluated_context();
+    bool instantiate_definition =
+        !in_unevaluated_context() &&
+        (!session_.func_state_.in_function ||
+         function_template_specialization_requires_definition_now(
+             *specialization_info));
     std::shared_ptr<Symbol> completed_symbol = nullptr;
     auto* completed_decl = instantiate_function_template_specialization(
         specialization_info->primary_template,
@@ -572,6 +594,9 @@ Collect::complete_selected_function_template_specialization_symbol(
         instantiate_definition);
     if (!completed_decl || !completed_symbol) {
         return collect_make<ErrorExpr>(std::string(failure_message), loc);
+    }
+    if (!in_unevaluated_context()) {
+        note_function_template_specialization_required(*specialization_info, loc);
     }
     selected_symbol = std::move(completed_symbol);
     return nullptr;
@@ -2653,7 +2678,14 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
             continue;
         }
         std::shared_ptr<Symbol> specialization_symbol = nullptr;
-        bool instantiate_definition = !in_unevaluated_context();
+        FunctionTemplateSpecializationInfo specialization_info{
+            function_template,
+            specialization_arguments};
+        bool instantiate_definition =
+            !in_unevaluated_context() &&
+            (!session_.func_state_.in_function ||
+             function_template_specialization_requires_definition_now(
+                 specialization_info));
         auto* specialization_decl =
             instantiate_function_template_specialization(
                 function_template,
@@ -2663,6 +2695,11 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
                 instantiate_definition);
         if (!specialization_decl || !specialization_symbol) {
             continue;
+        }
+        if (!in_unevaluated_context()) {
+            note_function_template_specialization_required(
+                specialization_info,
+                loc);
         }
 
         if (selected_function_symbol) {

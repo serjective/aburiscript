@@ -1362,3 +1362,57 @@ FuncDecl* Collect::instantiate_function_template_specialization(
                instantiate_definition)
         .run();
 }
+
+void Collect::note_function_template_specialization_required(
+    const FunctionTemplateSpecializationInfo& specialization_info,
+    SrcLoc loc) {
+    if (!ast_ctx_ ||
+        !specialization_info.primary_template ||
+        function_template_requirement_notes_suppressed()) {
+        return;
+    }
+    auto* entry = ast_ctx_->lookup_function_template_specialization(
+        specialization_info.primary_template,
+        specialization_info.arguments);
+    if (entry) {
+        entry->note_first_required_loc(loc);
+    }
+}
+
+void Collect::instantiate_pending_required_function_template_specializations() {
+    if (!ast_ctx_) {
+        return;
+    }
+
+    bool progressed = false;
+    do {
+        progressed = false;
+        const auto& entries = ast_ctx_->function_template_specializations();
+        const size_t entry_count = entries.size();
+        for (size_t idx = 0; idx < entry_count; ++idx) {
+            auto* entry = entries[idx].get();
+            if (!entry ||
+                !entry->primary_template ||
+                entry->is_instantiated ||
+                entry->is_instantiating ||
+                entry->instantiation_failed ||
+                entry->first_required_loc.isInvalid()) {
+                continue;
+            }
+            const auto* pattern = entry->primary_template->function_decl();
+            if (pattern && pattern->name == "declval") {
+                continue;
+            }
+            std::shared_ptr<Symbol> ignored_symbol;
+            auto* instantiated = instantiate_function_template_specialization(
+                entry->primary_template,
+                entry->arguments,
+                entry->first_required_loc,
+                &ignored_symbol,
+                /*instantiate_definition=*/true);
+            if (instantiated && entry->is_instantiated) {
+                progressed = true;
+            }
+        }
+    } while (progressed);
+}

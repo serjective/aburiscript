@@ -430,6 +430,7 @@ struct Collect::VariableTemplateSpecializationInstantiator {
             }
             TemplateArgumentBindings partial_bindings;
             if (!deduce_variable_template_partial_specialization_bindings(
+                    collect,
                     partial,
                     normalized_arguments,
                     partial_bindings)) {
@@ -473,10 +474,12 @@ struct Collect::VariableTemplateSpecializationInstantiator {
         for (size_t idx = 0; idx < matches.size(); ++idx) {
             bool more_specialized_than_selected =
                 is_variable_template_partial_specialization_more_specialized(
+                    collect,
                     matches[idx].partial,
                     matches[selected_index].partial);
             bool selected_more_specialized =
                 is_variable_template_partial_specialization_more_specialized(
+                    collect,
                     matches[selected_index].partial,
                     matches[idx].partial);
             if (more_specialized_than_selected && !selected_more_specialized) {

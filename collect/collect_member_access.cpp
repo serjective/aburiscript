@@ -742,17 +742,24 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
     bool is_current_instantiation =
         dependent_base_analysis.is_current_instantiation;
     bool names_dependent_base = false;
+    bool current_instantiation_has_member = false;
+    if (is_current_instantiation && dependent_record_type) {
+        current_instantiation_has_member =
+            lookup_record_member_name(
+                dependent_record_type.get(),
+                member_name).has_member_match();
+    }
     if (is_current_instantiation &&
         record_has_dependent_bases(current_record_decl) &&
         dependent_record_type &&
-        !lookup_record_member_name(
-             dependent_record_type.get(),
-             member_name).has_member_match()) {
+        !current_instantiation_has_member) {
         names_dependent_base = true;
     }
 
     if (lang_opts_.is_cxx_mode() &&
-        (dependent_base_expr || dependent_base_type || names_dependent_base)) {
+        (((dependent_base_expr || dependent_base_type) &&
+          !current_instantiation_has_member) ||
+         names_dependent_base)) {
         QualType dependent_declared_member_type;
         QualType dependent_member_type =
             names_dependent_base
@@ -788,12 +795,18 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
         }
         record_type =
             desugar_type(ptr_type->pointed_type, ast_ctx_.get()).as_shared<ObjectType>();
+        if (!record_type && current_instantiation_has_member) {
+            record_type = dependent_record_type;
+        }
         if (!record_type) {
             report_error("arrow operator requires pointer to class/struct/union type", loc);
             return member;
         }
     } else {
         record_type = semantic_base_type.as_shared<ObjectType>();
+        if (!record_type && current_instantiation_has_member) {
+            record_type = dependent_record_type;
+        }
         if (!record_type) {
             report_error("dot operator requires class/struct/union type", loc);
             return member;

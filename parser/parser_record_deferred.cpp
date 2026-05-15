@@ -265,9 +265,10 @@ void Parser::build_cpp_record_parse_deferred_bodies(
 
         QualType previous_record_lookup_type =
             collect_->collect_current_cpp_record_lookup_type();
-        if (ctx.record_type) {
+        QualType active_record_lookup_type = QualType(ctx.record_type);
+        if (active_record_lookup_type) {
             collect_->collect_set_current_cpp_record_lookup_type(
-                QualType(ctx.record_type));
+                active_record_lookup_type);
         }
 
         Collect::CppThisContext cpp_this_context;
@@ -279,9 +280,23 @@ void Parser::build_cpp_record_parse_deferred_bodies(
             !fn_type->parameters.empty()) {
             cpp_this_context.this_type = fn_type->parameters.front();
         }
-        if (!cpp_this_context.this_type && ctx.record_type) {
+        if (!cpp_this_context.this_type && active_record_lookup_type) {
             cpp_this_context.this_type = QualType(
-                std::make_shared<PointerType>(QualType(ctx.record_type)));
+                std::make_shared<PointerType>(active_record_lookup_type));
+        } else if (cpp_this_context.this_type &&
+                   ctx.current_instantiation_type) {
+            uint8_t pointee_quals = QUAL_NONE;
+            if (auto this_ptr =
+                    cpp_this_context.this_type.as_shared<PointerType>()) {
+                pointee_quals = this_ptr->pointed_type.get_qualifiers();
+            }
+            QualType qualified_owner(
+                ctx.current_instantiation_type.get_shared(),
+                static_cast<uint8_t>(
+                    ctx.current_instantiation_type.get_qualifiers() |
+                    pointee_quals));
+            cpp_this_context.this_type = QualType(
+                std::make_shared<PointerType>(qualified_owner));
         }
 
         func_type = member_decl->type;

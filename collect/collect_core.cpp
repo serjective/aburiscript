@@ -533,6 +533,7 @@ std::unique_ptr<TranslationUnit> Collect::collect_finish_translation_unit(std::v
         }
     }
 
+    instantiate_pending_required_function_template_specializations();
     flush_delayed_diagnostics();
     return tu;
 }

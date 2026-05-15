@@ -353,6 +353,40 @@ int compare_qualification_conversion_sequences(
     return lhs_target_converts_to_rhs ? -1 : 1;
 }
 
+int compare_derived_to_base_reference_binding_sequences(
+    const Collect::ImplicitConversionSequence& lhs,
+    const Collect::ImplicitConversionSequence& rhs,
+    const ASTContext* ast_ctx) {
+    auto is_reference_derived_to_base_binding =
+        [](const Collect::ImplicitConversionSequence& seq) {
+        return seq.rank == Collect::ConversionSequenceRank::Conversion &&
+               seq.kind == Collect::ConversionSequenceKind::Pointer &&
+               seq.detail_kind ==
+                   Collect::ConversionSequenceDetailKind::ReferenceDirectBinding;
+    };
+
+    if (!is_reference_derived_to_base_binding(lhs) ||
+        !is_reference_derived_to_base_binding(rhs) ||
+        !same_type_ignoring_all_qualifiers(lhs.from, rhs.from, ast_ctx)) {
+        return 0;
+    }
+
+    QualType lhs_target = remove_reference(lhs.to, ast_ctx);
+    QualType rhs_target = remove_reference(rhs.to, ast_ctx);
+    if (!same_type_ignoring_all_qualifiers(lhs_target, rhs_target, ast_ctx)) {
+        return 0;
+    }
+
+    bool lhs_target_converts_to_rhs =
+        can_convert_by_qualification_conversion(lhs_target, rhs_target, ast_ctx);
+    bool rhs_target_converts_to_lhs =
+        can_convert_by_qualification_conversion(rhs_target, lhs_target, ast_ctx);
+    if (lhs_target_converts_to_rhs == rhs_target_converts_to_lhs) {
+        return 0;
+    }
+    return lhs_target_converts_to_rhs ? -1 : 1;
+}
+
 const EnumType* enum_type_from_qualtype(QualType type, const ASTContext* ast_ctx) {
     type = remove_reference(type, ast_ctx);
     type = desugar_type(type, ast_ctx);
@@ -1176,13 +1210,41 @@ MemberNameLookupResult lookup_record_member_name(const ObjectType* record_type,
     return result;
 }
 
+std::shared_ptr<ObjectType> class_template_pattern_record_type_from_specialization(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    (void)ast_ctx;
+    auto specialization_type =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_typedefs(type).get_shared());
+    if (!specialization_type) {
+        return nullptr;
+    }
+    auto* class_template =
+        dyn_cast<ClassTemplateDecl>(specialization_type->primary_template);
+    if (!class_template) {
+        return nullptr;
+    }
+    const ObjectDecl* pattern_decl = class_template->pattern_semantic_decl();
+    if (!pattern_decl) {
+        return nullptr;
+    }
+    return pattern_decl->get_record_type();
+}
+
 std::shared_ptr<ObjectType> current_record_from_this_type(QualType this_type,
                                                           const ASTContext* ast_ctx) {
     auto this_ptr = desugar_type(this_type, ast_ctx).as_shared<PointerType>();
     if (!this_ptr) {
         return nullptr;
     }
-    return desugar_type(this_ptr->pointed_type, ast_ctx).as_shared<ObjectType>();
+    QualType pointed_type = desugar_type(this_ptr->pointed_type, ast_ctx);
+    if (auto record_type = pointed_type.as_shared<ObjectType>()) {
+        return record_type;
+    }
+    return class_template_pattern_record_type_from_specialization(
+        pointed_type,
+        ast_ctx);
 }
 
 std::shared_ptr<ObjectType> current_record_from_this_type(QualType this_type) {
@@ -1350,6 +1412,12 @@ CppMemberLookupBaseAnalysis analyze_cpp_member_lookup_base(
                   ast_ctx)
                   .as_shared<ObjectType>()
             : nullptr;
+    if (!analysis.object_record_type) {
+        analysis.object_record_type =
+            class_template_pattern_record_type_from_specialization(
+                object_type,
+                ast_ctx);
+    }
     analysis.object_record_decl =
         record_decl_from_record_type(analysis.object_record_type.get());
 

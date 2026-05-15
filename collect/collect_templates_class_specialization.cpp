@@ -644,6 +644,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
             TemplateArgumentBindings partial_bindings;
             if (!deduce_class_template_partial_specialization_bindings(
+                    collect,
                     partial_specialization,
                     normalized_arguments,
                     partial_bindings)) {
@@ -672,6 +673,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                         continue;
                     }
                     if (is_class_template_partial_specialization_more_specialized(
+                            collect,
                             matching_partials[other_idx].partial_specialization,
                             matching_partials[idx].partial_specialization)) {
                         is_less_specialized = true;

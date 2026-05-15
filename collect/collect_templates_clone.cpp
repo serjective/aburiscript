@@ -496,6 +496,36 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
         if (!collect) {
             return sym;
         }
+        if (const auto* function_specialization_info =
+                get_symbol_function_template_specialization(sym.get());
+            function_specialization_info &&
+            function_specialization_info->primary_template) {
+            std::vector<TemplateArgument> rewritten_arguments =
+                rewrite_template_arguments_fn
+                    ? rewrite_template_arguments_fn(
+                          function_specialization_info->arguments)
+                    : function_specialization_info->arguments;
+            for (auto& argument : rewritten_arguments) {
+                remap_template_argument_symbol_references(argument, clone_ctx);
+            }
+            std::shared_ptr<Symbol> specialization_symbol = nullptr;
+            auto* specialization_decl =
+                collect->instantiate_function_template_specialization_for_clone(
+                    function_specialization_info->primary_template,
+                    rewritten_arguments,
+                    fallback_loc,
+                    &specialization_symbol,
+                    /*instantiate_definition=*/true);
+            if (!specialization_decl || !specialization_symbol) {
+                return sym;
+            }
+            clone_ctx.symbol_remap[sym.get()] = specialization_symbol;
+            if (register_symbol_fn) {
+                register_symbol_fn(specialization_symbol);
+            }
+            return specialization_symbol;
+        }
+
         const auto* specialization_info =
             get_symbol_variable_template_specialization(sym.get());
         if (!specialization_info || !specialization_info->primary_template) {

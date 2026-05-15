@@ -1785,6 +1785,20 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
             }
             return false;
         }
+        if (auto object_type = dyn_cast_shared<ObjectType>(raw)) {
+            if (!object_type->is_class_template_specialization()) {
+                return false;
+            }
+            for (const auto& argument :
+                 object_type->get_template_specialization_arguments()) {
+                if (template_argument_depends_on_template_parameters(
+                        argument,
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         if (auto dependent_name = dyn_cast_shared<DependentNameType>(raw)) {
             auto resolved_type =
                 lookup_dependent_name_resolved_type(

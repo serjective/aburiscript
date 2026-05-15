@@ -1470,3 +1470,38 @@ bool Collect::bind_and_normalize_template_arguments_for_specialization(
     normalized_arguments_out = flatten_template_argument_bindings(bindings_out);
     return true;
 }
+
+bool Collect::complete_partial_specialization_primary_arguments(
+    const TemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& written_arguments,
+    SrcLoc loc,
+    std::vector<TemplateArgument>& completed_arguments_out,
+    std::string* error_out) {
+    completed_arguments_out.clear();
+    if (!primary_template) {
+        set_template_default_completion_error(
+            error_out,
+            "internal error: null primary template");
+        return false;
+    }
+
+    TemplateArgumentBindings primary_bindings;
+    if (!bind_explicit_template_arguments_prefix_to_parameters(
+            primary_template->parameters,
+            written_arguments,
+            primary_bindings,
+            error_out)) {
+        return false;
+    }
+
+    if (!complete_template_argument_bindings_with_substituted_defaults(
+            primary_template,
+            primary_bindings,
+            loc,
+            error_out)) {
+        return false;
+    }
+
+    completed_arguments_out = flatten_template_argument_bindings(primary_bindings);
+    return true;
+}

@@ -80,6 +80,21 @@ struct FunctionParameterLayout {
 
 std::optional<TemplateSpecializationMatchInfo> extract_template_specialization_match_info(
     QualType type) {
+    auto canonical_type = desugar_type(type);
+    auto object = canonical_type.as_shared<ObjectType>();
+    if (object && object->is_class_template_specialization()) {
+        std::string_view template_name;
+        if (auto* primary_template = object->get_primary_class_template()) {
+            if (auto* record = primary_template->record_decl()) {
+                template_name = record->name;
+            }
+        }
+        return TemplateSpecializationMatchInfo{
+            object->get_primary_class_template(),
+            template_name,
+            object->get_template_specialization_arguments()};
+    }
+
     auto spelled = desugar_typedefs(type);
     auto raw = spelled.get_shared();
     if (!raw) {
@@ -109,7 +124,7 @@ std::optional<TemplateSpecializationMatchInfo> extract_template_specialization_m
             std::move(arguments)};
     }
 
-    auto object = desugar_type(spelled).as_shared<ObjectType>();
+    object = desugar_type(spelled).as_shared<ObjectType>();
     if (!object || !object->is_class_template_specialization()) {
         return std::nullopt;
     }
@@ -519,6 +534,92 @@ bool expand_partial_specialization_argument_pattern(
         expanded_arguments_out.push_back(
             pattern_arguments[pattern_arguments.size() -
                               pattern_layout.trailing_count + idx]);
+    }
+    return true;
+}
+
+bool complete_partial_specialization_primary_arguments(
+    Collect& collect,
+    const TemplateDecl* primary_template,
+    const std::vector<TemplateArgument>& written_arguments,
+    SrcLoc loc,
+    std::vector<TemplateArgument>& completed_arguments_out) {
+    std::string binding_error;
+    return collect.complete_partial_specialization_primary_arguments(
+        primary_template,
+        written_arguments,
+        loc,
+        completed_arguments_out,
+        &binding_error);
+}
+
+bool substituted_partial_specialization_arguments_match_actual(
+    Collect& collect,
+    const std::vector<TemplateArgument>& pattern_arguments,
+    const TemplateParameterList& parameters,
+    const TemplateArgumentBindings& deduced_bindings,
+    const std::vector<TemplateArgument>& actual_arguments,
+    SrcLoc loc) {
+    auto diagnostic_checkpoint = collect.collect_diagnostic_checkpoint();
+    Collect::UnevaluatedContextScope unevaluated_context(
+        &collect,
+        "partial specialization validation");
+    Collect::FunctionTemplateRequirementNoteSuppressionScope
+        suppress_requirement_notes(&collect);
+    auto substituted_arguments =
+        collect.collect_substitute_template_arguments_with_bindings(
+            pattern_arguments,
+            parameters,
+            deduced_bindings,
+            loc);
+    bool substitution_reported_diagnostic =
+        collect.collect_diagnostics_changed_since(diagnostic_checkpoint);
+    collect.collect_restore_diagnostic_checkpoint(diagnostic_checkpoint);
+    if (substitution_reported_diagnostic) {
+        return false;
+    }
+
+    if (substituted_arguments.size() != actual_arguments.size()) {
+        return false;
+    }
+
+    for (size_t idx = 0; idx < substituted_arguments.size(); ++idx) {
+        const auto& substituted = substituted_arguments[idx];
+        const auto& actual = actual_arguments[idx];
+        if (substituted.kind != actual.kind) {
+            return false;
+        }
+
+        if (substituted.kind == TemplateArgumentKind::Type) {
+            QualType substituted_type =
+                collect.collect_try_realize_deferred_semantic_type(
+                    substituted.type);
+            QualType actual_type =
+                collect.collect_try_realize_deferred_semantic_type(
+                    actual.type);
+            if (!desugar_type(substituted_type).equals_qualified(
+                    desugar_type(actual_type))) {
+                return false;
+            }
+            continue;
+        }
+
+        TemplateArgument normalized_substituted = substituted;
+        TemplateArgument normalized_actual = actual;
+        QualType target_type = normalized_actual.value_type
+            ? normalized_actual.value_type
+            : normalized_substituted.value_type;
+        if (!template_sema_internal::normalize_concrete_template_value_argument(
+                normalized_substituted,
+                target_type,
+                nullptr) ||
+            !template_sema_internal::normalize_concrete_template_value_argument(
+                normalized_actual,
+                target_type,
+                nullptr) ||
+            !normalized_substituted.equals(normalized_actual)) {
+            return false;
+        }
     }
     return true;
 }
@@ -963,6 +1064,12 @@ bool deduce_template_argument_types_impl(
         auto argument_specialization =
             extract_template_specialization_match_info(argument_type);
         if (!argument_specialization.has_value()) {
+            if (deduction_mode == TemplateTypeDeductionMode::PartialOrdering &&
+                isa<AliasTemplateDecl>(
+                    const_cast<Decl*>(
+                        pattern_specialization->primary_template))) {
+                return true;
+            }
             return false;
         }
         if (auto* pattern_template_parameter = dyn_cast<TemplateTemplateParmDecl>(
@@ -1026,18 +1133,35 @@ bool deduce_function_template_argument_types(
 }
 
 bool class_template_partial_specialization_is_at_least_as_specialized_as(
+    Collect& collect,
     const ClassTemplatePartialSpecializationDecl* parameter_partial,
     const ClassTemplatePartialSpecializationDecl* argument_partial) {
     if (!parameter_partial || !argument_partial) {
         return false;
     }
+    std::vector<TemplateArgument> parameter_arguments;
+    std::vector<TemplateArgument> argument_arguments;
+    if (!complete_partial_specialization_primary_arguments(
+            collect,
+            parameter_partial->primary_template(),
+            parameter_partial->specialization_arguments,
+            parameter_partial->location,
+            parameter_arguments) ||
+        !complete_partial_specialization_primary_arguments(
+            collect,
+            argument_partial->primary_template(),
+            argument_partial->specialization_arguments,
+            argument_partial->location,
+            argument_arguments)) {
+        return false;
+    }
     TemplatePatternLayout parameter_layout =
         analyze_template_argument_pattern_layout(
-            parameter_partial->specialization_arguments,
+            parameter_arguments,
             &parameter_partial->parameters);
     TemplatePatternLayout argument_layout =
         analyze_template_argument_pattern_layout(
-            argument_partial->specialization_arguments,
+            argument_arguments,
             &argument_partial->parameters);
     if (!parameter_layout.valid || !argument_layout.valid) {
         return false;
@@ -1055,7 +1179,7 @@ bool class_template_partial_specialization_is_at_least_as_specialized_as(
 
     std::vector<TemplateArgument> transformed_argument_patterns;
     if (!expand_partial_specialization_argument_pattern(
-            argument_partial->specialization_arguments,
+            argument_arguments,
             argument_layout,
             transformed_argument_count,
             transformed_argument_patterns)) {
@@ -1064,7 +1188,7 @@ bool class_template_partial_specialization_is_at_least_as_specialized_as(
 
     TemplateArgumentBindings deduced_bindings;
     return deduce_class_template_specialization_argument_list(
-        parameter_partial->specialization_arguments,
+        parameter_arguments,
         parameter_layout,
         parameter_partial->parameters,
         transformed_argument_patterns,
@@ -1076,6 +1200,7 @@ bool class_template_partial_specialization_is_at_least_as_specialized_as(
 namespace template_sema_internal {
 
 bool deduce_class_template_partial_specialization_bindings(
+    Collect& collect,
     const ClassTemplatePartialSpecializationDecl* partial_specialization,
     const std::vector<TemplateArgument>& actual_arguments,
     TemplateArgumentBindings& deduced_bindings_out) {
@@ -1083,19 +1208,44 @@ bool deduce_class_template_partial_specialization_bindings(
     if (!partial_specialization) {
         return false;
     }
+    std::vector<TemplateArgument> pattern_arguments;
+    if (!complete_partial_specialization_primary_arguments(
+            collect,
+            partial_specialization->primary_template(),
+            partial_specialization->specialization_arguments,
+            partial_specialization->location,
+            pattern_arguments)) {
+        return false;
+    }
     TemplatePatternLayout pattern_layout =
         analyze_template_argument_pattern_layout(
-            partial_specialization->specialization_arguments,
+            pattern_arguments,
             &partial_specialization->parameters);
-    return deduce_class_template_specialization_argument_list(
-        partial_specialization->specialization_arguments,
-        pattern_layout,
+    deduced_bindings_out.clear();
+    deduced_bindings_out.resize(partial_specialization->parameters.size());
+    if (!deduce_class_template_specialization_argument_list_into_existing_bindings(
+            pattern_arguments,
+            pattern_layout,
+            partial_specialization->parameters,
+            actual_arguments,
+            deduced_bindings_out,
+            /*finalize_bindings=*/false) ||
+        !finalize_deduced_template_bindings(
+            partial_specialization->parameters,
+            deduced_bindings_out)) {
+        return false;
+    }
+    return substituted_partial_specialization_arguments_match_actual(
+        collect,
+        pattern_arguments,
         partial_specialization->parameters,
+        deduced_bindings_out,
         actual_arguments,
-        deduced_bindings_out);
+        partial_specialization->location);
 }
 
 bool is_class_template_partial_specialization_more_specialized(
+    Collect& collect,
     const ClassTemplatePartialSpecializationDecl* lhs_partial,
     const ClassTemplatePartialSpecializationDecl* rhs_partial) {
     if (!lhs_partial || !rhs_partial || lhs_partial == rhs_partial) {
@@ -1104,6 +1254,7 @@ bool is_class_template_partial_specialization_more_specialized(
 
     bool rhs_from_lhs =
         class_template_partial_specialization_is_at_least_as_specialized_as(
+            collect,
             rhs_partial,
             lhs_partial);
     if (!rhs_from_lhs) {
@@ -1111,23 +1262,41 @@ bool is_class_template_partial_specialization_more_specialized(
     }
     bool lhs_from_rhs =
         class_template_partial_specialization_is_at_least_as_specialized_as(
+            collect,
             lhs_partial,
             rhs_partial);
     if (!lhs_from_rhs) {
         return true;
     }
+    std::vector<TemplateArgument> lhs_arguments;
+    std::vector<TemplateArgument> rhs_arguments;
+    if (!complete_partial_specialization_primary_arguments(
+            collect,
+            lhs_partial->primary_template(),
+            lhs_partial->specialization_arguments,
+            lhs_partial->location,
+            lhs_arguments) ||
+        !complete_partial_specialization_primary_arguments(
+            collect,
+            rhs_partial->primary_template(),
+            rhs_partial->specialization_arguments,
+            rhs_partial->location,
+            rhs_arguments)) {
+        return false;
+    }
     TemplatePatternLayout lhs_layout =
         analyze_template_argument_pattern_layout(
-            lhs_partial->specialization_arguments,
+            lhs_arguments,
             &lhs_partial->parameters);
     TemplatePatternLayout rhs_layout =
         analyze_template_argument_pattern_layout(
-            rhs_partial->specialization_arguments,
+            rhs_arguments,
             &rhs_partial->parameters);
     return compare_pack_layout_specificity(lhs_layout, rhs_layout) > 0;
 }
 
 bool deduce_variable_template_partial_specialization_bindings(
+    Collect& collect,
     const VariableTemplatePartialSpecializationDecl* partial_specialization,
     const std::vector<TemplateArgument>& actual_arguments,
     TemplateArgumentBindings& deduced_bindings_out) {
@@ -1135,19 +1304,44 @@ bool deduce_variable_template_partial_specialization_bindings(
     if (!partial_specialization) {
         return false;
     }
+    std::vector<TemplateArgument> pattern_arguments;
+    if (!complete_partial_specialization_primary_arguments(
+            collect,
+            partial_specialization->primary_template(),
+            partial_specialization->specialization_arguments,
+            partial_specialization->location,
+            pattern_arguments)) {
+        return false;
+    }
     TemplatePatternLayout pattern_layout =
         analyze_template_argument_pattern_layout(
-            partial_specialization->specialization_arguments,
+            pattern_arguments,
             &partial_specialization->parameters);
-    return deduce_class_template_specialization_argument_list(
-        partial_specialization->specialization_arguments,
-        pattern_layout,
+    deduced_bindings_out.clear();
+    deduced_bindings_out.resize(partial_specialization->parameters.size());
+    if (!deduce_class_template_specialization_argument_list_into_existing_bindings(
+            pattern_arguments,
+            pattern_layout,
+            partial_specialization->parameters,
+            actual_arguments,
+            deduced_bindings_out,
+            /*finalize_bindings=*/false) ||
+        !finalize_deduced_template_bindings(
+            partial_specialization->parameters,
+            deduced_bindings_out)) {
+        return false;
+    }
+    return substituted_partial_specialization_arguments_match_actual(
+        collect,
+        pattern_arguments,
         partial_specialization->parameters,
+        deduced_bindings_out,
         actual_arguments,
-        deduced_bindings_out);
+        partial_specialization->location);
 }
 
 bool is_variable_template_partial_specialization_more_specialized(
+    Collect& collect,
     const VariableTemplatePartialSpecializationDecl* lhs_partial,
     const VariableTemplatePartialSpecializationDecl* rhs_partial) {
     if (!lhs_partial || !rhs_partial || lhs_partial == rhs_partial) {
@@ -1155,19 +1349,35 @@ bool is_variable_template_partial_specialization_more_specialized(
     }
 
     auto variable_partial_is_at_least_as_specialized_as =
-        [](const VariableTemplatePartialSpecializationDecl* parameter_partial,
-           const VariableTemplatePartialSpecializationDecl* argument_partial)
+        [&collect](const VariableTemplatePartialSpecializationDecl* parameter_partial,
+                   const VariableTemplatePartialSpecializationDecl* argument_partial)
         -> bool {
             if (!parameter_partial || !argument_partial) {
                 return false;
             }
+            std::vector<TemplateArgument> parameter_arguments;
+            std::vector<TemplateArgument> argument_arguments;
+            if (!complete_partial_specialization_primary_arguments(
+                    collect,
+                    parameter_partial->primary_template(),
+                    parameter_partial->specialization_arguments,
+                    parameter_partial->location,
+                    parameter_arguments) ||
+                !complete_partial_specialization_primary_arguments(
+                    collect,
+                    argument_partial->primary_template(),
+                    argument_partial->specialization_arguments,
+                    argument_partial->location,
+                    argument_arguments)) {
+                return false;
+            }
             TemplatePatternLayout parameter_layout =
                 analyze_template_argument_pattern_layout(
-                    parameter_partial->specialization_arguments,
+                    parameter_arguments,
                     &parameter_partial->parameters);
             TemplatePatternLayout argument_layout =
                 analyze_template_argument_pattern_layout(
-                    argument_partial->specialization_arguments,
+                    argument_arguments,
                     &argument_partial->parameters);
             if (!parameter_layout.valid || !argument_layout.valid) {
                 return false;
@@ -1187,7 +1397,7 @@ bool is_variable_template_partial_specialization_more_specialized(
 
             std::vector<TemplateArgument> transformed_argument_patterns;
             if (!expand_partial_specialization_argument_pattern(
-                    argument_partial->specialization_arguments,
+                    argument_arguments,
                     argument_layout,
                     transformed_argument_count,
                     transformed_argument_patterns)) {
@@ -1196,7 +1406,7 @@ bool is_variable_template_partial_specialization_more_specialized(
 
             TemplateArgumentBindings deduced_bindings;
             return deduce_class_template_specialization_argument_list(
-                parameter_partial->specialization_arguments,
+                parameter_arguments,
                 parameter_layout,
                 parameter_partial->parameters,
                 transformed_argument_patterns,
@@ -1213,13 +1423,29 @@ bool is_variable_template_partial_specialization_more_specialized(
     if (!lhs_from_rhs) {
         return true;
     }
+    std::vector<TemplateArgument> lhs_arguments;
+    std::vector<TemplateArgument> rhs_arguments;
+    if (!complete_partial_specialization_primary_arguments(
+            collect,
+            lhs_partial->primary_template(),
+            lhs_partial->specialization_arguments,
+            lhs_partial->location,
+            lhs_arguments) ||
+        !complete_partial_specialization_primary_arguments(
+            collect,
+            rhs_partial->primary_template(),
+            rhs_partial->specialization_arguments,
+            rhs_partial->location,
+            rhs_arguments)) {
+        return false;
+    }
     TemplatePatternLayout lhs_layout =
         analyze_template_argument_pattern_layout(
-            lhs_partial->specialization_arguments,
+            lhs_arguments,
             &lhs_partial->parameters);
     TemplatePatternLayout rhs_layout =
         analyze_template_argument_pattern_layout(
-            rhs_partial->specialization_arguments,
+            rhs_arguments,
             &rhs_partial->parameters);
     return compare_pack_layout_specificity(lhs_layout, rhs_layout) > 0;
 }

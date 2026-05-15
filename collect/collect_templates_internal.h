@@ -291,20 +291,24 @@ bool substitute_cpp_explicit_specifier_for_specialization(
     std::string* error_out);
 
 bool deduce_class_template_partial_specialization_bindings(
+    Collect& collect,
     const ClassTemplatePartialSpecializationDecl* partial_specialization,
     const std::vector<TemplateArgument>& actual_arguments,
     TemplateArgumentBindings& deduced_bindings_out);
 
 bool is_class_template_partial_specialization_more_specialized(
+    Collect& collect,
     const ClassTemplatePartialSpecializationDecl* lhs_partial,
     const ClassTemplatePartialSpecializationDecl* rhs_partial);
 
 bool deduce_variable_template_partial_specialization_bindings(
+    Collect& collect,
     const VariableTemplatePartialSpecializationDecl* partial_specialization,
     const std::vector<TemplateArgument>& actual_arguments,
     TemplateArgumentBindings& deduced_bindings_out);
 
 bool is_variable_template_partial_specialization_more_specialized(
+    Collect& collect,
     const VariableTemplatePartialSpecializationDecl* lhs_partial,
     const VariableTemplatePartialSpecializationDecl* rhs_partial);
 

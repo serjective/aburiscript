@@ -73,6 +73,22 @@ bool Collect::in_unevaluated_context() const {
     return session_.func_state_.unevaluated_depth > 0;
 }
 
+void Collect::enter_function_template_requirement_note_suppression() {
+    materialize_tentative_snapshot_if_needed();
+    ++session_.function_template_requirement_note_suppression_depth_;
+}
+
+void Collect::leave_function_template_requirement_note_suppression() {
+    if (session_.function_template_requirement_note_suppression_depth_ > 0) {
+        materialize_tentative_snapshot_if_needed();
+        --session_.function_template_requirement_note_suppression_depth_;
+    }
+}
+
+bool Collect::function_template_requirement_notes_suppressed() const {
+    return session_.function_template_requirement_note_suppression_depth_ > 0;
+}
+
 void Collect::enter_immediate_function_context() {
     materialize_tentative_snapshot_if_needed();
     ++session_.func_state_.immediate_function_context_depth;
