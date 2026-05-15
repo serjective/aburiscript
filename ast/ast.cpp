@@ -202,6 +202,20 @@ const TemplateDecl* get_template_decl_canonical_decl(const TemplateDecl* decl) {
     return nullptr;
 }
 
+void set_template_decl_definition_decl(const TemplateDecl* decl,
+                                       const TemplateDecl* definition_decl) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_template_decl_definition_decl(decl, definition_decl);
+    }
+}
+
+const TemplateDecl* get_template_decl_definition_decl(const TemplateDecl* decl) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_template_decl_definition_decl(decl);
+    }
+    return nullptr;
+}
+
 void clear_template_decl_canonical_decls() {
     if (ASTContext* ctx = current_side_table_context()) {
         ctx->clear_template_decl_canonical_decls();

@@ -1031,6 +1031,9 @@ void clear_variable_decl_variable_template_specializations();
 void set_template_decl_canonical_decl(const TemplateDecl* decl,
                                       const TemplateDecl* canonical_decl);
 const TemplateDecl* get_template_decl_canonical_decl(const TemplateDecl* decl);
+void set_template_decl_definition_decl(const TemplateDecl* decl,
+                                       const TemplateDecl* definition_decl);
+const TemplateDecl* get_template_decl_definition_decl(const TemplateDecl* decl);
 void clear_template_decl_canonical_decls();
 const TemplateDecl* get_template_decl_lookup_identity(const Decl* decl);
 bool template_decls_share_lookup_identity(const Decl* lhs, const Decl* rhs);
@@ -3002,6 +3005,7 @@ struct TemplateDecl : Decl {
     std::unique_ptr<Expr> associated_constraint;
     mutable uint32_t external_semantic_owner_id = 0; // See ownership conventions at top of file
     mutable const TemplateDecl* canonical_decl = nullptr;
+    mutable const TemplateDecl* definition_decl = nullptr;
     mutable const TemplateDecl* pattern_template_decl = nullptr;
     mutable std::vector<std::optional<TemplateArgument>> merged_default_arguments;
     std::vector<class TemplateExplicitSpecializationDecl*> explicit_specializations_;

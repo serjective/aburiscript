@@ -48,6 +48,10 @@ public:
                                           const TemplateDecl* canonical_decl);
     const TemplateDecl* get_template_decl_canonical_decl(
         const TemplateDecl* decl) const;
+    void set_template_decl_definition_decl(const TemplateDecl* decl,
+                                          const TemplateDecl* definition_decl);
+    const TemplateDecl* get_template_decl_definition_decl(
+        const TemplateDecl* decl) const;
     void clear_template_decl_canonical_decls();
 
     void set_template_parameter_default_argument(

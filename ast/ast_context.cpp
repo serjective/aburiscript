@@ -918,6 +918,17 @@ const TemplateDecl* ASTContext::get_template_decl_canonical_decl(
     return semantic_store_->get_template_decl_canonical_decl(decl);
 }
 
+void ASTContext::set_template_decl_definition_decl(
+    const TemplateDecl* decl,
+    const TemplateDecl* definition_decl) {
+    semantic_store_->set_template_decl_definition_decl(decl, definition_decl);
+}
+
+const TemplateDecl* ASTContext::get_template_decl_definition_decl(
+    const TemplateDecl* decl) const {
+    return semantic_store_->get_template_decl_definition_decl(decl);
+}
+
 void ASTContext::clear_template_decl_canonical_decls() {
     semantic_store_->clear_template_decl_canonical_decls();
 }

@@ -49,6 +49,26 @@ std::optional<std::string> namespace_prefix_for_specialized_member(
         pattern_symbol ? get_symbol_cxx_qualifier_prefix(pattern_symbol) : nullptr);
 }
 
+const ClassTemplateDecl* class_template_definition_for_instantiation(
+    const ClassTemplateDecl* class_template) {
+    if (!class_template) {
+        return nullptr;
+    }
+    if (class_template->record_decl() &&
+        class_template->record_decl()->is_definition) {
+        return class_template;
+    }
+    auto* definition = dyn_cast<ClassTemplateDecl>(
+        const_cast<TemplateDecl*>(
+            get_template_decl_definition_decl(class_template)));
+    if (definition &&
+        definition->record_decl() &&
+        definition->record_decl()->is_definition) {
+        return definition;
+    }
+    return class_template;
+}
+
 struct ClassTemplatePartialSpecializationMatch {
     const ClassTemplatePartialSpecializationDecl* partial_specialization = nullptr;
     TemplateArgumentBindings bindings;
@@ -4766,6 +4786,7 @@ ObjectDecl* Collect::instantiate_class_template_specialization(
     const ClassTemplateDecl* class_template,
     const std::vector<TemplateArgument>& arguments,
     SrcLoc loc) {
+    class_template = class_template_definition_for_instantiation(class_template);
     return ClassTemplateSpecializationInstantiator{
         *this,
         class_template,
@@ -4812,12 +4833,15 @@ bool Collect::materialize_class_template_member_body(
         }
     } depth_guard{ast_ctx_.get()};
 
+    const ClassTemplateDecl* instantiation_template =
+        class_template_definition_for_instantiation(entry.primary_template);
     ClassTemplateSpecializationInstantiator instantiator{
         *this,
-        entry.primary_template,
+        instantiation_template,
         entry.arguments,
         loc};
-    instantiator.primary_pattern = entry.primary_template->record_decl();
+    instantiator.primary_pattern =
+        instantiation_template ? instantiation_template->record_decl() : nullptr;
     if (!instantiator.primary_pattern) {
         report_error(
             "internal error: missing class template pattern for member body materialization",

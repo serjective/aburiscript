@@ -3906,6 +3906,39 @@ void Parser::validate_template_default_argument_rules(
     }
 }
 
+namespace {
+
+bool primary_template_decl_is_definition(const TemplateDecl* template_decl) {
+    if (!template_decl) {
+        return false;
+    }
+    if (auto* class_template =
+            dyn_cast<ClassTemplateDecl>(const_cast<TemplateDecl*>(template_decl))) {
+        return class_template->record_decl() &&
+               class_template->record_decl()->is_definition;
+    }
+    if (auto* function_template =
+            dyn_cast<FunctionTemplateDecl>(const_cast<TemplateDecl*>(template_decl))) {
+        return function_template->function_decl() &&
+               function_decl_defines_entity(function_template->function_decl());
+    }
+    if (auto* variable_template =
+            dyn_cast<VariableTemplateDecl>(const_cast<TemplateDecl*>(template_decl))) {
+        auto* variable = variable_template->variable_decl();
+        return variable_template->is_pattern_complete &&
+               variable &&
+               (variable->init ||
+                variable->storage_class != StorageClass::EXTERN);
+    }
+    if (auto* concept_decl =
+            dyn_cast<ConceptDecl>(const_cast<TemplateDecl*>(template_decl))) {
+        return concept_decl->constraint_expr != nullptr;
+    }
+    return false;
+}
+
+} // namespace
+
 void Parser::finalize_primary_template_decl(
     TemplateDecl* template_decl,
     const std::string& template_name,
@@ -3918,6 +3951,13 @@ void Parser::finalize_primary_template_decl(
         template_decl,
         template_name,
         lookup_namespace);
+    if (primary_template_decl_is_definition(template_decl)) {
+        const TemplateDecl* canonical_template =
+            get_template_decl_canonical_decl(template_decl);
+        set_template_decl_definition_decl(
+            canonical_template ? canonical_template : template_decl,
+            template_decl);
+    }
 
     size_t conflict_index = std::numeric_limits<size_t>::max();
     if (merge_template_decl_default_arguments(

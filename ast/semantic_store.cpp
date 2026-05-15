@@ -120,6 +120,9 @@ void erase_template_decl_owner_if_unused(const CollectSemanticStore* store,
     if (canonical && canonical != decl) {
         return;
     }
+    if (decl->definition_decl) {
+        return;
+    }
     if (decl->external_semantic_owner_id == store->registry_id()) {
         decl->external_semantic_owner_id = 0;
     }
@@ -1042,6 +1045,41 @@ const TemplateDecl* CollectSemanticStore::get_template_decl_canonical_decl(
     return current;
 }
 
+void CollectSemanticStore::set_template_decl_definition_decl(
+    const TemplateDecl* decl,
+    const TemplateDecl* definition_decl) {
+    if (!decl) {
+        return;
+    }
+    tracked_template_decls_.insert(decl);
+    if (definition_decl) {
+        tracked_template_decls_.insert(definition_decl);
+    }
+    if (!definition_decl) {
+        decl->definition_decl = nullptr;
+        erase_template_decl_owner_if_unused(this, decl);
+        return;
+    }
+    decl->definition_decl = definition_decl;
+    decl->external_semantic_owner_id = registry_id_;
+    definition_decl->external_semantic_owner_id = registry_id_;
+}
+
+const TemplateDecl* CollectSemanticStore::get_template_decl_definition_decl(
+    const TemplateDecl* decl) const {
+    if (!decl) {
+        return nullptr;
+    }
+    if (decl->definition_decl) {
+        return decl->definition_decl;
+    }
+    const TemplateDecl* canonical = get_template_decl_canonical_decl(decl);
+    if (canonical && canonical->definition_decl) {
+        return canonical->definition_decl;
+    }
+    return nullptr;
+}
+
 void CollectSemanticStore::clear_template_decl_canonical_decls() {
     std::vector<const TemplateDecl*> decls(
         tracked_template_decls_.begin(),
@@ -1049,6 +1087,7 @@ void CollectSemanticStore::clear_template_decl_canonical_decls() {
     for (const TemplateDecl* decl : decls) {
         if (decl) {
             decl->canonical_decl = nullptr;
+            decl->definition_decl = nullptr;
         }
     }
     for (const TemplateDecl* decl : decls) {
