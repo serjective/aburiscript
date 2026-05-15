@@ -176,6 +176,14 @@ std::vector<std::string_view> split_cxx_qualifier_prefix(std::string_view prefix
     return components;
 }
 
+std::string_view qualifier_component_template_name(std::string_view component) {
+    size_t template_start = component.find('<');
+    if (template_start == std::string_view::npos) {
+        return component;
+    }
+    return component.substr(0, template_start);
+}
+
 size_t implicit_object_parameter_count(const FunctionType& fn,
                                        std::string_view qualifier_prefix,
                                        QualType owner_type);
@@ -1336,7 +1344,9 @@ std::vector<std::string_view> normalized_member_qualifier_components(
     if (!owner_name.has_value() || components.empty()) {
         return components;
     }
-    if (components.back() == *owner_name) {
+    std::string_view last_component = components.back();
+    if (last_component == *owner_name ||
+        qualifier_component_template_name(last_component) == *owner_name) {
         components.pop_back();
     }
     return components;

@@ -162,6 +162,91 @@ bool expr_references_active_parameter_pack(
 
 } // namespace
 
+bool Parser::skip_balanced_group_for_template_id_lookahead(
+    size_t& offset,
+    TokenType open_tok,
+    TokenType close_tok) {
+    if (peek_token_shortcut(offset).type != open_tok) {
+        return false;
+    }
+    size_t depth = 0;
+    while (peek_token_shortcut(offset).type != TokenType::Eof) {
+        TokenType tok = peek_token_shortcut(offset).type;
+        if (tok == open_tok) {
+            ++depth;
+        } else if (tok == close_tok) {
+            --depth;
+            ++offset;
+            if (depth == 0) {
+                return true;
+            }
+            continue;
+        }
+        ++offset;
+    }
+    return false;
+}
+
+bool Parser::skip_template_argument_list_for_expression_probe(size_t& offset) {
+    if (peek_token_shortcut(offset).type != TokenType::LESS_THAN) {
+        return false;
+    }
+    ++offset;
+    size_t angle_depth = 1;
+    while (peek_token_shortcut(offset).type != TokenType::Eof) {
+        TokenType tok = peek_token_shortcut(offset).type;
+        switch (tok) {
+            case TokenType::LESS_THAN:
+                ++angle_depth;
+                ++offset;
+                break;
+            case TokenType::GREATER_THAN:
+                --angle_depth;
+                ++offset;
+                if (angle_depth == 0) {
+                    return true;
+                }
+                break;
+            case TokenType::RIGHT_SHIFT:
+                if (angle_depth <= 2) {
+                    ++offset;
+                    return true;
+                }
+                angle_depth -= 2;
+                ++offset;
+                break;
+            case TokenType::LEFT_PAREN:
+                if (!skip_balanced_group_for_template_id_lookahead(
+                        offset,
+                        TokenType::LEFT_PAREN,
+                        TokenType::RIGHT_PAREN)) {
+                    return false;
+                }
+                break;
+            case TokenType::LEFT_BRACE:
+                if (!skip_balanced_group_for_template_id_lookahead(
+                        offset,
+                        TokenType::LEFT_BRACE,
+                        TokenType::RIGHT_BRACE)) {
+                    return false;
+                }
+                break;
+            case TokenType::LEFT_BRACKET:
+                if (!skip_balanced_group_for_template_id_lookahead(
+                        offset,
+                        TokenType::LEFT_BRACKET,
+                        TokenType::RIGHT_BRACKET)) {
+                    return false;
+                }
+                break;
+            default:
+                ++offset;
+                break;
+        }
+    }
+    return false;
+}
+
 void Parser::retain_type_specifier_decl_if_needed(DeclarationParser& decl_parser) {
     if (!ast_ctx) {
         return;
@@ -895,19 +980,16 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
 
     bool looks_like_call = gentle_check(TokenType::LEFT_PAREN);
     bool might_be_template_id = looks_like_call;
-    if (!looks_like_call &&
-        is_cxx_mode_active() &&
-        gentle_check(TokenType::LESS_THAN)) {
-        TentativeParsingAction tentative(*this);
-        try {
-            (void)parse_cpp_template_argument_list();
-            might_be_template_id = true;
-            looks_like_call = gentle_check(TokenType::LEFT_PAREN);
-        } catch (const ParseError&) {
-        } catch (const FatalErrorLimitReached&) {
-            throw;
+        if (!looks_like_call &&
+            is_cxx_mode_active() &&
+            gentle_check(TokenType::LESS_THAN)) {
+            size_t offset = 0;
+            if (skip_template_argument_list_for_expression_probe(offset)) {
+                might_be_template_id = true;
+                looks_like_call =
+                    peek_token_shortcut(offset).type == TokenType::LEFT_PAREN;
+            }
         }
-    }
 
     auto lookup_scope = owner_chain.lookup_scope;
     const DeclContext* lookup_context = owner_chain.lookup_context;
@@ -962,8 +1044,11 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             }
             visited.insert(current_decl);
             const RecordSemanticState* state =
-                collect_ ? collect_->query_lookup_record_semantics(current_decl)
-                         : record_semantics_cache_lookup(current_decl);
+                collect_
+                    ? collect_->ensure_record_semantics_available(
+                          QualType(current_decl->get_record_type()),
+                          qualified_loc)
+                    : record_semantics_cache_lookup(current_decl);
             if (!state) {
                 return;
             }
@@ -2377,17 +2462,11 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
         if (!looks_like_call &&
             is_cxx_mode_active() &&
             peek_token().type == TokenType::LESS_THAN) {
-            TentativeParsingAction tentative(*this);
-            try {
-                advance();
-                if (gentle_check(TokenType::LESS_THAN)) {
-                    (void)parse_cpp_template_argument_list();
-                    might_be_template_id = true;
-                    looks_like_call = gentle_check(TokenType::LEFT_PAREN);
-                }
-            } catch (const ParseError&) {
-            } catch (const FatalErrorLimitReached&) {
-                throw;
+            size_t offset = 1;
+            if (skip_template_argument_list_for_expression_probe(offset)) {
+                might_be_template_id = true;
+                looks_like_call =
+                    peek_token_shortcut(offset).type == TokenType::LEFT_PAREN;
             }
         }
         // todo: when we get typedefs this can be ambgioous. But we should realize that at cast_expression not here
@@ -2469,6 +2548,23 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             advance();
             return parsed;
         };
+    auto unqualified_var_ref_names_template = [&](const VarRef* ref) {
+        if (!ref || ref->symref || ref->has_cpp_qualified_info() || !collect_) {
+            return false;
+        }
+        auto scope = collect_->collect_current_scope();
+        if (!scope || ref->get_name().empty()) {
+            return false;
+        }
+        auto lookup = LookupEngine::lookup_unqualified_template_binding_result(
+            ref->get_name(),
+            scope,
+            /*allow_enclosing_lookup=*/true,
+            LookupNamespace::Ordinary);
+        return lookup.binding &&
+               (lookup.binding->template_decl ||
+                lookup.binding->has_template_overload_set());
+    };
     while (true) {
         SrcLoc loc = expr->location;
         if (is_cxx_mode_active() &&
@@ -2481,6 +2577,45 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                 dyn_cast<UnresolvedLookupExpr>(expr.get());
             if (callee_ref || member_callee ||
                 unresolved_member_callee || unresolved_lookup_callee) {
+                size_t explicit_suffix_probe_offset = 0;
+                bool parse_known_unqualified_template =
+                    unqualified_var_ref_names_template(callee_ref) &&
+                    skip_template_argument_list_for_expression_probe(
+                        explicit_suffix_probe_offset);
+                if (parse_known_unqualified_template) {
+                    auto explicit_template_args =
+                        parse_cpp_template_argument_list();
+                    if (lambda_template_requires_clause_depth_ > 0 &&
+                        is_lambda_declarator_parameter_clause_ahead()) {
+                        expr = collect_->collect_explicit_template_id_expression(
+                            std::move(expr),
+                            std::move(explicit_template_args),
+                            loc);
+                        continue;
+                    }
+                    if (gentle_check(TokenType::LEFT_PAREN)) {
+                        advance();
+                        std::vector<std::unique_ptr<Expr>> args;
+                        if (!gentle_check(TokenType::RIGHT_PAREN)) {
+                            do {
+                                auto arg = parse_call_argument_expression();
+                                args.push_back(std::move(arg));
+                            } while (gentle_check_and_consume(TokenType::COMMA));
+                        }
+                        check_and_consume(TokenType::RIGHT_PAREN);
+                        expr = collect_->collect_explicit_function_template_call(
+                            std::move(expr),
+                            std::move(explicit_template_args),
+                            std::move(args),
+                            loc);
+                        continue;
+                    }
+                    expr = collect_->collect_explicit_template_id_expression(
+                        std::move(expr),
+                        std::move(explicit_template_args),
+                        loc);
+                    continue;
+                }
                 TentativeParsingAction tentative(*this);
                 try {
                     auto explicit_template_args =

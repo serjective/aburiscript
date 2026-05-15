@@ -9,6 +9,20 @@
 // Static empty list returned by get_attrs when no attributes exist for a node
 static const AttributeList empty_attr_list{};
 
+void ClassTemplateSpecializationEntry::retire_member_decls_for_rebuild() {
+    if (member_decls.empty()) {
+        return;
+    }
+    retired_member_decls.reserve(
+        retired_member_decls.size() + member_decls.size());
+    for (auto& member_decl : member_decls) {
+        if (member_decl) {
+            retired_member_decls.push_back(std::move(member_decl));
+        }
+    }
+    member_decls.clear();
+}
+
 namespace {
 // Threading: g_active_side_table_ast_context is thread_local, so it is safe
 // for per-thread use.  However, the registration map and ID counter below

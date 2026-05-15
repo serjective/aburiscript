@@ -124,6 +124,10 @@ struct ClassTemplateSpecializationEntry {
     std::shared_ptr<ObjectType> specialization_type = nullptr;
     std::unique_ptr<ObjectDecl> specialization_decl;
     std::vector<std::unique_ptr<Decl>> member_decls;
+    // Member-template specializations can retain raw pointers to earlier
+    // specialized member-template clones. Keep rebuilt members alive while
+    // excluding them from current semantic lookup and codegen walks.
+    std::vector<std::unique_ptr<Decl>> retired_member_decls;
     SrcLoc first_required_loc;
     std::unordered_map<const Decl*, SrcLoc> primary_member_first_required_locs;
     std::unordered_map<const Decl*, const Decl*>
@@ -137,6 +141,8 @@ struct ClassTemplateSpecializationEntry {
     bool is_instantiating = false;
     bool is_instantiated = false;
     bool instantiation_failed = false;
+
+    void retire_member_decls_for_rebuild();
 
     void note_first_required_loc(SrcLoc loc) {
         if (!loc.isInvalid() && first_required_loc.isInvalid()) {

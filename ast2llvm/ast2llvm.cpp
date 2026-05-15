@@ -697,9 +697,22 @@ std::shared_ptr<Symbol> ASTToLLVM::get_function_symbol_for_decl(
         return nullptr;
     }
 
+    auto symbol_matches_decl = [](const std::shared_ptr<Symbol>& symbol,
+                                  const FuncDecl* candidate_decl,
+                                  const FuncDecl& decl) {
+        if (candidate_decl != &decl &&
+            (!symbol || symbol->function_definition != &decl)) {
+            return false;
+        }
+        return true;
+    };
+
     if (const auto* ctor = dyn_cast<CppConstructorDecl>(&decl)) {
         for (const auto& candidate : state->constructors) {
-            if (candidate.decl == ctor) {
+            if (symbol_matches_decl(
+                    candidate.symbol,
+                    candidate.decl,
+                    decl)) {
                 return candidate.symbol;
             }
         }
@@ -707,7 +720,10 @@ std::shared_ptr<Symbol> ASTToLLVM::get_function_symbol_for_decl(
     }
     if (const auto* dtor = dyn_cast<CppDestructorDecl>(&decl)) {
         for (const auto& candidate : state->destructors) {
-            if (candidate.decl == dtor) {
+            if (symbol_matches_decl(
+                    candidate.symbol,
+                    candidate.decl,
+                    decl)) {
                 return candidate.symbol;
             }
         }
@@ -715,7 +731,10 @@ std::shared_ptr<Symbol> ASTToLLVM::get_function_symbol_for_decl(
     }
     if (const auto* method = dyn_cast<CppMethodDecl>(&decl)) {
         for (const auto& candidate : state->methods) {
-            if (candidate.decl == method) {
+            if (symbol_matches_decl(
+                    candidate.symbol,
+                    candidate.decl,
+                    decl)) {
                 return candidate.symbol;
             }
         }
@@ -758,6 +777,18 @@ std::string ASTToLLVM::get_function_llvm_name(const FuncDecl& decl) const {
     if (auto sym = get_function_symbol_for_decl(decl)) {
         if (!(ast_ctx && ast_ctx->abi_policy) ||
             ast_ctx->abi_policy->mangling == ManglingKind::C) {
+            bool has_member_owner =
+                static_cast<bool>(get_symbol_owner_record_type(sym.get())) ||
+                static_cast<bool>(get_func_decl_owner_record_type(&decl));
+            if (!sym->uid.empty() && has_member_owner) {
+                auto* ctor = dyn_cast<CppConstructorDecl>(&decl);
+                bool is_default_constructor_decl =
+                    ctor && decl.parameters.size() == 1 &&
+                    is_cxx_default_constructor_symbol(sym);
+                if (!is_default_constructor_decl) {
+                    return mangleCIdentifier(sym->uid);
+                }
+            }
             return get_function_llvm_name(sym, decl.name);
         }
     }
@@ -783,8 +814,27 @@ std::string ASTToLLVM::get_function_llvm_name(const std::shared_ptr<Symbol>& sym
         if (sym->name == "main") {
             return "main";
         }
+        if (sym->function_definition && ast_ctx && ast_ctx->abi_policy &&
+            ast_ctx->abi_policy->mangling != ManglingKind::C) {
+            const auto* symbol_specialization =
+                get_symbol_function_template_specialization(sym.get());
+            const auto* decl_specialization =
+                get_func_decl_function_template_specialization(
+                    sym->function_definition);
+            if (!symbol_specialization || decl_specialization) {
+                auto resolved = resolve_function_linkage_name(
+                    *sym->function_definition,
+                    *ast_ctx->abi_policy);
+                if (resolved.from_asm_label) {
+                    return get_asm_label_name(resolved.name);
+                }
+                return resolved.name;
+            }
+        }
         if (!sym->uid.empty() &&
-            get_symbol_owner_record_type(sym.get()) &&
+            (get_symbol_owner_record_type(sym.get()) ||
+             (sym->function_definition &&
+              get_func_decl_owner_record_type(sym->function_definition))) &&
             (!(ast_ctx && ast_ctx->abi_policy) ||
              ast_ctx->abi_policy->mangling == ManglingKind::C)) {
             if (is_cxx_default_constructor_symbol(sym)) {
@@ -1069,8 +1119,7 @@ llvm::Function* ASTToLLVM::get_or_create_function_symbol(
     llvm::Type* ret_type = convert_function_return_type(func_ctype->ret_type);
     llvm::FunctionType* ft = llvm::FunctionType::get(
         ret_type, param_types, func_ctype->is_variadic || !func_ctype->has_prototype);
-    llvm::GlobalValue::LinkageTypes linkage =
-        get_function_symbol_linkage(*sym);
+    llvm::GlobalValue::LinkageTypes linkage = llvm::GlobalValue::ExternalLinkage;
     llvm::Function* fn =
         llvm::Function::Create(ft, linkage, fn_name, module.get());
     apply_indirect_result_attributes(fn, 0, func_ctype->ret_type);

@@ -1721,7 +1721,8 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
         ast_param_count += 1;
     }
     bool needs_signature_update =
-        mainFunc && func_ctype_check && mainFunc->arg_size() != ast_param_count &&
+        mainFunc && mainFunc->empty() &&
+        func_ctype_check && mainFunc->arg_size() != ast_param_count &&
         (func_ctype_check->has_prototype || ast_param_count > 0);
     if (needs_signature_update) {
         // Prior declaration may have come from empty parens (K&R style) and
@@ -2205,9 +2206,25 @@ void ASTToLLVM::convert_translation_unit(Decl *decl) {
     for (auto& decls: translation_unit->declarations) {
         deal_global_variable_declaration(decls.get());
     }
+    auto retained_decl_is_current = [&](const Decl* retained_decl) {
+        auto* function_decl =
+            retained_decl ? dyn_cast<FuncDecl>(retained_decl) : nullptr;
+        if (!function_decl) {
+            return true;
+        }
+        if (!isa<CppConstructorDecl>(function_decl) &&
+            !isa<CppDestructorDecl>(function_decl) &&
+            !isa<CppMethodDecl>(function_decl)) {
+            return true;
+        }
+        return static_cast<bool>(get_function_symbol_for_decl(*function_decl));
+    };
     if (ast_ctx) {
         for (const auto& retained_decl : ast_ctx->retained_external_decls()) {
             if (!retained_decl) {
+                continue;
+            }
+            if (!retained_decl_is_current(retained_decl.get())) {
                 continue;
             }
             deal_global_variable_declaration(retained_decl.get());
@@ -2234,6 +2251,9 @@ void ASTToLLVM::convert_translation_unit(Decl *decl) {
     if (ast_ctx) {
         for (const auto& retained_decl : ast_ctx->retained_external_decls()) {
             if (!retained_decl) {
+                continue;
+            }
+            if (!retained_decl_is_current(retained_decl.get())) {
                 continue;
             }
             convert_declaration(retained_decl.get());

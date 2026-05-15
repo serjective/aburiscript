@@ -17,6 +17,19 @@ bool refactor_metrics_enabled() {
     return enabled;
 }
 
+const ObjectDecl* canonical_record_owner_decl(const ObjectDecl* decl) {
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto record_type = decl->get_record_type()) {
+        if (auto* canonical_decl =
+                dyn_cast<ObjectDecl>(record_type->get_decl())) {
+            return canonical_decl;
+        }
+    }
+    return decl;
+}
+
 } // namespace
 
 CollectQueryContext* get_active_collect_query_context() {
@@ -30,11 +43,20 @@ void set_active_collect_query_context(CollectQueryContext* context) {
 void CollectQueryContext::clear() {
     tentative_overlays_.clear();
     metrics_ = Metrics{};
+    bump_revision();
+}
+
+void CollectQueryContext::bump_revision() {
+    ++revision_;
+    if (revision_ == 0) {
+        revision_ = 1;
+    }
 }
 
 void CollectQueryContext::begin_tentative_overlay() {
     tentative_overlays_.emplace_back();
     ++metrics_.overlay_begins;
+    bump_revision();
 }
 
 void CollectQueryContext::merge_overlay_into_parent(TentativeOverlay& parent,
@@ -105,6 +127,7 @@ void CollectQueryContext::commit_tentative_overlay(CollectSemanticStore& store) 
     TentativeOverlay overlay = std::move(tentative_overlays_.back());
     tentative_overlays_.pop_back();
     ++metrics_.overlay_commits;
+    bump_revision();
     if (!tentative_overlays_.empty()) {
         merge_overlay_into_parent(tentative_overlays_.back(), std::move(overlay));
         ++metrics_.overlay_merges;
@@ -119,6 +142,7 @@ void CollectQueryContext::rollback_tentative_overlay() {
     }
     tentative_overlays_.pop_back();
     ++metrics_.overlay_rollbacks;
+    bump_revision();
 }
 
 const RecordSemanticState* CollectQueryContext::lookup_record_semantics(
@@ -156,6 +180,7 @@ const RecordSemanticState* CollectQueryContext::publish_record_semantics(
         return nullptr;
     }
     ++metrics_.record_semantics_publications;
+    bump_revision();
     if (tentative_overlays_.empty()) {
         store.set_record_semantics(record_decl, std::move(state));
         return store.lookup_record_semantics(record_decl);
@@ -172,6 +197,7 @@ void CollectQueryContext::erase_record_semantics(const ObjectDecl* record_decl,
     if (!record_decl) {
         return;
     }
+    bump_revision();
     if (tentative_overlays_.empty()) {
         store.erase_record_semantics(record_decl);
         return;
@@ -388,6 +414,55 @@ const RecordSemanticState* Collect::query_lookup_record_semantics(
     return query_context_.lookup_record_semantics(
         record_decl,
         ast_ctx_->semantic_store());
+}
+
+const RecordSemanticState* Collect::ensure_record_semantics_available(
+    QualType owner_type,
+    SrcLoc loc) {
+    if (!ast_ctx_ || !owner_type) {
+        return nullptr;
+    }
+
+    auto record_type =
+        desugar_type(owner_type, ast_ctx_.get()).as_shared<ObjectType>();
+    if (!record_type) {
+        return nullptr;
+    }
+    auto* owner_decl = dyn_cast<ObjectDecl>(record_type->get_decl());
+    if (!owner_decl) {
+        return nullptr;
+    }
+    owner_decl = const_cast<ObjectDecl*>(canonical_record_owner_decl(owner_decl));
+
+    const RecordSemanticState* state = query_lookup_record_semantics(owner_decl);
+    if (state && !state->is_incomplete) {
+        return state;
+    }
+    if (!record_type->is_class_template_specialization()) {
+        return state;
+    }
+
+    const ClassTemplateDecl* primary_template =
+        record_type->get_primary_class_template();
+    if (!primary_template) {
+        return state;
+    }
+
+    ObjectDecl* realized_decl = try_instantiate_class_template_specialization(
+        primary_template,
+        record_type->get_template_specialization_arguments(),
+        loc);
+    if (!realized_decl) {
+        return state;
+    }
+
+    auto* canonical_realized =
+        const_cast<ObjectDecl*>(canonical_record_owner_decl(realized_decl));
+    if (const RecordSemanticState* realized_state =
+            query_lookup_record_semantics(canonical_realized)) {
+        return realized_state;
+    }
+    return query_lookup_record_semantics(owner_decl);
 }
 
 const RecordSemanticState* Collect::query_publish_record_semantics(

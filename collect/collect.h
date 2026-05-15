@@ -1406,6 +1406,9 @@ public:
     void collect_record_compute_layout(CollectRecordBuildContext& ctx) const;
     const RecordSemanticState* query_lookup_record_semantics(
         const ObjectDecl* record_decl) const;
+    const RecordSemanticState* ensure_record_semantics_available(
+        QualType owner_type,
+        SrcLoc loc);
     const RecordSemanticState* query_publish_record_semantics(
         const ObjectDecl* record_decl,
         RecordSemanticState state);

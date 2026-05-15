@@ -1091,12 +1091,18 @@ bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
         components.push_back(std::move(*component));
     }
 
-    if (!can_follow_named_type_specifier(token_at(offset).type)) {
+    TokenType follow = token_at(offset).type;
+    if (!can_follow_named_type_specifier(follow)) {
         return false;
     }
 
     if (qualified_terminal_names_type(components, has_global_qualifier)) {
         return true;
+    }
+
+    if (!components.empty() && components.back().has_template_argument_list &&
+        follow == TokenType::LEFT_PAREN) {
+        return false;
     }
 
     for (size_t idx = 0; idx + 1 < components.size(); ++idx) {

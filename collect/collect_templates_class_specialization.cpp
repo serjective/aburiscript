@@ -433,6 +433,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     std::vector<std::pair<const CppConstructorDecl*, CppConstructorDecl*>>
         pending_ctor_init_clones;
     RecordSemanticState semantic_state;
+    std::unordered_map<std::string, std::shared_ptr<Symbol>>
+        reusable_static_member_symbols;
 
     ObjectDecl* run() {
         if (!class_template || !ast_ctx()) {
@@ -519,9 +521,6 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         if (!entry || entry->is_instantiating || !entry->specialization_decl) {
             return;
         }
-        if (collect.collect_is_speculative_parsing()) {
-            return;
-        }
         if (!entry->is_instantiated && !entry->instantiation_failed) {
             return;
         }
@@ -535,6 +534,21 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
         entry->is_instantiated = false;
         entry->instantiation_failed = false;
+        reusable_static_member_symbols.clear();
+        for (const auto& member_decl : entry->member_decls) {
+            const auto* variable = dyn_cast<VariableDecl>(member_decl.get());
+            if (!variable || !variable->sym ||
+                variable->storage_class != StorageClass::STATIC) {
+                continue;
+            }
+            reusable_static_member_symbols.emplace(variable->name, variable->sym);
+        }
+        entry->retire_member_decls_for_rebuild();
+        entry->primary_member_first_required_locs.clear();
+        entry->specialized_member_to_primary_member_decl.clear();
+        entry->specialized_member_symbol_to_primary_member_decl.clear();
+        entry->primary_member_owner_specialized_templates.clear();
+        entry->pending_member_body_instantiations.clear();
     }
 
     bool fail_instantiation(const std::string& message, SrcLoc error_loc) {
@@ -1425,7 +1439,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         pending_method_template_clones.reserve(pattern->members.size());
         pending_body_clones.reserve(pattern->members.size());
         pending_ctor_init_clones.reserve(pattern->members.size());
-        entry->member_decls.clear();
+        entry->retire_member_decls_for_rebuild();
         entry->specialized_member_to_primary_member_decl.clear();
         entry->specialized_member_symbol_to_primary_member_decl.clear();
         entry->primary_member_owner_specialized_templates.clear();
@@ -2047,7 +2061,16 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 ? pattern_symbol_it->second
                 : nullptr;
         std::shared_ptr<Symbol> cloned_symbol = cloned_decl->sym;
-        if (!cloned_symbol && pattern_symbol) {
+        if (auto reusable_it =
+                reusable_static_member_symbols.find(cloned_decl->name);
+            reusable_it != reusable_static_member_symbols.end()) {
+            cloned_symbol = reusable_it->second;
+            cloned_decl->sym = cloned_symbol;
+            if (pattern_symbol) {
+                clone_pass.context().symbol_remap[pattern_symbol.get()] =
+                    cloned_symbol;
+            }
+        } else if (!cloned_symbol && pattern_symbol) {
             cloned_symbol = clone_symbol_shallow_for_specialization(
                 pattern_symbol,
                 desugar_type(cloned_decl->type));
@@ -2063,15 +2086,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 ? get_symbol_cxx_qualifier_prefix(cloned_symbol.get())
                 : nullptr,
             pattern_symbol.get());
-        if (namespace_prefix.has_value() && cloned_symbol) {
+        if (cloned_symbol) {
             set_symbol_cxx_qualifier_prefix(
                 cloned_symbol.get(),
-                *namespace_prefix);
-        }
-        if (cloned_symbol) {
+                namespace_prefix);
             set_symbol_owner_record_type(cloned_symbol.get(), owner_type);
+            cloned_symbol->type = desugar_type(cloned_decl->type);
             cloned_symbol->storage_class = StorageClass::STATIC;
             cloned_symbol->is_constexpr = cloned_decl->is_constexpr;
+            cloned_symbol->variable_definition = cloned_decl;
         }
 
         if (!try_finalize_static_member_for_later_members(
@@ -4034,7 +4057,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     clone_error.empty()
                         ? "class template static data member dependent resolution is not supported"
                         : clone_error,
-                    member_decl ? member_decl->location : loc);
+                        member_decl ? member_decl->location : loc);
             }
         }
         return true;

@@ -1788,7 +1788,9 @@ llvm::Value * ASTToLLVM::convert_expression(Expr *expr) {
             break;
     }
 
-    throw std::runtime_error("unimplemented convert_expression in ASTToLLVM");
+    throw std::runtime_error(
+        "unimplemented convert_expression in ASTToLLVM for StmtKind " +
+        std::to_string(static_cast<int>(expr->get_kind())));
 }
 
 llvm::Value* ASTToLLVM::convert_label_address_expr(LabelAddressExpr *expr) {

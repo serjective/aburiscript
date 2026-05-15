@@ -566,6 +566,11 @@ private:
     std::unique_ptr<Expr> parse_cpp_constraint_logical_or_expression();
     std::unique_ptr<Expr> parse_cpp_constraint_primary_expression();
     bool is_cpp_template_argument_boundary_here();
+    bool skip_balanced_group_for_template_id_lookahead(
+        size_t& offset,
+        TokenType open_tok,
+        TokenType close_tok);
+    bool skip_template_argument_list_for_expression_probe(size_t& offset);
     const TemplateParameterDecl* find_active_template_parameter(
         std::string_view name) const;
     const TemplateParameterDecl* find_active_template_parameter_pack(

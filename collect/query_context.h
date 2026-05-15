@@ -37,6 +37,7 @@ public:
     void commit_tentative_overlay(CollectSemanticStore& store);
     void rollback_tentative_overlay();
     bool has_tentative_overlay() const { return !tentative_overlays_.empty(); }
+    uint64_t revision() const { return revision_; }
 
     const RecordSemanticState* lookup_record_semantics(
         const ObjectDecl* record_decl,
@@ -95,9 +96,11 @@ private:
                                           TentativeOverlay child);
     static void apply_overlay_to_store(TentativeOverlay& overlay,
                                        CollectSemanticStore& store);
+    void bump_revision();
 
     std::vector<TentativeOverlay> tentative_overlays_;
     mutable Metrics metrics_;
+    uint64_t revision_ = 1;
 };
 
 CollectQueryContext* get_active_collect_query_context();
