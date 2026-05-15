@@ -625,11 +625,14 @@ LookupTraversalResult lookup_in_context_graph(
                     trace_named_step(trace, "hit template binding: ", name);
                     result.disposition = ContextLookupDisposition::Found;
                     result.binding = binding;
+                    result.owner_context = context;
                     return result;
                 }
                 trace_named_step(
                     trace, "blocked by non-template binding: ", name);
                 result.disposition = ContextLookupDisposition::Blocked;
+                result.binding = binding;
+                result.owner_context = context;
                 return result;
             }
             trace_named_step(trace, "miss template binding: ", name);
@@ -883,7 +886,7 @@ OrdinaryBindingSetResult collect_ordinary_bindings_in_context_graph(
         std::move(traversal_result.qualified_bindings)};
 }
 
-const DeclBinding* lookup_template_binding_in_context_graph(
+LookupTraversalResult lookup_template_binding_in_context_graph(
     InternedName name,
     const DeclContext* context,
     uint64_t lookup_position,
@@ -902,9 +905,7 @@ const DeclBinding* lookup_template_binding_in_context_graph(
         LookupEngine::OrdinaryFilter::Any,
         visited_contexts,
         trace);
-    return traversal_result.disposition == ContextLookupDisposition::Found
-               ? traversal_result.binding
-               : nullptr;
+    return traversal_result;
 }
 }
 
@@ -1002,68 +1003,37 @@ LookupEngine::lookup_unqualified_template_binding_result(
     LookupNamespace lookup_namespace,
     LookupTrace* trace) {
 
-    std::unordered_set<const DeclContext*> visited_contexts;
-    size_t depth = 0;
-    for (auto scope = start_scope; scope; scope = look_parents ? scope->parent : nullptr, ++depth) {
-        trace_scope_step(trace, depth, scope->flags);
-        if (scope->associated_decl_context &&
-            visited_contexts.insert(scope->associated_decl_context).second) {
-            const DeclContext* context =
-                canonical_decl_context(scope->associated_decl_context);
-            InternedName interned_name = intern_lookup_name(context, name);
-            if (!interned_name) {
-                continue;
-            }
-            const DeclBinding* binding = nullptr;
-            if (context &&
-                (context->kind() == DeclContextKind::Namespace ||
-                 context->kind() == DeclContextKind::TranslationUnit)) {
-                std::unordered_set<const DeclContext*> visited_context_graph;
-                binding = lookup_template_binding_in_context_graph(
-                    interned_name,
-                    context,
-                    context->next_lookup_event_index(),
-                    lookup_namespace,
-                    visited_context_graph,
-                    trace);
-            } else {
-                binding = lookup_context_local(
-                    context, interned_name, lookup_namespace);
-                if (binding) {
-                    if (binding_has_template_entity(binding)) {
-                        trace_named_step(trace, "hit template binding: ", name);
-                        return UnqualifiedTemplateLookupResult{
-                            binding,
-                            scope,
-                            context,
-                            context,
-                            depth,
-                            false};
-                    }
-                    trace_named_step(trace, "blocked by non-template binding: ", name);
-                    return UnqualifiedTemplateLookupResult{
-                        nullptr,
-                        scope,
-                        context,
-                        context,
-                        depth,
-                        true};
-                }
-                trace_named_step(trace, "miss template binding: ", name);
-            }
-            if (binding) {
-                return UnqualifiedTemplateLookupResult{
-                    binding,
-                    scope,
-                    context,
-                    nullptr,
-                    depth,
-                    false};
-            }
+    auto environment = build_unqualified_environment(start_scope, look_parents, trace);
+    for (const auto& frame : environment.frames) {
+        InternedName interned_name = intern_lookup_name(frame.decl_context, name);
+        if (!interned_name) {
+            continue;
         }
-
-        if (!look_parents) {
-            break;
+        std::unordered_set<const DeclContext*> visited_contexts;
+        auto result = lookup_template_binding_in_context_graph(
+            interned_name,
+            frame.decl_context,
+            frame.lookup_position,
+            lookup_namespace,
+            visited_contexts,
+            trace);
+        if (result.disposition == ContextLookupDisposition::Found) {
+            return UnqualifiedTemplateLookupResult{
+                result.binding,
+                frame.scope,
+                frame.decl_context,
+                result.owner_context,
+                frame.scope_depth,
+                false};
+        }
+        if (result.disposition == ContextLookupDisposition::Blocked) {
+            return UnqualifiedTemplateLookupResult{
+                nullptr,
+                frame.scope,
+                frame.decl_context,
+                result.owner_context,
+                frame.scope_depth,
+                true};
         }
     }
     trace_named_step(trace, "template lookup miss: ", name);
@@ -1087,10 +1057,9 @@ const DeclBinding* LookupEngine::lookup_unqualified_template_binding_from_contex
     LookupNamespace lookup_namespace,
     LookupTrace* trace) {
     std::unordered_set<const DeclContext*> visited_contexts;
-    size_t depth = 0;
     for (const DeclContext* context = start_decl_context;
          context;
-         context = look_parents ? context->lexical_parent() : nullptr, ++depth) {
+         context = look_parents ? context->lexical_parent() : nullptr) {
         context = canonical_decl_context(context);
         if (!context || !visited_contexts.insert(context).second) {
             if (!look_parents) {
@@ -1109,34 +1078,19 @@ const DeclBinding* LookupEngine::lookup_unqualified_template_binding_from_contex
             }
             continue;
         }
-        const DeclBinding* binding = nullptr;
-        if (context->kind() == DeclContextKind::Namespace ||
-            context->kind() == DeclContextKind::TranslationUnit) {
-            std::unordered_set<const DeclContext*> visited_context_graph;
-            binding = lookup_template_binding_in_context_graph(
-                interned_name,
-                context,
-                context->next_lookup_event_index(),
-                lookup_namespace,
-                visited_context_graph,
-                trace);
-        } else {
-            binding = lookup_context_local(
-                context,
-                interned_name,
-                lookup_namespace);
-            if (binding) {
-                if (binding_has_template_entity(binding)) {
-                    trace_named_step(trace, "hit template binding: ", name);
-                    return binding;
-                }
-                trace_named_step(trace, "blocked by non-template binding: ", name);
-                return nullptr;
-            }
-            trace_named_step(trace, "miss template binding: ", name);
+        std::unordered_set<const DeclContext*> visited_context_graph;
+        auto result = lookup_template_binding_in_context_graph(
+            interned_name,
+            context,
+            context->next_lookup_event_index(),
+            lookup_namespace,
+            visited_context_graph,
+            trace);
+        if (result.disposition == ContextLookupDisposition::Found) {
+            return result.binding;
         }
-        if (binding) {
-            return binding;
+        if (result.disposition == ContextLookupDisposition::Blocked) {
+            return nullptr;
         }
         if (!look_parents) {
             break;
