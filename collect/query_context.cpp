@@ -17,13 +17,6 @@ bool refactor_metrics_enabled() {
     return enabled;
 }
 
-bool record_semantics_must_publish_durably(const ObjectDecl* record_decl) {
-    if (!record_decl) {
-        return false;
-    }
-    auto record_type = record_decl->get_record_type();
-    return record_type && record_type->is_class_template_specialization();
-}
 } // namespace
 
 CollectQueryContext* get_active_collect_query_context() {
@@ -163,8 +156,7 @@ const RecordSemanticState* CollectQueryContext::publish_record_semantics(
         return nullptr;
     }
     ++metrics_.record_semantics_publications;
-    if (tentative_overlays_.empty() ||
-        record_semantics_must_publish_durably(record_decl)) {
+    if (tentative_overlays_.empty()) {
         store.set_record_semantics(record_decl, std::move(state));
         return store.lookup_record_semantics(record_decl);
     }
@@ -180,8 +172,7 @@ void CollectQueryContext::erase_record_semantics(const ObjectDecl* record_decl,
     if (!record_decl) {
         return;
     }
-    if (tentative_overlays_.empty() ||
-        record_semantics_must_publish_durably(record_decl)) {
+    if (tentative_overlays_.empty()) {
         store.erase_record_semantics(record_decl);
         return;
     }

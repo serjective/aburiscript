@@ -6412,15 +6412,7 @@ bool Parser::isTokenDeclarationSpec(Token s) {
                 if (is_cxx_mode_active() &&
                     (is_cpp_qualified_id_start() ||
                      peek_token().type == TokenType::LESS_THAN)) {
-                    RevertingTentativeParsingAction tentative(*this);
-                    try {
-                        DeclarationParser decl(this);
-                        return static_cast<bool>(decl.parse_declaration(false));
-                    } catch (const FatalErrorLimitReached&) {
-                        return false;
-                    } catch (const ParseError&) {
-                        return false;
-                    }
+                    return can_start_cpp_named_type_specifier_for_lookahead();
                 }
                 return false;
             }
@@ -6428,15 +6420,7 @@ bool Parser::isTokenDeclarationSpec(Token s) {
                 (s.type == TokenType::SCOPE_RESOLUTION ||
                  (s.type == TokenType::COLON &&
                   peek_token().type == TokenType::COLON))) {
-                RevertingTentativeParsingAction tentative(*this);
-                try {
-                    DeclarationParser decl(this);
-                    return static_cast<bool>(decl.parse_declaration(false));
-                } catch (const FatalErrorLimitReached&) {
-                    return false;
-                } catch (const ParseError&) {
-                    return false;
-                }
+                return can_start_cpp_named_type_specifier_for_lookahead();
             }
             // Check for C23 [[...]] attribute syntax
             if (s.type == TokenType::LEFT_BRACKET && peek_token().type == TokenType::LEFT_BRACKET) {

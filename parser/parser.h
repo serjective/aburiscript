@@ -579,6 +579,7 @@ private:
     std::vector<TemplateArgument> parse_cpp_template_argument_list();
     void consume_cpp_template_argument_list_close();
     bool try_consume_cpp_decltype_specifier_for_lookahead();
+    bool can_start_cpp_named_type_specifier_for_lookahead();
     QualType parse_cpp_decltype_type_specifier();
     std::optional<ParsedCppTypeNameSpecifier> try_parse_cpp_named_type_specifier();
     std::unique_ptr<Expr> try_parse_cpp_constraint_name_expression(

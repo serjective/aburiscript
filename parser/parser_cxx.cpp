@@ -794,6 +794,324 @@ bool Parser::try_consume_cpp_decltype_specifier_for_lookahead() {
     return true;
 }
 
+bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
+    if (!is_cxx_mode_active() || !collect_) {
+        return false;
+    }
+
+    struct ProbeComponent {
+        std::string name;
+        bool has_template_argument_list = false;
+        bool preceded_by_template_keyword = false;
+    };
+
+    auto token_at = [&](size_t offset) {
+        return peek_token_shortcut(offset);
+    };
+
+    auto consume_scope_resolution_at = [&](size_t& offset) {
+        if (token_at(offset).type == TokenType::SCOPE_RESOLUTION) {
+            ++offset;
+            return true;
+        }
+        if (token_at(offset).type == TokenType::COLON &&
+            token_at(offset + 1).type == TokenType::COLON) {
+            offset += 2;
+            return true;
+        }
+        return false;
+    };
+
+    auto skip_balanced_group_at =
+        [&](size_t& offset,
+            TokenType open_tok,
+            TokenType close_tok) -> bool {
+        if (token_at(offset).type != open_tok) {
+            return false;
+        }
+        size_t depth = 0;
+        while (token_at(offset).type != TokenType::Eof) {
+            TokenType tok = token_at(offset).type;
+            if (tok == open_tok) {
+                ++depth;
+            } else if (tok == close_tok) {
+                --depth;
+                ++offset;
+                if (depth == 0) {
+                    return true;
+                }
+                continue;
+            }
+            ++offset;
+        }
+        return false;
+    };
+
+    auto skip_template_argument_list_at = [&](size_t& offset) -> bool {
+        if (token_at(offset).type != TokenType::LESS_THAN) {
+            return false;
+        }
+        ++offset;
+        size_t angle_depth = 1;
+        while (token_at(offset).type != TokenType::Eof) {
+            TokenType tok = token_at(offset).type;
+            switch (tok) {
+                case TokenType::LESS_THAN:
+                    ++angle_depth;
+                    ++offset;
+                    break;
+                case TokenType::GREATER_THAN:
+                    --angle_depth;
+                    ++offset;
+                    if (angle_depth == 0) {
+                        return true;
+                    }
+                    break;
+                case TokenType::RIGHT_SHIFT:
+                    if (angle_depth <= 2) {
+                        ++offset;
+                        return true;
+                    }
+                    angle_depth -= 2;
+                    ++offset;
+                    break;
+                case TokenType::LEFT_PAREN:
+                    if (!skip_balanced_group_at(
+                            offset,
+                            TokenType::LEFT_PAREN,
+                            TokenType::RIGHT_PAREN)) {
+                        return false;
+                    }
+                    break;
+                case TokenType::LEFT_BRACE:
+                    if (!skip_balanced_group_at(
+                            offset,
+                            TokenType::LEFT_BRACE,
+                            TokenType::RIGHT_BRACE)) {
+                        return false;
+                    }
+                    break;
+                case TokenType::LEFT_BRACKET:
+                    if (!skip_balanced_group_at(
+                            offset,
+                            TokenType::LEFT_BRACKET,
+                            TokenType::RIGHT_BRACKET)) {
+                        return false;
+                    }
+                    break;
+                default:
+                    ++offset;
+                    break;
+            }
+        }
+        return false;
+    };
+
+    auto parse_component_at =
+        [&](size_t& offset,
+            bool allow_template_keyword) -> std::optional<ProbeComponent> {
+        ProbeComponent component;
+        if (allow_template_keyword &&
+            token_at(offset).type == TokenType::TEMPLATE) {
+            component.preceded_by_template_keyword = true;
+            ++offset;
+        }
+        if (token_at(offset).type != TokenType::IDENTIFIER) {
+            return std::nullopt;
+        }
+        component.name = token_at(offset).value;
+        ++offset;
+        if (token_at(offset).type == TokenType::LESS_THAN) {
+            component.has_template_argument_list = true;
+            if (!skip_template_argument_list_at(offset)) {
+                return std::nullopt;
+            }
+        }
+        return component;
+    };
+
+    auto can_follow_named_type_specifier = [](TokenType tok) {
+        switch (tok) {
+            case TokenType::IDENTIFIER:
+            case TokenType::MULTIPLY:
+            case TokenType::BITWISE_AND:
+            case TokenType::LOGICAL_AND:
+            case TokenType::LEFT_PAREN:
+            case TokenType::RIGHT_PAREN:
+            case TokenType::LEFT_BRACKET:
+            case TokenType::COMMA:
+            case TokenType::ELLIPSIS:
+            case TokenType::CONST:
+            case TokenType::VOLATILE:
+            case TokenType::RESTRICT:
+            case TokenType::ATTRIBUTE_KW:
+            case TokenType::ALIGNAS:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    auto single_template_decl_from_binding =
+        [](const DeclBinding* binding) -> const Decl* {
+        if (!binding) {
+            return nullptr;
+        }
+        if (binding->template_decl) {
+            return binding->template_decl;
+        }
+        if (binding->template_overload_candidates.size() == 1) {
+            return binding->template_overload_candidates.front();
+        }
+        return nullptr;
+    };
+
+    auto is_type_template_decl = [](const Decl* decl) {
+        return isa<AliasTemplateDecl>(decl) ||
+               isa<ClassTemplateDecl>(decl) ||
+               isa<TemplateTemplateParmDecl>(decl);
+    };
+
+    auto lookup_qualified_type_template =
+        [&](const LookupEngine::QualifiedNameSpec& name_spec) -> const Decl* {
+        auto ordinary_lookup = LookupEngine::lookup_qualified_name(
+            name_spec,
+            collect_->get_current_decl_context().get(),
+            LookupNamespace::Ordinary);
+        if (const Decl* decl =
+                single_template_decl_from_binding(ordinary_lookup.binding);
+            is_type_template_decl(decl)) {
+            return decl;
+        }
+
+        auto tag_lookup = LookupEngine::lookup_qualified_name(
+            name_spec,
+            collect_->get_current_decl_context().get(),
+            LookupNamespace::Tag);
+        if (const Decl* decl =
+                single_template_decl_from_binding(tag_lookup.binding);
+            is_type_template_decl(decl)) {
+            return decl;
+        }
+        return nullptr;
+    };
+
+    auto lookup_type_template_at =
+        [&](const std::vector<ProbeComponent>& components,
+            bool has_global_qualifier,
+            size_t component_idx) -> const Decl* {
+        if (!has_global_qualifier && component_idx == 0) {
+            auto scope = collect_->collect_current_scope();
+            return lookup_cpp_unqualified_type_template_decl(
+                components[component_idx].name,
+                scope,
+                /*allow_enclosing_lookup=*/true);
+        }
+
+        LookupEngine::QualifiedNameSpec name_spec;
+        name_spec.has_global_qualifier = has_global_qualifier;
+        for (size_t idx = 0; idx < component_idx; ++idx) {
+            if (components[idx].has_template_argument_list ||
+                components[idx].preceded_by_template_keyword) {
+                return nullptr;
+            }
+            name_spec.qualifiers.push_back(components[idx].name);
+        }
+        name_spec.terminal_name = components[component_idx].name;
+        return lookup_qualified_type_template(name_spec);
+    };
+
+    auto qualified_terminal_names_type =
+        [&](const std::vector<ProbeComponent>& components,
+            bool has_global_qualifier) {
+        if (components.empty()) {
+            return false;
+        }
+
+        const size_t terminal_idx = components.size() - 1;
+        const auto& terminal = components.back();
+        LookupEngine::QualifiedNameSpec name_spec;
+        name_spec.has_global_qualifier = has_global_qualifier;
+        for (size_t idx = 0; idx < terminal_idx; ++idx) {
+            if (components[idx].has_template_argument_list ||
+                components[idx].preceded_by_template_keyword) {
+                return false;
+            }
+            name_spec.qualifiers.push_back(components[idx].name);
+        }
+        name_spec.terminal_name = terminal.name;
+
+        if (terminal.has_template_argument_list) {
+            if (!has_global_qualifier && terminal_idx == 0) {
+                auto scope = collect_->collect_current_scope();
+                return lookup_cpp_unqualified_type_template_decl(
+                           terminal.name,
+                           scope,
+                           /*allow_enclosing_lookup=*/true) != nullptr;
+            }
+            return lookup_qualified_type_template(name_spec) != nullptr;
+        }
+
+        auto ordinary_lookup = LookupEngine::lookup_qualified_name(
+            name_spec,
+            collect_->get_current_decl_context().get(),
+            LookupNamespace::Ordinary,
+            LookupEngine::OrdinaryFilter::TypedefOnly);
+        if (ordinary_lookup.binding && ordinary_lookup.symbol &&
+            ordinary_lookup.symbol->kind == SymbolKind::TYPE) {
+            return true;
+        }
+
+        auto tag_lookup = LookupEngine::lookup_qualified_name(
+            name_spec,
+            collect_->get_current_decl_context().get(),
+            LookupNamespace::Tag);
+        return tag_lookup.binding != nullptr;
+    };
+
+    size_t offset = 0;
+    bool has_global_qualifier = consume_scope_resolution_at(offset);
+
+    auto first_component = parse_component_at(
+        offset,
+        /*allow_template_keyword=*/false);
+    if (!first_component) {
+        return false;
+    }
+
+    std::vector<ProbeComponent> components;
+    components.push_back(std::move(*first_component));
+    while (consume_scope_resolution_at(offset)) {
+        auto component = parse_component_at(
+            offset,
+            /*allow_template_keyword=*/true);
+        if (!component) {
+            return false;
+        }
+        components.push_back(std::move(*component));
+    }
+
+    if (!can_follow_named_type_specifier(token_at(offset).type)) {
+        return false;
+    }
+
+    if (qualified_terminal_names_type(components, has_global_qualifier)) {
+        return true;
+    }
+
+    for (size_t idx = 0; idx + 1 < components.size(); ++idx) {
+        if (!components[idx].has_template_argument_list) {
+            continue;
+        }
+        if (lookup_type_template_at(components, has_global_qualifier, idx)) {
+            return true;
+        }
+        return false;
+    }
+
+    return false;
+}
+
 QualType Parser::parse_cpp_decltype_type_specifier() {
     Token decltype_tok = current_token();
     if (!is_cxx_mode_active()) {

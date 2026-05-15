@@ -460,6 +460,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         if (!entry->specialization_type) {
             entry->specialization_type = entry->specialization_decl->get_record_type();
         }
+        repair_entry_after_tentative_semantic_rollback();
         if (entry->is_instantiated || entry->is_instantiating ||
             entry->instantiation_failed) {
             return entry->specialization_decl.get();
@@ -513,6 +514,28 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     }
 
     ASTContext* ast_ctx() const { return collect.ast_ctx_.get(); }
+
+    void repair_entry_after_tentative_semantic_rollback() {
+        if (!entry || entry->is_instantiating || !entry->specialization_decl) {
+            return;
+        }
+        if (collect.collect_is_speculative_parsing()) {
+            return;
+        }
+        if (!entry->is_instantiated && !entry->instantiation_failed) {
+            return;
+        }
+
+        const RecordSemanticState* state =
+            collect.query_lookup_record_semantics(
+                entry->specialization_decl.get());
+        if (state && (!pattern->is_definition || !state->is_incomplete)) {
+            return;
+        }
+
+        entry->is_instantiated = false;
+        entry->instantiation_failed = false;
+    }
 
     bool fail_instantiation(const std::string& message, SrcLoc error_loc) {
         collect.report_error(message, error_loc);
@@ -1403,6 +1426,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         pending_body_clones.reserve(pattern->members.size());
         pending_ctor_init_clones.reserve(pattern->members.size());
         entry->member_decls.clear();
+        entry->specialized_member_to_primary_member_decl.clear();
+        entry->specialized_member_symbol_to_primary_member_decl.clear();
+        entry->primary_member_owner_specialized_templates.clear();
+        entry->pending_member_body_instantiations.clear();
         entry->member_decls.reserve(pattern->members.size());
     }
 

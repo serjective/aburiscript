@@ -2882,6 +2882,7 @@ void Collect::collect_record_synthesize_implicit_members(
         ctor_decl->is_deleted = is_deleted;
         ctor_decl->is_defaulted = true;
         ctor_decl->is_defaulted_on_first_declaration = true;
+        ctor_decl->is_constexpr = !is_deleted;
         ctor_decl->set_language_linkage(LanguageLinkage::CXX);
 
         std::string ctor_prefix = ctx.tag;
@@ -2994,6 +2995,7 @@ void Collect::collect_record_synthesize_implicit_members(
         method_decl->is_deleted = is_deleted;
         method_decl->is_defaulted = true;
         method_decl->is_defaulted_on_first_declaration = true;
+        method_decl->is_constexpr = !is_deleted;
         method_decl->set_language_linkage(LanguageLinkage::CXX);
 
         std::string method_prefix = ctx.tag;
