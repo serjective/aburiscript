@@ -8587,11 +8587,15 @@ Collect::ImplicitConversionSequence Collect::build_implicit_conversion_sequence(
         return seq;
     }
 
-    if (from.equals_unqualified(to)) {
-        seq.kind = ConversionSequenceKind::Qualification;
-        seq.rank = ConversionSequenceRank::ExactMatch;
-        return seq;
-    }
+        if (from.equals_unqualified(to)) {
+            seq.kind = ConversionSequenceKind::Qualification;
+            seq.rank = ConversionSequenceRank::ExactMatch;
+            seq.exact_subrank = qualification_conversion_exact_subrank(
+                from,
+                to,
+                ast_ctx_.get());
+            return seq;
+        }
 
     auto from_canonical = desugar_type(from, ast_ctx_.get());
     auto to_canonical = desugar_type(to, ast_ctx_.get());
@@ -8820,7 +8824,11 @@ Collect::build_cpp_overload_reference_conversion_sequence(
             seq.kind = ConversionSequenceKind::Qualification;
             seq.rank = ConversionSequenceRank::ExactMatch;
             seq.detail_kind = ConversionSequenceDetailKind::ReferenceDirectBinding;
-            seq.exact_subrank = qualification_subrank;
+            seq.exact_subrank = qualification_conversion_exact_subrank(
+                source_type,
+                target_type,
+                ast_ctx_.get(),
+                qualification_subrank);
             return true;
         }
         if (can_convert_derived_to_base_object(source_type, target_type)) {
@@ -8977,6 +8985,10 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
     if (same_unqualified_type) {
         seq.kind = ConversionSequenceKind::Qualification;
         seq.rank = ConversionSequenceRank::ExactMatch;
+        seq.exact_subrank = qualification_conversion_exact_subrank(
+            from_for_conversion,
+            to,
+            ast_ctx_.get());
         return seq;
     }
 
@@ -9051,6 +9063,12 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
                     ? ConversionSequenceKind::Identity
                     : ConversionSequenceKind::Qualification;
                 seq.rank = ConversionSequenceRank::ExactMatch;
+                if (seq.kind == ConversionSequenceKind::Qualification) {
+                    seq.exact_subrank = qualification_conversion_exact_subrank(
+                        from_ptr->pointed_type,
+                        to_ptr->pointed_type,
+                        ast_ctx_.get());
+                }
                 return seq;
             }
             bool to_void = to_ptr->pointed_type && to_ptr->pointed_type->isVoid();
@@ -9082,6 +9100,12 @@ Collect::build_cpp_overload_nonreference_conversion_sequence(
                 ? ConversionSequenceKind::Identity
                 : ConversionSequenceKind::Qualification;
             seq.rank = ConversionSequenceRank::ExactMatch;
+            if (seq.kind == ConversionSequenceKind::Qualification) {
+                seq.exact_subrank = qualification_conversion_exact_subrank(
+                    from_block->pointed_type,
+                    to_block->pointed_type,
+                    ast_ctx_.get());
+            }
             return seq;
         }
     }

@@ -155,6 +155,204 @@ bool same_type_ignoring_all_qualifiers(QualType lhs, QualType rhs) {
         get_active_side_table_ast_context());
 }
 
+int count_qualifier_bits(uint8_t qualifiers) {
+    int count = 0;
+    while (qualifiers != 0) {
+        count += qualifiers & 1U;
+        qualifiers >>= 1U;
+    }
+    return count;
+}
+
+bool can_convert_by_qualification_conversion(QualType from,
+                                             QualType to,
+                                             const ASTContext* ast_ctx) {
+    from = desugar_type(from, ast_ctx);
+    to = desugar_type(to, ast_ctx);
+    if (!from || !to) {
+        return false;
+    }
+    if (!to.has_all_qualifiers_of(from)) {
+        return false;
+    }
+    if (from->kind != to->kind) {
+        return false;
+    }
+
+    if (auto from_ptr = from.as_shared<PointerType>()) {
+        auto to_ptr = to.as_shared<PointerType>();
+        return to_ptr &&
+            can_convert_by_qualification_conversion(
+                from_ptr->pointed_type,
+                to_ptr->pointed_type,
+                ast_ctx);
+    }
+
+    if (auto from_block = from.as_shared<BlockPointerType>()) {
+        auto to_block = to.as_shared<BlockPointerType>();
+        return to_block &&
+            can_convert_by_qualification_conversion(
+                from_block->pointed_type,
+                to_block->pointed_type,
+                ast_ctx);
+    }
+
+    if (auto from_ref = from.as_shared<ReferenceType>()) {
+        auto to_ref = to.as_shared<ReferenceType>();
+        return to_ref &&
+            from_ref->reference_kind == to_ref->reference_kind &&
+            can_convert_by_qualification_conversion(
+                from_ref->referred_type,
+                to_ref->referred_type,
+                ast_ctx);
+    }
+
+    if (auto from_member = from.as_shared<MemberPointerType>()) {
+        auto to_member = to.as_shared<MemberPointerType>();
+        return to_member &&
+            can_convert_by_qualification_conversion(
+                from_member->class_type,
+                to_member->class_type,
+                ast_ctx) &&
+            can_convert_by_qualification_conversion(
+                from_member->member_type,
+                to_member->member_type,
+                ast_ctx);
+    }
+
+    if (auto from_array = from.as_shared<ArrayType>()) {
+        auto to_array = to.as_shared<ArrayType>();
+        if (!to_array || from_array->size_kind != to_array->size_kind) {
+            return false;
+        }
+        if (from_array->size_kind == ArraySizeKind::Constant &&
+            from_array->size != to_array->size) {
+            return false;
+        }
+        return can_convert_by_qualification_conversion(
+            from_array->element_type,
+            to_array->element_type,
+            ast_ctx);
+    }
+
+    return from.without_qualifiers().equals_unqualified(
+        to.without_qualifiers());
+}
+
+bool can_convert_by_qualification_conversion(QualType from, QualType to) {
+    return can_convert_by_qualification_conversion(
+        from,
+        to,
+        get_active_side_table_ast_context());
+}
+
+int qualification_conversion_added_qualifier_count(QualType from,
+                                                   QualType to,
+                                                   const ASTContext* ast_ctx) {
+    from = desugar_type(from, ast_ctx);
+    to = desugar_type(to, ast_ctx);
+    if (!from || !to || from->kind != to->kind) {
+        return 0;
+    }
+
+    int count = count_qualifier_bits(
+        static_cast<uint8_t>(to.get_qualifiers() & ~from.get_qualifiers()));
+
+    if (auto from_ptr = from.as_shared<PointerType>()) {
+        auto to_ptr = to.as_shared<PointerType>();
+        return to_ptr
+            ? count + qualification_conversion_added_qualifier_count(
+                  from_ptr->pointed_type,
+                  to_ptr->pointed_type,
+                  ast_ctx)
+            : count;
+    }
+
+    if (auto from_block = from.as_shared<BlockPointerType>()) {
+        auto to_block = to.as_shared<BlockPointerType>();
+        return to_block
+            ? count + qualification_conversion_added_qualifier_count(
+                  from_block->pointed_type,
+                  to_block->pointed_type,
+                  ast_ctx)
+            : count;
+    }
+
+    if (auto from_ref = from.as_shared<ReferenceType>()) {
+        auto to_ref = to.as_shared<ReferenceType>();
+        return to_ref
+            ? count + qualification_conversion_added_qualifier_count(
+                  from_ref->referred_type,
+                  to_ref->referred_type,
+                  ast_ctx)
+            : count;
+    }
+
+    if (auto from_member = from.as_shared<MemberPointerType>()) {
+        auto to_member = to.as_shared<MemberPointerType>();
+        return to_member
+            ? count +
+                  qualification_conversion_added_qualifier_count(
+                      from_member->class_type,
+                      to_member->class_type,
+                      ast_ctx) +
+                  qualification_conversion_added_qualifier_count(
+                      from_member->member_type,
+                      to_member->member_type,
+                      ast_ctx)
+            : count;
+    }
+
+    if (auto from_array = from.as_shared<ArrayType>()) {
+        auto to_array = to.as_shared<ArrayType>();
+        return to_array
+            ? count + qualification_conversion_added_qualifier_count(
+                  from_array->element_type,
+                  to_array->element_type,
+                  ast_ctx)
+            : count;
+    }
+
+    return count;
+}
+
+int qualification_conversion_exact_subrank(QualType from,
+                                           QualType to,
+                                           const ASTContext* ast_ctx,
+                                           int base_subrank = 1) {
+    int added_qualifiers =
+        qualification_conversion_added_qualifier_count(from, to, ast_ctx);
+    return base_subrank +
+        (added_qualifiers > 0 ? added_qualifiers - 1 : 0);
+}
+
+int compare_qualification_conversion_sequences(
+    const Collect::ImplicitConversionSequence& lhs,
+    const Collect::ImplicitConversionSequence& rhs,
+    const ASTContext* ast_ctx) {
+    auto is_qualification_orderable_exact_match =
+        [](const Collect::ImplicitConversionSequence& seq) {
+            return seq.rank == Collect::ConversionSequenceRank::ExactMatch &&
+                   (seq.kind == Collect::ConversionSequenceKind::Identity ||
+                    seq.kind == Collect::ConversionSequenceKind::Qualification);
+        };
+
+    if (!is_qualification_orderable_exact_match(lhs) ||
+        !is_qualification_orderable_exact_match(rhs) ||
+        !same_type_ignoring_all_qualifiers(lhs.from, rhs.from, ast_ctx)) {
+        return 0;
+    }
+
+    bool lhs_target_converts_to_rhs =
+        can_convert_by_qualification_conversion(lhs.to, rhs.to, ast_ctx);
+    bool rhs_target_converts_to_lhs =
+        can_convert_by_qualification_conversion(rhs.to, lhs.to, ast_ctx);
+    if (lhs_target_converts_to_rhs == rhs_target_converts_to_lhs) {
+        return 0;
+    }
+    return lhs_target_converts_to_rhs ? -1 : 1;
+}
+
 const EnumType* enum_type_from_qualtype(QualType type, const ASTContext* ast_ctx) {
     type = remove_reference(type, ast_ctx);
     type = desugar_type(type, ast_ctx);
@@ -367,6 +565,24 @@ const std::vector<const Expr*>* symbol_default_arguments(
     return get_symbol_cpp_default_arguments(symbol.get());
 }
 
+const Expr* function_decl_default_argument_at(const FuncDecl* decl,
+                                              size_t param_index) {
+    if (!decl || param_index >= decl->parameters.size()) {
+        return nullptr;
+    }
+    auto* param_decl = dyn_cast<ParamDecl>(decl->parameters[param_index].get());
+    return param_decl ? get_param_decl_default_argument(param_decl) : nullptr;
+}
+
+const FuncDecl* function_template_pattern_for_symbol(
+    const std::shared_ptr<Symbol>& symbol) {
+    const auto* specialization_info =
+        symbol ? get_symbol_function_template_specialization(symbol.get()) : nullptr;
+    const auto* primary_template =
+        specialization_info ? specialization_info->primary_template : nullptr;
+    return primary_template ? primary_template->function_decl() : nullptr;
+}
+
 size_t count_trailing_default_arguments_for_call(
     const std::shared_ptr<Symbol>& symbol,
     size_t named_param_count,
@@ -396,20 +612,17 @@ size_t count_trailing_default_arguments_for_call(
         });
     }
 
-    const auto* specialization_info =
-        symbol ? get_symbol_function_template_specialization(symbol.get()) : nullptr;
-    const auto* primary_template =
-        specialization_info ? specialization_info->primary_template : nullptr;
-    const auto* pattern = primary_template ? primary_template->function_decl() : nullptr;
-    if (!pattern) {
+    const FuncDecl* default_argument_source =
+        symbol && symbol->function_definition
+            ? symbol->function_definition
+            : function_template_pattern_for_symbol(symbol);
+    if (!default_argument_source) {
         return 0;
     }
     return count_trailing_defaults([&](size_t index) {
-        if (index >= pattern->parameters.size()) {
-            return false;
-        }
-        auto* param_decl = dyn_cast<ParamDecl>(pattern->parameters[index].get());
-        return param_decl && get_param_decl_default_argument(param_decl) != nullptr;
+        return function_decl_default_argument_at(
+                   default_argument_source,
+                   index) != nullptr;
     });
 }
 
@@ -417,10 +630,21 @@ const Expr* lookup_default_argument_for_param(
     const std::shared_ptr<Symbol>& symbol,
     size_t param_index) {
     const auto* defaults = symbol_default_arguments(symbol);
-    if (!defaults || param_index >= defaults->size()) {
-        return nullptr;
+    if (defaults && param_index < defaults->size()) {
+        return (*defaults)[param_index];
     }
-    return (*defaults)[param_index];
+    if (symbol && symbol->function_definition) {
+        if (const Expr* default_expr =
+                function_decl_default_argument_at(
+                    symbol->function_definition,
+                    param_index)) {
+            return default_expr;
+        }
+    }
+    if (const FuncDecl* pattern = function_template_pattern_for_symbol(symbol)) {
+        return function_decl_default_argument_at(pattern, param_index);
+    }
+    return nullptr;
 }
 
 struct MethodLookupResult {

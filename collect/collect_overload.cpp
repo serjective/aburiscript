@@ -176,6 +176,18 @@ bool is_strictly_better_conversion_profile(
             continue;
         }
         if (lhs_conversions[i].rank == Collect::ConversionSequenceRank::ExactMatch) {
+            int qualification_order =
+                compare_qualification_conversion_sequences(
+                    lhs_conversions[i],
+                    rhs_conversions[i],
+                    get_active_side_table_ast_context());
+            if (qualification_order < 0) {
+                strictly_better = true;
+                continue;
+            }
+            if (qualification_order > 0) {
+                return false;
+            }
             int lhs_subrank = exact_match_subrank(lhs_conversions[i]);
             int rhs_subrank = exact_match_subrank(rhs_conversions[i]);
             if (lhs_subrank > rhs_subrank) {
@@ -2523,7 +2535,13 @@ Collect::evaluate_overload_implicit_object_conversion(
         seq.to = param_type;
         seq.viable = true;
         seq.detail_kind = ConversionSequenceDetailKind::ReferenceDirectBinding;
-        seq.exact_subrank = (seq.kind == ConversionSequenceKind::Identity) ? 0 : 1;
+        seq.exact_subrank =
+            seq.kind == ConversionSequenceKind::Identity
+                ? 0
+                : qualification_conversion_exact_subrank(
+                      object_type,
+                      pointed_type,
+                      ast_ctx_.get());
         seq.note.clear();
         return seq;
     }
@@ -2864,6 +2882,14 @@ bool Collect::overload_note_order_less(
                 return lhs_rank < rhs_rank;
             }
             if (lhs.conversions[i].rank == ConversionSequenceRank::ExactMatch) {
+                int qualification_order =
+                    compare_qualification_conversion_sequences(
+                        lhs.conversions[i],
+                        rhs.conversions[i],
+                        get_active_side_table_ast_context());
+                if (qualification_order != 0) {
+                    return qualification_order < 0;
+                }
                 int lhs_subrank = exact_match_subrank(lhs.conversions[i]);
                 int rhs_subrank = exact_match_subrank(rhs.conversions[i]);
                 if (lhs_subrank != rhs_subrank) {
