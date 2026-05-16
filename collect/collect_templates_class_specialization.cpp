@@ -69,6 +69,50 @@ const ClassTemplateDecl* class_template_definition_for_instantiation(
     return class_template;
 }
 
+const ClassTemplateDecl* canonical_class_template_primary(
+    const ClassTemplateDecl* class_template) {
+    if (!class_template) {
+        return nullptr;
+    }
+    auto* canonical = dyn_cast<ClassTemplateDecl>(
+        const_cast<TemplateDecl*>(
+            get_template_decl_canonical_decl(class_template)));
+    return canonical ? canonical : class_template;
+}
+
+std::vector<const ClassTemplatePartialSpecializationDecl*>
+class_template_partial_specializations_for_instantiation(
+    const ClassTemplateDecl* class_template) {
+    std::vector<const ClassTemplatePartialSpecializationDecl*> partials;
+    auto append_from = [&](const ClassTemplateDecl* source) {
+        if (!source) {
+            return;
+        }
+        for (const auto* partial : source->partial_specializations()) {
+            if (!partial) {
+                continue;
+            }
+            bool already_seen = false;
+            for (const auto* existing : partials) {
+                if (existing == partial) {
+                    already_seen = true;
+                    break;
+                }
+            }
+            if (!already_seen) {
+                partials.push_back(partial);
+            }
+        }
+    };
+
+    const ClassTemplateDecl* canonical =
+        canonical_class_template_primary(class_template);
+    append_from(canonical);
+    append_from(class_template_definition_for_instantiation(canonical));
+    append_from(class_template);
+    return partials;
+}
+
 struct ClassTemplatePartialSpecializationMatch {
     const ClassTemplatePartialSpecializationDecl* partial_specialization = nullptr;
     TemplateArgumentBindings bindings;
@@ -692,10 +736,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             return false;
         }
 
+        auto partial_specializations =
+            class_template_partial_specializations_for_instantiation(class_template);
         std::vector<ClassTemplatePartialSpecializationMatch> matching_partials;
-        matching_partials.reserve(class_template->partial_specializations().size());
-        for (const auto* partial_specialization :
-             class_template->partial_specializations()) {
+        matching_partials.reserve(partial_specializations.size());
+        for (const auto* partial_specialization : partial_specializations) {
             if (!partial_specialization) {
                 continue;
             }

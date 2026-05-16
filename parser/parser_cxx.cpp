@@ -49,6 +49,19 @@ bool is_integer_pack_builtin_expr(const Expr* expr) {
     return false;
 }
 
+template <typename TemplateDeclT>
+TemplateDeclT* canonical_primary_template_for_partial_registration(
+    TemplateDeclT* primary_template) {
+    if (!primary_template) {
+        return nullptr;
+    }
+    const TemplateDecl* canonical_template =
+        get_template_decl_canonical_decl(primary_template);
+    auto* canonical_primary = dyn_cast<TemplateDeclT>(
+        const_cast<TemplateDecl*>(canonical_template));
+    return canonical_primary ? canonical_primary : primary_template;
+}
+
 } // namespace
 
 bool Parser::is_cxx_mode_active() const {
@@ -4552,6 +4565,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                             prepared_class_template_name + "'",
                         record_decl->location);
                 }
+                primary_class_template =
+                    canonical_primary_template_for_partial_registration(
+                        primary_class_template);
                 prepared_class_partial_specialization =
                     make_ast<ClassTemplatePartialSpecializationDecl>(
                         *ast_ctx,
@@ -4607,6 +4623,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                             prepared_variable_template_name + "'",
                         variable_decl->location);
                 }
+                primary_variable_template =
+                    canonical_primary_template_for_partial_registration(
+                        primary_variable_template);
                 auto specialization_arguments =
                     std::move(variable_decl->explicit_specialization_arguments);
                 variable_decl->explicit_specialization_arguments.clear();

@@ -3206,6 +3206,11 @@ struct VariableTemplateDecl : TemplateDecl {
         if (!partial_specialization) {
             return;
         }
+        for (auto* existing : partial_specializations_) {
+            if (existing == partial_specialization) {
+                return;
+            }
+        }
         partial_specializations_.push_back(partial_specialization);
     }
 
@@ -3300,6 +3305,11 @@ struct ClassTemplateDecl : TemplateDecl {
         ClassTemplatePartialSpecializationDecl* partial_specialization) {
         if (!partial_specialization) {
             return;
+        }
+        for (auto* existing : partial_specializations_) {
+            if (existing == partial_specialization) {
+                return;
+            }
         }
         partial_specializations_.push_back(partial_specialization);
     }

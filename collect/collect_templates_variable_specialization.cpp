@@ -22,6 +22,61 @@ VariableLinkage variable_linkage_for_specialization(const VariableDecl* pattern)
     return VariableLinkage::EXTERNAL;
 }
 
+const VariableTemplateDecl* canonical_variable_template_primary(
+    const VariableTemplateDecl* variable_template) {
+    if (!variable_template) {
+        return nullptr;
+    }
+    auto* canonical = dyn_cast<VariableTemplateDecl>(
+        const_cast<TemplateDecl*>(
+            get_template_decl_canonical_decl(variable_template)));
+    return canonical ? canonical : variable_template;
+}
+
+const VariableTemplateDecl* variable_template_definition_decl(
+    const VariableTemplateDecl* variable_template) {
+    if (!variable_template) {
+        return nullptr;
+    }
+    auto* definition = dyn_cast<VariableTemplateDecl>(
+        const_cast<TemplateDecl*>(
+            get_template_decl_definition_decl(variable_template)));
+    return definition ? definition : nullptr;
+}
+
+std::vector<const VariableTemplatePartialSpecializationDecl*>
+variable_template_partial_specializations_for_instantiation(
+    const VariableTemplateDecl* variable_template) {
+    std::vector<const VariableTemplatePartialSpecializationDecl*> partials;
+    auto append_from = [&](const VariableTemplateDecl* source) {
+        if (!source) {
+            return;
+        }
+        for (const auto* partial : source->partial_specializations()) {
+            if (!partial) {
+                continue;
+            }
+            bool already_seen = false;
+            for (const auto* existing : partials) {
+                if (existing == partial) {
+                    already_seen = true;
+                    break;
+                }
+            }
+            if (!already_seen) {
+                partials.push_back(partial);
+            }
+        }
+    };
+
+    const VariableTemplateDecl* canonical =
+        canonical_variable_template_primary(variable_template);
+    append_from(canonical);
+    append_from(variable_template_definition_decl(canonical));
+    append_from(variable_template);
+    return partials;
+}
+
 } // namespace
 
 struct Collect::VariableTemplateSpecializationInstantiator {
@@ -410,8 +465,10 @@ struct Collect::VariableTemplateSpecializationInstantiator {
     }
 
     bool select_partial_specialization() {
-        if (specialization_is_dependent ||
-            variable_template->partial_specializations().empty()) {
+        auto partial_specializations =
+            variable_template_partial_specializations_for_instantiation(
+                variable_template);
+        if (specialization_is_dependent || partial_specializations.empty()) {
             selected_pattern = pattern;
             selected_parameters = &variable_template->parameters;
             return true;
@@ -423,8 +480,8 @@ struct Collect::VariableTemplateSpecializationInstantiator {
         };
 
         std::vector<PartialMatch> matches;
-        matches.reserve(variable_template->partial_specializations().size());
-        for (const auto* partial : variable_template->partial_specializations()) {
+        matches.reserve(partial_specializations.size());
+        for (const auto* partial : partial_specializations) {
             if (!partial) {
                 continue;
             }
