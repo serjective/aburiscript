@@ -320,26 +320,26 @@ std::unique_ptr<Stmt> Collect::collect_default_statement(std::unique_ptr<Stmt> s
 
 CppIfConditionInfo Collect::collect_if_condition(std::unique_ptr<Expr> condition,
                                                  IfStatementKind statement_kind,
-                                                 SrcLoc loc) const {
+                                                 SrcLoc loc,
+                                                 bool defer_unmaterialized_constexpr_calls) const {
     CppIfConditionInfo info;
     info.condition = collect_condition_expression(std::move(condition), loc, "if");
     if (statement_kind != IfStatementKind::Constexpr || !info.condition) {
         return info;
     }
 
-    QualType condition_type = info.condition->get_type();
     info.is_value_dependent =
-        expression_depends_on_template_parameters(info.condition.get()) ||
-        expression_constexpr_value_depends_on_template_parameters(
-            info.condition.get()) ||
-        (condition_type &&
-         type_depends_on_template_parameters(condition_type, ast_ctx_.get()));
+        expression_is_value_dependent_for_constant_evaluation(
+            info.condition.get(),
+            defer_unmaterialized_constexpr_calls);
     if (info.is_value_dependent) {
         return info;
     }
 
-    ConstEvalResult eval = evaluate_with_consteval_compat(
-        info.condition.get(), ConstEvalMode::cpp_core_constant_expression());
+    ConstEvalResult eval = evaluate_constant_expression_demand(
+        info.condition.get(),
+        ConstEvalMode::cpp_core_constant_expression(),
+        loc);
     if (eval.status != ConstEvalStatus::Constant ||
         !eval.int_value.has_value()) {
         report_error(

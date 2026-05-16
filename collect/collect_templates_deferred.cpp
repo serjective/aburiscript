@@ -160,19 +160,25 @@ bool expr_constexpr_value_depends_on_template_parameters_impl(
     const Expr* expr,
     const ASTContext* ast_ctx,
     std::unordered_set<const Symbol*>& active_variable_symbols,
-    std::unordered_set<const FuncDecl*>& active_functions);
+    std::unordered_set<const FuncDecl*>& active_functions,
+    QualType active_record_lookup_type,
+    bool defer_unmaterialized_constexpr_calls);
 
 bool stmt_constexpr_value_depends_on_template_parameters_impl(
     const Stmt* stmt,
     const ASTContext* ast_ctx,
     std::unordered_set<const Symbol*>& active_variable_symbols,
-    std::unordered_set<const FuncDecl*>& active_functions);
+    std::unordered_set<const FuncDecl*>& active_functions,
+    QualType active_record_lookup_type,
+    bool defer_unmaterialized_constexpr_calls);
 
 bool constexpr_function_call_body_depends_on_template_parameters(
     const FuncCall* call,
     const ASTContext* ast_ctx,
     std::unordered_set<const Symbol*>& active_variable_symbols,
-    std::unordered_set<const FuncDecl*>& active_functions) {
+    std::unordered_set<const FuncDecl*>& active_functions,
+    QualType active_record_lookup_type,
+    bool defer_unmaterialized_constexpr_calls) {
     if (!call || !call->func) {
         return false;
     }
@@ -187,8 +193,11 @@ bool constexpr_function_call_body_depends_on_template_parameters(
     const auto& symbol = callee_ref->symref;
     const auto* function_decl =
         dyn_cast<FuncDecl>(symbol->function_definition);
-    if (!function_decl || !function_decl->body) {
-        return false;
+    if (!function_decl) {
+        QualType owner_type = get_symbol_owner_record_type(symbol.get());
+        return defer_unmaterialized_constexpr_calls &&
+               (symbol->is_constexpr || symbol->is_consteval) &&
+               static_cast<bool>(owner_type);
     }
 
     bool is_constexpr_callable =
@@ -199,19 +208,36 @@ bool constexpr_function_call_body_depends_on_template_parameters(
         return false;
     }
 
+    QualType owner_type = get_func_decl_owner_record_type(function_decl);
+    if (!owner_type) {
+        owner_type = get_symbol_owner_record_type(symbol.get());
+    }
+    if (!owner_type &&
+        (isa<CppMethodDecl>(function_decl) ||
+         isa<CppConstructorDecl>(function_decl) ||
+         isa<CppDestructorDecl>(function_decl))) {
+        owner_type = active_record_lookup_type;
+    }
+    bool owner_depends =
+        type_depends_on_template_parameters(owner_type, ast_ctx);
+    if (!function_decl->body) {
+        return (owner_depends || defer_unmaterialized_constexpr_calls) &&
+               function_decl_defines_entity(function_decl);
+    }
+
     if (!active_functions.insert(function_decl).second) {
         return false;
     }
 
     bool depends =
-        type_depends_on_template_parameters(
-            get_func_decl_owner_record_type(function_decl),
-            ast_ctx) ||
+        owner_depends ||
         stmt_constexpr_value_depends_on_template_parameters_impl(
             function_decl->body.get(),
             ast_ctx,
             active_variable_symbols,
-            active_functions);
+            active_functions,
+            active_record_lookup_type,
+            defer_unmaterialized_constexpr_calls);
 
     active_functions.erase(function_decl);
     return depends;
@@ -221,7 +247,9 @@ bool decl_constexpr_value_depends_on_template_parameters_impl(
     const Decl* decl,
     const ASTContext* ast_ctx,
     std::unordered_set<const Symbol*>& active_variable_symbols,
-    std::unordered_set<const FuncDecl*>& active_functions) {
+    std::unordered_set<const FuncDecl*>& active_functions,
+    QualType active_record_lookup_type,
+    bool defer_unmaterialized_constexpr_calls) {
     if (!decl) {
         return false;
     }
@@ -235,7 +263,9 @@ bool decl_constexpr_value_depends_on_template_parameters_impl(
                    variable->init.get(),
                    ast_ctx,
                    active_variable_symbols,
-                   active_functions);
+                   active_functions,
+                   active_record_lookup_type,
+                   defer_unmaterialized_constexpr_calls);
     }
 
     if (const auto* static_assert_decl = dyn_cast<StaticAssertDecl>(decl)) {
@@ -243,7 +273,9 @@ bool decl_constexpr_value_depends_on_template_parameters_impl(
             static_assert_decl->condition.get(),
             ast_ctx,
             active_variable_symbols,
-            active_functions);
+            active_functions,
+            active_record_lookup_type,
+            defer_unmaterialized_constexpr_calls);
     }
 
     return false;
@@ -253,7 +285,9 @@ bool stmt_constexpr_value_depends_on_template_parameters_impl(
     const Stmt* stmt,
     const ASTContext* ast_ctx,
     std::unordered_set<const Symbol*>& active_variable_symbols,
-    std::unordered_set<const FuncDecl*>& active_functions) {
+    std::unordered_set<const FuncDecl*>& active_functions,
+    QualType active_record_lookup_type,
+    bool defer_unmaterialized_constexpr_calls) {
     if (!stmt) {
         return false;
     }
@@ -263,7 +297,9 @@ bool stmt_constexpr_value_depends_on_template_parameters_impl(
             expr,
             ast_ctx,
             active_variable_symbols,
-            active_functions);
+            active_functions,
+            active_record_lookup_type,
+            defer_unmaterialized_constexpr_calls);
     }
 
     switch (stmt->get_kind()) {
@@ -274,7 +310,9 @@ bool stmt_constexpr_value_depends_on_template_parameters_impl(
                         child.get(),
                         ast_ctx,
                         active_variable_symbols,
-                        active_functions)) {
+                        active_functions,
+                        active_record_lookup_type,
+                        defer_unmaterialized_constexpr_calls)) {
                     return true;
                 }
             }
@@ -287,7 +325,9 @@ bool stmt_constexpr_value_depends_on_template_parameters_impl(
                         decl.get(),
                         ast_ctx,
                         active_variable_symbols,
-                        active_functions)) {
+                        active_functions,
+                        active_record_lookup_type,
+                        defer_unmaterialized_constexpr_calls)) {
                     return true;
                 }
             }
@@ -298,29 +338,39 @@ bool stmt_constexpr_value_depends_on_template_parameters_impl(
                 static_cast<const ReturnStmt*>(stmt)->expression.get(),
                 ast_ctx,
                 active_variable_symbols,
-                active_functions);
+                active_functions,
+                active_record_lookup_type,
+                defer_unmaterialized_constexpr_calls);
         case StmtKind::IfStmt: {
             const auto* if_stmt = static_cast<const IfStmt*>(stmt);
             return stmt_constexpr_value_depends_on_template_parameters_impl(
                        if_stmt->init_stmt.get(),
                        ast_ctx,
                        active_variable_symbols,
-                       active_functions) ||
+                       active_functions,
+                       active_record_lookup_type,
+                       defer_unmaterialized_constexpr_calls) ||
                    expr_constexpr_value_depends_on_template_parameters_impl(
                        if_stmt->condition.get(),
                        ast_ctx,
                        active_variable_symbols,
-                       active_functions) ||
+                       active_functions,
+                       active_record_lookup_type,
+                       defer_unmaterialized_constexpr_calls) ||
                    stmt_constexpr_value_depends_on_template_parameters_impl(
                        if_stmt->then_stmt.get(),
                        ast_ctx,
                        active_variable_symbols,
-                       active_functions) ||
+                       active_functions,
+                       active_record_lookup_type,
+                       defer_unmaterialized_constexpr_calls) ||
                    stmt_constexpr_value_depends_on_template_parameters_impl(
                        if_stmt->else_stmt.get(),
                        ast_ctx,
                        active_variable_symbols,
-                       active_functions);
+                       active_functions,
+                       active_record_lookup_type,
+                       defer_unmaterialized_constexpr_calls);
         }
         default:
             return false;
@@ -331,7 +381,9 @@ bool expr_constexpr_value_depends_on_template_parameters_impl(
     const Expr* expr,
     const ASTContext* ast_ctx,
     std::unordered_set<const Symbol*>& active_variable_symbols,
-    std::unordered_set<const FuncDecl*>& active_functions) {
+    std::unordered_set<const FuncDecl*>& active_functions,
+    QualType active_record_lookup_type,
+    bool defer_unmaterialized_constexpr_calls) {
     if (!expr) {
         return false;
     }
@@ -355,7 +407,9 @@ bool expr_constexpr_value_depends_on_template_parameters_impl(
                     call->func.get(),
                     ast_ctx,
                     active_variable_symbols,
-                    active_functions)) {
+                    active_functions,
+                    active_record_lookup_type,
+                    defer_unmaterialized_constexpr_calls)) {
                 return true;
             }
             for (const auto& arg : call->args) {
@@ -363,7 +417,9 @@ bool expr_constexpr_value_depends_on_template_parameters_impl(
                         arg.get(),
                         ast_ctx,
                         active_variable_symbols,
-                        active_functions)) {
+                        active_functions,
+                        active_record_lookup_type,
+                        defer_unmaterialized_constexpr_calls)) {
                     return true;
                 }
             }
@@ -371,7 +427,9 @@ bool expr_constexpr_value_depends_on_template_parameters_impl(
                 call,
                 ast_ctx,
                 active_variable_symbols,
-                active_functions);
+                active_functions,
+                active_record_lookup_type,
+                defer_unmaterialized_constexpr_calls);
         }
         case StmtKind::CppMemberCallExpr: {
             const auto* call = static_cast<const CppMemberCallExpr*>(stripped);
@@ -379,26 +437,34 @@ bool expr_constexpr_value_depends_on_template_parameters_impl(
                 call->lowered_call.get(),
                 ast_ctx,
                 active_variable_symbols,
-                active_functions);
+                active_functions,
+                active_record_lookup_type,
+                defer_unmaterialized_constexpr_calls);
         }
         case StmtKind::UnaryOperation:
             return expr_constexpr_value_depends_on_template_parameters_impl(
                 static_cast<const UnaryOperation*>(stripped)->exp.get(),
                 ast_ctx,
                 active_variable_symbols,
-                active_functions);
+                active_functions,
+                active_record_lookup_type,
+                defer_unmaterialized_constexpr_calls);
         case StmtKind::BinaryOperation: {
             const auto* binary = static_cast<const BinaryOperation*>(stripped);
             return expr_constexpr_value_depends_on_template_parameters_impl(
                        binary->left.get(),
                        ast_ctx,
                        active_variable_symbols,
-                       active_functions) ||
+                       active_functions,
+                       active_record_lookup_type,
+                       defer_unmaterialized_constexpr_calls) ||
                    expr_constexpr_value_depends_on_template_parameters_impl(
                        binary->right.get(),
                        ast_ctx,
                        active_variable_symbols,
-                       active_functions);
+                       active_functions,
+                       active_record_lookup_type,
+                       defer_unmaterialized_constexpr_calls);
         }
         case StmtKind::CondExpr: {
             const auto* cond = static_cast<const CondExpr*>(stripped);
@@ -406,31 +472,41 @@ bool expr_constexpr_value_depends_on_template_parameters_impl(
                        cond->condition.get(),
                        ast_ctx,
                        active_variable_symbols,
-                       active_functions) ||
+                       active_functions,
+                       active_record_lookup_type,
+                       defer_unmaterialized_constexpr_calls) ||
                    expr_constexpr_value_depends_on_template_parameters_impl(
                        cond->true_expr.get(),
                        ast_ctx,
                        active_variable_symbols,
-                       active_functions) ||
+                       active_functions,
+                       active_record_lookup_type,
+                       defer_unmaterialized_constexpr_calls) ||
                    expr_constexpr_value_depends_on_template_parameters_impl(
                        cond->false_expr.get(),
                        ast_ctx,
                        active_variable_symbols,
-                       active_functions);
+                       active_functions,
+                       active_record_lookup_type,
+                       defer_unmaterialized_constexpr_calls);
         }
         case StmtKind::ExplicitCast:
             return expr_constexpr_value_depends_on_template_parameters_impl(
                 static_cast<const ExplicitCast*>(stripped)->expr.get(),
                 ast_ctx,
                 active_variable_symbols,
-                active_functions);
+                active_functions,
+                active_record_lookup_type,
+                defer_unmaterialized_constexpr_calls);
         case StmtKind::CppImmediateInvocationExpr:
             return expr_constexpr_value_depends_on_template_parameters_impl(
                 static_cast<const CppImmediateInvocationExpr*>(stripped)
                     ->invocation.get(),
                 ast_ctx,
                 active_variable_symbols,
-                active_functions);
+                active_functions,
+                active_record_lookup_type,
+                defer_unmaterialized_constexpr_calls);
         default:
             return false;
     }
@@ -841,6 +917,397 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
             return false;
     }
 }
+
+using NoteSpecializationUseForConstantEval =
+    std::function<void(const std::shared_ptr<Symbol>&, SrcLoc)>;
+
+void materialize_function_type_exception_spec_for_constant_evaluation(
+    const Collect& collect,
+    QualType type,
+    SrcLoc loc,
+    const NoteSpecializationUseForConstantEval& note_specialization_use,
+    std::unordered_set<const Expr*>& active_exprs,
+    std::unordered_set<const Symbol*>& active_symbols);
+
+void materialize_symbol_for_constant_evaluation(
+    const Collect& collect,
+    const std::shared_ptr<Symbol>& symbol,
+    SrcLoc loc,
+    bool materialize_body,
+    const NoteSpecializationUseForConstantEval& note_specialization_use,
+    std::unordered_set<const Expr*>& active_exprs,
+    std::unordered_set<const Symbol*>& active_symbols) {
+    if (!symbol || symbol->kind != SymbolKind::FUNCTION) {
+        return;
+    }
+    if (!active_symbols.insert(symbol.get()).second) {
+        return;
+    }
+    if (materialize_body) {
+        note_specialization_use(symbol, loc);
+    }
+    materialize_function_type_exception_spec_for_constant_evaluation(
+        collect,
+        symbol->type,
+        loc,
+        note_specialization_use,
+        active_exprs,
+        active_symbols);
+    active_symbols.erase(symbol.get());
+}
+
+void materialize_expr_for_constant_evaluation(
+    const Collect& collect,
+    const Expr* expr,
+    SrcLoc loc,
+    bool evaluated_context,
+    const NoteSpecializationUseForConstantEval& note_specialization_use,
+    std::unordered_set<const Expr*>& active_exprs,
+    std::unordered_set<const Symbol*>& active_symbols);
+
+void materialize_function_type_exception_spec_for_constant_evaluation(
+    const Collect& collect,
+    QualType type,
+    SrcLoc loc,
+    const NoteSpecializationUseForConstantEval& note_specialization_use,
+    std::unordered_set<const Expr*>& active_exprs,
+    std::unordered_set<const Symbol*>& active_symbols) {
+    auto canonical = desugar_type(type);
+    if (auto pointer = canonical.as_shared<PointerType>()) {
+        canonical = desugar_type(pointer->pointed_type);
+    } else if (auto block_pointer = canonical.as_shared<BlockPointerType>()) {
+        canonical = desugar_type(block_pointer->pointed_type);
+    }
+    auto function_type = canonical.as_shared<FunctionType>();
+    if (!function_type || !function_type->exception_spec_expr) {
+        return;
+    }
+    materialize_expr_for_constant_evaluation(
+        collect,
+        function_type->exception_spec_expr.get(),
+        loc,
+        true,
+        note_specialization_use,
+        active_exprs,
+        active_symbols);
+}
+
+void materialize_expr_for_constant_evaluation(
+    const Collect& collect,
+    const Expr* expr,
+    SrcLoc loc,
+    bool evaluated_context,
+    const NoteSpecializationUseForConstantEval& note_specialization_use,
+    std::unordered_set<const Expr*>& active_exprs,
+    std::unordered_set<const Symbol*>& active_symbols) {
+    if (!expr || !active_exprs.insert(expr).second) {
+        return;
+    }
+
+    const Expr* stripped =
+        Collect::strip_implicit_casts(const_cast<Expr*>(expr));
+    if (!stripped) {
+        active_exprs.erase(expr);
+        return;
+    }
+
+    auto visit = [&](const std::unique_ptr<Expr>& child,
+                     bool child_evaluated = true) {
+        materialize_expr_for_constant_evaluation(
+            collect,
+            child.get(),
+            loc,
+            child_evaluated,
+            note_specialization_use,
+            active_exprs,
+            active_symbols);
+    };
+    auto visit_symbol = [&](const std::shared_ptr<Symbol>& symbol,
+                            bool materialize_body) {
+        materialize_symbol_for_constant_evaluation(
+            collect,
+            symbol,
+            loc,
+            materialize_body,
+            note_specialization_use,
+            active_exprs,
+            active_symbols);
+    };
+    auto visit_call_target = [&](const Expr* callee) {
+        auto* callee_ref = dyn_cast<VarRef>(
+            Collect::strip_implicit_casts(const_cast<Expr*>(callee)));
+        if (callee_ref) {
+            visit_symbol(callee_ref->symref, evaluated_context);
+        }
+        if (callee) {
+            materialize_function_type_exception_spec_for_constant_evaluation(
+                collect,
+                const_cast<Expr*>(callee)->get_type(),
+                loc,
+                note_specialization_use,
+                active_exprs,
+                active_symbols);
+        }
+    };
+
+    switch (stripped->get_kind()) {
+        case StmtKind::FuncCall: {
+            const auto* call = static_cast<const FuncCall*>(stripped);
+            visit_call_target(call->func.get());
+            visit(call->func, evaluated_context);
+            for (const auto& arg : call->args) {
+                visit(arg, evaluated_context);
+            }
+            break;
+        }
+        case StmtKind::CppMemberCallExpr: {
+            const auto* call =
+                static_cast<const CppMemberCallExpr*>(stripped);
+            materialize_expr_for_constant_evaluation(
+                collect,
+                call->lowered_call.get(),
+                loc,
+                evaluated_context,
+                note_specialization_use,
+                active_exprs,
+                active_symbols);
+            break;
+        }
+        case StmtKind::CppConstructExpr: {
+            const auto* construct =
+                static_cast<const CppConstructExpr*>(stripped);
+            visit_symbol(construct->ctor_sym, evaluated_context);
+            for (const auto& arg : construct->args) {
+                visit(arg, evaluated_context);
+            }
+            break;
+        }
+        case StmtKind::CppFunctionStyleCastExpr: {
+            const auto* cast =
+                static_cast<const CppFunctionStyleCastExpr*>(stripped);
+            for (const auto& arg : cast->args) {
+                visit(arg, evaluated_context);
+            }
+            break;
+        }
+        case StmtKind::CppImmediateInvocationExpr:
+            visit(static_cast<const CppImmediateInvocationExpr*>(stripped)
+                      ->invocation,
+                  evaluated_context);
+            break;
+        case StmtKind::CppNoexceptExpr:
+            visit(static_cast<const CppNoexceptExpr*>(stripped)->operand,
+                  false);
+            break;
+        case StmtKind::UnaryOperation:
+            visit(static_cast<const UnaryOperation*>(stripped)->exp,
+                  evaluated_context);
+            break;
+        case StmtKind::DependentUnaryExpr:
+            visit(static_cast<const DependentUnaryExpr*>(stripped)->operand,
+                  evaluated_context);
+            break;
+        case StmtKind::BinaryOperation: {
+            const auto* binary = static_cast<const BinaryOperation*>(stripped);
+            visit(binary->left, evaluated_context);
+            visit(binary->right, evaluated_context);
+            break;
+        }
+        case StmtKind::DependentBinaryExpr: {
+            const auto* binary =
+                static_cast<const DependentBinaryExpr*>(stripped);
+            visit(binary->left, evaluated_context);
+            visit(binary->right, evaluated_context);
+            break;
+        }
+        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+            const auto* compare =
+                static_cast<const CppBuiltinThreeWayCompareExpr*>(stripped);
+            visit(compare->left, evaluated_context);
+            visit(compare->right, evaluated_context);
+            break;
+        }
+        case StmtKind::CompoundAssignOperation: {
+            const auto* binary =
+                static_cast<const CompoundAssignOperation*>(stripped);
+            visit(binary->left, evaluated_context);
+            visit(binary->right, evaluated_context);
+            break;
+        }
+        case StmtKind::CondExpr: {
+            const auto* cond = static_cast<const CondExpr*>(stripped);
+            visit(cond->condition, evaluated_context);
+            visit(cond->true_expr, evaluated_context);
+            visit(cond->false_expr, evaluated_context);
+            break;
+        }
+        case StmtKind::ImplicitCast:
+            visit(static_cast<const ImplicitCast*>(stripped)->expr,
+                  evaluated_context);
+            break;
+        case StmtKind::ExplicitCast:
+            visit(static_cast<const ExplicitCast*>(stripped)->expr,
+                  evaluated_context);
+            break;
+        case StmtKind::ArraySubscriptExpr: {
+            const auto* subscript =
+                static_cast<const ArraySubscriptExpr*>(stripped);
+            visit(subscript->array, evaluated_context);
+            visit(subscript->index, evaluated_context);
+            break;
+        }
+        case StmtKind::DependentArraySubscriptExpr: {
+            const auto* subscript =
+                static_cast<const DependentArraySubscriptExpr*>(stripped);
+            visit(subscript->array, evaluated_context);
+            visit(subscript->index, evaluated_context);
+            break;
+        }
+        case StmtKind::MemberExpr:
+            visit(static_cast<const MemberExpr*>(stripped)->base,
+                  evaluated_context);
+            break;
+        case StmtKind::UnresolvedMemberExpr:
+            visit(static_cast<const UnresolvedMemberExpr*>(stripped)->base,
+                  evaluated_context);
+            break;
+        case StmtKind::MemberPointerLiteralExpr: {
+            const auto* literal =
+                static_cast<const MemberPointerLiteralExpr*>(stripped);
+            visit_symbol(literal->method_symbol, evaluated_context);
+            break;
+        }
+        case StmtKind::MemberPointerAccessExpr: {
+            const auto* access =
+                static_cast<const MemberPointerAccessExpr*>(stripped);
+            visit(access->base, evaluated_context);
+            visit(access->member_pointer, evaluated_context);
+            break;
+        }
+        case StmtKind::DependentMemberPointerAccessExpr: {
+            const auto* access =
+                static_cast<const DependentMemberPointerAccessExpr*>(stripped);
+            visit(access->base, evaluated_context);
+            visit(access->member_pointer, evaluated_context);
+            break;
+        }
+        case StmtKind::PackExpansionExpr:
+            visit(static_cast<const PackExpansionExpr*>(stripped)->pattern,
+                  evaluated_context);
+            break;
+        case StmtKind::FoldExpr: {
+            const auto* fold = static_cast<const FoldExpr*>(stripped);
+            visit(fold->pattern, evaluated_context);
+            visit(fold->init, evaluated_context);
+            break;
+        }
+        case StmtKind::InitListExpr: {
+            const auto* init_list = static_cast<const InitListExpr*>(stripped);
+            for (const auto& element : init_list->elements) {
+                visit(element.value, evaluated_context);
+                for (const auto& designator : element.designators) {
+                    visit(designator.index, evaluated_context);
+                    visit(designator.range_end, evaluated_context);
+                }
+            }
+            break;
+        }
+        case StmtKind::CompoundLiteralExpr:
+            visit(static_cast<const CompoundLiteralExpr*>(stripped)->init,
+                  evaluated_context);
+            break;
+        case StmtKind::SizeOfExpr:
+        case StmtKind::AlignOfExpr:
+        case StmtKind::CppTypeIdExpr:
+            break;
+        case StmtKind::GenericExpr: {
+            const auto* generic = static_cast<const GenericExpr*>(stripped);
+            visit(generic->controlling_expr, evaluated_context);
+            if (generic->result_index < generic->associations.size()) {
+                materialize_expr_for_constant_evaluation(
+                    collect,
+                    generic->associations[generic->result_index].expr.get(),
+                    loc,
+                    evaluated_context,
+                    note_specialization_use,
+                    active_exprs,
+                    active_symbols);
+            }
+            break;
+        }
+        case StmtKind::BuiltinCallExpr: {
+            const auto* builtin = static_cast<const BuiltinCallExpr*>(stripped);
+            for (const auto& arg : builtin->args) {
+                visit(arg, evaluated_context);
+            }
+            break;
+        }
+        case StmtKind::CppDynamicCastExpr:
+            visit(static_cast<const CppDynamicCastExpr*>(stripped)->expr,
+                  evaluated_context);
+            break;
+        case StmtKind::CppThrowExpr:
+            visit(static_cast<const CppThrowExpr*>(stripped)->thrown_expr,
+                  evaluated_context);
+            break;
+        case StmtKind::CppNewExpr: {
+            const auto* new_expr = static_cast<const CppNewExpr*>(stripped);
+            visit_symbol(new_expr->allocator_sym, evaluated_context);
+            visit_symbol(new_expr->ctor_sym, evaluated_context);
+            for (const auto& arg : new_expr->placement_args) {
+                visit(arg, evaluated_context);
+            }
+            visit(new_expr->initializer, evaluated_context);
+            for (const auto& arg : new_expr->constructor_args) {
+                visit(arg, evaluated_context);
+            }
+            break;
+        }
+        case StmtKind::CppDeleteExpr: {
+            const auto* delete_expr =
+                static_cast<const CppDeleteExpr*>(stripped);
+            visit(delete_expr->operand, evaluated_context);
+            visit_symbol(delete_expr->deallocator_sym, evaluated_context);
+            visit_symbol(delete_expr->destructor_sym, evaluated_context);
+            break;
+        }
+        case StmtKind::CppPseudoDestructorExpr: {
+            const auto* pseudo_dtor =
+                static_cast<const CppPseudoDestructorExpr*>(stripped);
+            visit(pseudo_dtor->base, evaluated_context);
+            visit_symbol(pseudo_dtor->destructor_sym, evaluated_context);
+            break;
+        }
+        case StmtKind::BlockByrefAccessExpr:
+            visit(static_cast<const BlockByrefAccessExpr*>(stripped)->cell_expr,
+                  evaluated_context);
+            break;
+        case StmtKind::VaArgExpr:
+            visit(static_cast<const VaArgExpr*>(stripped)->va_list_expr,
+                  evaluated_context);
+            break;
+        case StmtKind::VaStartExpr: {
+            const auto* va_start = static_cast<const VaStartExpr*>(stripped);
+            visit(va_start->va_list_expr, evaluated_context);
+            visit(va_start->last_param, evaluated_context);
+            break;
+        }
+        case StmtKind::VaEndExpr:
+            visit(static_cast<const VaEndExpr*>(stripped)->va_list_expr,
+                  evaluated_context);
+            break;
+        case StmtKind::VaCopyExpr: {
+            const auto* va_copy = static_cast<const VaCopyExpr*>(stripped);
+            visit(va_copy->dest, evaluated_context);
+            visit(va_copy->src, evaluated_context);
+            break;
+        }
+        default:
+            break;
+    }
+
+    active_exprs.erase(expr);
+}
 } // namespace
 
 bool Collect::contains_deferred_semantic_type(
@@ -1026,14 +1493,91 @@ bool Collect::expression_depends_on_template_parameters(
 }
 
 bool Collect::expression_constexpr_value_depends_on_template_parameters(
-    const Expr* expr) const {
+    const Expr* expr,
+    bool defer_unmaterialized_constexpr_calls) const {
     std::unordered_set<const Symbol*> active_variable_symbols;
     std::unordered_set<const FuncDecl*> active_functions;
     return expr_constexpr_value_depends_on_template_parameters_impl(
         expr,
         ast_ctx_.get(),
         active_variable_symbols,
-        active_functions);
+        active_functions,
+        session_.current_cpp_record_lookup_type_,
+        defer_unmaterialized_constexpr_calls);
+}
+
+bool Collect::expression_is_value_dependent_for_constant_evaluation(
+    const Expr* expr,
+    bool defer_unmaterialized_constexpr_calls) const {
+    if (!expr) {
+        return false;
+    }
+    QualType expr_type = const_cast<Expr*>(expr)->get_type();
+    return expression_depends_on_template_parameters(expr) ||
+           expression_constexpr_value_depends_on_template_parameters(
+               expr,
+               defer_unmaterialized_constexpr_calls) ||
+           (expr_type &&
+            type_depends_on_template_parameters(expr_type, ast_ctx_.get()));
+}
+
+void Collect::materialize_specialization_uses_for_constant_evaluation(
+    const Expr* expr,
+    SrcLoc loc) const {
+    std::unordered_set<const Expr*> active_exprs;
+    std::unordered_set<const Symbol*> active_symbols;
+    NoteSpecializationUseForConstantEval note_specialization_use =
+        [this](const std::shared_ptr<Symbol>& symbol, SrcLoc use_loc) {
+            note_specialization_use_for_symbol(symbol, use_loc);
+        };
+    materialize_expr_for_constant_evaluation(
+        *this,
+        expr,
+        loc,
+        true,
+        note_specialization_use,
+        active_exprs,
+        active_symbols);
+}
+
+void Collect::materialize_specialization_uses_for_noexcept_evaluation(
+    const Expr* expr,
+    SrcLoc loc) const {
+    std::unordered_set<const Expr*> active_exprs;
+    std::unordered_set<const Symbol*> active_symbols;
+    NoteSpecializationUseForConstantEval note_specialization_use =
+        [this](const std::shared_ptr<Symbol>& symbol, SrcLoc use_loc) {
+            note_specialization_use_for_symbol(symbol, use_loc);
+        };
+    materialize_expr_for_constant_evaluation(
+        *this,
+        expr,
+        loc,
+        false,
+        note_specialization_use,
+        active_exprs,
+        active_symbols);
+}
+
+ConstEvalResult Collect::evaluate_constant_expression_demand(
+    Expr* expr,
+    ConstEvalMode mode,
+    SrcLoc loc) const {
+    materialize_specialization_uses_for_constant_evaluation(expr, loc);
+    return evaluate_with_consteval_compat(expr, mode);
+}
+
+std::optional<int64_t> Collect::try_evaluate_constant_expression_demand(
+    Expr* expr,
+    ConstEvalMode mode,
+    SrcLoc loc) const {
+    ConstEvalResult result =
+        evaluate_constant_expression_demand(expr, mode, loc);
+    if (result.status == ConstEvalStatus::Constant &&
+        result.int_value.has_value()) {
+        return *result.int_value;
+    }
+    return std::nullopt;
 }
 
 QualType Collect::resolve_deferred_decltype_expr_type(

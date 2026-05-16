@@ -237,8 +237,12 @@ Collect::ArrayBoundResult Collect::collect_array_bound_expression(std::unique_pt
 }
 
 
-std::unique_ptr<Decl> Collect::collect_static_assert_declaration(std::unique_ptr<Expr> condition,
-    std::string message, bool has_message, SrcLoc loc) const {
+std::unique_ptr<Decl> Collect::collect_static_assert_declaration(
+    std::unique_ptr<Expr> condition,
+    std::string message,
+    bool has_message,
+    SrcLoc loc,
+    bool defer_unmaterialized_constexpr_calls) const {
 
     if (!condition) {
         report_error("static assertion requires a constant expression", loc);
@@ -249,7 +253,9 @@ std::unique_ptr<Decl> Collect::collect_static_assert_declaration(std::unique_ptr
         return collect_make<StaticAssertDecl>(
             std::move(condition), std::move(message), has_message, loc);
     }
-    if (expression_depends_on_template_parameters(condition.get())) {
+    if (expression_is_value_dependent_for_constant_evaluation(
+            condition.get(),
+            defer_unmaterialized_constexpr_calls)) {
         return collect_make<StaticAssertDecl>(
             std::move(condition), std::move(message), has_message, loc);
     }
@@ -257,7 +263,10 @@ std::unique_ptr<Decl> Collect::collect_static_assert_declaration(std::unique_ptr
     auto mode = lang_opts_.is_cxx_mode()
         ? ConstEvalMode::cpp_core_constant_expression()
         : ConstEvalMode::c_ice();
-    auto val = try_evaluate_with_consteval_compat(condition.get(), mode);
+    auto val = try_evaluate_constant_expression_demand(
+        condition.get(),
+        mode,
+        loc);
     if (!val.has_value()) {
         report_error(lang_opts_.is_cxx_mode()
                          ? "static assertion expression is not a constant expression"

@@ -1397,6 +1397,99 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return nullptr;
     }
 
+    bool function_symbol_matches_decl_alias(
+        const std::shared_ptr<Symbol>& symbol,
+        const FuncDecl* decl) const {
+        if (!symbol || !decl || symbol->kind != SymbolKind::FUNCTION) {
+            return false;
+        }
+        if (symbol->function_definition == decl) {
+            return true;
+        }
+        if (symbol->name != decl->name || !symbol->type || !decl->type) {
+            return false;
+        }
+        if (!desugar_type(symbol->type, ast_ctx())
+                 .equals_unqualified(
+                     desugar_type(QualType(decl->type), ast_ctx()))) {
+            return false;
+        }
+        QualType decl_owner_type = get_func_decl_owner_record_type(decl);
+        if (decl_owner_type &&
+            !same_owner_type(
+                get_symbol_owner_record_type(symbol.get()),
+                decl_owner_type,
+                ast_ctx())) {
+            return false;
+        }
+        const auto* decl_qualifier_prefix =
+            get_func_decl_cxx_qualifier_prefix(decl);
+        if (decl_qualifier_prefix &&
+            !same_qualifier_prefix(
+                get_symbol_cxx_qualifier_prefix(symbol.get()),
+                decl_qualifier_prefix)) {
+            return false;
+        }
+        return true;
+    }
+
+    std::vector<std::shared_ptr<Symbol>> lookup_function_symbol_aliases_for_decl(
+        const FuncDecl* decl) const {
+        std::vector<std::shared_ptr<Symbol>> aliases;
+        std::unordered_set<const Symbol*> seen;
+        auto add_alias = [&](const std::shared_ptr<Symbol>& symbol) {
+            if (!function_symbol_matches_decl_alias(symbol, decl)) {
+                return;
+            }
+            if (!seen.insert(symbol.get()).second) {
+                return;
+            }
+            aliases.push_back(symbol);
+        };
+
+        std::function<void(const DeclContext*)> visit_decl_context =
+            [&](const DeclContext* decl_context) {
+                if (!decl_context) {
+                    return;
+                }
+                for (const auto& binding : decl_context->declarations()) {
+                    add_alias(binding.symbol);
+                }
+                for (const auto& child : decl_context->lexical_children()) {
+                    visit_decl_context(child.get());
+                }
+            };
+        if (collect.session_.translation_unit_decl_context_) {
+            visit_decl_context(
+                collect.session_.translation_unit_decl_context_.get());
+        }
+        if (collect.session_.current_global_scope_ && decl) {
+            auto it =
+                collect.session_.current_global_scope_->all_variables.find(
+                    decl->name);
+            if (it !=
+                collect.session_.current_global_scope_->all_variables.end()) {
+                for (const auto& symbol : it->second) {
+                    add_alias(symbol);
+                }
+            }
+        }
+        return aliases;
+    }
+
+    void map_function_symbol_aliases_to_specialized_symbol(
+        const FuncDecl* pattern_decl,
+        const std::shared_ptr<Symbol>& specialized_symbol) {
+        if (!pattern_decl || !specialized_symbol) {
+            return;
+        }
+        for (const auto& alias :
+             lookup_function_symbol_aliases_for_decl(pattern_decl)) {
+            clone_pass.context().symbol_remap[alias.get()] =
+                specialized_symbol;
+        }
+    }
+
     std::shared_ptr<Symbol> ensure_explicit_member_function_symbol(
         const FuncDecl* decl,
         bool is_definition) const {
@@ -3440,6 +3533,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             QualType(canonical_type),
             namespace_prefix ? &*namespace_prefix : nullptr,
             true);
+        map_function_symbol_aliases_to_specialized_symbol(
+            method_decl,
+            cloned_symbol);
 
         RecordSemanticState::Method semantic_method;
         semantic_method.name = cloned_decl->name;
@@ -3546,6 +3642,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             QualType(canonical_type),
             namespace_prefix ? &*namespace_prefix : nullptr,
             true);
+        map_function_symbol_aliases_to_specialized_symbol(
+            ctor_decl,
+            cloned_symbol);
 
         RecordSemanticState::Constructor semantic_ctor;
         semantic_ctor.name = cloned_decl->name;
@@ -3634,6 +3733,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             QualType(canonical_type),
             namespace_prefix ? &*namespace_prefix : nullptr,
             true);
+        map_function_symbol_aliases_to_specialized_symbol(
+            dtor_decl,
+            cloned_symbol);
 
         RecordSemanticState::Destructor semantic_dtor;
         semantic_dtor.name = cloned_decl->name;

@@ -133,7 +133,11 @@ std::unique_ptr<Decl> Parser::parse_static_assert_declaration() {
     check_and_consume(TokenType::RIGHT_PAREN);
     check_and_consume(TokenType::SEMICOLON);
     return collect_->collect_static_assert_declaration(
-        std::move(condition), std::move(message), has_message, loc);
+        std::move(condition),
+        std::move(message),
+        has_message,
+        loc,
+        is_in_template_pattern_context());
 }
 
 // aka block-item/6.8.2
@@ -561,7 +565,8 @@ std::unique_ptr<Stmt> Parser::parse_if_stmt() {
     auto condition_info = collect_->collect_if_condition(
         std::move(condition),
         is_constexpr_if ? IfStatementKind::Constexpr : IfStatementKind::Runtime,
-        t.loc);
+        t.loc,
+        is_in_template_pattern_context());
 
     auto branch_state = [&](bool then_branch) -> CppConstexprIfBranchState {
         if (!is_constexpr_if) {

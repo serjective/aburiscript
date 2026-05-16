@@ -1927,7 +1927,11 @@ bool substitute_cpp_explicit_specifier_for_specialization(
         }
         return false;
     }
-    if (!resolution_pass.resolve_expr_in_place(cloned_condition, &clone_error)) {
+    bool needs_dependent_resolution =
+        collect.expression_depends_on_template_parameters(
+            cloned_condition.get());
+    if (needs_dependent_resolution &&
+        !resolution_pass.resolve_expr_in_place(cloned_condition, &clone_error)) {
         if (error_out) {
             *error_out =
                 clone_error.empty()
@@ -1938,10 +1942,9 @@ bool substitute_cpp_explicit_specifier_for_specialization(
     }
 
     bool is_dependent =
-        collect.expression_depends_on_template_parameters(
-            cloned_condition.get()) ||
-        type_depends_on_template_parameters(
-            cloned_condition ? cloned_condition->get_type() : QualType());
+        collect.expression_is_value_dependent_for_constant_evaluation(
+            cloned_condition.get(),
+            true);
     specialization.condition = std::shared_ptr<Expr>(cloned_condition.release());
     specialization.is_dependent = is_dependent;
     if (is_dependent) {
@@ -1949,9 +1952,10 @@ bool substitute_cpp_explicit_specifier_for_specialization(
         return true;
     }
 
-    auto eval = try_evaluate_with_consteval_compat(
+    auto eval = collect.try_evaluate_constant_expression_demand(
         specialization.condition.get(),
-        ConstEvalMode::cpp_core_constant_expression());
+        ConstEvalMode::cpp_core_constant_expression(),
+        loc);
     if (!eval.has_value()) {
         if (error_out) {
             *error_out =

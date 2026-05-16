@@ -1470,7 +1470,11 @@ QualType Collect::substitute_template_type_with_bindings(
                 return type;
             }
             std::string resolve_error;
-            if (!resolve_dependent_expr_after_substitution(
+            bool needs_dependent_resolution =
+                expression_depends_on_template_parameters(
+                    cloned_exception_expr.get());
+            if (needs_dependent_resolution &&
+                !resolve_dependent_expr_after_substitution(
                     cloned_exception_expr,
                     QualType(),
                     &resolve_error)) {
@@ -1484,24 +1488,32 @@ QualType Collect::substitute_template_type_with_bindings(
             changed = true;
             substituted_exception_spec_expr =
                 std::shared_ptr<Expr>(cloned_exception_expr.release());
-            ConstEvalResult eval = evaluate_with_consteval_compat(
-                substituted_exception_spec_expr.get(),
-                ConstEvalMode::cpp_core_constant_expression());
             bool known_exception_spec = false;
             bool is_non_throwing = false;
-            if (eval.status == ConstEvalStatus::Constant && eval.value.has_value()) {
-                switch (eval.value->kind) {
-                    case ConstValueKind::Boolean:
-                        is_non_throwing = eval.value->bool_value;
-                        known_exception_spec = true;
-                        break;
-                    case ConstValueKind::Integer:
-                        is_non_throwing =
-                            eval.value->int_value.to_unsigned_u64() != 0;
-                        known_exception_spec = true;
-                        break;
-                    default:
-                        break;
+            bool expression_is_dependent =
+                expression_is_value_dependent_for_constant_evaluation(
+                    substituted_exception_spec_expr.get(),
+                    true);
+            if (!expression_is_dependent) {
+                ConstEvalResult eval = evaluate_constant_expression_demand(
+                    substituted_exception_spec_expr.get(),
+                    ConstEvalMode::cpp_core_constant_expression(),
+                    loc);
+                if (eval.status == ConstEvalStatus::Constant &&
+                    eval.value.has_value()) {
+                    switch (eval.value->kind) {
+                        case ConstValueKind::Boolean:
+                            is_non_throwing = eval.value->bool_value;
+                            known_exception_spec = true;
+                            break;
+                        case ConstValueKind::Integer:
+                            is_non_throwing =
+                                eval.value->int_value.to_unsigned_u64() != 0;
+                            known_exception_spec = true;
+                            break;
+                        default:
+                            break;
+                    }
                 }
             }
             if (known_exception_spec) {

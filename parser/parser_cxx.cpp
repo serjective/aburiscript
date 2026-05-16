@@ -6103,20 +6103,20 @@ CppExplicitSpecifier Parser::parse_cpp_optional_explicit_specifier() {
     }
 
     bool is_dependent =
-        (collect_ &&
-         collect_->expression_depends_on_template_parameters(condition.get())) ||
-        type_depends_on_template_parameters(
-            condition ? condition->get_type() : QualType(),
-            ast_ctx.get());
+        collect_ &&
+        collect_->expression_is_value_dependent_for_constant_evaluation(
+            condition.get(),
+            is_in_template_pattern_context());
 
     specifier.condition = std::shared_ptr<Expr>(condition.release());
     if (is_dependent) {
         specifier.is_dependent = true;
         specifier.effective_value = true;
     } else {
-        auto eval = try_evaluate_with_consteval_compat(
+        auto eval = collect_->try_evaluate_constant_expression_demand(
             specifier.condition.get(),
-            ConstEvalMode::cpp_core_constant_expression());
+            ConstEvalMode::cpp_core_constant_expression(),
+            lparen_loc);
         if (!eval.has_value()) {
             SrcLoc diag_loc = specifier.condition
                 ? specifier.condition->location
@@ -6153,12 +6153,10 @@ void Parser::parse_cpp_optional_noexcept_spec(FunctionType& function_type) {
         } else {
             auto noexcept_expr = parse_conditional_expression();
             bool is_dependent =
-                (collect_ &&
-                 collect_->expression_depends_on_template_parameters(
-                     noexcept_expr.get())) ||
-                type_depends_on_template_parameters(
-                    noexcept_expr ? noexcept_expr->get_type() : QualType(),
-                    ast_ctx.get());
+                collect_ &&
+                collect_->expression_is_value_dependent_for_constant_evaluation(
+                    noexcept_expr.get(),
+                    is_in_template_pattern_context());
             if (is_dependent) {
                 function_type.exception_spec =
                     FunctionExceptionSpecKind::Dependent;
@@ -6166,9 +6164,10 @@ void Parser::parse_cpp_optional_noexcept_spec(FunctionType& function_type) {
                     std::shared_ptr<Expr>(noexcept_expr.release());
                 is_non_throwing = false;
             } else {
-                auto eval = try_evaluate_with_consteval_compat(
+                auto eval = collect_->try_evaluate_constant_expression_demand(
                     noexcept_expr.get(),
-                    ConstEvalMode::cpp_core_constant_expression());
+                    ConstEvalMode::cpp_core_constant_expression(),
+                    lparen_loc);
                 if (!eval.has_value()) {
                     SrcLoc diag_loc =
                         noexcept_expr ? noexcept_expr->location : current_token().loc;

@@ -5750,6 +5750,93 @@ std::unique_ptr<Expr> Collect::collect_alignof_expression(std::unique_ptr<Expr> 
     return node;
 }
 
+namespace {
+std::shared_ptr<FunctionType> function_type_from_noexcept_callee(
+    QualType type) {
+    auto canonical = desugar_type(type);
+    if (auto pointer = canonical.as_shared<PointerType>()) {
+        canonical = desugar_type(pointer->pointed_type);
+    } else if (auto block_pointer = canonical.as_shared<BlockPointerType>()) {
+        canonical = desugar_type(block_pointer->pointed_type);
+    }
+    return canonical.as_shared<FunctionType>();
+}
+
+std::optional<bool> function_type_is_non_throwing_with_demand(
+    Collect& collect,
+    QualType type,
+    SrcLoc loc) {
+    auto function_type = function_type_from_noexcept_callee(type);
+    if (!function_type) {
+        return std::nullopt;
+    }
+    if (function_type->exception_spec ==
+        FunctionExceptionSpecKind::NonThrowing) {
+        return true;
+    }
+    if (function_type->exception_spec !=
+            FunctionExceptionSpecKind::Dependent ||
+        !function_type->exception_spec_expr) {
+        return false;
+    }
+
+    ConstEvalResult eval = collect.evaluate_constant_expression_demand(
+        function_type->exception_spec_expr.get(),
+        ConstEvalMode::cpp_core_constant_expression(),
+        loc);
+    if (eval.status != ConstEvalStatus::Constant || !eval.value.has_value()) {
+        return std::nullopt;
+    }
+    switch (eval.value->kind) {
+        case ConstValueKind::Boolean:
+            return eval.value->bool_value;
+        case ConstValueKind::Integer:
+            return eval.value->int_value.to_unsigned_u64() != 0;
+        default:
+            return std::nullopt;
+    }
+}
+
+std::optional<bool> expression_is_known_noexcept_with_demand(
+    Collect& collect,
+    Expr* expr,
+    SrcLoc loc) {
+    auto* stripped = Collect::strip_implicit_casts(expr);
+    if (!stripped) {
+        return std::nullopt;
+    }
+    if (auto* call = dyn_cast<FuncCall>(stripped)) {
+        if (!call->func) {
+            return std::nullopt;
+        }
+        return function_type_is_non_throwing_with_demand(
+            collect,
+            call->func->get_type(),
+            loc);
+    }
+    if (auto* member_call = dyn_cast<CppMemberCallExpr>(stripped)) {
+        if (!member_call->lowered_call ||
+            !member_call->lowered_call->func) {
+            return std::nullopt;
+        }
+        return function_type_is_non_throwing_with_demand(
+            collect,
+            member_call->lowered_call->func->get_type(),
+            loc);
+    }
+    if (auto* construct = dyn_cast<CppConstructExpr>(stripped)) {
+        if (!construct->ctor_sym) {
+            return std::nullopt;
+        }
+        return function_type_is_non_throwing_with_demand(
+            collect,
+            construct->ctor_sym->type,
+            loc);
+    }
+    return std::nullopt;
+}
+} // namespace
+
 std::unique_ptr<Expr> Collect::collect_cpp_noexcept_expression(
     std::unique_ptr<Expr> expr,
     SrcLoc loc) {
@@ -5765,6 +5852,21 @@ std::unique_ptr<Expr> Collect::collect_cpp_noexcept_expression(
     }
 
     auto bool_type = QualType(get_builtin_bool());
+    materialize_specialization_uses_for_noexcept_evaluation(expr.get(), loc);
+    bool is_noexcept = cpp_expression_is_known_noexcept(expr.get(), ast_ctx_.get());
+    if (!is_noexcept) {
+        auto demand_noexcept =
+            expression_is_known_noexcept_with_demand(*this, expr.get(), loc);
+        if (demand_noexcept.has_value()) {
+            is_noexcept = *demand_noexcept;
+        }
+    }
+    if (is_noexcept) {
+        return collect_integer_literal(
+            "1",
+            get_builtin_bool(),
+            loc);
+    }
     if (expression_depends_on_template_parameters(expr.get()) ||
         type_depends_on_template_parameters(expr->get_type(), ast_ctx_.get())) {
         return collect_make<CppNoexceptExpr>(
@@ -5773,9 +5875,8 @@ std::unique_ptr<Expr> Collect::collect_cpp_noexcept_expression(
             loc);
     }
 
-    bool is_noexcept = cpp_expression_is_known_noexcept(expr.get(), ast_ctx_.get());
     return collect_integer_literal(
-        is_noexcept ? "1" : "0",
+        "0",
         get_builtin_bool(),
         loc);
 }

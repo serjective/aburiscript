@@ -791,7 +791,8 @@ public:
 
     CppIfConditionInfo collect_if_condition(std::unique_ptr<Expr> condition,
                                             IfStatementKind statement_kind,
-                                            SrcLoc loc) const ;
+                                            SrcLoc loc,
+                                            bool defer_unmaterialized_constexpr_calls = false) const ;
 
     std::unique_ptr<Stmt> collect_if_statement(std::unique_ptr<Stmt> init_stmt,
                                                std::unique_ptr<Expr> condition,
@@ -871,7 +872,8 @@ public:
     std::unique_ptr<Decl> collect_static_assert_declaration(std::unique_ptr<Expr> condition,
                                                             std::string message,
                                                             bool has_message,
-                                                            SrcLoc loc) const ;
+                                                            SrcLoc loc,
+                                                            bool defer_unmaterialized_constexpr_calls = false) const ;
 
     std::unique_ptr<FuncDecl> collect_function_declaration(const std::string& name,
                                                            std::shared_ptr<CType> type,
@@ -1135,7 +1137,25 @@ public:
     bool expression_depends_on_template_parameters(
         const Expr* expr) const ;
     bool expression_constexpr_value_depends_on_template_parameters(
-        const Expr* expr) const ;
+        const Expr* expr,
+        bool defer_unmaterialized_constexpr_calls = false) const ;
+    bool expression_is_value_dependent_for_constant_evaluation(
+        const Expr* expr,
+        bool defer_unmaterialized_constexpr_calls = false) const ;
+    void materialize_specialization_uses_for_constant_evaluation(
+        const Expr* expr,
+        SrcLoc loc) const ;
+    void materialize_specialization_uses_for_noexcept_evaluation(
+        const Expr* expr,
+        SrcLoc loc) const ;
+    ConstEvalResult evaluate_constant_expression_demand(
+        Expr* expr,
+        ConstEvalMode mode,
+        SrcLoc loc) const ;
+    std::optional<int64_t> try_evaluate_constant_expression_demand(
+        Expr* expr,
+        ConstEvalMode mode,
+        SrcLoc loc) const ;
 
     std::unique_ptr<Expr> collect_member_initializer_expression(
         std::unique_ptr<Expr> init,
