@@ -1,6 +1,23 @@
 #include "parser.h"
 
 namespace {
+bool is_lone_unnamed_void_parameter_list(
+    const std::vector<QualType>& args,
+    const std::vector<std::unique_ptr<DeclarationParser>>& parsed_args,
+    bool is_variadic) {
+    if (is_variadic || args.size() != 1 || parsed_args.size() != 1) {
+        return false;
+    }
+    const auto* param = parsed_args.front().get();
+    return param &&
+        param->result_type &&
+        param->result_type->isVoid() &&
+        param->qualifiers == QUAL_NONE &&
+        param->name.empty() &&
+        !param->is_parameter_pack &&
+        !param->default_argument;
+}
+
 bool parse_cpp_operator_function_name(DeclarationParser& decl_parser) {
     auto* mgnt = decl_parser.mgnt;
     auto* pars = decl_parser.pars;
@@ -1550,6 +1567,13 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                             }
                         }
                     }
+                }
+                if (is_lone_unnamed_void_parameter_list(
+                        args,
+                        local_args,
+                        found_ellipsis)) {
+                    args.clear();
+                    local_args.clear();
                 }
                 std::vector<uint8_t> parameter_pack_flags;
                 if (!captured_func_args) {

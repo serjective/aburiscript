@@ -6937,6 +6937,17 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     if (has_void_param && is_variadic) {
         error("'void' parameter cannot be combined with '...'");
     }
+    if (has_void_param && !is_variadic) {
+        auto* void_param = cast<ParamDecl>(params.front().get());
+        if (!void_param->has_name() &&
+            !void_param->is_parameter_pack &&
+            void_param->type.get_qualifiers() == QUAL_NONE &&
+            !get_param_decl_default_argument(void_param)) {
+            params.clear();
+            param_types.clear();
+            parameter_pack_flags.clear();
+        }
+    }
 
     bool saw_invalid_cvref = false;
     SrcLoc invalid_cvref_loc;
