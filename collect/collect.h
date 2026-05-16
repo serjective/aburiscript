@@ -1134,6 +1134,8 @@ public:
 
     bool expression_depends_on_template_parameters(
         const Expr* expr) const ;
+    bool expression_constexpr_value_depends_on_template_parameters(
+        const Expr* expr) const ;
 
     std::unique_ptr<Expr> collect_member_initializer_expression(
         std::unique_ptr<Expr> init,

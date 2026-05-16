@@ -330,6 +330,8 @@ CppIfConditionInfo Collect::collect_if_condition(std::unique_ptr<Expr> condition
     QualType condition_type = info.condition->get_type();
     info.is_value_dependent =
         expression_depends_on_template_parameters(info.condition.get()) ||
+        expression_constexpr_value_depends_on_template_parameters(
+            info.condition.get()) ||
         (condition_type &&
          type_depends_on_template_parameters(condition_type, ast_ctx_.get()));
     if (info.is_value_dependent) {

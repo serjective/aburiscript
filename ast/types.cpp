@@ -878,6 +878,16 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
             }
             break;
         }
+        case StmtKind::VarRef: {
+            const auto* var_ref = static_cast<const VarRef*>(expr);
+            if (var_ref->symref &&
+                type_depends_on_template_parameters(
+                    get_symbol_owner_record_type(var_ref->symref.get()),
+                    ast_ctx)) {
+                return true;
+            }
+            break;
+        }
         case StmtKind::UnresolvedLookupExpr: {
             const auto* lookup = static_cast<const UnresolvedLookupExpr*>(expr);
             if (lookup->is_dependent ||

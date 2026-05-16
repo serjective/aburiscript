@@ -156,6 +156,286 @@ bool variable_definition_depends_on_template_parameters(
     return depends;
 }
 
+bool expr_constexpr_value_depends_on_template_parameters_impl(
+    const Expr* expr,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const Symbol*>& active_variable_symbols,
+    std::unordered_set<const FuncDecl*>& active_functions);
+
+bool stmt_constexpr_value_depends_on_template_parameters_impl(
+    const Stmt* stmt,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const Symbol*>& active_variable_symbols,
+    std::unordered_set<const FuncDecl*>& active_functions);
+
+bool constexpr_function_call_body_depends_on_template_parameters(
+    const FuncCall* call,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const Symbol*>& active_variable_symbols,
+    std::unordered_set<const FuncDecl*>& active_functions) {
+    if (!call || !call->func) {
+        return false;
+    }
+
+    auto* callee_ref = dyn_cast<VarRef>(
+        Collect::strip_implicit_casts(call->func.get()));
+    if (!callee_ref || !callee_ref->symref ||
+        callee_ref->symref->kind != SymbolKind::FUNCTION) {
+        return false;
+    }
+
+    const auto& symbol = callee_ref->symref;
+    const auto* function_decl =
+        dyn_cast<FuncDecl>(symbol->function_definition);
+    if (!function_decl || !function_decl->body) {
+        return false;
+    }
+
+    bool is_constexpr_callable =
+        function_decl->is_constexpr ||
+        symbol->is_constexpr ||
+        symbol->is_consteval;
+    if (!is_constexpr_callable) {
+        return false;
+    }
+
+    if (!active_functions.insert(function_decl).second) {
+        return false;
+    }
+
+    bool depends =
+        type_depends_on_template_parameters(
+            get_func_decl_owner_record_type(function_decl),
+            ast_ctx) ||
+        stmt_constexpr_value_depends_on_template_parameters_impl(
+            function_decl->body.get(),
+            ast_ctx,
+            active_variable_symbols,
+            active_functions);
+
+    active_functions.erase(function_decl);
+    return depends;
+}
+
+bool decl_constexpr_value_depends_on_template_parameters_impl(
+    const Decl* decl,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const Symbol*>& active_variable_symbols,
+    std::unordered_set<const FuncDecl*>& active_functions) {
+    if (!decl) {
+        return false;
+    }
+
+    if (const auto* variable = dyn_cast<VariableDecl>(decl)) {
+        return type_depends_on_template_parameters(variable->type, ast_ctx) ||
+               type_depends_on_template_parameters(
+                   QualType(variable->original_type),
+                   ast_ctx) ||
+               expr_constexpr_value_depends_on_template_parameters_impl(
+                   variable->init.get(),
+                   ast_ctx,
+                   active_variable_symbols,
+                   active_functions);
+    }
+
+    if (const auto* static_assert_decl = dyn_cast<StaticAssertDecl>(decl)) {
+        return expr_constexpr_value_depends_on_template_parameters_impl(
+            static_assert_decl->condition.get(),
+            ast_ctx,
+            active_variable_symbols,
+            active_functions);
+    }
+
+    return false;
+}
+
+bool stmt_constexpr_value_depends_on_template_parameters_impl(
+    const Stmt* stmt,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const Symbol*>& active_variable_symbols,
+    std::unordered_set<const FuncDecl*>& active_functions) {
+    if (!stmt) {
+        return false;
+    }
+
+    if (const auto* expr = dyn_cast<Expr>(stmt)) {
+        return expr_constexpr_value_depends_on_template_parameters_impl(
+            expr,
+            ast_ctx,
+            active_variable_symbols,
+            active_functions);
+    }
+
+    switch (stmt->get_kind()) {
+        case StmtKind::CompoundStmt: {
+            const auto* compound = static_cast<const CompoundStmt*>(stmt);
+            for (const auto& child : compound->statements) {
+                if (stmt_constexpr_value_depends_on_template_parameters_impl(
+                        child.get(),
+                        ast_ctx,
+                        active_variable_symbols,
+                        active_functions)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case StmtKind::Decl2Stmt: {
+            const auto* decl_stmt = static_cast<const Decl2Stmt*>(stmt);
+            for (const auto& decl : decl_stmt->decls) {
+                if (decl_constexpr_value_depends_on_template_parameters_impl(
+                        decl.get(),
+                        ast_ctx,
+                        active_variable_symbols,
+                        active_functions)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case StmtKind::ReturnStmt:
+            return expr_constexpr_value_depends_on_template_parameters_impl(
+                static_cast<const ReturnStmt*>(stmt)->expression.get(),
+                ast_ctx,
+                active_variable_symbols,
+                active_functions);
+        case StmtKind::IfStmt: {
+            const auto* if_stmt = static_cast<const IfStmt*>(stmt);
+            return stmt_constexpr_value_depends_on_template_parameters_impl(
+                       if_stmt->init_stmt.get(),
+                       ast_ctx,
+                       active_variable_symbols,
+                       active_functions) ||
+                   expr_constexpr_value_depends_on_template_parameters_impl(
+                       if_stmt->condition.get(),
+                       ast_ctx,
+                       active_variable_symbols,
+                       active_functions) ||
+                   stmt_constexpr_value_depends_on_template_parameters_impl(
+                       if_stmt->then_stmt.get(),
+                       ast_ctx,
+                       active_variable_symbols,
+                       active_functions) ||
+                   stmt_constexpr_value_depends_on_template_parameters_impl(
+                       if_stmt->else_stmt.get(),
+                       ast_ctx,
+                       active_variable_symbols,
+                       active_functions);
+        }
+        default:
+            return false;
+    }
+}
+
+bool expr_constexpr_value_depends_on_template_parameters_impl(
+    const Expr* expr,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const Symbol*>& active_variable_symbols,
+    std::unordered_set<const FuncDecl*>& active_functions) {
+    if (!expr) {
+        return false;
+    }
+
+    if (expr_depends_on_template_parameters_impl(
+            expr,
+            ast_ctx,
+            active_variable_symbols)) {
+        return true;
+    }
+
+    auto* stripped = Collect::strip_implicit_casts(const_cast<Expr*>(expr));
+    if (!stripped) {
+        return false;
+    }
+
+    switch (stripped->get_kind()) {
+        case StmtKind::FuncCall: {
+            const auto* call = static_cast<const FuncCall*>(stripped);
+            if (expr_constexpr_value_depends_on_template_parameters_impl(
+                    call->func.get(),
+                    ast_ctx,
+                    active_variable_symbols,
+                    active_functions)) {
+                return true;
+            }
+            for (const auto& arg : call->args) {
+                if (expr_constexpr_value_depends_on_template_parameters_impl(
+                        arg.get(),
+                        ast_ctx,
+                        active_variable_symbols,
+                        active_functions)) {
+                    return true;
+                }
+            }
+            return constexpr_function_call_body_depends_on_template_parameters(
+                call,
+                ast_ctx,
+                active_variable_symbols,
+                active_functions);
+        }
+        case StmtKind::CppMemberCallExpr: {
+            const auto* call = static_cast<const CppMemberCallExpr*>(stripped);
+            return expr_constexpr_value_depends_on_template_parameters_impl(
+                call->lowered_call.get(),
+                ast_ctx,
+                active_variable_symbols,
+                active_functions);
+        }
+        case StmtKind::UnaryOperation:
+            return expr_constexpr_value_depends_on_template_parameters_impl(
+                static_cast<const UnaryOperation*>(stripped)->exp.get(),
+                ast_ctx,
+                active_variable_symbols,
+                active_functions);
+        case StmtKind::BinaryOperation: {
+            const auto* binary = static_cast<const BinaryOperation*>(stripped);
+            return expr_constexpr_value_depends_on_template_parameters_impl(
+                       binary->left.get(),
+                       ast_ctx,
+                       active_variable_symbols,
+                       active_functions) ||
+                   expr_constexpr_value_depends_on_template_parameters_impl(
+                       binary->right.get(),
+                       ast_ctx,
+                       active_variable_symbols,
+                       active_functions);
+        }
+        case StmtKind::CondExpr: {
+            const auto* cond = static_cast<const CondExpr*>(stripped);
+            return expr_constexpr_value_depends_on_template_parameters_impl(
+                       cond->condition.get(),
+                       ast_ctx,
+                       active_variable_symbols,
+                       active_functions) ||
+                   expr_constexpr_value_depends_on_template_parameters_impl(
+                       cond->true_expr.get(),
+                       ast_ctx,
+                       active_variable_symbols,
+                       active_functions) ||
+                   expr_constexpr_value_depends_on_template_parameters_impl(
+                       cond->false_expr.get(),
+                       ast_ctx,
+                       active_variable_symbols,
+                       active_functions);
+        }
+        case StmtKind::ExplicitCast:
+            return expr_constexpr_value_depends_on_template_parameters_impl(
+                static_cast<const ExplicitCast*>(stripped)->expr.get(),
+                ast_ctx,
+                active_variable_symbols,
+                active_functions);
+        case StmtKind::CppImmediateInvocationExpr:
+            return expr_constexpr_value_depends_on_template_parameters_impl(
+                static_cast<const CppImmediateInvocationExpr*>(stripped)
+                    ->invocation.get(),
+                ast_ctx,
+                active_variable_symbols,
+                active_functions);
+        default:
+            return false;
+    }
+}
+
 bool expr_depends_on_template_parameters_impl(const Expr* expr,
                                               const ASTContext* ast_ctx,
                                               std::unordered_set<const Symbol*>&
@@ -743,6 +1023,17 @@ bool Collect::expression_depends_on_template_parameters(
         expr,
         ast_ctx_.get(),
         active_variable_symbols);
+}
+
+bool Collect::expression_constexpr_value_depends_on_template_parameters(
+    const Expr* expr) const {
+    std::unordered_set<const Symbol*> active_variable_symbols;
+    std::unordered_set<const FuncDecl*> active_functions;
+    return expr_constexpr_value_depends_on_template_parameters_impl(
+        expr,
+        ast_ctx_.get(),
+        active_variable_symbols,
+        active_functions);
 }
 
 QualType Collect::resolve_deferred_decltype_expr_type(
