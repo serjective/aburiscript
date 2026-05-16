@@ -1,6 +1,13 @@
 #include "collect.h"
+#include "../ast/expr_clone.h"
 
 namespace {
+enum class VarRefQualifierDependency {
+    None,
+    Dependent,
+    NonDependent,
+};
+
 bool decltype_uses_declared_entity_rule(bool use_declared_type_rule,
                                         const Expr* expr) {
     if (!use_declared_type_rule || !expr) {
@@ -36,6 +43,26 @@ bool template_arguments_contain_dependency(
 bool symbol_is_non_type_template_parameter(const Symbol* sym) {
     return sym &&
            isa<TemplateNonTypeParmDecl>(sym->template_parameter_decl);
+}
+
+VarRefQualifierDependency classify_var_ref_qualifier_dependency(
+    const VarRef* var_ref,
+    const ASTContext* ast_ctx) {
+    if (!var_ref) {
+        return VarRefQualifierDependency::None;
+    }
+
+    const auto* qualified_info = var_ref->get_cpp_qualified_info();
+    if (!qualified_info) {
+        return VarRefQualifierDependency::None;
+    }
+    if (qualified_info->is_current_instantiation ||
+        type_depends_on_template_parameters(
+            qualified_info->qualifier_type,
+            ast_ctx)) {
+        return VarRefQualifierDependency::Dependent;
+    }
+    return VarRefQualifierDependency::NonDependent;
 }
 
 bool variable_template_specialization_depends_on_template_parameters(
@@ -142,6 +169,17 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
     }
 
     if (auto* var_ref = dyn_cast<VarRef>(stripped)) {
+        VarRefQualifierDependency qualifier_dependency =
+            classify_var_ref_qualifier_dependency(var_ref, ast_ctx);
+        if (qualifier_dependency == VarRefQualifierDependency::Dependent) {
+            return true;
+        }
+        if (qualifier_dependency != VarRefQualifierDependency::NonDependent &&
+            type_depends_on_template_parameters(
+                get_symbol_owner_record_type(var_ref->symref.get()),
+                ast_ctx)) {
+            return true;
+        }
         if (symbol_is_non_type_template_parameter(var_ref->symref.get())) {
             return true;
         }
@@ -150,7 +188,8 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                 ast_ctx)) {
             return true;
         }
-        if (variable_definition_depends_on_template_parameters(
+        if (qualifier_dependency != VarRefQualifierDependency::NonDependent &&
+            variable_definition_depends_on_template_parameters(
                 var_ref->symref.get(),
                 ast_ctx,
                 active_variable_symbols)) {
@@ -836,11 +875,60 @@ void Collect::rewrite_deferred_template_arguments_in_place(
                 argument.type,
                 loc,
                 mode);
-        } else {
+        } else if (argument.kind == TemplateArgumentKind::Value) {
             argument.value_type = resolve_deferred_semantic_type_impl(
                 argument.value_type,
                 loc,
                 mode);
+            if (!argument.is_dependent || !argument.value_expr) {
+                continue;
+            }
+
+            std::string clone_error;
+            auto cloned_expr =
+                clone_expr_tree(argument.value_expr.get(), ast_ctx_.get(), &clone_error);
+            if (!cloned_expr) {
+                continue;
+            }
+            std::string resolve_error;
+            if (!resolve_dependent_expr_after_substitution(
+                    cloned_expr,
+                    QualType(),
+                    &resolve_error)) {
+                continue;
+            }
+
+            bool still_dependent =
+                expression_depends_on_template_parameters(cloned_expr.get()) ||
+                type_depends_on_template_parameters(
+                    cloned_expr->get_type(),
+                    ast_ctx_.get()) ||
+                type_depends_on_template_parameters(
+                    argument.value_type,
+                    ast_ctx_.get());
+            if (still_dependent) {
+                argument.value_expr =
+                    std::shared_ptr<Expr>(cloned_expr.release());
+                argument.is_dependent = true;
+                continue;
+            }
+
+            ConstEvalResult eval = evaluate_with_consteval_compat(
+                cloned_expr.get(),
+                ConstEvalMode::cpp_non_type_template_argument());
+            if (eval.status == ConstEvalStatus::Constant &&
+                eval.value.has_value() &&
+                eval.value->kind != ConstValueKind::Invalid) {
+                std::shared_ptr<Expr> concrete_expr = nullptr;
+                if (eval.value->kind == ConstValueKind::Object) {
+                    concrete_expr = std::shared_ptr<Expr>(cloned_expr.release());
+                }
+                argument = TemplateArgument::value_argument(
+                    argument.value_type,
+                    *eval.value,
+                    {},
+                    std::move(concrete_expr));
+            }
         }
     }
 }

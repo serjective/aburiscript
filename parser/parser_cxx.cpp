@@ -1323,7 +1323,9 @@ TemplateArgument Parser::parse_cpp_template_argument() {
         ConstEvalResult eval = evaluate_with_consteval_compat(
             parsed_expr.get(),
             ConstEvalMode::cpp_non_type_template_argument());
-        if (eval.status == ConstEvalStatus::Constant && eval.value.has_value()) {
+        if (eval.status == ConstEvalStatus::Constant &&
+            eval.value.has_value() &&
+            eval.value->kind != ConstValueKind::Invalid) {
             std::shared_ptr<Expr> concrete_expr = nullptr;
             if (eval.value->kind == ConstValueKind::Object) {
                 if (auto* var_ref =

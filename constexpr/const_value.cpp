@@ -38,6 +38,14 @@ uint64_t sign_extend_u64(uint64_t value, uint16_t width) {
     return value | ~width_mask(width);
 }
 
+ConstIntValue make_int_from_bits(uint64_t bits, uint16_t width, bool is_unsigned) {
+    ConstIntValue out;
+    out.bit_width = normalize_width(width);
+    out.is_unsigned = is_unsigned;
+    out.bits = bits & width_mask(out.bit_width);
+    return out;
+}
+
 bool const_object_equals(const std::shared_ptr<ConstObjectValue>& lhs,
                          const std::shared_ptr<ConstObjectValue>& rhs);
 }
@@ -258,6 +266,34 @@ ConstIntOpResult const_int_mod(ConstIntValue lhs, ConstIntValue rhs) {
     return ConstIntOpResult::ok(ConstIntValue::from_signed(r, lhs.bit_width));
 }
 
+ConstIntValue const_int_neg(ConstIntValue value) {
+    return make_int_from_bits(
+        uint64_t(0) - value.to_unsigned_u64(),
+        value.bit_width,
+        value.is_unsigned);
+}
+
+ConstIntValue const_int_add(ConstIntValue lhs, ConstIntValue rhs) {
+    return make_int_from_bits(
+        lhs.to_unsigned_u64() + rhs.to_unsigned_u64(),
+        lhs.bit_width,
+        lhs.is_unsigned);
+}
+
+ConstIntValue const_int_sub(ConstIntValue lhs, ConstIntValue rhs) {
+    return make_int_from_bits(
+        lhs.to_unsigned_u64() - rhs.to_unsigned_u64(),
+        lhs.bit_width,
+        lhs.is_unsigned);
+}
+
+ConstIntValue const_int_mul(ConstIntValue lhs, ConstIntValue rhs) {
+    return make_int_from_bits(
+        lhs.to_unsigned_u64() * rhs.to_unsigned_u64(),
+        lhs.bit_width,
+        lhs.is_unsigned);
+}
+
 ConstIntOpResult const_int_shl(ConstIntValue lhs, ConstIntValue rhs) {
     uint64_t shift = rhs.to_unsigned_u64();
     if (shift >= lhs.bit_width) {
@@ -266,8 +302,24 @@ ConstIntOpResult const_int_shl(ConstIntValue lhs, ConstIntValue rhs) {
 
     uint64_t base = lhs.to_unsigned_u64();
     uint64_t shifted = (base << shift);
-    if (lhs.is_unsigned) {
-        return ConstIntOpResult::ok(ConstIntValue::from_unsigned(shifted, lhs.bit_width));
+    return ConstIntOpResult::ok(make_int_from_bits(
+        shifted,
+        lhs.bit_width,
+        lhs.is_unsigned));
+}
+
+ConstIntOpResult const_int_shr(ConstIntValue lhs, ConstIntValue rhs) {
+    uint64_t shift = rhs.to_unsigned_u64();
+    if (shift >= lhs.bit_width) {
+        return ConstIntOpResult::fail(ConstIntOpError::InvalidShiftAmount);
     }
-    return ConstIntOpResult::ok(ConstIntValue::from_signed(static_cast<int64_t>(shifted), lhs.bit_width));
+
+    if (lhs.is_unsigned) {
+        return ConstIntOpResult::ok(ConstIntValue::from_unsigned(
+            lhs.to_unsigned_u64() >> shift,
+            lhs.bit_width));
+    }
+    return ConstIntOpResult::ok(ConstIntValue::from_signed(
+        lhs.to_signed_i64() >> shift,
+        lhs.bit_width));
 }

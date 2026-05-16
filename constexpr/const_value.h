@@ -156,7 +156,12 @@ struct ConstIntOpResult {
 
 ConstIntOpResult const_int_div(ConstIntValue lhs, ConstIntValue rhs);
 ConstIntOpResult const_int_mod(ConstIntValue lhs, ConstIntValue rhs);
+ConstIntValue const_int_neg(ConstIntValue value);
+ConstIntValue const_int_add(ConstIntValue lhs, ConstIntValue rhs);
+ConstIntValue const_int_sub(ConstIntValue lhs, ConstIntValue rhs);
+ConstIntValue const_int_mul(ConstIntValue lhs, ConstIntValue rhs);
 ConstIntOpResult const_int_shl(ConstIntValue lhs, ConstIntValue rhs);
+ConstIntOpResult const_int_shr(ConstIntValue lhs, ConstIntValue rhs);
 
 bool const_value_equals(const ConstValue& lhs, const ConstValue& rhs);
 std::string const_value_to_string(const ConstValue& value,

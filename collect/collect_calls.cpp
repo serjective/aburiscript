@@ -3028,6 +3028,104 @@ bool Collect::resolve_dependent_expr_after_substitution(
         return true;
     };
 
+    auto rebind_qualified_var_ref_after_substitution =
+        [&](std::unique_ptr<Expr>& candidate) -> bool {
+        auto* qualified_ref = dyn_cast<QualifiedVarRef>(candidate.get());
+        if (!qualified_ref) {
+            return true;
+        }
+        const auto* qualified_info = qualified_ref->get_cpp_qualified_info();
+        if (!qualified_info ||
+            !qualified_info->is_type_qualified ||
+            !qualified_info->qualifier_type) {
+            return true;
+        }
+
+        DependentLookupQualifier qualifier =
+            build_dependent_lookup_qualifier(*qualified_info);
+        if (dependent_lookup_qualifier_is_dependent(
+                qualifier,
+                ast_ctx_.get())) {
+            return true;
+        }
+
+        QualType resolved_owner_type = finalize_deferred_semantic_type(
+            qualified_info->qualifier_type,
+            candidate->location);
+        if (!resolved_owner_type ||
+            type_depends_on_template_parameters(
+                resolved_owner_type,
+                ast_ctx_.get())) {
+            return true;
+        }
+
+        CppQualifiedExprInfo resolved_info = *qualified_info;
+        resolved_info.qualifier_type = resolved_owner_type;
+        auto owner_analysis =
+            analyze_cpp_qualified_expr_owner(&resolved_info, ast_ctx_.get());
+        auto qualified_owner_type = owner_analysis.qualifier_record_type;
+        if (!qualified_owner_type || !owner_analysis.qualifier_record_decl) {
+            return true;
+        }
+
+        auto member_lookup = lookup_record_member_name(
+            qualified_owner_type.get(),
+            qualified_ref->get_name());
+        size_t total_matches =
+            member_lookup.field_matches +
+            member_lookup.static_method_matches +
+            member_lookup.static_method_template_matches +
+            member_lookup.static_data_matches +
+            member_lookup.enumerator_matches +
+            member_lookup.nonstatic_method_matches +
+            member_lookup.nonstatic_method_template_matches;
+        if (total_matches != 1) {
+            return true;
+        }
+
+        std::shared_ptr<Symbol> selected_symbol = nullptr;
+        if (member_lookup.static_data_matches == 1 &&
+            member_lookup.single_static_data_member) {
+            selected_symbol = member_lookup.single_static_data_member->symbol;
+        } else if (member_lookup.enumerator_matches == 1 &&
+                   member_lookup.single_enumerator_member) {
+            selected_symbol = member_lookup.single_enumerator_member->symbol;
+        } else if (member_lookup.static_method_matches == 1 &&
+                   member_lookup.single_static_method) {
+            selected_symbol = member_lookup.single_static_method->symbol;
+        }
+        if (!selected_symbol ||
+            selected_symbol.get() == qualified_ref->symref.get()) {
+            if (auto* mutable_info = qualified_ref->get_cpp_qualified_info()) {
+                mutable_info->qualifier_type = resolved_owner_type;
+            }
+            return true;
+        }
+
+        auto rebound = collect_identifier_reference(
+            qualified_ref->get_name(),
+            std::move(selected_symbol),
+            candidate->location);
+        if (!rebound) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to rebind qualified member reference after substitution";
+            }
+            return false;
+        }
+        if (isa<VarRef>(rebound.get())) {
+            rebound = attach_cpp_qualified_info_to_expr(
+                std::move(rebound),
+                std::move(resolved_info));
+        }
+        candidate = std::move(rebound);
+        return true;
+    };
+
+    if (!rebind_qualified_var_ref_after_substitution(expr)) {
+        return false;
+    }
+
     if (auto* implicit_cast = dyn_cast<ImplicitCast>(expr.get())) {
         if (implicit_cast->expr &&
             !resolve_dependent_expr_after_substitution(

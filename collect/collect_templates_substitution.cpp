@@ -2020,7 +2020,8 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                             cloned_expr.get(),
                             ConstEvalMode::cpp_non_type_template_argument());
                         if (eval.status == ConstEvalStatus::Constant &&
-                            eval.value.has_value()) {
+                            eval.value.has_value() &&
+                            eval.value->kind != ConstValueKind::Invalid) {
                             std::shared_ptr<Expr> concrete_expr = nullptr;
                             if (eval.value->kind == ConstValueKind::Object) {
                                 concrete_expr = std::shared_ptr<Expr>(

@@ -77,6 +77,74 @@ IntShape infer_integer_shape(QualType type) {
     return shape;
 }
 
+bool is_integer_like_consteval_type(QualType type) {
+    if (!type) {
+        return false;
+    }
+
+    QualType resolved = desugar_type(type);
+    while (resolved && resolved->kind == TypeKind::Enum) {
+        auto en = resolved.as<EnumType>();
+        if (!en) {
+            break;
+        }
+        auto underlying = en->semantic_underlying_type();
+        if (!underlying) {
+            break;
+        }
+        resolved = QualType(underlying);
+    }
+    return resolved && resolved->isInteger();
+}
+
+IntShape infer_first_integer_shape(QualType preferred, QualType fallback) {
+    if (is_integer_like_consteval_type(preferred)) {
+        return infer_integer_shape(preferred);
+    }
+    if (is_integer_like_consteval_type(fallback)) {
+        return infer_integer_shape(fallback);
+    }
+    return infer_integer_shape(preferred ? preferred : fallback);
+}
+
+IntShape infer_binary_integer_operand_shape(BinaryOperation* bin) {
+    if (!bin) {
+        return {};
+    }
+
+    switch (bin->bop) {
+        case BinOpTypes::SHIFT_LEFT:
+        case BinOpTypes::SHIFT_RIGHT:
+            return infer_first_integer_shape(
+                bin->left ? bin->left->get_type() : QualType(),
+                bin->get_type());
+        case BinOpTypes::LESS_EQUAL_THAN:
+        case BinOpTypes::LESS_THAN:
+        case BinOpTypes::GREATER_EQUAL_THAN:
+        case BinOpTypes::GREATER_THAN:
+        case BinOpTypes::EQUAL:
+        case BinOpTypes::NOT_EQUAL:
+            return infer_first_integer_shape(
+                bin->left ? bin->left->get_type() : QualType(),
+                bin->right ? bin->right->get_type() : QualType());
+        case BinOpTypes::ADD:
+        case BinOpTypes::SUB:
+        case BinOpTypes::MULT:
+        case BinOpTypes::DIV:
+        case BinOpTypes::MOD:
+        case BinOpTypes::BITWISE_AND:
+        case BinOpTypes::BITWISE_XOR:
+        case BinOpTypes::BITWISE_OR:
+            return infer_first_integer_shape(
+                bin->get_type(),
+                bin->left ? bin->left->get_type() : QualType());
+        default:
+            return infer_first_integer_shape(
+                bin->left ? bin->left->get_type() : QualType(),
+                bin->get_type());
+    }
+}
+
 int64_t compute_type_alignment_bytes(const std::shared_ptr<CType>& type) {
     if (!type) {
         return 0;
@@ -2260,22 +2328,14 @@ ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_
                 unary->location);
         }
 
+        ConstIntValue one = shape.is_unsigned
+            ? ConstIntValue::from_unsigned(1, shape.width)
+            : ConstIntValue::from_signed(1, shape.width);
         ConstIntValue updated_int =
-            shape.is_unsigned
-                ? ConstIntValue::from_unsigned(
-                      current_int.to_unsigned_u64() +
-                          ((unary->uop == UnaryOpTypes::INCREMENT_PREFIX ||
-                            unary->uop == UnaryOpTypes::INCREMENT_POSTFIX)
-                               ? 1u
-                               : uint64_t(-1)),
-                      shape.width)
-                : ConstIntValue::from_signed(
-                      current_int.to_signed_i64() +
-                          ((unary->uop == UnaryOpTypes::INCREMENT_PREFIX ||
-                            unary->uop == UnaryOpTypes::INCREMENT_POSTFIX)
-                               ? 1
-                               : -1),
-                      shape.width);
+            (unary->uop == UnaryOpTypes::INCREMENT_PREFIX ||
+             unary->uop == UnaryOpTypes::INCREMENT_POSTFIX)
+                ? const_int_add(current_int, one)
+                : const_int_sub(current_int, one);
         auto casted =
             cast_const_value_to_type(ConstValue::integer(updated_int), location.value_type);
         if (!casted.has_value() ||
@@ -2323,12 +2383,7 @@ ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_
 
     switch (unary->uop) {
         case UnaryOpTypes::NEG:
-            if (result_shape.is_unsigned) {
-                return make_constant_int(ConstIntValue::from_unsigned(
-                    uint64_t(0) - inner_int.to_unsigned_u64(), result_shape.width));
-            }
-            return make_constant_int(ConstIntValue::from_signed(
-                -inner_int.to_signed_i64(), result_shape.width));
+            return make_constant_int(const_int_neg(inner_int));
         case UnaryOpTypes::POSITIVE:
             return make_constant_int(inner_int);
         case UnaryOpTypes::BITWISE_NOT:
@@ -2429,13 +2484,7 @@ ConstEvalResult eval_assignment_to_location(Expr* lhs_expr,
         ConstIntValue updated_int{};
         switch (normalize_compound_assignment_binop(assign_kind)) {
             case BinOpTypes::MULT:
-                updated_int = operand_shape.is_unsigned
-                    ? ConstIntValue::from_unsigned(
-                          lhs_int.to_unsigned_u64() * rhs_int.to_unsigned_u64(),
-                          operand_shape.width)
-                    : ConstIntValue::from_signed(
-                          lhs_int.to_signed_i64() * rhs_int.to_signed_i64(),
-                          operand_shape.width);
+                updated_int = const_int_mul(lhs_int, rhs_int);
                 break;
             case BinOpTypes::DIV: {
                 auto div_res = const_int_div(lhs_int, rhs_int);
@@ -2460,22 +2509,10 @@ ConstEvalResult eval_assignment_to_location(Expr* lhs_expr,
                 break;
             }
             case BinOpTypes::ADD:
-                updated_int = operand_shape.is_unsigned
-                    ? ConstIntValue::from_unsigned(
-                          lhs_int.to_unsigned_u64() + rhs_int.to_unsigned_u64(),
-                          operand_shape.width)
-                    : ConstIntValue::from_signed(
-                          lhs_int.to_signed_i64() + rhs_int.to_signed_i64(),
-                          operand_shape.width);
+                updated_int = const_int_add(lhs_int, rhs_int);
                 break;
             case BinOpTypes::SUB:
-                updated_int = operand_shape.is_unsigned
-                    ? ConstIntValue::from_unsigned(
-                          lhs_int.to_unsigned_u64() - rhs_int.to_unsigned_u64(),
-                          operand_shape.width)
-                    : ConstIntValue::from_signed(
-                          lhs_int.to_signed_i64() - rhs_int.to_signed_i64(),
-                          operand_shape.width);
+                updated_int = const_int_sub(lhs_int, rhs_int);
                 break;
             case BinOpTypes::SHIFT_LEFT: {
                 auto shl_res = const_int_shl(lhs_int, rhs_int);
@@ -2489,20 +2526,14 @@ ConstEvalResult eval_assignment_to_location(Expr* lhs_expr,
                 break;
             }
             case BinOpTypes::SHIFT_RIGHT: {
-                uint64_t shift = rhs_int.to_unsigned_u64();
-                if (shift >= lhs_int.bit_width) {
+                auto shr_res = const_int_shr(lhs_int, rhs_int);
+                if (!shr_res.value.has_value()) {
                     return make_error(
                         ConstEvalDiagCode::InvalidShiftAmount,
                         "invalid right-shift amount in constant expression",
                         loc);
                 }
-                updated_int = lhs_int.is_unsigned
-                    ? ConstIntValue::from_unsigned(
-                          lhs_int.to_unsigned_u64() >> shift,
-                          lhs_int.bit_width)
-                    : ConstIntValue::from_signed(
-                          lhs_int.to_signed_i64() >> shift,
-                          lhs_int.bit_width);
+                updated_int = *shr_res.value;
                 break;
             }
             case BinOpTypes::BITWISE_AND:
@@ -2593,13 +2624,7 @@ ConstEvalResult eval_binary_expr(BinaryOperation* bin, ConstEvalMode mode, size_
             bin->location);
     }
 
-    IntShape operand_shape = infer_integer_shape(bin->left->get_type());
-    if (operand_shape.width == 64 && !operand_shape.is_unsigned) {
-        IntShape result_shape = infer_integer_shape(bin->get_type());
-        if (result_shape.width != 64 || result_shape.is_unsigned) {
-            operand_shape = result_shape;
-        }
-    }
+    IntShape operand_shape = infer_binary_integer_operand_shape(bin);
 
     if (bin->bop == BinOpTypes::LOGICAL_AND || bin->bop == BinOpTypes::LOGICAL_OR) {
         ConstEvalResult lhs_res = eval_expr(bin->left.get(), mode, depth + 1);
@@ -2737,26 +2762,11 @@ ConstEvalResult eval_binary_expr(BinaryOperation* bin, ConstEvalMode mode, size_
 
     switch (bin->bop) {
         case BinOpTypes::ADD:
-            if (operand_shape.is_unsigned) {
-                return make_constant_int(ConstIntValue::from_unsigned(
-                    lhs_int.to_unsigned_u64() + rhs_int.to_unsigned_u64(), operand_shape.width));
-            }
-            return make_constant_int(ConstIntValue::from_signed(
-                lhs_int.to_signed_i64() + rhs_int.to_signed_i64(), operand_shape.width));
+            return make_constant_int(const_int_add(lhs_int, rhs_int));
         case BinOpTypes::SUB:
-            if (operand_shape.is_unsigned) {
-                return make_constant_int(ConstIntValue::from_unsigned(
-                    lhs_int.to_unsigned_u64() - rhs_int.to_unsigned_u64(), operand_shape.width));
-            }
-            return make_constant_int(ConstIntValue::from_signed(
-                lhs_int.to_signed_i64() - rhs_int.to_signed_i64(), operand_shape.width));
+            return make_constant_int(const_int_sub(lhs_int, rhs_int));
         case BinOpTypes::MULT:
-            if (operand_shape.is_unsigned) {
-                return make_constant_int(ConstIntValue::from_unsigned(
-                    lhs_int.to_unsigned_u64() * rhs_int.to_unsigned_u64(), operand_shape.width));
-            }
-            return make_constant_int(ConstIntValue::from_signed(
-                lhs_int.to_signed_i64() * rhs_int.to_signed_i64(), operand_shape.width));
+            return make_constant_int(const_int_mul(lhs_int, rhs_int));
         case BinOpTypes::DIV: {
             auto div_res = const_int_div(lhs_int, rhs_int);
             if (!div_res.value.has_value()) {
@@ -2794,17 +2804,12 @@ ConstEvalResult eval_binary_expr(BinaryOperation* bin, ConstEvalMode mode, size_
             return make_constant_int(shl_res.value.value());
         }
         case BinOpTypes::SHIFT_RIGHT: {
-            uint64_t shift = rhs_int.to_unsigned_u64();
-            if (shift >= lhs_int.bit_width) {
+            auto shr_res = const_int_shr(lhs_int, rhs_int);
+            if (!shr_res.value.has_value()) {
                 return make_error(ConstEvalDiagCode::InvalidShiftAmount,
                     "invalid right-shift amount in constant expression", bin->location);
             }
-            if (lhs_int.is_unsigned) {
-                return make_constant_int(ConstIntValue::from_unsigned(
-                    lhs_int.to_unsigned_u64() >> shift, lhs_int.bit_width));
-            }
-            return make_constant_int(ConstIntValue::from_signed(
-                lhs_int.to_signed_i64() >> shift, lhs_int.bit_width));
+            return make_constant_int(shr_res.value.value());
         }
         case BinOpTypes::LESS_EQUAL_THAN:
             if (operand_shape.is_unsigned) {

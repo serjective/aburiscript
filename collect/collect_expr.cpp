@@ -3632,6 +3632,27 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             }
             return false;
         }
+        case BuiltinKind::IS_UNSIGNED: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto canonical = desugar_type(*type_arg, ast_ctx_.get());
+            if (!canonical) {
+                return false;
+            }
+            if (auto builtin = canonical.as_shared<BuiltinType>()) {
+                return builtin->isInteger() &&
+                       builtin->builtin_kind != BuiltinTypes::Bool &&
+                       builtin->isUnsigned();
+            }
+            if (auto enum_type = canonical.as_shared<EnumType>()) {
+                QualType underlying(enum_type->semantic_underlying_type());
+                auto builtin = underlying.as_shared<BuiltinType>();
+                return builtin && builtin->isInteger() && builtin->isUnsigned();
+            }
+            return false;
+        }
         case BuiltinKind::IS_ASSIGNABLE: {
             auto lhs = get_canonical_arg(0);
             auto rhs = get_canonical_arg(1);

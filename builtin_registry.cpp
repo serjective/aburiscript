@@ -33,6 +33,7 @@ bool is_builtin_type_trait_kind(BuiltinKind kind) {
         case BuiltinKind::IS_SCOPED_ENUM:
         case BuiltinKind::IS_FUNDAMENTAL:
         case BuiltinKind::IS_INTEGRAL:
+        case BuiltinKind::IS_UNSIGNED:
         case BuiltinKind::IS_ASSIGNABLE:
         case BuiltinKind::IS_TRIVIALLY_ASSIGNABLE:
         case BuiltinKind::IS_NOTHROW_ASSIGNABLE:
@@ -98,6 +99,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__is_scoped_enum", BuiltinKind::IS_SCOPED_ENUM, 1, 1, true, true});
     register_builtin({"__is_fundamental", BuiltinKind::IS_FUNDAMENTAL, 1, 1, true, true});
     register_builtin({"__is_integral", BuiltinKind::IS_INTEGRAL, 1, 1, true, true});
+    register_builtin({"__is_unsigned", BuiltinKind::IS_UNSIGNED, 1, 1, true, true});
     register_builtin({"__is_assignable", BuiltinKind::IS_ASSIGNABLE, 2, 2, true, true});
     register_builtin({"__is_trivially_assignable", BuiltinKind::IS_TRIVIALLY_ASSIGNABLE, 2, 2, true, true});
     register_builtin({"__is_nothrow_assignable", BuiltinKind::IS_NOTHROW_ASSIGNABLE, 2, 2, true, true});

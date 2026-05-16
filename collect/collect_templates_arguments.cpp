@@ -81,6 +81,174 @@ void append_const_value_cache_key(std::string& out, const ConstValue& value) {
     }
 }
 
+void append_qualified_expr_info_cache_key(
+    std::string& out,
+    const CppQualifiedExprInfo* info) {
+    if (!info || !info->has_qualifier()) {
+        out += "Q:none";
+        return;
+    }
+    out += "Q:";
+    out += info->has_global_qualifier ? "global:" : "relative:";
+    out += info->is_type_qualified ? "type:" : "namespace:";
+    out += info->is_current_instantiation ? "current:" : "ordinary:";
+    append_type_cache_key(out, info->qualifier_type);
+    out += ":";
+    for (size_t idx = 0; idx < info->qualifiers.size(); ++idx) {
+        if (idx > 0) {
+            out += "::";
+        }
+        out += info->qualifiers[idx];
+    }
+}
+
+void append_dependent_lookup_qualifier_cache_key(
+    std::string& out,
+    const DependentLookupQualifier& qualifier) {
+    out += "DLQ:";
+    out += qualifier.has_global_qualifier ? "global:" : "relative:";
+    out += qualifier.is_type_qualified ? "type:" : "namespace:";
+    out += qualifier.is_current_instantiation ? "current:" : "ordinary:";
+    append_type_cache_key(out, qualifier.qualifier_type);
+    out += ":";
+    for (size_t idx = 0; idx < qualifier.qualifiers.size(); ++idx) {
+        if (idx > 0) {
+            out += "::";
+        }
+        out += qualifier.qualifiers[idx];
+    }
+}
+
+void append_expr_cache_key(std::string& out, const Expr* expr) {
+    expr = Collect::strip_implicit_casts(const_cast<Expr*>(expr));
+    if (!expr) {
+        out += "E:null";
+        return;
+    }
+    out += "E";
+    out += std::to_string(static_cast<int>(expr->get_kind()));
+    out += "(";
+    append_type_cache_key(
+        out,
+        const_cast<Expr*>(expr)->get_type());
+    out += "):";
+
+    switch (expr->get_kind()) {
+        case StmtKind::IntegerLiteral: {
+            const auto* literal = static_cast<const IntegerLiteral*>(expr);
+            out += "int:";
+            out += literal->get_value();
+            return;
+        }
+        case StmtKind::VarRef:
+        case StmtKind::QualifiedVarRef: {
+            const auto* var_ref = static_cast<const VarRef*>(expr);
+            out += "var:";
+            out += var_ref->get_name();
+            out += ":sym:";
+            out += pointer_identity_string(var_ref->symref.get());
+            out += ":owner:";
+            append_type_cache_key(
+                out,
+                get_symbol_owner_record_type(var_ref->symref.get()));
+            out += ":";
+            append_qualified_expr_info_cache_key(
+                out,
+                var_ref->get_cpp_qualified_info());
+            return;
+        }
+        case StmtKind::UnresolvedLookupExpr: {
+            const auto* lookup =
+                static_cast<const UnresolvedLookupExpr*>(expr);
+            out += "lookup:";
+            out += lookup->name;
+            out += ":";
+            append_dependent_lookup_qualifier_cache_key(
+                out,
+                lookup->qualifier);
+            out += ":template:";
+            out += lookup->requires_template_keyword ? "yes:" : "no:";
+            out += lookup->is_dependent ? "dep:" : "nondep:";
+            if (lookup->explicit_template_arguments.has_value()) {
+                out += "<";
+                for (size_t idx = 0;
+                     idx < lookup->explicit_template_arguments->size();
+                     ++idx) {
+                    if (idx > 0) {
+                        out += ",";
+                    }
+                    append_template_argument_cache_key(
+                        out,
+                        (*lookup->explicit_template_arguments)[idx]);
+                }
+                out += ">";
+            }
+            return;
+        }
+        case StmtKind::DependentUnaryExpr: {
+            const auto* unary =
+                static_cast<const DependentUnaryExpr*>(expr);
+            out += "du:";
+            out += std::to_string(static_cast<int>(unary->uop));
+            out += ":";
+            append_expr_cache_key(out, unary->operand.get());
+            return;
+        }
+        case StmtKind::UnaryOperation: {
+            const auto* unary = static_cast<const UnaryOperation*>(expr);
+            out += "u:";
+            out += std::to_string(static_cast<int>(unary->uop));
+            out += ":";
+            append_expr_cache_key(out, unary->exp.get());
+            return;
+        }
+        case StmtKind::DependentBinaryExpr: {
+            const auto* binary =
+                static_cast<const DependentBinaryExpr*>(expr);
+            out += "db:";
+            out += std::to_string(static_cast<int>(binary->bop));
+            out += ":";
+            append_expr_cache_key(out, binary->left.get());
+            out += ":";
+            append_expr_cache_key(out, binary->right.get());
+            return;
+        }
+        case StmtKind::BinaryOperation: {
+            const auto* binary = static_cast<const BinaryOperation*>(expr);
+            out += "b:";
+            out += std::to_string(static_cast<int>(binary->bop));
+            out += ":";
+            append_expr_cache_key(out, binary->left.get());
+            out += ":";
+            append_expr_cache_key(out, binary->right.get());
+            return;
+        }
+        case StmtKind::ExplicitCast: {
+            const auto* cast = static_cast<const ExplicitCast*>(expr);
+            out += "ecast:";
+            out += std::to_string(static_cast<int>(cast->cast_kind));
+            out += ":";
+            append_type_cache_key(out, cast->ctype);
+            out += ":";
+            append_expr_cache_key(out, cast->expr.get());
+            return;
+        }
+        case StmtKind::ImplicitCast: {
+            const auto* cast = static_cast<const ImplicitCast*>(expr);
+            out += "icast:";
+            out += std::to_string(static_cast<int>(cast->kind));
+            out += ":";
+            append_type_cache_key(out, cast->ctype);
+            out += ":";
+            append_expr_cache_key(out, cast->expr.get());
+            return;
+        }
+        default:
+            out += "kind-only";
+            return;
+    }
+}
+
 const TemplateDecl* canonical_template_decl_identity(const TemplateDecl* decl) {
     return decl ? get_template_decl_canonical_decl(decl) : nullptr;
 }
@@ -503,6 +671,9 @@ void append_template_argument_cache_key(std::string& out,
                 if (argument.referenced_parameter) {
                     out += "dep:";
                     out += pointer_identity_string(argument.referenced_parameter);
+                } else if (argument.value_expr) {
+                    out += "expr:";
+                    append_expr_cache_key(out, argument.value_expr.get());
                 } else if (!argument.value_spelling.empty()) {
                     out += "sp:";
                     out += argument.value_spelling;
@@ -1303,7 +1474,6 @@ bool Collect::complete_template_argument_bindings_with_substituted_defaults(
                 "template argument count does not satisfy parameter defaults");
             return false;
         }
-
         auto rewritten_defaults =
             substitute_template_arguments_with_bindings(
                 {*default_argument},

@@ -857,6 +857,27 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
     }
 
     switch (expr->get_kind()) {
+        case StmtKind::QualifiedVarRef: {
+            const auto* var_ref = static_cast<const QualifiedVarRef*>(expr);
+            const auto* qualified_info = var_ref->get_cpp_qualified_info();
+            bool has_non_dependent_qualifier = false;
+            if (qualified_info) {
+                if (qualified_info->is_current_instantiation ||
+                    type_depends_on_template_parameters(
+                        qualified_info->qualifier_type,
+                        ast_ctx)) {
+                    return true;
+                }
+                has_non_dependent_qualifier = true;
+            }
+            if (!has_non_dependent_qualifier &&
+                type_depends_on_template_parameters(
+                    get_symbol_owner_record_type(var_ref->symref.get()),
+                    ast_ctx)) {
+                return true;
+            }
+            break;
+        }
         case StmtKind::UnresolvedLookupExpr: {
             const auto* lookup = static_cast<const UnresolvedLookupExpr*>(expr);
             if (lookup->is_dependent ||
@@ -2109,6 +2130,11 @@ bool TemplateArgument::equals(const TemplateArgument& other) const {
             if (is_dependent) {
                 if (referenced_parameter && other.referenced_parameter) {
                     return referenced_parameter == other.referenced_parameter;
+                }
+                if (value_expr || other.value_expr) {
+                    return expr_structurally_matches(
+                        value_expr.get(),
+                        other.value_expr.get());
                 }
                 return value_spelling == other.value_spelling;
             }
