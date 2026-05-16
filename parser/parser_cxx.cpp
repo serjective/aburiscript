@@ -691,9 +691,9 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
 
         std::string template_name =
             format_template_name_argument(components);
-        tentative.commit();
 
         if (owner_chain.is_dependent_context()) {
+            tentative.commit();
             TemplateArgument argument =
                 TemplateArgument::dependent_template_argument(
                     template_name);
@@ -715,6 +715,7 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
         if (!template_decl) {
             return std::nullopt;
         }
+        tentative.commit();
         return TemplateArgument::template_argument(
             template_decl,
             template_name);
