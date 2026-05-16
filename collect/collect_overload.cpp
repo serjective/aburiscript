@@ -237,6 +237,34 @@ bool is_function_template_specialization_symbol(
         get_symbol_function_template_specialization(symbol.get()) != nullptr;
 }
 
+OverloadCandidateProvenance function_candidate_provenance(
+    const std::shared_ptr<Symbol>& symbol) {
+    return is_function_template_specialization_symbol(symbol)
+        ? OverloadCandidateProvenance::FunctionTemplateSpecialization
+        : OverloadCandidateProvenance::OrdinaryFunction;
+}
+
+OverloadCandidateProvenance constructor_candidate_provenance(
+    const RecordSemanticState::Constructor& ctor) {
+    if (ctor.is_implicit) {
+        return OverloadCandidateProvenance::ImplicitSpecialMember;
+    }
+    if (ctor.function_template ||
+        (ctor.symbol &&
+         get_symbol_function_template_specialization(ctor.symbol.get()))) {
+        return OverloadCandidateProvenance::ConstructorTemplateSpecialization;
+    }
+    return OverloadCandidateProvenance::Constructor;
+}
+
+bool overload_candidate_is_template_specialization(
+    OverloadCandidateProvenance provenance) {
+    return provenance ==
+               OverloadCandidateProvenance::FunctionTemplateSpecialization ||
+           provenance ==
+               OverloadCandidateProvenance::ConstructorTemplateSpecialization;
+}
+
 std::vector<Expr*> make_raw_explicit_args(
     const std::vector<std::unique_ptr<Expr>>& explicit_args) {
     std::vector<Expr*> raw_args;
@@ -1482,6 +1510,7 @@ Collect::OverloadCandidateEval Collect::evaluate_conversion_constructor_candidat
     OverloadCandidateEval eval;
     eval.candidate_kind = OverloadCandidateKind::ConversionConstructor;
     eval.symbol = ctor.symbol;
+    eval.provenance = constructor_candidate_provenance(ctor);
     eval.constructor = &ctor;
     eval.function_type =
         desugar_type(ctor.type, ast_ctx_.get()).as_shared<FunctionType>();
@@ -1592,6 +1621,7 @@ Collect::OverloadCandidateEval Collect::evaluate_conversion_function_candidate(
     OverloadCandidateEval eval;
     eval.candidate_kind = OverloadCandidateKind::ConversionFunction;
     eval.symbol = method.symbol;
+    eval.provenance = OverloadCandidateProvenance::ConversionFunction;
     eval.conversion_function = &method;
     eval.owner_record_decl = owner_record_decl;
     eval.implicit_object_arg_kind = OverloadImplicitObjectArgKind::MemberObject;
@@ -2593,6 +2623,7 @@ Collect::OverloadCandidateEval Collect::evaluate_overload_call_candidate(
     OverloadCandidateEval eval;
     eval.candidate_kind = OverloadCandidateKind::Function;
     eval.symbol = candidate_info.symbol;
+    eval.provenance = function_candidate_provenance(candidate_info.symbol);
     eval.implicit_object_arg_kind = candidate_info.implicit_object_arg_kind;
     eval.operator_rewrite_kind = candidate_info.operator_rewrite_kind;
     eval.is_synthesized_reversed_operator_candidate =
@@ -2942,9 +2973,9 @@ bool Collect::overload_note_order_less(
         }
 
         bool lhs_is_template_specialization =
-            is_function_template_specialization_symbol(lhs.symbol);
+            overload_candidate_is_template_specialization(lhs.provenance);
         bool rhs_is_template_specialization =
-            is_function_template_specialization_symbol(rhs.symbol);
+            overload_candidate_is_template_specialization(rhs.provenance);
         if (lhs_is_template_specialization != rhs_is_template_specialization) {
             return !lhs_is_template_specialization &&
                 rhs_is_template_specialization;
@@ -3057,13 +3088,16 @@ bool Collect::is_better_overload_candidate(
     }
 
     bool lhs_is_template_specialization =
-        is_function_template_specialization_symbol(lhs.symbol);
+        overload_candidate_is_template_specialization(lhs.provenance);
     bool rhs_is_template_specialization =
-        is_function_template_specialization_symbol(rhs.symbol);
+        overload_candidate_is_template_specialization(rhs.provenance);
     if (lhs_is_template_specialization != rhs_is_template_specialization) {
         return !lhs_is_template_specialization && rhs_is_template_specialization;
     }
-    if (lhs_is_template_specialization && rhs_is_template_specialization) {
+    if (lhs.provenance ==
+            OverloadCandidateProvenance::FunctionTemplateSpecialization &&
+        rhs.provenance ==
+            OverloadCandidateProvenance::FunctionTemplateSpecialization) {
         auto* lhs_template = function_template_primary_for_symbol(lhs.symbol);
         auto* rhs_template = function_template_primary_for_symbol(rhs.symbol);
         if (lhs_template != rhs_template) {

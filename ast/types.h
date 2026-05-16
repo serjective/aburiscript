@@ -1643,6 +1643,7 @@ struct RecordSemanticState {
         bool is_consteval = false;
         const CppConstructorDecl* decl = nullptr;
         std::shared_ptr<Symbol> symbol = nullptr;
+        const FunctionTemplateDecl* function_template = nullptr;
     };
 
     struct Destructor {

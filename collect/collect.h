@@ -66,6 +66,16 @@ enum class CppConstexprIfBranchState : uint8_t {
     Deferred,
 };
 
+enum class OverloadCandidateProvenance : uint8_t {
+    Unknown,
+    OrdinaryFunction,
+    FunctionTemplateSpecialization,
+    Constructor,
+    ConstructorTemplateSpecialization,
+    ImplicitSpecialMember,
+    ConversionFunction
+};
+
 // Parser-facing semantic action surface.
 // This owns semantic lifecycle state and is the single AST node construction
 // entrypoint for parser reductions.
@@ -1616,6 +1626,8 @@ private:
 
     struct OverloadCandidateEval {
         OverloadCandidateKind candidate_kind = OverloadCandidateKind::Function;
+        OverloadCandidateProvenance provenance =
+            OverloadCandidateProvenance::Unknown;
         std::shared_ptr<Symbol> symbol = nullptr;
         std::shared_ptr<FunctionType> function_type = nullptr;
         std::vector<ImplicitConversionSequence> conversions;
@@ -1741,6 +1753,8 @@ private:
 
     struct ConstructorCandidateEval {
         const RecordSemanticState::Constructor* ctor = nullptr;
+        OverloadCandidateProvenance provenance =
+            OverloadCandidateProvenance::Unknown;
         std::shared_ptr<FunctionType> function_type = nullptr;
         size_t user_param_start = 0;
         size_t max_user_param_count = 0;

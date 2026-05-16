@@ -411,6 +411,7 @@ Collect::instantiate_constructor_template_candidates(
         ctor.is_deleted = specialized_ctor->is_deleted;
         ctor.decl = specialized_ctor;
         ctor.symbol = std::move(specialization_symbol);
+        ctor.function_template = function_template;
         template_constructors.push_back(std::move(ctor));
     }
 
@@ -426,6 +427,16 @@ Collect::evaluate_variable_constructor_candidate(
 
     ConstructorCandidateEval eval;
     eval.ctor = &ctor;
+    if (ctor.is_implicit) {
+        eval.provenance = OverloadCandidateProvenance::ImplicitSpecialMember;
+    } else if (ctor.function_template ||
+               (ctor.symbol &&
+                get_symbol_function_template_specialization(ctor.symbol.get()))) {
+        eval.provenance =
+            OverloadCandidateProvenance::ConstructorTemplateSpecialization;
+    } else {
+        eval.provenance = OverloadCandidateProvenance::Constructor;
+    }
     eval.function_type =
         desugar_type(ctor.type, ast_ctx_.get()).as_shared<FunctionType>();
     if (!eval.function_type) {
@@ -696,7 +707,23 @@ bool Collect::is_better_variable_constructor_candidate(
             }
         }
     }
-    return strictly_better;
+    if (strictly_better) {
+        return true;
+    }
+
+    auto is_template_constructor = [](OverloadCandidateProvenance provenance) {
+        return provenance ==
+            OverloadCandidateProvenance::ConstructorTemplateSpecialization;
+    };
+    bool lhs_template_constructor =
+        is_template_constructor(lhs.provenance);
+    bool rhs_template_constructor =
+        is_template_constructor(rhs.provenance);
+    if (lhs_template_constructor != rhs_template_constructor) {
+        return !lhs_template_constructor && rhs_template_constructor;
+    }
+
+    return false;
 }
 
 std::optional<size_t> Collect::select_best_variable_constructor_candidate_index(
