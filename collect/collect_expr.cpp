@@ -6349,6 +6349,11 @@ std::unique_ptr<Expr> Collect::collect_binary_operation_impl(
             loc);
     }
 
+    if (lang_opts_.is_cxx_mode()) {
+        realize_deferred_expr_type_after_substitution(lhs.get());
+        realize_deferred_expr_type_after_substitution(rhs.get());
+    }
+
     bool has_dependent_operand =
         lang_opts_.is_cxx_mode() &&
         (expression_depends_on_template_parameters(lhs.get()) ||

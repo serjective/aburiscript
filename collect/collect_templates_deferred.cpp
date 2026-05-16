@@ -1,4 +1,5 @@
 #include "collect.h"
+#include "collect_internal.h"
 #include "../ast/expr_clone.h"
 
 namespace {
@@ -731,7 +732,8 @@ bool Collect::decltype_expression_requires_deferred_resolution(
         return true;
     }
 
-    return type_depends_on_template_parameters(expr_type, ast_ctx_.get());
+    return type_depends_on_template_parameters(expr_type, ast_ctx_.get()) ||
+           contains_deferred_semantic_type(expr_type.get_shared());
 }
 
 bool Collect::expression_depends_on_template_parameters(
@@ -769,7 +771,134 @@ QualType Collect::resolve_decltype_expression_type(
         return QualType();
     }
 
+    std::unique_ptr<Expr> resolved_expr_owner;
     auto* stripped_expr = strip_implicit_casts(expr);
+    auto apply_decltype_qualifiers = [&](QualType resolved_type) -> QualType {
+        if (!resolved_type) {
+            return resolved_type;
+        }
+        return QualType(
+            resolved_type.get_shared(),
+            static_cast<uint8_t>(
+                original_type.get_qualifiers() |
+                resolved_type.get_qualifiers()));
+    };
+    auto resolve_declval_argument_type =
+        [&](const TemplateArgument& argument) -> QualType {
+        if (argument.kind != TemplateArgumentKind::Type ||
+            !argument.type) {
+            return QualType();
+        }
+        QualType resolved_type = resolve_deferred_semantic_type_impl(
+            argument.type,
+            loc,
+            mode);
+        if (!resolved_type ||
+            type_depends_on_template_parameters(resolved_type, ast_ctx_.get()) ||
+            contains_deferred_semantic_type(resolved_type.get_shared())) {
+            return QualType();
+        }
+        return resolved_type;
+    };
+    auto try_declval_call_type = [&](const Expr* candidate) -> QualType {
+        candidate = strip_implicit_casts(const_cast<Expr*>(candidate));
+        const UnresolvedLookupExpr* lookup = nullptr;
+        if (auto* dependent_call = dyn_cast<DependentCallExpr>(candidate)) {
+            lookup = dyn_cast<UnresolvedLookupExpr>(
+                dependent_call->callee.get());
+        } else if (auto* lookup_expr =
+                       dyn_cast<UnresolvedLookupExpr>(candidate)) {
+            lookup = lookup_expr;
+        }
+        if (!lookup ||
+            (lookup->name != "declval" && lookup->name != "__declval") ||
+            !lookup->explicit_template_arguments ||
+            lookup->explicit_template_arguments->size() != 1) {
+            return QualType();
+        }
+        QualType value_type = resolve_declval_argument_type(
+            lookup->explicit_template_arguments->front());
+        if (!value_type) {
+            return QualType();
+        }
+        return make_reference_type(value_type, ReferenceKind::RValue);
+    };
+    auto try_declval_conditional_type = [&](const Expr* candidate) -> QualType {
+        candidate = strip_implicit_casts(const_cast<Expr*>(candidate));
+        auto* cond = dyn_cast<CondExpr>(candidate);
+        if (!cond || !cond->false_expr) {
+            return QualType();
+        }
+        const Expr* true_operand = cond->true_expr
+            ? cond->true_expr.get()
+            : cond->condition.get();
+        QualType true_type = try_declval_call_type(true_operand);
+        QualType false_type = try_declval_call_type(cond->false_expr.get());
+        if (!true_type || !false_type) {
+            return QualType();
+        }
+        if (true_type.equals_qualified(false_type)) {
+            return true_type;
+        }
+        QualType true_object = remove_reference(true_type, ast_ctx_.get());
+        QualType false_object = remove_reference(false_type, ast_ctx_.get());
+        if (true_object.equals_qualified(false_object)) {
+            return true_object;
+        }
+        if (collect_internal::is_arithmetic_adjacent(
+                true_object,
+                ast_ctx_.get()) &&
+            collect_internal::is_arithmetic_adjacent(
+                false_object,
+                ast_ctx_.get())) {
+            return usual_arithmetic_conversion_type(true_object, false_object);
+        }
+        return QualType();
+    };
+    if (QualType declval_type = try_declval_call_type(stripped_expr)) {
+        return apply_decltype_qualifiers(declval_type);
+    }
+    if (QualType cond_type = try_declval_conditional_type(stripped_expr)) {
+        return apply_decltype_qualifiers(cond_type);
+    }
+    if (decltype_expression_requires_deferred_resolution(stripped_expr)) {
+        std::string clone_error;
+        auto cloned_expr =
+            clone_expr_tree(expr, ast_ctx_.get(), &clone_error);
+        if (cloned_expr) {
+            auto checkpoint = diag_engine_
+                ? diag_engine_->checkpoint()
+                : DiagnosticEngine::Checkpoint{};
+            {
+                UnevaluatedContextScope unevaluated_scope(
+                    this,
+                    "deferred decltype resolution");
+                std::string resolution_error;
+                QualType implicit_this_type =
+                    session_.func_state_.current_function_is_cpp_member
+                        ? session_.func_state_.current_function_cpp_this_type
+                        : QualType();
+                if (resolve_dependent_expr_after_substitution(
+                        cloned_expr,
+                        implicit_this_type,
+                        &resolution_error)) {
+                    realize_deferred_expr_type_after_substitution(
+                        cloned_expr.get(),
+                        mode == DeferredTypeResolutionMode::Finalize);
+                }
+            }
+            if (mode == DeferredTypeResolutionMode::TryRealize &&
+                diag_engine_) {
+                diag_engine_->restore(checkpoint);
+            }
+            auto* resolved_stripped = strip_implicit_casts(cloned_expr.get());
+            if (!decltype_expression_requires_deferred_resolution(
+                    resolved_stripped)) {
+                resolved_expr_owner = std::move(cloned_expr);
+                stripped_expr = resolved_stripped;
+            }
+        }
+    }
     if (decltype_expression_requires_deferred_resolution(stripped_expr)) {
         return original_type;
     }
@@ -1070,6 +1199,15 @@ QualType Collect::resolve_deferred_dependent_name_type(
         dependent_name.template_arguments,
         loc,
         mode);
+    if (dependent_name.is_current_instantiation &&
+        dependent_name.qualifier_type &&
+        !type_depends_on_template_parameters(
+            dependent_name.qualifier_type,
+            ast_ctx_.get()) &&
+        !contains_deferred_semantic_type(
+            dependent_name.qualifier_type.get_shared())) {
+        dependent_name.is_current_instantiation = false;
+    }
     query_publish_dependent_name_resolved_type(original_type, nullptr);
     auto resolved_type =
         query_lookup_dependent_name_resolved_type(&dependent_name);

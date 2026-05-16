@@ -1555,6 +1555,15 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
             "explicit template arguments require a function or member template name",
             loc);
     }
+    if (auto* callee_ref = dyn_cast<VarRef>(callee.get())) {
+        if (auto* qualified_info = callee_ref->get_cpp_qualified_info()) {
+            DependentLookupQualifier qualifier =
+                normalize_dependent_lookup_qualifier_after_substitution(
+                    build_dependent_lookup_qualifier(*qualified_info),
+                    callee_ref->location);
+            *qualified_info = build_cpp_qualified_expr_info(qualifier);
+        }
+    }
 
     bool explicit_args_are_dependent = false;
     bool any_arg_is_dependent = false;
@@ -2743,47 +2752,298 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
     return result;
 }
 
+DependentLookupQualifier
+Collect::normalize_dependent_lookup_qualifier_after_substitution(
+    const DependentLookupQualifier& qualifier,
+    SrcLoc loc) {
+    DependentLookupQualifier normalized = qualifier;
+    if (!normalized.is_type_qualified || !normalized.qualifier_type) {
+        return normalized;
+    }
+
+    QualType realized_type =
+        try_realize_deferred_semantic_type(normalized.qualifier_type);
+    if (!realized_type &&
+        !type_depends_on_template_parameters(
+            normalized.qualifier_type,
+            ast_ctx_.get())) {
+        realized_type =
+            finalize_deferred_semantic_type(normalized.qualifier_type, loc);
+    }
+    if (realized_type) {
+        normalized.qualifier_type = realized_type;
+    }
+
+    bool still_dependent =
+        type_depends_on_template_parameters(
+            normalized.qualifier_type,
+            ast_ctx_.get()) ||
+        contains_deferred_semantic_type(
+            normalized.qualifier_type.get_shared());
+    if (!still_dependent) {
+        normalized.is_current_instantiation = false;
+        normalized.names_dependent_base = false;
+    }
+    return normalized;
+}
+
+void Collect::realize_deferred_expr_type_after_substitution(
+    Expr* expr,
+    bool allow_finalize) {
+    if (!expr) {
+        return;
+    }
+
+    auto realize_type = [&](QualType type) -> QualType {
+        if (!type) {
+            return type;
+        }
+        if (!contains_deferred_semantic_type(type.get_shared()) &&
+            !type_depends_on_template_parameters(type, ast_ctx_.get())) {
+            return type;
+        }
+        QualType realized = try_realize_deferred_semantic_type(type);
+        if (allow_finalize &&
+            (!realized ||
+             contains_deferred_semantic_type(realized.get_shared()) ||
+             type_depends_on_template_parameters(realized, ast_ctx_.get()))) {
+            realized = finalize_deferred_semantic_type(
+                realized ? realized : type,
+                expr->location);
+        }
+        return realized ? realized : type;
+    };
+
+    switch (expr->get_kind()) {
+        case StmtKind::ImplicitCast: {
+            auto* cast = static_cast<ImplicitCast*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                cast->expr.get(),
+                allow_finalize);
+            cast->ctype = realize_type(cast->ctype);
+            return;
+        }
+        case StmtKind::ExplicitCast: {
+            auto* cast = static_cast<ExplicitCast*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                cast->expr.get(),
+                allow_finalize);
+            cast->ctype = realize_type(cast->ctype);
+            return;
+        }
+        case StmtKind::CppFunctionStyleCastExpr: {
+            auto* cast = static_cast<CppFunctionStyleCastExpr*>(expr);
+            cast->target_type = realize_type(cast->target_type);
+            for (auto& arg : cast->args) {
+                realize_deferred_expr_type_after_substitution(
+                    arg.get(),
+                    allow_finalize);
+            }
+            return;
+        }
+        case StmtKind::CppValueInitExpr: {
+            auto* value_init = static_cast<CppValueInitExpr*>(expr);
+            value_init->ctype = realize_type(value_init->ctype);
+            return;
+        }
+        case StmtKind::FuncCall: {
+            auto* call = static_cast<FuncCall*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                call->func.get(),
+                allow_finalize);
+            for (auto& arg : call->args) {
+                realize_deferred_expr_type_after_substitution(
+                    arg.get(),
+                    allow_finalize);
+            }
+            call->ctype = realize_type(call->ctype);
+            return;
+        }
+        case StmtKind::CppMemberCallExpr: {
+            auto* call = static_cast<CppMemberCallExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                call->lowered_call.get(),
+                allow_finalize);
+            call->ctype = realize_type(call->ctype);
+            return;
+        }
+        case StmtKind::UnaryOperation: {
+            auto* unary = static_cast<UnaryOperation*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                unary->exp.get(),
+                allow_finalize);
+            unary->ctype = realize_type(unary->ctype);
+            return;
+        }
+        case StmtKind::DependentUnaryExpr: {
+            auto* unary = static_cast<DependentUnaryExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                unary->operand.get(),
+                allow_finalize);
+            unary->ctype = realize_type(unary->ctype);
+            return;
+        }
+        case StmtKind::BinaryOperation: {
+            auto* binary = static_cast<BinaryOperation*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                binary->left.get(),
+                allow_finalize);
+            realize_deferred_expr_type_after_substitution(
+                binary->right.get(),
+                allow_finalize);
+            binary->ctype = realize_type(binary->ctype);
+            return;
+        }
+        case StmtKind::DependentBinaryExpr: {
+            auto* binary = static_cast<DependentBinaryExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                binary->left.get(),
+                allow_finalize);
+            realize_deferred_expr_type_after_substitution(
+                binary->right.get(),
+                allow_finalize);
+            binary->ctype = realize_type(binary->ctype);
+            return;
+        }
+        case StmtKind::CompoundAssignOperation: {
+            auto* binary = static_cast<CompoundAssignOperation*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                binary->left.get(),
+                allow_finalize);
+            realize_deferred_expr_type_after_substitution(
+                binary->right.get(),
+                allow_finalize);
+            binary->ctype = realize_type(binary->ctype);
+            return;
+        }
+        case StmtKind::CondExpr: {
+            auto* cond = static_cast<CondExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                cond->condition.get(),
+                allow_finalize);
+            realize_deferred_expr_type_after_substitution(
+                cond->true_expr.get(),
+                allow_finalize);
+            realize_deferred_expr_type_after_substitution(
+                cond->false_expr.get(),
+                allow_finalize);
+            cond->type = realize_type(cond->type);
+            return;
+        }
+        case StmtKind::ArraySubscriptExpr: {
+            auto* subscript = static_cast<ArraySubscriptExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                subscript->array.get(),
+                allow_finalize);
+            realize_deferred_expr_type_after_substitution(
+                subscript->index.get(),
+                allow_finalize);
+            subscript->ctype = realize_type(subscript->ctype);
+            return;
+        }
+        case StmtKind::DependentArraySubscriptExpr: {
+            auto* subscript = static_cast<DependentArraySubscriptExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                subscript->array.get(),
+                allow_finalize);
+            realize_deferred_expr_type_after_substitution(
+                subscript->index.get(),
+                allow_finalize);
+            subscript->ctype = realize_type(subscript->ctype);
+            return;
+        }
+        case StmtKind::MemberExpr: {
+            auto* member = static_cast<MemberExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                member->base.get(),
+                allow_finalize);
+            member->member_type = realize_type(member->member_type);
+            member->declared_member_type =
+                realize_type(member->declared_member_type);
+            return;
+        }
+        case StmtKind::DependentMemberPointerAccessExpr: {
+            auto* access =
+                static_cast<DependentMemberPointerAccessExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                access->base.get(),
+                allow_finalize);
+            realize_deferred_expr_type_after_substitution(
+                access->member_pointer.get(),
+                allow_finalize);
+            access->ctype = realize_type(access->ctype);
+            return;
+        }
+        case StmtKind::CppBuiltinThreeWayCompareExpr: {
+            auto* compare = static_cast<CppBuiltinThreeWayCompareExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                compare->left.get(),
+                allow_finalize);
+            realize_deferred_expr_type_after_substitution(
+                compare->right.get(),
+                allow_finalize);
+            compare->ctype = realize_type(compare->ctype);
+            return;
+        }
+        default:
+            break;
+    }
+
+    QualType realized_type = realize_type(expr->get_type());
+    if (realized_type) {
+        store_explicit_expr_type(expr, realized_type);
+    }
+}
+
 std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
     const std::string& name,
     const DependentLookupQualifier& qualifier,
     bool looks_like_call,
     SrcLoc loc,
     QualType implicit_this_type) {
+    DependentLookupQualifier normalized_qualifier =
+        normalize_dependent_lookup_qualifier_after_substitution(
+            qualifier,
+            loc);
     auto make_qualified_var_ref =
         [&](std::shared_ptr<Symbol> symbol) -> std::unique_ptr<Expr> {
             auto qualified_ref =
                 collect_identifier_reference(name, std::move(symbol), loc);
             if (isa<VarRef>(qualified_ref.get()) &&
-                qualifier.has_qualifier()) {
+                normalized_qualifier.has_qualifier()) {
                 qualified_ref = attach_cpp_qualified_info_to_expr(
                     std::move(qualified_ref),
-                    build_cpp_qualified_expr_info(qualifier));
+                    build_cpp_qualified_expr_info(normalized_qualifier));
             }
             return qualified_ref;
         };
 
-    if (!qualifier.is_type_qualified) {
+    if (!normalized_qualifier.is_type_qualified) {
         return make_qualified_var_ref(nullptr);
     }
 
     if (current_constexpr_if_branch_state() !=
             CppConstexprIfBranchState::Active &&
-        dependent_lookup_qualifier_is_dependent(qualifier, ast_ctx_.get())) {
+        dependent_lookup_qualifier_is_dependent(
+            normalized_qualifier,
+            ast_ctx_.get())) {
         return collect_unresolved_lookup_expression(
             name,
-            qualifier,
+            normalized_qualifier,
             /*requires_template_keyword=*/false,
             loc);
     }
 
     QualType resolved_owner_type =
-        finalize_deferred_semantic_type(qualifier.qualifier_type, loc);
+        finalize_deferred_semantic_type(
+            normalized_qualifier.qualifier_type,
+            loc);
     auto resolved_qualified_info = build_cpp_qualified_expr_info(
-        qualifier.has_global_qualifier,
-        qualifier.qualifiers,
+        normalized_qualifier.has_global_qualifier,
+        normalized_qualifier.qualifiers,
         resolved_owner_type,
-        qualifier.is_type_qualified,
-        qualifier.is_current_instantiation);
+        normalized_qualifier.is_type_qualified,
+        normalized_qualifier.is_current_instantiation);
     auto qualified_owner_analysis =
         analyze_cpp_qualified_expr_owner(&resolved_qualified_info, ast_ctx_.get());
     auto qualified_owner_type = qualified_owner_analysis.qualifier_record_type;
@@ -3043,6 +3303,9 @@ bool Collect::resolve_dependent_expr_after_substitution(
 
         DependentLookupQualifier qualifier =
             build_dependent_lookup_qualifier(*qualified_info);
+        qualifier = normalize_dependent_lookup_qualifier_after_substitution(
+            qualifier,
+            candidate->location);
         if (dependent_lookup_qualifier_is_dependent(
                 qualifier,
                 ast_ctx_.get())) {
@@ -3059,7 +3322,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
             return true;
         }
 
-        CppQualifiedExprInfo resolved_info = *qualified_info;
+        CppQualifiedExprInfo resolved_info =
+            build_cpp_qualified_expr_info(qualifier);
         resolved_info.qualifier_type = resolved_owner_type;
         auto owner_analysis =
             analyze_cpp_qualified_expr_owner(&resolved_info, ast_ctx_.get());
@@ -3097,7 +3361,7 @@ bool Collect::resolve_dependent_expr_after_substitution(
         if (!selected_symbol ||
             selected_symbol.get() == qualified_ref->symref.get()) {
             if (auto* mutable_info = qualified_ref->get_cpp_qualified_info()) {
-                mutable_info->qualifier_type = resolved_owner_type;
+                *mutable_info = resolved_info;
             }
             return true;
         }
@@ -3597,8 +3861,12 @@ bool Collect::resolve_dependent_expr_after_substitution(
                     }
                 }
             }
+            DependentLookupQualifier qualifier =
+                normalize_dependent_lookup_qualifier_after_substitution(
+                    unresolved_lookup->qualifier,
+                    unresolved_lookup->location);
             return dependent_lookup_qualifier_is_dependent(
-                unresolved_lookup->qualifier,
+                qualifier,
                 ast_ctx_.get());
         };
 
@@ -3830,6 +4098,12 @@ bool Collect::resolve_dependent_expr_after_substitution(
         strip_stale_dependent_implicit_casts(dependent_binary->right);
         materialize_constant_after_substitution(dependent_binary->left);
         materialize_constant_after_substitution(dependent_binary->right);
+        realize_deferred_expr_type_after_substitution(
+            dependent_binary->left.get(),
+            /*allow_finalize=*/true);
+        realize_deferred_expr_type_after_substitution(
+            dependent_binary->right.get(),
+            /*allow_finalize=*/true);
         if (!dependent_binary->left ||
             !dependent_binary->right ||
             expression_depends_on_template_parameters(
@@ -4240,14 +4514,14 @@ bool Collect::resolve_dependent_expr_after_substitution(
         lexical_lookup_scope,
         lexical_lookup_context);
     std::unique_ptr<Expr> concrete_callee;
-    if (has_explicit_template_args) {
+    if (has_explicit_template_args &&
+        !owned_lookup->qualifier.is_type_qualified) {
         concrete_callee = collect_identifier_reference(
             owned_lookup->name,
             nullptr,
             owned_lookup->location);
         if (isa<VarRef>(concrete_callee.get()) &&
-            (owned_lookup->qualifier.is_type_qualified ||
-             owned_lookup->qualifier.has_global_qualifier ||
+            (owned_lookup->qualifier.has_global_qualifier ||
              !owned_lookup->qualifier.qualifiers.empty())) {
             concrete_callee = attach_cpp_qualified_info_to_expr(
                 std::move(concrete_callee),

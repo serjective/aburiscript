@@ -269,6 +269,14 @@ public:
         QualType implicit_this_type,
         std::string* error_out) ;
 
+    DependentLookupQualifier normalize_dependent_lookup_qualifier_after_substitution(
+        const DependentLookupQualifier& qualifier,
+        SrcLoc loc) ;
+
+    void realize_deferred_expr_type_after_substitution(
+        Expr* expr,
+        bool allow_finalize = false) ;
+
     void set_current_decl_context(std::shared_ptr<DeclContext> decl_context) ;
 
     void collect_set_current_scope(std::shared_ptr<Scope> scope) ;
