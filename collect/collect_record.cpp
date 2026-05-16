@@ -2785,7 +2785,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
 
 void Collect::collect_record_synthesize_implicit_members(
     CollectRecordBuildContext& ctx) const {
-    if (!ctx.record_type) {
+    if (!ctx.record_type || ctx.semantic_state.is_incomplete) {
         return;
     }
 
