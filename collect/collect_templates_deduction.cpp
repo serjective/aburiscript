@@ -553,6 +553,26 @@ bool complete_partial_specialization_primary_arguments(
         &binding_error);
 }
 
+std::vector<TemplateArgument> normalize_actual_arguments_for_partial_matching(
+    Collect& collect,
+    const std::vector<TemplateArgument>& actual_arguments,
+    SrcLoc loc) {
+    std::vector<TemplateArgument> normalized_arguments = actual_arguments;
+    for (auto& argument : normalized_arguments) {
+        if (argument.kind != TemplateArgumentKind::Type || !argument.type) {
+            continue;
+        }
+        QualType realized_type =
+            collect.collect_try_realize_deferred_semantic_type(argument.type);
+        if (!realized_type) {
+            continue;
+        }
+        argument.type = realized_type;
+        argument.is_dependent = type_depends_on_template_parameters(realized_type);
+    }
+    return normalized_arguments;
+}
+
 bool substituted_partial_specialization_arguments_match_actual(
     Collect& collect,
     const std::vector<TemplateArgument>& pattern_arguments,
@@ -1221,13 +1241,18 @@ bool deduce_class_template_partial_specialization_bindings(
         analyze_template_argument_pattern_layout(
             pattern_arguments,
             &partial_specialization->parameters);
+    auto normalized_actual_arguments =
+        normalize_actual_arguments_for_partial_matching(
+            collect,
+            actual_arguments,
+            partial_specialization->location);
     deduced_bindings_out.clear();
     deduced_bindings_out.resize(partial_specialization->parameters.size());
     if (!deduce_class_template_specialization_argument_list_into_existing_bindings(
             pattern_arguments,
             pattern_layout,
             partial_specialization->parameters,
-            actual_arguments,
+            normalized_actual_arguments,
             deduced_bindings_out,
             /*finalize_bindings=*/false) ||
         !finalize_deduced_template_bindings(
@@ -1240,7 +1265,7 @@ bool deduce_class_template_partial_specialization_bindings(
         pattern_arguments,
         partial_specialization->parameters,
         deduced_bindings_out,
-        actual_arguments,
+        normalized_actual_arguments,
         partial_specialization->location);
 }
 
@@ -1317,13 +1342,18 @@ bool deduce_variable_template_partial_specialization_bindings(
         analyze_template_argument_pattern_layout(
             pattern_arguments,
             &partial_specialization->parameters);
+    auto normalized_actual_arguments =
+        normalize_actual_arguments_for_partial_matching(
+            collect,
+            actual_arguments,
+            partial_specialization->location);
     deduced_bindings_out.clear();
     deduced_bindings_out.resize(partial_specialization->parameters.size());
     if (!deduce_class_template_specialization_argument_list_into_existing_bindings(
             pattern_arguments,
             pattern_layout,
             partial_specialization->parameters,
-            actual_arguments,
+            normalized_actual_arguments,
             deduced_bindings_out,
             /*finalize_bindings=*/false) ||
         !finalize_deduced_template_bindings(
@@ -1336,7 +1366,7 @@ bool deduce_variable_template_partial_specialization_bindings(
         pattern_arguments,
         partial_specialization->parameters,
         deduced_bindings_out,
-        actual_arguments,
+        normalized_actual_arguments,
         partial_specialization->location);
 }
 
