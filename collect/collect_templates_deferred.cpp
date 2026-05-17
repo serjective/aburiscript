@@ -1,6 +1,7 @@
 #include "collect.h"
 #include "collect_internal.h"
 #include "../ast/expr_clone.h"
+#include "../helpers/auto_type_utils.h"
 
 namespace {
 enum class VarRefQualifierDependency {
@@ -154,6 +155,12 @@ bool variable_definition_depends_on_template_parameters(
 
     active_variable_symbols.erase(sym);
     return depends;
+}
+
+bool type_contains_undeduced_cxx_auto(QualType type) {
+    return type &&
+           (auto_type_utils::auto_type_flavors_in(type.get_shared()) &
+            auto_type_utils::kCxxAutoFlavor) != 0;
 }
 
 bool expr_constexpr_value_depends_on_template_parameters_impl(
@@ -555,6 +562,13 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
     }
 
     if (type_depends_on_template_parameters(stripped->get_type(), ast_ctx)) {
+        return true;
+    }
+    // A C++ auto placeholder that survives expression collection is an
+    // undeduced placeholder. In templates this can happen for locals whose
+    // initializer is dependent; uses of that local must be treated as dependent
+    // so semantic checks run after specialization deduces the placeholder.
+    if (type_contains_undeduced_cxx_auto(stripped->get_type())) {
         return true;
     }
 
@@ -1480,7 +1494,8 @@ bool Collect::decltype_expression_requires_deferred_resolution(
     }
 
     return type_depends_on_template_parameters(expr_type, ast_ctx_.get()) ||
-           contains_deferred_semantic_type(expr_type.get_shared());
+           contains_deferred_semantic_type(expr_type.get_shared()) ||
+           type_contains_undeduced_cxx_auto(expr_type);
 }
 
 bool Collect::expression_depends_on_template_parameters(
