@@ -459,13 +459,38 @@ QualType Collect::substitute_template_type_with_bindings(
             auto rewrite_bound_template_arguments =
                 [&](const std::vector<TemplateArgument>& template_arguments)
                 -> std::vector<TemplateArgument> {
-                    return substitute_template_arguments_with_bindings(
+                    auto rewritten = substitute_template_arguments_with_bindings(
                         template_arguments,
                         parameters,
                         argument_bindings,
                         loc,
                         allow_unsubstituted_parameters,
                         clone_context);
+                    for (auto& argument : rewritten) {
+                        if (argument.kind == TemplateArgumentKind::Type) {
+                            if (auto realized =
+                                    try_realize_deferred_semantic_type(
+                                        argument.type)) {
+                                argument.type = realized;
+                                argument.is_dependent =
+                                    type_depends_on_template_parameters(
+                                        argument.type,
+                                        ast_ctx_.get());
+                            }
+                        } else if (argument.kind == TemplateArgumentKind::Value) {
+                            if (auto realized =
+                                    try_realize_deferred_semantic_type(
+                                        argument.value_type)) {
+                                argument.value_type = realized;
+                                argument.is_dependent =
+                                    argument.is_dependent ||
+                                    type_depends_on_template_parameters(
+                                        argument.value_type,
+                                        ast_ctx_.get());
+                            }
+                        }
+                    }
+                    return rewritten;
                 };
 
             auto clone_pass_builder = make_template_binding_clone_pass_builder(

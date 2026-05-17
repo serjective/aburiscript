@@ -129,6 +129,97 @@ bool expr_depends_on_template_parameters_impl(
     const ASTContext* ast_ctx,
     std::unordered_set<const Symbol*>& active_variable_symbols);
 
+bool dependent_lookup_qualifier_depends_on_template_parameters(
+    const DependentLookupQualifier& qualifier,
+    const ASTContext* ast_ctx) {
+    return qualifier.is_current_instantiation ||
+           qualifier.names_dependent_base ||
+           type_depends_on_template_parameters(
+               qualifier.qualifier_type,
+               ast_ctx);
+}
+
+bool unresolved_lookup_is_non_dependent_declval(
+    const UnresolvedLookupExpr* lookup,
+    const ASTContext* ast_ctx) {
+    if (!lookup ||
+        (lookup->name != "declval" && lookup->name != "__declval") ||
+        !lookup->explicit_template_arguments ||
+        lookup->explicit_template_arguments->size() != 1) {
+        return false;
+    }
+    return !template_argument_depends_on_template_parameters(
+        lookup->explicit_template_arguments->front(),
+        ast_ctx);
+}
+
+bool dependent_call_expr_depends_on_template_parameters(
+    const DependentCallExpr* call,
+    const ASTContext* ast_ctx,
+    std::unordered_set<const Symbol*>& active_variable_symbols) {
+    if (!call || !call->callee) {
+        return true;
+    }
+
+    const Expr* callee =
+        Collect::strip_implicit_casts(const_cast<Expr*>(call->callee.get()));
+    if (!callee) {
+        return true;
+    }
+
+    if (const auto* lookup = dyn_cast<UnresolvedLookupExpr>(callee)) {
+        if (!unresolved_lookup_is_non_dependent_declval(lookup, ast_ctx)) {
+            if (lookup->is_dependent ||
+                dependent_lookup_qualifier_depends_on_template_parameters(
+                    lookup->qualifier,
+                    ast_ctx)) {
+                return true;
+            }
+        }
+        if (template_arguments_contain_dependency(
+                lookup->explicit_template_arguments,
+                ast_ctx) ||
+            type_depends_on_template_parameters(lookup->ctype, ast_ctx)) {
+            return true;
+        }
+    } else if (const auto* member = dyn_cast<UnresolvedMemberExpr>(callee)) {
+        if (member->is_current_instantiation ||
+            member->names_dependent_base ||
+            expr_depends_on_template_parameters_impl(
+                member->base.get(),
+                ast_ctx,
+                active_variable_symbols) ||
+            template_arguments_contain_dependency(
+                member->explicit_template_arguments,
+                ast_ctx) ||
+            type_depends_on_template_parameters(member->member_type, ast_ctx) ||
+            type_depends_on_template_parameters(
+                member->declared_member_type,
+                ast_ctx)) {
+            return true;
+        }
+    } else if (expr_depends_on_template_parameters_impl(
+                   callee,
+                   ast_ctx,
+                   active_variable_symbols)) {
+        return true;
+    }
+
+    for (const auto& arg : call->args) {
+        if (expr_depends_on_template_parameters_impl(
+                arg.get(),
+                ast_ctx,
+                active_variable_symbols)) {
+            return true;
+        }
+    }
+
+    return type_depends_on_template_parameters(call->ctype, ast_ctx) ||
+           type_depends_on_template_parameters(
+               call->known_function_type,
+               ast_ctx);
+}
+
 bool variable_definition_depends_on_template_parameters(
     const Symbol* sym,
     const ASTContext* ast_ctx,
@@ -564,11 +655,20 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
     if (type_depends_on_template_parameters(stripped->get_type(), ast_ctx)) {
         return true;
     }
+    bool is_non_dependent_declval_call = false;
+    if (auto* dependent_call = dyn_cast<DependentCallExpr>(stripped)) {
+        auto* callee_lookup = dyn_cast<UnresolvedLookupExpr>(
+            Collect::strip_implicit_casts(dependent_call->callee.get()));
+        is_non_dependent_declval_call =
+            unresolved_lookup_is_non_dependent_declval(callee_lookup, ast_ctx);
+    }
+
     // A C++ auto placeholder that survives expression collection is an
     // undeduced placeholder. In templates this can happen for locals whose
     // initializer is dependent; uses of that local must be treated as dependent
     // so semantic checks run after specialization deduces the placeholder.
-    if (type_contains_undeduced_cxx_auto(stripped->get_type())) {
+    if (!is_non_dependent_declval_call &&
+        type_contains_undeduced_cxx_auto(stripped->get_type())) {
         return true;
     }
 
@@ -595,6 +695,10 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                        ast_ctx);
         }
         case StmtKind::DependentCallExpr:
+            return dependent_call_expr_depends_on_template_parameters(
+                static_cast<const DependentCallExpr*>(stripped),
+                ast_ctx,
+                active_variable_symbols);
         case StmtKind::DependentArraySubscriptExpr:
         case StmtKind::DependentUnaryExpr:
         case StmtKind::DependentBinaryExpr:
@@ -1439,6 +1543,7 @@ bool Collect::decltype_expression_requires_deferred_resolution(
             return static_cast<const UnresolvedLookupExpr*>(stripped)
                 ->is_dependent;
         case StmtKind::DependentCallExpr:
+            break;
         case StmtKind::DependentArraySubscriptExpr:
         case StmtKind::DependentUnaryExpr:
         case StmtKind::DependentBinaryExpr:
@@ -1854,6 +1959,20 @@ void Collect::rewrite_deferred_template_arguments_in_place(
                 argument.type,
                 loc,
                 mode);
+            if (argument.type &&
+                !type_depends_on_template_parameters(
+                    argument.type,
+                    ast_ctx_.get())) {
+                QualType canonical_type =
+                    desugar_type(argument.type, ast_ctx_.get());
+                if (canonical_type) {
+                    argument.type = canonical_type;
+                }
+            }
+            argument.is_dependent =
+                type_depends_on_template_parameters(
+                    argument.type,
+                    ast_ctx_.get());
         } else if (argument.kind == TemplateArgumentKind::Value) {
             argument.value_type = resolve_deferred_semantic_type_impl(
                 argument.value_type,
@@ -2236,6 +2355,43 @@ QualType Collect::resolve_deferred_semantic_type_impl(
             selected_type.get_shared(),
             static_cast<uint8_t>(
                 type.get_qualifiers() | selected_type.get_qualifiers()));
+    }
+
+    if (auto object_type = dyn_cast_shared<ObjectType>(raw)) {
+        const auto* primary_template =
+            object_type->get_primary_class_template();
+        if (!primary_template) {
+            return type;
+        }
+
+        auto rewritten_arguments =
+            object_type->get_template_specialization_arguments();
+        rewrite_deferred_template_arguments_in_place(
+            rewritten_arguments,
+            loc,
+            mode);
+        if (template_arguments_contain_dependency(
+                rewritten_arguments,
+                ast_ctx_.get())) {
+            return type;
+        }
+
+        ObjectDecl* specialization_decl =
+            mode == DeferredTypeResolutionMode::Finalize
+                ? instantiate_class_template_specialization(
+                      primary_template,
+                      rewritten_arguments,
+                      loc)
+                : try_instantiate_class_template_specialization(
+                      primary_template,
+                      rewritten_arguments,
+                      loc);
+        if (specialization_decl && specialization_decl->get_record_type()) {
+            return QualType(
+                specialization_decl->get_record_type(),
+                type.get_qualifiers());
+        }
+        return type;
     }
 
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {

@@ -508,6 +508,10 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
             for (auto& argument : rewritten_arguments) {
                 remap_template_argument_symbol_references(argument, clone_ctx);
             }
+            const auto* pattern_decl =
+                function_specialization_info->primary_template->function_decl();
+            bool instantiate_definition =
+                !(pattern_decl && pattern_decl->name == "declval");
             std::shared_ptr<Symbol> specialization_symbol = nullptr;
             auto* specialization_decl =
                 collect->instantiate_function_template_specialization_for_clone(
@@ -515,7 +519,7 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
                     rewritten_arguments,
                     fallback_loc,
                     &specialization_symbol,
-                    /*instantiate_definition=*/true);
+                    instantiate_definition);
             if (!specialization_decl || !specialization_symbol) {
                 return sym;
             }

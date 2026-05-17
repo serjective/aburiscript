@@ -177,24 +177,30 @@ Parser::build_cpp_current_instantiation_arguments(
             break;
         }
     }
-    if (!active_parameters) {
-        return std::nullopt;
-    }
 
     std::vector<TemplateArgument> arguments;
-    arguments.reserve(active_parameters->size());
-    for (const auto* active_parameter : *active_parameters) {
+    arguments.reserve(active_parameters ? active_parameters->size()
+                                        : class_template->parameters.size());
+    auto append_argument = [&](const TemplateParameterDecl* active_parameter)
+        -> bool {
         if (auto* type_parameter =
                 dyn_cast<TemplateTypeParmDecl>(
                     const_cast<TemplateParameterDecl*>(active_parameter))) {
             arguments.emplace_back(QualType(type_parameter->type));
-            continue;
+            return true;
         }
         if (auto* non_type_parameter =
                 dyn_cast<TemplateNonTypeParmDecl>(
                     const_cast<TemplateParameterDecl*>(active_parameter))) {
+            if (!non_type_parameter->sym &&
+                non_type_parameter->name.empty() &&
+                get_template_parameter_default_argument(non_type_parameter)) {
+                arguments.push_back(
+                    *get_template_parameter_default_argument(non_type_parameter));
+                return true;
+            }
             if (!collect_ || !non_type_parameter->sym) {
-                return std::nullopt;
+                return false;
             }
             auto expr = collect_->collect_identifier_reference(
                 non_type_parameter->name,
@@ -207,7 +213,7 @@ Parser::build_cpp_current_instantiation_arguments(
                     std::move(shared_expr),
                     non_type_parameter->name,
                     non_type_parameter));
-            continue;
+            return true;
         }
         if (auto* template_parameter =
                 dyn_cast<TemplateTemplateParmDecl>(
@@ -216,9 +222,23 @@ Parser::build_cpp_current_instantiation_arguments(
                 TemplateArgument::dependent_template_argument(
                     template_parameter->name,
                     template_parameter));
-            continue;
+            return true;
         }
-        return std::nullopt;
+        return false;
+    };
+
+    if (active_parameters) {
+        for (const auto* active_parameter : *active_parameters) {
+            if (!append_argument(active_parameter)) {
+                return std::nullopt;
+            }
+        }
+    } else {
+        for (const auto& parameter : class_template->parameters) {
+            if (!append_argument(parameter.get())) {
+                return std::nullopt;
+            }
+        }
     }
     return arguments;
 }

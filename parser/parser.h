@@ -200,6 +200,7 @@ private:
         std::shared_ptr<Scope> target_scope;
         const ObjectDecl* owner_record_decl = nullptr;
         const ClassTemplateDecl* owner_class_template = nullptr;
+        QualType owner_type = nullptr;
         std::vector<TemplateArgument> owner_template_arguments;
         bool owner_has_specialization_argument_list = false;
         bool targets_template_pattern = false;

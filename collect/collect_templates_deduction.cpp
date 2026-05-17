@@ -570,8 +570,10 @@ std::vector<TemplateArgument> normalize_actual_arguments_for_partial_matching(
         if (!realized_type) {
             continue;
         }
-        argument.type = realized_type;
-        argument.is_dependent = type_depends_on_template_parameters(realized_type);
+        QualType canonical_type = desugar_type(realized_type);
+        argument.type = canonical_type ? canonical_type : realized_type;
+        argument.is_dependent =
+            type_depends_on_template_parameters(argument.type);
     }
     return normalized_arguments;
 }

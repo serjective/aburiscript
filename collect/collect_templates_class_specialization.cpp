@@ -1157,6 +1157,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     error_out);
             };
         clone_pass = clone_pass_builder.build_substitution_pass();
+        if (pattern_semantic_decl && owner_type) {
+            clone_pass.context().record_type_remap[pattern_semantic_decl] =
+                owner_type;
+        }
         clone_pass_ptr = &clone_pass;
         return true;
     }

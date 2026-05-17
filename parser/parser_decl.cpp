@@ -308,31 +308,75 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     auto prev_decl_language_linkage = current_language_linkage_;
     func_type = fin_funcdecl->type;
     Collect::CppThisContext cpp_this_context;
+    QualType active_record_lookup_type;
     if (is_cxx_mode_active() &&
         !cxx_record_parse_stack_.empty() &&
         cxx_record_parse_stack_.back().kind != CppRecordKind::Union &&
         !cxx_record_parse_stack_.back().name.empty()) {
+        const auto& record_frame = cxx_record_parse_stack_.back();
         cpp_this_context.is_member_function = true;
         cpp_this_context.is_static_member_function =
             fin_funcdecl->storage_class == StorageClass::STATIC;
+        active_record_lookup_type = record_frame.current_instantiation_type;
+        if (!active_record_lookup_type && record_frame.semantic_owner &&
+            record_frame.semantic_owner->get_record_type()) {
+            active_record_lookup_type =
+                QualType(record_frame.semantic_owner->get_record_type());
+        }
+        if (!active_record_lookup_type) {
+            auto owner_type_raw = collect_->collect_lookup_tag_type(
+                record_frame.name,
+                true);
+            auto owner_type = dyn_cast_shared<ObjectType>(owner_type_raw);
+            if (owner_type) {
+                active_record_lookup_type = QualType(owner_type);
+            }
+        }
         if (!cpp_this_context.is_static_member_function) {
+            QualType predecl_this_type;
             if (predecl_original_type) {
                 auto predecl_fn_type =
                     desugar_type(predecl_original_type).as_shared<FunctionType>();
                 if (predecl_fn_type && !predecl_fn_type->parameters.empty()) {
-                    cpp_this_context.this_type = predecl_fn_type->parameters.front();
+                    predecl_this_type = predecl_fn_type->parameters.front();
                 }
             }
-            if (!cpp_this_context.this_type) {
-                auto owner_type_raw = collect_->collect_lookup_tag_type(
-                    cxx_record_parse_stack_.back().name, true);
-                auto owner_type = dyn_cast_shared<ObjectType>(owner_type_raw);
-                if (owner_type) {
-                    cpp_this_context.this_type =
-                        QualType(std::make_shared<PointerType>(QualType(owner_type)));
+            if (record_frame.current_instantiation_type) {
+                uint8_t pointee_quals = QUAL_NONE;
+                if (auto this_ptr =
+                        predecl_this_type.as_shared<PointerType>()) {
+                    pointee_quals = this_ptr->pointed_type.get_qualifiers();
                 }
+                QualType qualified_owner =
+                    record_frame.current_instantiation_type.with_qualifiers(
+                        pointee_quals);
+                cpp_this_context.this_type = QualType(
+                    std::make_shared<PointerType>(qualified_owner));
+            } else if (predecl_this_type) {
+                cpp_this_context.this_type = predecl_this_type;
+            } else if (active_record_lookup_type) {
+                cpp_this_context.this_type = QualType(
+                    std::make_shared<PointerType>(active_record_lookup_type));
             }
         }
+        cpp_this_context.access_context_type = active_record_lookup_type;
+    }
+    QualType previous_record_lookup_type =
+        collect_->collect_current_cpp_record_lookup_type();
+    struct FunctionRecordLookupGuard {
+        Collect* collect = nullptr;
+        QualType previous_type = nullptr;
+        ~FunctionRecordLookupGuard() {
+            if (collect) {
+                collect->collect_set_current_cpp_record_lookup_type(previous_type);
+            }
+        }
+    } function_record_lookup_guard{
+        active_record_lookup_type ? collect_.get() : nullptr,
+        previous_record_lookup_type};
+    if (active_record_lookup_type) {
+        collect_->collect_set_current_cpp_record_lookup_type(
+            active_record_lookup_type);
     }
     collect_->collect_start_function_definition(
         fin_funcdecl->name, QualType(fin_funcdecl->type), cpp_this_context);

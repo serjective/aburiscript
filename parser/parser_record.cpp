@@ -2074,6 +2074,19 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
                     "internal error: missing primary class template pattern owner",
                     context.info.loc);
             }
+            if (context.info.targets_template_pattern) {
+                const auto* template_record = class_template->record_decl();
+                context.info.owner_type =
+                    build_cpp_current_instantiation_type(
+                        class_template,
+                        template_record && !template_record->name.empty()
+                            ? template_record->name
+                            : component.name,
+                        context.info.owner_template_arguments);
+            } else if (context.info.owner_record_decl->get_record_type()) {
+                context.info.owner_type =
+                    QualType(context.info.owner_record_decl->get_record_type());
+            }
         } else {
             auto* owner_tag_decl = LookupEngine::lookup_tag_decl(
                 component.name,
@@ -2095,6 +2108,10 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
                 }
             }
             context.info.owner_record_decl = owner_record_decl;
+            if (owner_record_decl->get_record_type()) {
+                context.info.owner_type =
+                    QualType(owner_record_decl->get_record_type());
+            }
             context.info.owner_has_specialization_argument_list = false;
             context.info.targets_template_pattern = false;
         }
@@ -2908,7 +2925,12 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             qualified_declarator.owner_record_decl->is_union
                 ? CppRecordKind::Union
                 : CppRecordKind::Class,
-            qualified_declarator.owner_record_decl->tag});
+            qualified_declarator.owner_record_decl->tag,
+            qualified_declarator.owner_record_decl,
+            qualified_declarator.owner_class_template,
+            qualified_declarator.targets_template_pattern
+                ? qualified_declarator.owner_type
+                : QualType()});
         struct RecordParseScopeGuard {
             std::vector<CppRecordParseFrame>* stack = nullptr;
             ~RecordParseScopeGuard() {
@@ -3565,7 +3587,9 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
         qualified_declarator.owner_record_decl &&
         qualified_declarator.owner_record_decl->get_record_type()) {
         collect_->collect_set_current_cpp_record_lookup_type(
-            QualType(qualified_declarator.owner_record_decl->get_record_type()));
+            qualified_declarator.owner_type
+                ? qualified_declarator.owner_type
+                : QualType(qualified_declarator.owner_record_decl->get_record_type()));
     }
     if (is_cxx_mode_active() &&
         !qualified_declarator.owner_record_decl &&

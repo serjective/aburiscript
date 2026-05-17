@@ -590,7 +590,12 @@ Collect::complete_selected_function_template_specialization_symbol(
         return nullptr;
     }
 
+    const auto* pattern_decl =
+        specialization_info->primary_template->function_decl();
+    bool is_declval_specialization =
+        pattern_decl && pattern_decl->name == "declval";
     bool instantiate_definition =
+        !is_declval_specialization &&
         !in_unevaluated_context() &&
         (!session_.func_state_.in_function ||
          function_template_specialization_requires_definition_now(
@@ -629,6 +634,30 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
 
     const auto* qualified_info = callee_ref->get_cpp_qualified_info();
     if (qualified_info && qualified_info->is_type_qualified) {
+        CppQualifiedExprInfo normalized_qualified_info = *qualified_info;
+        DependentLookupQualifier qualifier =
+            normalize_dependent_lookup_qualifier_after_substitution(
+                build_dependent_lookup_qualifier(*qualified_info),
+                loc);
+        if (!dependent_lookup_qualifier_is_dependent(
+                qualifier,
+                ast_ctx_.get())) {
+            QualType resolved_owner_type =
+                finalize_deferred_semantic_type(qualifier.qualifier_type, loc);
+            if (resolved_owner_type &&
+                !type_depends_on_template_parameters(
+                    resolved_owner_type,
+                    ast_ctx_.get())) {
+                normalized_qualified_info =
+                    build_cpp_qualified_expr_info(qualifier);
+                normalized_qualified_info.qualifier_type = resolved_owner_type;
+                if (auto* mutable_info = callee_ref->get_cpp_qualified_info()) {
+                    *mutable_info = normalized_qualified_info;
+                }
+                qualified_info = &normalized_qualified_info;
+            }
+        }
+
         auto qualified_owner_analysis =
             analyze_cpp_qualified_expr_owner(qualified_info, ast_ctx_.get());
         auto qualified_owner_type = qualified_owner_analysis.qualifier_record_type;
@@ -2824,7 +2853,8 @@ Collect::normalize_dependent_lookup_qualifier_after_substitution(
             finalize_deferred_semantic_type(normalized.qualifier_type, loc);
     }
     if (realized_type) {
-        normalized.qualifier_type = realized_type;
+        QualType semantic_type = desugar_type(realized_type, ast_ctx_.get());
+        normalized.qualifier_type = semantic_type ? semantic_type : realized_type;
     }
 
     bool still_dependent =
@@ -3375,7 +3405,7 @@ bool Collect::resolve_dependent_expr_after_substitution(
         }
 
         QualType resolved_owner_type = finalize_deferred_semantic_type(
-            qualified_info->qualifier_type,
+            qualifier.qualifier_type,
             candidate->location);
         if (!resolved_owner_type ||
             type_depends_on_template_parameters(
@@ -3406,6 +3436,9 @@ bool Collect::resolve_dependent_expr_after_substitution(
             member_lookup.nonstatic_method_matches +
             member_lookup.nonstatic_method_template_matches;
         if (total_matches != 1) {
+            if (auto* mutable_info = qualified_ref->get_cpp_qualified_info()) {
+                *mutable_info = resolved_info;
+            }
             return true;
         }
 
@@ -4744,7 +4777,16 @@ std::unique_ptr<Expr> Collect::try_builtin_or_overloaded_varref_call(
     }
 
     const std::string& callee_name = var_ref->get_name();
+    const auto* qualified_info = var_ref->get_cpp_qualified_info();
+    // A leading global `::` can still name a builtin extension, but namespace
+    // or type qualification must use ordinary qualified lookup first.
+    bool has_builtin_disqualifying_qualifier =
+        qualified_info &&
+        (qualified_info->is_type_qualified || !qualified_info->qualifiers.empty());
     if (callee_name == "__builtin_va_start") {
+        if (has_builtin_disqualifying_qualifier) {
+            return nullptr;
+        }
         if (call->args.size() != 2) {
             report_error("__builtin_va_start requires exactly 2 arguments", loc);
             return collect_make<ErrorExpr>("invalid __builtin_va_start invocation", loc);
@@ -4760,6 +4802,9 @@ std::unique_ptr<Expr> Collect::try_builtin_or_overloaded_varref_call(
             std::move(va_list_arg), std::move(last_param), loc);
     }
     if (callee_name == "__builtin_va_copy") {
+        if (has_builtin_disqualifying_qualifier) {
+            return nullptr;
+        }
         if (call->args.size() != 2) {
             report_error("__builtin_va_copy requires exactly 2 arguments", loc);
             return collect_make<ErrorExpr>("invalid __builtin_va_copy invocation", loc);
@@ -4769,6 +4814,9 @@ std::unique_ptr<Expr> Collect::try_builtin_or_overloaded_varref_call(
         return collect_make<VaCopyExpr>(std::move(dest_arg), std::move(src_arg), loc);
     }
     if (callee_name == "__builtin_va_end") {
+        if (has_builtin_disqualifying_qualifier) {
+            return nullptr;
+        }
         if (call->args.size() != 1) {
             report_error("__builtin_va_end requires exactly 1 argument", loc);
             return collect_make<ErrorExpr>("invalid __builtin_va_end invocation", loc);
@@ -4777,31 +4825,33 @@ std::unique_ptr<Expr> Collect::try_builtin_or_overloaded_varref_call(
         return collect_make<VaEndExpr>(std::move(va_list_arg), loc);
     }
 
-    if (auto* builtin_info = BuiltinRegistry::instance().lookup(callee_name)) {
-        if (!builtin_info->takes_type_arg) {
-            int arg_count = static_cast<int>(call->args.size());
-            if (arg_count < builtin_info->min_args) {
-                report_error(
-                    std::string(builtin_info->name) + " requires at least " +
-                    std::to_string(builtin_info->min_args) + " argument(s)",
-                    loc);
-                return collect_make<ErrorExpr>("invalid builtin argument count", loc);
-            }
-            if (builtin_info->max_args >= 0 && arg_count > builtin_info->max_args) {
-                report_error(
-                    std::string(builtin_info->name) + " takes at most " +
-                    std::to_string(builtin_info->max_args) + " argument(s)",
-                    loc);
-                return collect_make<ErrorExpr>("invalid builtin argument count", loc);
-            }
-            if (!builtin_call_preserves_argument_value_category(builtin_info->kind)) {
-                for (auto& arg : call->args) {
-                    arg = collect_apply_standard_conversions(
-                        std::move(arg), ExprUseContext::CallArgument);
+    if (!has_builtin_disqualifying_qualifier) {
+        if (auto* builtin_info = BuiltinRegistry::instance().lookup(callee_name)) {
+            if (!builtin_info->takes_type_arg) {
+                int arg_count = static_cast<int>(call->args.size());
+                if (arg_count < builtin_info->min_args) {
+                    report_error(
+                        std::string(builtin_info->name) + " requires at least " +
+                        std::to_string(builtin_info->min_args) + " argument(s)",
+                        loc);
+                    return collect_make<ErrorExpr>("invalid builtin argument count", loc);
                 }
+                if (builtin_info->max_args >= 0 && arg_count > builtin_info->max_args) {
+                    report_error(
+                        std::string(builtin_info->name) + " takes at most " +
+                        std::to_string(builtin_info->max_args) + " argument(s)",
+                        loc);
+                    return collect_make<ErrorExpr>("invalid builtin argument count", loc);
+                }
+                if (!builtin_call_preserves_argument_value_category(builtin_info->kind)) {
+                    for (auto& arg : call->args) {
+                        arg = collect_apply_standard_conversions(
+                            std::move(arg), ExprUseContext::CallArgument);
+                    }
+                }
+                return builtin_call_expression(
+                    builtin_info->kind, std::move(call->args), loc);
             }
-            return builtin_call_expression(
-                builtin_info->kind, std::move(call->args), loc);
         }
     }
 

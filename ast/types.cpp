@@ -850,6 +850,105 @@ bool expr_structurally_matches(const Expr* lhs, const Expr* rhs) {
 }
 
 bool expr_depends_on_template_parameters_for_type(const Expr* expr,
+                                                  const ASTContext* ast_ctx);
+
+bool template_argument_list_depends_on_template_parameters(
+    const std::optional<std::vector<TemplateArgument>>& arguments,
+    const ASTContext* ast_ctx) {
+    if (!arguments.has_value()) {
+        return false;
+    }
+    for (const auto& argument : *arguments) {
+        if (template_argument_depends_on_template_parameters(argument, ast_ctx)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool dependent_lookup_qualifier_depends_on_template_parameters(
+    const DependentLookupQualifier& qualifier,
+    const ASTContext* ast_ctx) {
+    return qualifier.is_current_instantiation ||
+           qualifier.names_dependent_base ||
+           type_depends_on_template_parameters(
+               qualifier.qualifier_type,
+               ast_ctx);
+}
+
+bool unresolved_lookup_is_non_dependent_declval(
+    const UnresolvedLookupExpr* lookup,
+    const ASTContext* ast_ctx) {
+    if (!lookup ||
+        (lookup->name != "declval" && lookup->name != "__declval") ||
+        !lookup->explicit_template_arguments ||
+        lookup->explicit_template_arguments->size() != 1) {
+        return false;
+    }
+    return !template_argument_depends_on_template_parameters(
+        lookup->explicit_template_arguments->front(),
+        ast_ctx);
+}
+
+bool dependent_call_expr_depends_on_template_parameters(
+    const DependentCallExpr* call,
+    const ASTContext* ast_ctx) {
+    if (!call || !call->callee) {
+        return true;
+    }
+
+    const Expr* callee = strip_structural_implicit_casts(call->callee.get());
+    if (!callee) {
+        return true;
+    }
+
+    if (const auto* lookup = dyn_cast<UnresolvedLookupExpr>(callee)) {
+        if (!unresolved_lookup_is_non_dependent_declval(lookup, ast_ctx)) {
+            if (lookup->is_dependent ||
+                dependent_lookup_qualifier_depends_on_template_parameters(
+                    lookup->qualifier,
+                    ast_ctx)) {
+                return true;
+            }
+        }
+        if (template_argument_list_depends_on_template_parameters(
+                lookup->explicit_template_arguments,
+                ast_ctx) ||
+            type_depends_on_template_parameters(lookup->ctype, ast_ctx)) {
+            return true;
+        }
+    } else if (const auto* member = dyn_cast<UnresolvedMemberExpr>(callee)) {
+        if (member->is_current_instantiation ||
+            member->names_dependent_base ||
+            expr_depends_on_template_parameters_for_type(
+                member->base.get(),
+                ast_ctx) ||
+            template_argument_list_depends_on_template_parameters(
+                member->explicit_template_arguments,
+                ast_ctx) ||
+            type_depends_on_template_parameters(member->member_type, ast_ctx) ||
+            type_depends_on_template_parameters(
+                member->declared_member_type,
+                ast_ctx)) {
+            return true;
+        }
+    } else if (expr_depends_on_template_parameters_for_type(callee, ast_ctx)) {
+        return true;
+    }
+
+    for (const auto& arg : call->args) {
+        if (expr_depends_on_template_parameters_for_type(arg.get(), ast_ctx)) {
+            return true;
+        }
+    }
+
+    return type_depends_on_template_parameters(call->ctype, ast_ctx) ||
+           type_depends_on_template_parameters(
+               call->known_function_type,
+               ast_ctx);
+}
+
+bool expr_depends_on_template_parameters_for_type(const Expr* expr,
                                                   const ASTContext* ast_ctx) {
     expr = strip_structural_implicit_casts(expr);
     if (!expr) {
@@ -908,6 +1007,9 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
             return false;
         }
         case StmtKind::DependentCallExpr:
+            return dependent_call_expr_depends_on_template_parameters(
+                static_cast<const DependentCallExpr*>(expr),
+                ast_ctx);
         case StmtKind::DependentArraySubscriptExpr:
         case StmtKind::DependentUnaryExpr:
         case StmtKind::DependentBinaryExpr:
