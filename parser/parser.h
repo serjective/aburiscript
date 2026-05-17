@@ -91,6 +91,16 @@ private:
         std::string spelling;
     };
 
+    struct CppTypeComponentResolution {
+        QualType type = nullptr;
+        std::shared_ptr<Symbol> typedef_symbol = nullptr;
+        bool names_current_instantiation_member = false;
+
+        explicit operator bool() const {
+            return static_cast<bool>(type);
+        }
+    };
+
     struct CppDependentOwnerAnalysis {
         QualType owner_type = nullptr;
         bool is_current_instantiation = false;
@@ -593,7 +603,7 @@ private:
         uint32_t index,
         bool is_parameter_pack,
         SrcLoc start_loc = SrcLoc());
-    QualType resolve_cpp_unqualified_type_component(
+    CppTypeComponentResolution resolve_cpp_unqualified_type_component(
         const std::string& component_name,
         const std::vector<TemplateArgument>& component_arguments,
         bool component_has_template_argument_list,
@@ -651,6 +661,10 @@ private:
     bool cpp_qualifier_is_current_instantiation(
         std::string_view qualifier_name,
         QualType qualifier_type) const;
+    bool cpp_type_lookup_names_current_instantiation_member(
+        const DeclContext* owner_context,
+        QualType type,
+        std::string_view name) const;
 
     std::vector<std::unique_ptr<Decl>> parse_struct_declaration(bool leading_virtual_specifier = false);
 

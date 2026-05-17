@@ -275,36 +275,58 @@ QualType Parser::try_build_cpp_injected_current_instantiation_type(
         loc);
 }
 
-QualType Parser::resolve_cpp_unqualified_type_component(
+Parser::CppTypeComponentResolution Parser::resolve_cpp_unqualified_type_component(
     const std::string& component_name,
     const std::vector<TemplateArgument>& component_arguments,
     bool component_has_template_argument_list,
     SrcLoc component_loc) {
+    CppTypeComponentResolution result;
     if (!component_has_template_argument_list) {
-        if (auto typedef_symbol =
-                collect_->collect_lookup_typedef_symbol(component_name, true)) {
-            return typedef_symbol->type;
+        auto current_scope =
+            collect_ ? collect_->collect_current_scope() : nullptr;
+        if (current_scope) {
+            auto typedef_lookup =
+                LookupEngine::lookup_unqualified_ordinary_result(
+                    component_name,
+                    current_scope,
+                    /*look_parents=*/true,
+                    LookupEngine::OrdinaryFilter::TypedefOnly);
+            if (typedef_lookup.symbol &&
+                typedef_lookup.symbol->kind == SymbolKind::TYPE) {
+                result.type = typedef_lookup.symbol->type;
+                result.typedef_symbol = typedef_lookup.symbol;
+                result.names_current_instantiation_member =
+                    cpp_type_lookup_names_current_instantiation_member(
+                        typedef_lookup.owner_context,
+                        result.type,
+                        component_name);
+                return result;
+            }
         }
         if (auto current_instantiation =
                 try_build_cpp_injected_current_instantiation_type(
                     component_name,
                     component_loc)) {
-            return current_instantiation;
+            result.type = current_instantiation;
+            return result;
         }
         if (auto tag_type =
                 collect_->collect_lookup_tag_type(component_name, true)) {
-            return QualType(tag_type);
+            result.type = QualType(tag_type);
+            return result;
         }
         if (auto named_type =
                 collect_->collect_lookup_type_name(component_name, true, true)) {
-            return named_type;
+            result.type = named_type;
+            return result;
         }
-        return lookup_cpp_current_record_nested_type(component_name);
+        result.type = lookup_cpp_current_record_nested_type(component_name);
+        return result;
     }
 
     auto current_scope = collect_->collect_current_scope();
     if (!current_scope) {
-        return QualType();
+        return result;
     }
 
     const Decl* primary_template =
@@ -315,7 +337,7 @@ QualType Parser::resolve_cpp_unqualified_type_component(
     if (!isa<AliasTemplateDecl>(primary_template) &&
         !isa<ClassTemplateDecl>(primary_template) &&
         !isa<TemplateTemplateParmDecl>(primary_template)) {
-        return QualType();
+        return result;
     }
 
     bool is_dependent = isa<TemplateTemplateParmDecl>(primary_template);
@@ -335,10 +357,12 @@ QualType Parser::resolve_cpp_unqualified_type_component(
             component_arguments,
             is_dependent));
     if (is_dependent) {
-        return specialization_type;
+        result.type = specialization_type;
+        return result;
     }
-    return collect_->collect_try_realize_deferred_semantic_type(
+    result.type = collect_->collect_try_realize_deferred_semantic_type(
         specialization_type);
+    return result;
 }
 
 std::optional<Parser::CppDependentOwnerAnalysis>
@@ -347,19 +371,21 @@ Parser::analyze_cpp_qualified_type_owner(
     const std::vector<TemplateArgument>& qualifier_arguments,
     bool qualifier_has_template_argument_list,
     SrcLoc qualifier_loc) {
-    QualType qualifier_type =
+    auto qualifier_resolution =
         resolve_cpp_unqualified_type_component(
             std::string(qualifier_name),
             qualifier_arguments,
             qualifier_has_template_argument_list,
             qualifier_loc);
-    if (!qualifier_type) {
+    if (!qualifier_resolution || !qualifier_resolution.type) {
         return std::nullopt;
     }
+    QualType qualifier_type = qualifier_resolution.type;
 
     CppDependentOwnerAnalysis analysis;
     analysis.owner_type = qualifier_type;
     analysis.is_current_instantiation =
+        qualifier_resolution.names_current_instantiation_member ||
         cpp_qualifier_is_current_instantiation(
             qualifier_name,
             qualifier_type);
@@ -480,23 +506,33 @@ Parser::resolve_cpp_qualified_owner_chain(
     auto lookup_type_in_scope =
         [&](const std::shared_ptr<Scope>& scope,
             bool allow_enclosing_lookup,
-            const std::string& name) -> QualType {
-            auto typedef_symbol =
-                LookupEngine::lookup_unqualified_ordinary(
+            const std::string& name) -> CppTypeComponentResolution {
+            CppTypeComponentResolution result;
+            auto typedef_lookup =
+                LookupEngine::lookup_unqualified_ordinary_result(
                     name,
                     scope,
                     allow_enclosing_lookup,
                     LookupEngine::OrdinaryFilter::TypedefOnly);
-            if (typedef_symbol && typedef_symbol->kind == SymbolKind::TYPE) {
-                return typedef_symbol->type;
+            if (typedef_lookup.symbol &&
+                typedef_lookup.symbol->kind == SymbolKind::TYPE) {
+                result.type = typedef_lookup.symbol->type;
+                result.typedef_symbol = typedef_lookup.symbol;
+                result.names_current_instantiation_member =
+                    cpp_type_lookup_names_current_instantiation_member(
+                        typedef_lookup.owner_context,
+                        result.type,
+                        name);
+                return result;
             }
             if (auto tag_type = LookupEngine::lookup_tag_type(
                     name,
                     scope,
                     allow_enclosing_lookup)) {
-                return QualType(tag_type);
+                result.type = QualType(tag_type);
+                return result;
             }
-            return QualType();
+            return result;
         };
 
     auto lookup_record_type_in_context =
@@ -676,10 +712,11 @@ Parser::resolve_cpp_qualified_owner_chain(
                     continue;
                 }
 
-                resolution.owner_type = lookup_type_in_scope(
+                auto type_lookup = lookup_type_in_scope(
                     resolution.lookup_scope,
                     allow_enclosing_lookup,
                     component.name);
+                resolution.owner_type = type_lookup.type;
                 if (!resolution.owner_type) {
                     resolution.owner_type = lookup_record_type_in_context(
                         resolution.lookup_context,
@@ -760,6 +797,7 @@ Parser::resolve_cpp_qualified_owner_chain(
                     return resolution;
                 }
                 resolution.is_current_instantiation =
+                    type_lookup.names_current_instantiation_member ||
                     cpp_qualifier_is_current_instantiation(
                         component.name,
                         resolution.owner_type);
@@ -1157,4 +1195,52 @@ bool Parser::cpp_qualifier_is_current_instantiation(
     }
     auto specialization = qualifier_type.as<TemplateSpecializationType>();
     return specialization && specialization->template_name == current_record_name;
+}
+
+bool Parser::cpp_type_lookup_names_current_instantiation_member(
+    const DeclContext* owner_context,
+    QualType type,
+    std::string_view) const {
+    if (!is_in_template_pattern_context() ||
+        cxx_record_parse_stack_.empty() ||
+        !owner_context ||
+        owner_context->kind() != DeclContextKind::Record ||
+        !type ||
+        !type_depends_on_template_parameters(type, ast_ctx.get())) {
+        return false;
+    }
+
+    const auto& current_record = cxx_record_parse_stack_.back();
+    if (current_record.name.empty()) {
+        return false;
+    }
+
+    if (collect_) {
+        auto current_context = collect_->get_current_decl_context();
+        const DeclContext* nearest_record_context = nullptr;
+        for (auto* ctx = current_context.get(); ctx; ctx = ctx->semantic_parent()) {
+            if (ctx->kind() == DeclContextKind::Record) {
+                nearest_record_context = ctx;
+                break;
+            }
+        }
+        if (nearest_record_context == owner_context) {
+            return true;
+        }
+    }
+
+    const Decl* owner_decl = owner_context->owner_decl();
+    if (current_record.semantic_owner && owner_decl == current_record.semantic_owner) {
+        return true;
+    }
+
+    if (owner_context->lookup_name() == current_record.name) {
+        return true;
+    }
+
+    if (const auto* owner_record = dyn_cast<ObjectDecl>(owner_decl)) {
+        return owner_record->tag == current_record.name;
+    }
+
+    return false;
 }

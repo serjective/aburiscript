@@ -5005,8 +5005,12 @@ bool Parser::is_cpp_qualified_id_start() {
             return is_cpp_scope_resolution_here();
         }
         bool has_global_qualifier = consume_cpp_scope_resolution();
-        if (!gentle_check(TokenType::IDENTIFIER)) {
+        if (!gentle_check(TokenType::IDENTIFIER) &&
+            !(has_global_qualifier && gentle_check(TokenType::OPERATOR_KW))) {
             return false;
+        }
+        if (gentle_check(TokenType::OPERATOR_KW)) {
+            return has_global_qualifier;
         }
         advance();
         if (gentle_check(TokenType::LESS_THAN)) {
@@ -6642,6 +6646,9 @@ Parser::TPResult Parser::try_parse_cpp_qualified_id() {
     RevertingTentativeParsingAction tentative(*this);
     try {
         auto parse_component = [&]() -> bool {
+            if (gentle_check(TokenType::OPERATOR_KW)) {
+                return try_parse_cpp_operator_function_id_name().has_value();
+            }
             if (!gentle_check(TokenType::IDENTIFIER)) {
                 return false;
             }

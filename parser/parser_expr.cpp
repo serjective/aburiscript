@@ -721,15 +721,27 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
 
     auto parse_component =
         [&](bool preceded_by_template_keyword) -> CppQualifiedNameComponent {
-            if (!gentle_check(TokenType::IDENTIFIER)) {
+            if (!gentle_check(TokenType::IDENTIFIER) &&
+                !gentle_check(TokenType::OPERATOR_KW)) {
                 error_custloc(
                     "expected identifier after '::' in qualified-id expression",
                     current_token().loc);
             }
             CppQualifiedNameComponent component;
-            component.name = current_token().value;
             component.loc = current_token().loc;
             component.preceded_by_template_keyword = preceded_by_template_keyword;
+            if (gentle_check(TokenType::OPERATOR_KW)) {
+                auto operator_name = try_parse_cpp_operator_function_id_name();
+                if (!operator_name) {
+                    error_custloc(
+                        "expected operator-function-id after '::' in qualified-id expression",
+                        component.loc);
+                }
+                component.name = std::move(*operator_name);
+                return component;
+            }
+
+            component.name = current_token().value;
             advance();
             if (gentle_check(TokenType::LESS_THAN)) {
                 RevertingTentativeParsingAction tentative(*this);
@@ -776,7 +788,8 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
         }
     } else {
         has_global_qualifier = consume_cpp_scope_resolution();
-        if (!gentle_check(TokenType::IDENTIFIER)) {
+        if (!gentle_check(TokenType::IDENTIFIER) &&
+            !(has_global_qualifier && gentle_check(TokenType::OPERATOR_KW))) {
             error_custloc("expected identifier after '::' in qualified-id expression",
                 current_token().loc);
         }
@@ -1115,6 +1128,11 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             method_template_matches.size() +
             static_data_matches.size() +
             enumerator_matches.size();
+        bool callable_only_matches =
+            looks_like_call &&
+            (method_matches.size() + method_template_matches.size()) > 0 &&
+            static_data_matches.empty() &&
+            enumerator_matches.empty();
         if (looks_like_call &&
             static_callable_matches > 0 &&
             nonstatic_method_matches == 0 &&
@@ -1139,7 +1157,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
                 false);
             return qualified_ref;
         }
-        if (total_matches > 1) {
+        if (total_matches > 1 && !callable_only_matches) {
             diag_engine->report_error(
                 "member '" + terminal_name + "' is ambiguous",
                 qualified_loc);

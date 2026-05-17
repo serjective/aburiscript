@@ -3126,6 +3126,15 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
         member_lookup.enumerator_matches +
         member_lookup.nonstatic_method_matches +
         member_lookup.nonstatic_method_template_matches;
+    bool callable_only_matches =
+        looks_like_call &&
+        (member_lookup.static_method_matches +
+         member_lookup.static_method_template_matches +
+         member_lookup.nonstatic_method_matches +
+         member_lookup.nonstatic_method_template_matches) > 0 &&
+        member_lookup.field_matches == 0 &&
+        member_lookup.static_data_matches == 0 &&
+        member_lookup.enumerator_matches == 0;
 
     if (looks_like_call &&
         static_callable_matches > 0 &&
@@ -3144,7 +3153,7 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
         return make_qualified_var_ref(std::move(selected_symbol));
     }
 
-    if (total_matches > 1) {
+    if (total_matches > 1 && !callable_only_matches) {
         report_error("member '" + name + "' is ambiguous", loc);
         return collect_make<ErrorExpr>("ambiguous member reference", loc);
     }
