@@ -1959,16 +1959,6 @@ void Collect::rewrite_deferred_template_arguments_in_place(
                 argument.type,
                 loc,
                 mode);
-            if (argument.type &&
-                !type_depends_on_template_parameters(
-                    argument.type,
-                    ast_ctx_.get())) {
-                QualType canonical_type =
-                    desugar_type(argument.type, ast_ctx_.get());
-                if (canonical_type) {
-                    argument.type = canonical_type;
-                }
-            }
             argument.is_dependent =
                 type_depends_on_template_parameters(
                     argument.type,
