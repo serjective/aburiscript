@@ -1,5 +1,8 @@
 #include "collect_templates_internal.h"
 
+#include <functional>
+#include <unordered_set>
+
 namespace {
 
 enum class TemplateTypeDeductionMode : uint8_t {
@@ -869,6 +872,162 @@ bool bind_deduced_template_template_argument(
            existing_single->equals(deduced_argument);
 }
 
+const ObjectDecl* canonical_record_decl_for_template_deduction(
+    const ObjectDecl* decl) {
+    if (!decl) {
+        return nullptr;
+    }
+    if (auto record_type = decl->get_record_type()) {
+        if (auto* canonical_decl =
+                dyn_cast<ObjectDecl>(record_type->get_decl())) {
+            return canonical_decl;
+        }
+    }
+    return decl;
+}
+
+const ObjectDecl* record_decl_from_template_deduction_type(QualType type) {
+    auto object_type = desugar_type(type).as_shared<ObjectType>();
+    return object_type
+        ? canonical_record_decl_for_template_deduction(
+              dyn_cast<ObjectDecl>(object_type->get_decl()))
+        : nullptr;
+}
+
+bool template_argument_bindings_equal(const TemplateArgumentBindings& lhs,
+                                      const TemplateArgumentBindings& rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < lhs.size(); ++idx) {
+        if (!lhs[idx].equals(rhs[idx])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool deduce_class_template_specialization_match_into_bindings(
+    const TemplateSpecializationType& pattern_specialization,
+    const TemplateSpecializationMatchInfo& argument_specialization,
+    const TemplateParameterList& parameters,
+    TemplateArgumentBindings& deduced_bindings) {
+    TemplateArgumentBindings candidate_bindings = deduced_bindings;
+    if (auto* pattern_template_parameter = dyn_cast<TemplateTemplateParmDecl>(
+            const_cast<Decl*>(pattern_specialization.primary_template))) {
+        if (!bind_deduced_template_template_argument(
+                pattern_template_parameter,
+                argument_specialization.primary_template,
+                parameters,
+                candidate_bindings)) {
+            return false;
+        }
+    } else {
+        if (pattern_specialization.primary_template &&
+            argument_specialization.primary_template &&
+            !template_decls_share_lookup_identity(
+                pattern_specialization.primary_template,
+                argument_specialization.primary_template)) {
+            return false;
+        }
+        if ((!pattern_specialization.primary_template ||
+             !argument_specialization.primary_template) &&
+            pattern_specialization.template_name !=
+                argument_specialization.template_name) {
+            return false;
+        }
+    }
+
+    TemplatePatternLayout pattern_layout =
+        analyze_template_argument_pattern_layout(
+            pattern_specialization.arguments,
+            &parameters);
+    if (!deduce_class_template_specialization_argument_list_into_existing_bindings(
+            pattern_specialization.arguments,
+            pattern_layout,
+            parameters,
+            argument_specialization.arguments,
+            candidate_bindings,
+            false)) {
+        return false;
+    }
+
+    deduced_bindings = std::move(candidate_bindings);
+    return true;
+}
+
+bool deduce_class_template_specialization_from_base_classes(
+    const TemplateSpecializationType& pattern_specialization,
+    QualType argument_type,
+    const TemplateParameterList& parameters,
+    TemplateArgumentBindings& deduced_bindings) {
+    const ObjectDecl* argument_decl =
+        record_decl_from_template_deduction_type(argument_type);
+    if (!argument_decl) {
+        return false;
+    }
+
+    std::optional<TemplateArgumentBindings> matched_bindings;
+    bool saw_conflicting_match = false;
+    std::unordered_set<const ObjectDecl*> active_stack;
+    active_stack.insert(argument_decl);
+
+    std::function<void(const ObjectDecl*)> walk =
+        [&](const ObjectDecl* current_decl) {
+        current_decl = canonical_record_decl_for_template_deduction(current_decl);
+        if (!current_decl || saw_conflicting_match) {
+            return;
+        }
+
+        const RecordSemanticState* state =
+            record_semantics_cache_lookup(current_decl);
+        if (!state) {
+            return;
+        }
+
+        for (const auto& base : state->bases) {
+            const ObjectDecl* base_decl =
+                canonical_record_decl_for_template_deduction(base.record_decl);
+            if (!base_decl) {
+                base_decl = record_decl_from_template_deduction_type(base.type);
+            }
+            if (!base_decl || active_stack.contains(base_decl)) {
+                continue;
+            }
+
+            if (auto base_specialization =
+                    extract_template_specialization_match_info(base.type)) {
+                TemplateArgumentBindings candidate_bindings = deduced_bindings;
+                if (deduce_class_template_specialization_match_into_bindings(
+                        pattern_specialization,
+                        *base_specialization,
+                        parameters,
+                        candidate_bindings)) {
+                    if (!matched_bindings.has_value()) {
+                        matched_bindings = std::move(candidate_bindings);
+                    } else if (!template_argument_bindings_equal(
+                                   *matched_bindings,
+                                   candidate_bindings)) {
+                        saw_conflicting_match = true;
+                        return;
+                    }
+                }
+            }
+
+            active_stack.insert(base_decl);
+            walk(base_decl);
+            active_stack.erase(base_decl);
+        }
+    };
+
+    walk(argument_decl);
+    if (!matched_bindings.has_value() || saw_conflicting_match) {
+        return false;
+    }
+    deduced_bindings = std::move(*matched_bindings);
+    return true;
+}
+
 bool deduce_template_argument_types_impl(
     QualType pattern_type,
     QualType argument_type,
@@ -1083,50 +1242,28 @@ bool deduce_template_argument_types_impl(
             dyn_cast_shared<TemplateSpecializationType>(pattern_raw)) {
         auto argument_specialization =
             extract_template_specialization_match_info(argument_type);
-        if (!argument_specialization.has_value()) {
+        if (argument_specialization.has_value()) {
+            if (deduce_class_template_specialization_match_into_bindings(
+                    *pattern_specialization,
+                    *argument_specialization,
+                    parameters,
+                    deduced_arguments)) {
+                return true;
+            }
+        } else {
             if (deduction_mode == TemplateTypeDeductionMode::PartialOrdering &&
                 isa<AliasTemplateDecl>(
                     const_cast<Decl*>(
                         pattern_specialization->primary_template))) {
                 return true;
             }
-            return false;
         }
-        if (auto* pattern_template_parameter = dyn_cast<TemplateTemplateParmDecl>(
-                const_cast<Decl*>(pattern_specialization->primary_template))) {
-            if (!bind_deduced_template_template_argument(
-                    pattern_template_parameter,
-                    argument_specialization->primary_template,
-                    parameters,
-                    deduced_arguments)) {
-                return false;
-            }
-        } else {
-            if (pattern_specialization->primary_template &&
-                argument_specialization->primary_template &&
-                !template_decls_share_lookup_identity(
-                    pattern_specialization->primary_template,
-                    argument_specialization->primary_template)) {
-                return false;
-            }
-            if ((!pattern_specialization->primary_template ||
-                 !argument_specialization->primary_template) &&
-                pattern_specialization->template_name !=
-                    argument_specialization->template_name) {
-                return false;
-            }
-        }
-        TemplatePatternLayout pattern_layout =
-            analyze_template_argument_pattern_layout(
-                pattern_specialization->arguments,
-                &parameters);
-        return deduce_class_template_specialization_argument_list_into_existing_bindings(
-            pattern_specialization->arguments,
-            pattern_layout,
-            parameters,
-            argument_specialization->arguments,
-            deduced_arguments,
-            false);
+        return deduction_mode == TemplateTypeDeductionMode::Call &&
+            deduce_class_template_specialization_from_base_classes(
+                *pattern_specialization,
+                argument_type,
+                parameters,
+                deduced_arguments);
     }
 
     auto canonical_pattern = desugar_type(spelled_pattern);

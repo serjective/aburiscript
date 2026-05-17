@@ -353,20 +353,18 @@ int compare_qualification_conversion_sequences(
     return lhs_target_converts_to_rhs ? -1 : 1;
 }
 
-int compare_derived_to_base_reference_binding_sequences(
+int compare_derived_to_base_pointer_conversion_sequences(
     const Collect::ImplicitConversionSequence& lhs,
     const Collect::ImplicitConversionSequence& rhs,
     const ASTContext* ast_ctx) {
-    auto is_reference_derived_to_base_binding =
+    auto is_derived_to_base_pointer_conversion =
         [](const Collect::ImplicitConversionSequence& seq) {
         return seq.rank == Collect::ConversionSequenceRank::Conversion &&
-               seq.kind == Collect::ConversionSequenceKind::Pointer &&
-               seq.detail_kind ==
-                   Collect::ConversionSequenceDetailKind::ReferenceDirectBinding;
+               seq.kind == Collect::ConversionSequenceKind::Pointer;
     };
 
-    if (!is_reference_derived_to_base_binding(lhs) ||
-        !is_reference_derived_to_base_binding(rhs) ||
+    if (!is_derived_to_base_pointer_conversion(lhs) ||
+        !is_derived_to_base_pointer_conversion(rhs) ||
         !same_type_ignoring_all_qualifiers(lhs.from, rhs.from, ast_ctx)) {
         return 0;
     }
