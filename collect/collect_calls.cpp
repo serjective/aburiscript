@@ -647,7 +647,16 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
                 session_.func_state_.current_function_cpp_this_type,
                 session_.func_state_.current_function_cpp_friend_access_type,
                 session_.current_cpp_record_lookup_type_,
-                ast_ctx_.get());
+                ast_ctx_.get(),
+                session_.func_state_.current_function_cpp_access_context_type);
+        QualType access_context_type =
+            current_access_context_record_type(
+                session_.func_state_.current_function_is_cpp_member,
+                session_.func_state_.current_function_cpp_this_type,
+                session_.func_state_.current_function_cpp_friend_access_type,
+                session_.current_cpp_record_lookup_type_,
+                ast_ctx_.get(),
+                session_.func_state_.current_function_cpp_access_context_type);
 
         std::vector<OverloadCallCandidate> overload_candidates;
         bool saw_private_member = false;
@@ -661,7 +670,9 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
             if (method->declared_access == RecordMemberAccess::Private) {
                 if (!can_access_private_member_in_context(
                         method_match.owner_record_decl,
-                        access_context_decl)) {
+                        access_context_decl,
+                        ast_ctx_.get(),
+                        access_context_type)) {
                     saw_private_member = true;
                     continue;
                 }
@@ -671,7 +682,9 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
                     method_match.owner_record_decl,
                     access_context_decl,
                     owner_record_decl,
-                    true);
+                    true,
+                    ast_ctx_.get(),
+                    access_context_type);
                 if (!protected_ok) {
                     saw_protected_member = true;
                     continue;
@@ -697,7 +710,9 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
             if (method_template->declared_access == RecordMemberAccess::Private) {
                 if (!can_access_private_member_in_context(
                         method_template_match.owner_record_decl,
-                        access_context_decl)) {
+                        access_context_decl,
+                        ast_ctx_.get(),
+                        access_context_type)) {
                     saw_private_member = true;
                     continue;
                 }
@@ -707,7 +722,9 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
                     method_template_match.owner_record_decl,
                     access_context_decl,
                     owner_record_decl,
-                    true);
+                    true,
+                    ast_ctx_.get(),
+                    access_context_type);
                 if (!protected_ok) {
                     saw_protected_member = true;
                     continue;
@@ -1699,7 +1716,16 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                 session_.func_state_.current_function_cpp_this_type,
                 session_.func_state_.current_function_cpp_friend_access_type,
                 session_.current_cpp_record_lookup_type_,
-                ast_ctx_.get());
+                ast_ctx_.get(),
+                session_.func_state_.current_function_cpp_access_context_type);
+        QualType access_context_type =
+            current_access_context_record_type(
+                session_.func_state_.current_function_is_cpp_member,
+                session_.func_state_.current_function_cpp_this_type,
+                session_.func_state_.current_function_cpp_friend_access_type,
+                session_.current_cpp_record_lookup_type_,
+                ast_ctx_.get(),
+                session_.func_state_.current_function_cpp_access_context_type);
 
         std::vector<OverloadCallCandidate> overload_candidates;
         overload_candidates.reserve(method_templates.size());
@@ -1735,7 +1761,9 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
             if (method_template->declared_access == RecordMemberAccess::Private) {
                 if (!can_access_private_member_in_context(
                         method_template_match.owner_record_decl,
-                        access_context_decl)) {
+                        access_context_decl,
+                        ast_ctx_.get(),
+                        access_context_type)) {
                     saw_private_method = true;
                     continue;
                 }
@@ -1745,7 +1773,9 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                     method_template_match.owner_record_decl,
                     access_context_decl,
                     object_record_decl,
-                    method_template->is_static);
+                    method_template->is_static,
+                    ast_ctx_.get(),
+                    access_context_type);
                 if (!protected_ok) {
                     saw_protected_method = true;
                     continue;
@@ -1975,7 +2005,16 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                 session_.func_state_.current_function_cpp_this_type,
                 session_.func_state_.current_function_cpp_friend_access_type,
                 session_.current_cpp_record_lookup_type_,
-                ast_ctx_.get());
+                ast_ctx_.get(),
+                session_.func_state_.current_function_cpp_access_context_type);
+        QualType access_context_type =
+            current_access_context_record_type(
+                session_.func_state_.current_function_is_cpp_member,
+                session_.func_state_.current_function_cpp_this_type,
+                session_.func_state_.current_function_cpp_friend_access_type,
+                session_.current_cpp_record_lookup_type_,
+                ast_ctx_.get(),
+                session_.func_state_.current_function_cpp_access_context_type);
 
         auto method_templates =
             find_record_method_templates(qualified_owner_type.get(), callee_name);
@@ -2060,7 +2099,9 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
             if (method_template->declared_access == RecordMemberAccess::Private) {
                 if (!can_access_private_member_in_context(
                         method_template_match.owner_record_decl,
-                        access_context_decl)) {
+                        access_context_decl,
+                        ast_ctx_.get(),
+                        access_context_type)) {
                     saw_private_method = true;
                     continue;
                 }
@@ -2070,7 +2111,9 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                     method_template_match.owner_record_decl,
                     access_context_decl,
                     owner_record_decl,
-                    method_template->is_static);
+                    method_template->is_static,
+                    ast_ctx_.get(),
+                    access_context_type);
                 if (!protected_ok) {
                     saw_protected_method = true;
                     continue;

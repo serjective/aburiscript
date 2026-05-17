@@ -1264,38 +1264,73 @@ const ObjectDecl* record_decl_from_record_type(const ObjectType* record_type) {
     return canonical_record_decl(dyn_cast<ObjectDecl>(record_type->get_decl()));
 }
 
+const ObjectDecl* record_decl_from_access_context_type(QualType type,
+                                                       const ASTContext* ast_ctx) {
+    auto access_record = desugar_type(type, ast_ctx).as_shared<ObjectType>();
+    if (!access_record) {
+        access_record = class_template_pattern_record_type_from_specialization(
+            type,
+            ast_ctx);
+    }
+    return record_decl_from_record_type(access_record.get());
+}
+
+QualType current_access_context_record_type(
+    bool current_function_is_cpp_member,
+    QualType current_function_cpp_this_type,
+    QualType current_function_cpp_friend_access_type,
+    QualType current_cpp_record_lookup_type,
+    const ASTContext* ast_ctx,
+    QualType current_function_cpp_access_context_type = nullptr) {
+    if (current_function_cpp_access_context_type) {
+        return current_function_cpp_access_context_type;
+    }
+    if (current_function_is_cpp_member) {
+        auto this_ptr =
+            desugar_type(current_function_cpp_this_type, ast_ctx)
+                .as_shared<PointerType>();
+        if (this_ptr && this_ptr->pointed_type) {
+            return this_ptr->pointed_type;
+        }
+    }
+    if (current_function_cpp_friend_access_type) {
+        return current_function_cpp_friend_access_type;
+    }
+    return current_cpp_record_lookup_type;
+}
+
 const ObjectDecl* current_access_context_record_decl(
     bool current_function_is_cpp_member,
     QualType current_function_cpp_this_type,
     QualType current_function_cpp_friend_access_type,
     QualType current_cpp_record_lookup_type,
-    const ASTContext* ast_ctx) {
-    auto lookup_record =
-        desugar_type(current_cpp_record_lookup_type, ast_ctx)
-            .as_shared<ObjectType>();
-    if (const ObjectDecl* lookup_decl =
-            record_decl_from_record_type(lookup_record.get())) {
-        return lookup_decl;
+    const ASTContext* ast_ctx,
+    QualType current_function_cpp_access_context_type = nullptr) {
+    if (const ObjectDecl* access_decl =
+            record_decl_from_access_context_type(
+                current_function_cpp_access_context_type, ast_ctx)) {
+        return access_decl;
     }
-
     if (current_function_is_cpp_member) {
-        auto current_record =
-            current_record_from_this_type(
-                current_function_cpp_this_type,
-                ast_ctx);
-        if (const ObjectDecl* current_decl =
-                record_decl_from_record_type(current_record.get())) {
-            return current_decl;
+        auto this_ptr =
+            desugar_type(current_function_cpp_this_type, ast_ctx)
+                .as_shared<PointerType>();
+        if (this_ptr && this_ptr->pointed_type) {
+            if (const ObjectDecl* access_decl =
+                    record_decl_from_access_context_type(
+                        this_ptr->pointed_type, ast_ctx)) {
+                return access_decl;
+            }
         }
     }
-    auto friend_access_record =
-        desugar_type(current_function_cpp_friend_access_type, ast_ctx)
-            .as_shared<ObjectType>();
-    if (const ObjectDecl* friend_access_decl =
-            record_decl_from_record_type(friend_access_record.get())) {
-        return friend_access_decl;
+    if (const ObjectDecl* access_decl =
+            record_decl_from_access_context_type(
+                current_function_cpp_friend_access_type, ast_ctx)) {
+        return access_decl;
     }
-    return nullptr;
+    return record_decl_from_access_context_type(
+        current_cpp_record_lookup_type,
+        ast_ctx);
 }
 
 const ObjectDecl* current_record_decl_from_this_type(QualType this_type) {
@@ -1493,6 +1528,17 @@ bool classify_constructor_symbol_call(const std::shared_ptr<Symbol>& sym,
         sym, owner_type_out, get_active_side_table_ast_context());
 }
 
+bool same_record_identity_or_tag(const ObjectDecl* lhs,
+                                 const ObjectDecl* rhs) {
+    if (!lhs || !rhs) {
+        return false;
+    }
+    if (lhs == rhs) {
+        return true;
+    }
+    return lhs->tag == rhs->tag;
+}
+
 bool is_same_record_or_any_access_derived(const ObjectDecl* derived_or_same,
                                           const ObjectDecl* base_decl) {
     derived_or_same = canonical_record_decl(derived_or_same);
@@ -1500,27 +1546,116 @@ bool is_same_record_or_any_access_derived(const ObjectDecl* derived_or_same,
     if (!derived_or_same || !base_decl) {
         return false;
     }
-    auto same_record_identity_or_tag =
-        [](const ObjectDecl* lhs, const ObjectDecl* rhs) {
-            if (!lhs || !rhs) {
-                return false;
-            }
-            if (lhs == rhs) {
-                return true;
-            }
-            return lhs->tag == rhs->tag;
-        };
     if (same_record_identity_or_tag(derived_or_same, base_decl)) {
         return true;
     }
     return has_any_access_unambiguous_base_path(derived_or_same, base_decl);
 }
 
+bool type_friend_matches_access_context(QualType friend_type,
+                                        const ObjectDecl* access_context_decl,
+                                        const ASTContext* ast_ctx,
+                                        QualType access_context_type = nullptr) {
+    access_context_decl = canonical_record_decl(access_context_decl);
+    if (!friend_type || (!access_context_decl && !access_context_type)) {
+        return false;
+    }
+
+    if (!access_context_type && access_context_decl->get_record_type()) {
+        access_context_type = QualType(access_context_decl->get_record_type());
+    }
+    if (!access_context_type) {
+        return false;
+    }
+    if (types_equivalent_after_template_argument_canonicalization(
+            friend_type,
+            access_context_type,
+            ast_ctx,
+            true)) {
+        return true;
+    }
+    if ((type_depends_on_template_parameters(friend_type, ast_ctx) ||
+         type_depends_on_template_parameters(access_context_type, ast_ctx)) &&
+        template_parameter_types_have_same_lookup_shape(
+            friend_type,
+            access_context_type)) {
+        return true;
+    }
+
+    QualType canonical_friend_type = desugar_type(friend_type, ast_ctx);
+    if (auto friend_record = canonical_friend_type.as_shared<ObjectType>()) {
+        return same_record_identity_or_tag(
+            record_decl_from_record_type(friend_record.get()),
+            access_context_decl);
+    }
+
+    auto access_context_record =
+        desugar_type(access_context_type, ast_ctx).as_shared<ObjectType>();
+    if (!access_context_record ||
+        !access_context_record->get_primary_class_template()) {
+        return false;
+    }
+
+    const ClassTemplateDecl* primary_template =
+        access_context_record->get_primary_class_template();
+    const CppRecordDecl* primary_record =
+        primary_template ? primary_template->record_decl() : nullptr;
+    QualType access_context_specialization =
+        QualType(std::make_shared<TemplateSpecializationType>(
+            primary_record
+                ? primary_record->name
+                : (access_context_decl ? access_context_decl->tag : std::string()),
+            primary_template,
+            access_context_record->get_template_specialization_arguments(),
+            false));
+    return types_equivalent_after_template_argument_canonicalization(
+        friend_type,
+        access_context_specialization,
+        ast_ctx,
+        true);
+}
+
+bool record_grants_type_friend_access(const ObjectDecl* member_owner_decl,
+                                      const ObjectDecl* access_context_decl,
+                                      const ASTContext* ast_ctx,
+                                      QualType access_context_type = nullptr) {
+    member_owner_decl = canonical_record_decl(member_owner_decl);
+    access_context_decl = canonical_record_decl(access_context_decl);
+    if (!member_owner_decl || (!access_context_decl && !access_context_type)) {
+        return false;
+    }
+
+    const RecordSemanticState* owner_state =
+        record_semantics_cache_lookup(member_owner_decl, ast_ctx);
+    if (!owner_state) {
+        return false;
+    }
+    for (const auto& friend_type : owner_state->friend_types) {
+        if (type_friend_matches_access_context(
+                friend_type.type,
+                access_context_decl,
+                ast_ctx,
+                access_context_type)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool can_access_protected_member_in_context(
     const ObjectDecl* member_owner_decl,
     const ObjectDecl* access_context_decl,
     const ObjectDecl* object_record_decl,
-    bool is_static_member) {
+    bool is_static_member,
+    const ASTContext* ast_ctx = get_active_side_table_ast_context(),
+    QualType access_context_type = nullptr) {
+    if (record_grants_type_friend_access(
+            member_owner_decl,
+            access_context_decl,
+            ast_ctx,
+            access_context_type)) {
+        return true;
+    }
     if (!is_same_record_or_any_access_derived(access_context_decl, member_owner_decl)) {
         return false;
     }
@@ -1533,12 +1668,22 @@ bool can_access_protected_member_in_context(
 }
 
 bool can_access_private_member_in_context(const ObjectDecl* member_owner_decl,
-                                          const ObjectDecl* access_context_decl) {
+                                          const ObjectDecl* access_context_decl,
+                                          const ASTContext* ast_ctx =
+                                              get_active_side_table_ast_context(),
+                                          QualType access_context_type = nullptr) {
     const ObjectDecl* owner_decl = canonical_record_decl(member_owner_decl);
     const ObjectDecl* context_decl = canonical_record_decl(access_context_decl);
+    if (record_grants_type_friend_access(
+            owner_decl,
+            context_decl,
+            ast_ctx,
+            access_context_type)) {
+        return true;
+    }
     return owner_decl &&
            context_decl &&
-           (owner_decl == context_decl || owner_decl->tag == context_decl->tag);
+           same_record_identity_or_tag(owner_decl, context_decl);
 }
 
 bool is_local_variable_or_parameter_symbol(const std::shared_ptr<Symbol>& sym) {

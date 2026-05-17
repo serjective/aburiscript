@@ -280,10 +280,17 @@ void Parser::build_cpp_record_parse_deferred_bodies(
             !fn_type->parameters.empty()) {
             cpp_this_context.this_type = fn_type->parameters.front();
         }
-        if (!cpp_this_context.this_type && active_record_lookup_type) {
+        if (!cpp_this_context.this_type &&
+            (ctx.current_instantiation_type || active_record_lookup_type)) {
+            QualType implicit_this_owner_type =
+                (!cpp_this_context.is_static_member_function &&
+                 ctx.current_instantiation_type)
+                    ? ctx.current_instantiation_type
+                    : active_record_lookup_type;
             cpp_this_context.this_type = QualType(
-                std::make_shared<PointerType>(active_record_lookup_type));
-        } else if (cpp_this_context.this_type &&
+                std::make_shared<PointerType>(implicit_this_owner_type));
+        } else if (!cpp_this_context.is_static_member_function &&
+                   cpp_this_context.this_type &&
                    ctx.current_instantiation_type) {
             uint8_t pointee_quals = QUAL_NONE;
             if (auto this_ptr =
@@ -298,6 +305,10 @@ void Parser::build_cpp_record_parse_deferred_bodies(
             cpp_this_context.this_type = QualType(
                 std::make_shared<PointerType>(qualified_owner));
         }
+        cpp_this_context.access_context_type =
+            ctx.current_instantiation_type
+                ? ctx.current_instantiation_type
+                : active_record_lookup_type;
 
         func_type = member_decl->type;
         current_language_linkage_ = LanguageLinkage::None;

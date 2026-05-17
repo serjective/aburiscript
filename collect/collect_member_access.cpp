@@ -95,7 +95,16 @@ QualType Collect::try_synthesize_dependent_member_type(
             session_.func_state_.current_function_cpp_this_type,
             session_.func_state_.current_function_cpp_friend_access_type,
             session_.current_cpp_record_lookup_type_,
-            ast_ctx_.get());
+            ast_ctx_.get(),
+            session_.func_state_.current_function_cpp_access_context_type);
+    QualType access_context_type =
+        current_access_context_record_type(
+            session_.func_state_.current_function_is_cpp_member,
+            session_.func_state_.current_function_cpp_this_type,
+            session_.func_state_.current_function_cpp_friend_access_type,
+            session_.current_cpp_record_lookup_type_,
+            ast_ctx_.get(),
+            session_.func_state_.current_function_cpp_access_context_type);
     auto current_scope_matches_owner =
         [&](const ObjectDecl* owner_decl) {
             auto current_record_scope =
@@ -116,7 +125,9 @@ QualType Collect::try_synthesize_dependent_member_type(
             lookup.owner_record_decl,
             access_context_decl,
             object_record_decl,
-            false) &&
+            false,
+            ast_ctx_.get(),
+            access_context_type) &&
         !current_scope_matches_owner(lookup.owner_record_decl)) {
         report_error(
             "member '" + member_name + "' is protected within this context",
@@ -125,7 +136,10 @@ QualType Collect::try_synthesize_dependent_member_type(
     }
     if (lookup.field->declared_access == RecordMemberAccess::Private &&
         !can_access_private_member_in_context(
-            lookup.owner_record_decl, access_context_decl) &&
+            lookup.owner_record_decl,
+            access_context_decl,
+            ast_ctx_.get(),
+            access_context_type) &&
         !current_scope_matches_owner(lookup.owner_record_decl)) {
         report_error(
             "member '" + member_name + "' is private within this context",
@@ -738,7 +752,8 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
             session_.func_state_.current_function_cpp_this_type,
             session_.func_state_.current_function_cpp_friend_access_type,
             session_.current_cpp_record_lookup_type_,
-            ast_ctx_.get());
+            ast_ctx_.get(),
+            session_.func_state_.current_function_cpp_access_context_type);
     bool is_current_instantiation =
         dependent_base_analysis.is_current_instantiation;
     bool names_dependent_base = false;
@@ -821,8 +836,19 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
                   session_.func_state_.current_function_cpp_this_type,
                   session_.func_state_.current_function_cpp_friend_access_type,
                   session_.current_cpp_record_lookup_type_,
-                  ast_ctx_.get())
+                  ast_ctx_.get(),
+                  session_.func_state_.current_function_cpp_access_context_type)
             : nullptr;
+    QualType access_context_type =
+        lang_opts_.is_cxx_mode()
+            ? current_access_context_record_type(
+                  session_.func_state_.current_function_is_cpp_member,
+                  session_.func_state_.current_function_cpp_this_type,
+                  session_.func_state_.current_function_cpp_friend_access_type,
+                  session_.current_cpp_record_lookup_type_,
+                  ast_ctx_.get(),
+                  session_.func_state_.current_function_cpp_access_context_type)
+            : QualType(nullptr);
     auto current_scope_matches_owner =
         [&](const ObjectDecl* owner_decl) {
             auto current_record_scope =
@@ -864,7 +890,9 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
                         method_lookup.owner_record_decl,
                         access_context_decl,
                         object_record_decl,
-                        method_lookup.method->is_static) &&
+                        method_lookup.method->is_static,
+                        ast_ctx_.get(),
+                        access_context_type) &&
                     !current_scope_matches_owner(method_lookup.owner_record_decl)) {
                     report_error(
                         "member '" + member_name + "' is protected within this context",
@@ -874,7 +902,10 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
                 if (method_lookup.method->declared_access ==
                         RecordMemberAccess::Private &&
                     !can_access_private_member_in_context(
-                        method_lookup.owner_record_decl, access_context_decl) &&
+                        method_lookup.owner_record_decl,
+                        access_context_decl,
+                        ast_ctx_.get(),
+                        access_context_type) &&
                     !current_scope_matches_owner(method_lookup.owner_record_decl)) {
                     report_error(
                         "member '" + member_name + "' is private within this context",
@@ -898,7 +929,9 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
                         method_template_matches.front().owner_record_decl,
                         access_context_decl,
                         object_record_decl,
-                        method_template->is_static) &&
+                        method_template->is_static,
+                        ast_ctx_.get(),
+                        access_context_type) &&
                     !current_scope_matches_owner(
                         method_template_matches.front().owner_record_decl)) {
                     report_error(
@@ -910,7 +943,9 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
                         RecordMemberAccess::Private &&
                     !can_access_private_member_in_context(
                         method_template_matches.front().owner_record_decl,
-                        access_context_decl) &&
+                        access_context_decl,
+                        ast_ctx_.get(),
+                        access_context_type) &&
                     !current_scope_matches_owner(
                         method_template_matches.front().owner_record_decl)) {
                     report_error(
@@ -938,7 +973,9 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
                 lookup.owner_record_decl,
                 access_context_decl,
                 object_record_decl,
-                false) &&
+                false,
+                ast_ctx_.get(),
+                access_context_type) &&
             !current_scope_matches_owner(lookup.owner_record_decl)) {
             report_error(
                 "member '" + member_name + "' is protected within this context",
@@ -947,7 +984,10 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
         }
         if (lookup.field->declared_access == RecordMemberAccess::Private &&
             !can_access_private_member_in_context(
-                lookup.owner_record_decl, access_context_decl) &&
+                lookup.owner_record_decl,
+                access_context_decl,
+                ast_ctx_.get(),
+                access_context_type) &&
             !current_scope_matches_owner(lookup.owner_record_decl)) {
             report_error(
                 "member '" + member_name + "' is private within this context",

@@ -750,8 +750,19 @@ std::unique_ptr<Expr> Collect::append_member_overload_candidates(
                   session_.func_state_.current_function_cpp_this_type,
                   session_.func_state_.current_function_cpp_friend_access_type,
                   session_.current_cpp_record_lookup_type_,
-                  ast_ctx_.get())
+                  ast_ctx_.get(),
+                  session_.func_state_.current_function_cpp_access_context_type)
             : nullptr;
+    QualType access_context_type =
+        lang_opts_.is_cxx_mode()
+            ? current_access_context_record_type(
+                  session_.func_state_.current_function_is_cpp_member,
+                  session_.func_state_.current_function_cpp_this_type,
+                  session_.func_state_.current_function_cpp_friend_access_type,
+                  session_.current_cpp_record_lookup_type_,
+                  ast_ctx_.get(),
+                  session_.func_state_.current_function_cpp_access_context_type)
+            : QualType(nullptr);
 
     candidates_out.reserve(candidates_out.size() + methods.size());
     for (const auto& method_match : methods) {
@@ -762,7 +773,10 @@ std::unique_ptr<Expr> Collect::append_member_overload_candidates(
         if (lang_opts_.is_cxx_mode()) {
             if (method->declared_access == RecordMemberAccess::Private) {
                 if (!can_access_private_member_in_context(
-                        method_match.owner_record_decl, access_context_decl)) {
+                        method_match.owner_record_decl,
+                        access_context_decl,
+                        ast_ctx_.get(),
+                        access_context_type)) {
                     saw_private_member_out = true;
                     continue;
                 }
@@ -772,7 +786,9 @@ std::unique_ptr<Expr> Collect::append_member_overload_candidates(
                     method_match.owner_record_decl,
                     access_context_decl,
                     object_record_decl,
-                    method->is_static);
+                    method->is_static,
+                    ast_ctx_.get(),
+                    access_context_type);
                 if (!protected_ok) {
                     saw_protected_member_out = true;
                     continue;
@@ -833,8 +849,19 @@ std::unique_ptr<Expr> Collect::append_member_template_overload_candidates(
                   session_.func_state_.current_function_cpp_this_type,
                   session_.func_state_.current_function_cpp_friend_access_type,
                   session_.current_cpp_record_lookup_type_,
-                  ast_ctx_.get())
+                  ast_ctx_.get(),
+                  session_.func_state_.current_function_cpp_access_context_type)
             : nullptr;
+    QualType access_context_type =
+        lang_opts_.is_cxx_mode()
+            ? current_access_context_record_type(
+                  session_.func_state_.current_function_is_cpp_member,
+                  session_.func_state_.current_function_cpp_this_type,
+                  session_.func_state_.current_function_cpp_friend_access_type,
+                  session_.current_cpp_record_lookup_type_,
+                  ast_ctx_.get(),
+                  session_.func_state_.current_function_cpp_access_context_type)
+            : QualType(nullptr);
 
     for (const auto& method_template_match : method_templates) {
         const auto* method_template = method_template_match.method_template;
@@ -847,7 +874,9 @@ std::unique_ptr<Expr> Collect::append_member_template_overload_candidates(
             if (method_template->declared_access == RecordMemberAccess::Private) {
                 if (!can_access_private_member_in_context(
                         method_template_match.owner_record_decl,
-                        access_context_decl)) {
+                        access_context_decl,
+                        ast_ctx_.get(),
+                        access_context_type)) {
                     saw_private_member_out = true;
                     continue;
                 }
@@ -858,7 +887,9 @@ std::unique_ptr<Expr> Collect::append_member_template_overload_candidates(
                     method_template_match.owner_record_decl,
                     access_context_decl,
                     object_record_decl,
-                    method_template->is_static);
+                    method_template->is_static,
+                    ast_ctx_.get(),
+                    access_context_type);
                 if (!protected_ok) {
                     saw_protected_member_out = true;
                     continue;
@@ -1656,17 +1687,33 @@ Collect::OverloadCandidateEval Collect::evaluate_conversion_function_candidate(
         source_record_type
             ? canonical_record_decl(dyn_cast<ObjectDecl>(source_record_type->get_decl()))
             : nullptr;
-    const ObjectDecl* access_context_decl = nullptr;
-    if (lang_opts_.is_cxx_mode() &&
-        session_.func_state_.current_function_is_cpp_member) {
-        access_context_decl = current_record_decl_from_this_type(
-            session_.func_state_.current_function_cpp_this_type);
-    }
+    const ObjectDecl* access_context_decl =
+        lang_opts_.is_cxx_mode()
+            ? current_access_context_record_decl(
+                  session_.func_state_.current_function_is_cpp_member,
+                  session_.func_state_.current_function_cpp_this_type,
+                  session_.func_state_.current_function_cpp_friend_access_type,
+                  session_.current_cpp_record_lookup_type_,
+                  ast_ctx_.get(),
+                  session_.func_state_.current_function_cpp_access_context_type)
+            : nullptr;
+    QualType access_context_type =
+        lang_opts_.is_cxx_mode()
+            ? current_access_context_record_type(
+                  session_.func_state_.current_function_is_cpp_member,
+                  session_.func_state_.current_function_cpp_this_type,
+                  session_.func_state_.current_function_cpp_friend_access_type,
+                  session_.current_cpp_record_lookup_type_,
+                  ast_ctx_.get(),
+                  session_.func_state_.current_function_cpp_access_context_type)
+            : QualType(nullptr);
     if (lang_opts_.is_cxx_mode()) {
         if (method.declared_access == RecordMemberAccess::Private &&
             !can_access_private_member_in_context(
                 owner_record_decl,
-                access_context_decl)) {
+                access_context_decl,
+                ast_ctx_.get(),
+                access_context_type)) {
             eval.failure.kind = OverloadFailureKind::InaccessibleCandidate;
             eval.failure.note = "conversion function is not accessible";
             return eval;
@@ -1676,7 +1723,9 @@ Collect::OverloadCandidateEval Collect::evaluate_conversion_function_candidate(
                 owner_record_decl,
                 access_context_decl,
                 source_record_decl,
-                false)) {
+                false,
+                ast_ctx_.get(),
+                access_context_type)) {
             eval.failure.kind = OverloadFailureKind::InaccessibleCandidate;
             eval.failure.note = "conversion function is not accessible";
             return eval;

@@ -1658,6 +1658,7 @@ public:
             ctx.nested_types.reserve(record_.members.size());
             ctx.nested_templates.reserve(record_.members.size());
             ctx.friend_functions.reserve(record_.members.size());
+            ctx.friend_types.reserve(record_.members.size());
             ctx.enumerator_members.reserve(record_.members.size());
             ctx.seen_static_data_member_names.reserve(record_.members.size());
             ctx.constructors.reserve(record_.members.size());
@@ -2223,6 +2224,12 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 friend_function.function_decl = function_decl;
                 friend_function.symbol = friend_decl->function_symbol;
                 ctx.friend_functions.push_back(std::move(friend_function));
+            } else if (friend_decl->get_friend_kind() == CppFriendKind::Type &&
+                       friend_decl->friend_type) {
+                RecordSemanticState::FriendType friend_type;
+                friend_type.type = friend_decl->friend_type;
+                friend_type.decl = friend_decl;
+                ctx.friend_types.push_back(std::move(friend_type));
             }
             continue;
         }
@@ -3509,6 +3516,7 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
     owner_state.nested_types = ctx.nested_types;
     owner_state.nested_templates = ctx.nested_templates;
     owner_state.friend_functions = ctx.friend_functions;
+    owner_state.friend_types = ctx.friend_types;
     owner_state.enumerator_members = ctx.enumerator_members;
     owner_state.constructors = ctx.constructors;
     owner_state.destructors = ctx.destructors;
@@ -5705,6 +5713,7 @@ void Collect::collect_record_publish_semantics(
     ctx.semantic_state.nested_types = std::move(ctx.nested_types);
     ctx.semantic_state.nested_templates = std::move(ctx.nested_templates);
     ctx.semantic_state.friend_functions = std::move(ctx.friend_functions);
+    ctx.semantic_state.friend_types = std::move(ctx.friend_types);
     ctx.semantic_state.enumerator_members = std::move(ctx.enumerator_members);
     ctx.semantic_state.constructors = std::move(ctx.constructors);
     ctx.semantic_state.destructors = std::move(ctx.destructors);

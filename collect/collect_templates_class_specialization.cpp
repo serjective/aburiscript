@@ -487,6 +487,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     std::vector<RecordSemanticState::NestedType> nested_types;
     std::vector<RecordSemanticState::NestedTemplate> nested_templates;
     std::vector<RecordSemanticState::FriendFunction> friend_functions;
+    std::vector<RecordSemanticState::FriendType> friend_types;
     std::vector<RecordSemanticState::EnumeratorMember> enumerator_members;
     std::unordered_map<const FuncDecl*, std::shared_ptr<Symbol>>
         specialized_member_symbols;
@@ -1575,6 +1576,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         nested_types.clear();
         nested_templates.clear();
         friend_functions.clear();
+        friend_types.clear();
         enumerator_members.clear();
         specialized_member_symbols.clear();
         specialized_nested_class_templates.clear();
@@ -1591,6 +1593,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         nested_types.reserve(pattern->members.size());
         nested_templates.reserve(pattern->members.size());
         friend_functions.reserve(pattern->members.size());
+        friend_types.reserve(pattern->members.size());
         enumerator_members.reserve(pattern->members.size());
         specialized_member_symbols.reserve(pattern->members.size());
         specialized_nested_class_templates.reserve(pattern->members.size());
@@ -1640,6 +1643,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         provisional_state.nested_types = nested_types;
         provisional_state.nested_templates = nested_templates;
         provisional_state.friend_functions = friend_functions;
+        provisional_state.friend_types = friend_types;
         provisional_state.enumerator_members = enumerator_members;
         collect.query_publish_record_semantics(entry->specialization_decl.get(),
                                                std::move(provisional_state));
@@ -3297,10 +3301,37 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
     bool handle_friend_member(const FriendDecl* friend_decl) {
         auto* function_decl = friend_decl ? friend_decl->function_decl() : nullptr;
-        if (!friend_decl || !function_decl) {
+        if (!friend_decl) {
             return fail_instantiation(
                 "class template friend declaration specialization for this friend kind is not supported yet",
                 friend_decl ? friend_decl->location : loc);
+        }
+        if (friend_decl->get_friend_kind() == CppFriendKind::Type) {
+            QualType rewritten_friend_type =
+                clone_pass.rewrite_type(friend_decl->friend_type);
+            if (!rewritten_friend_type) {
+                return fail_instantiation(
+                    "internal error: class template friend type specialization did not produce a type",
+                    friend_decl->location);
+            }
+
+            auto cloned_friend = collect.collect_make<FriendDecl>(
+                rewritten_friend_type,
+                owner_type,
+                friend_decl->location);
+
+            RecordSemanticState::FriendType semantic_friend;
+            semantic_friend.type = rewritten_friend_type;
+            semantic_friend.decl = cloned_friend.get();
+            friend_types.push_back(std::move(semantic_friend));
+            semantic_state.friend_types = friend_types;
+            entry->member_decls.push_back(std::move(cloned_friend));
+            return true;
+        }
+        if (!function_decl) {
+            return fail_instantiation(
+                "class template friend declaration specialization for this friend kind is not supported yet",
+                friend_decl->location);
         }
 
         auto rewritten_type =
@@ -4187,6 +4218,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         ctx.nested_types = std::move(nested_types);
         ctx.nested_templates = std::move(nested_templates);
         ctx.friend_functions = std::move(friend_functions);
+        ctx.friend_types = std::move(friend_types);
         ctx.enumerator_members = std::move(enumerator_members);
         ctx.semantic_state = semantic_state;
         collect.collect_record_synthesize_implicit_members(ctx);

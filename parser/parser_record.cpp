@@ -938,6 +938,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
     std::vector<RecordSemanticState::StaticDataMember> static_data_members;
     std::vector<RecordSemanticState::NestedType> nested_types;
     std::vector<RecordSemanticState::NestedTemplate> nested_templates;
+    std::vector<RecordSemanticState::FriendFunction> friend_functions;
+    std::vector<RecordSemanticState::FriendType> friend_types;
     std::vector<RecordSemanticState::Base> bases;
     fields.reserve(record->members.size());
     methods.reserve(record->members.size());
@@ -947,6 +949,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
     static_data_members.reserve(record->members.size());
     nested_types.reserve(record->members.size());
     nested_templates.reserve(record->members.size());
+    friend_functions.reserve(record->members.size());
+    friend_types.reserve(record->members.size());
     bases.reserve(record->bases.size());
 
     RecordMemberAccess current_access =
@@ -1153,6 +1157,25 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                     RecordSemanticState::NestedTemplateKind::Class;
                 nested_template.decl = class_template;
                 nested_templates.push_back(std::move(nested_template));
+            }
+            continue;
+        }
+
+        if (const auto* friend_decl = dyn_cast<FriendDecl>(member.get())) {
+            if (const auto* function_decl = friend_decl->function_decl()) {
+                RecordSemanticState::FriendFunction friend_function;
+                friend_function.name = function_decl->name;
+                friend_function.type = QualType(function_decl->type);
+                friend_function.decl = friend_decl;
+                friend_function.function_decl = function_decl;
+                friend_function.symbol = friend_decl->function_symbol;
+                friend_functions.push_back(std::move(friend_function));
+            } else if (friend_decl->get_friend_kind() == CppFriendKind::Type &&
+                       friend_decl->friend_type) {
+                RecordSemanticState::FriendType friend_type;
+                friend_type.type = friend_decl->friend_type;
+                friend_type.decl = friend_decl;
+                friend_types.push_back(std::move(friend_type));
             }
             continue;
         }
@@ -1432,6 +1455,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
     semantic_state.static_data_members = std::move(static_data_members);
     semantic_state.nested_types = std::move(nested_types);
     semantic_state.nested_templates = std::move(nested_templates);
+    semantic_state.friend_functions = std::move(friend_functions);
+    semantic_state.friend_types = std::move(friend_types);
     semantic_state.bases = std::move(bases);
     if (auto* definition_data = record->get_definition_data()) {
         *definition_data = semantic_state.definition_data;
@@ -4064,6 +4089,159 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
         return fields;
     }
 
+    auto current_granting_record_type = [&]() -> QualType {
+        if (cxx_record_parse_stack_.empty()) {
+            return QualType(nullptr);
+        }
+        const auto& record_frame = cxx_record_parse_stack_.back();
+        if (record_frame.semantic_owner &&
+            record_frame.semantic_owner->get_record_type()) {
+            return QualType(record_frame.semantic_owner->get_record_type());
+        }
+        if (!record_frame.name.empty()) {
+            auto owner_type = dyn_cast_shared<ObjectType>(
+                collect_->collect_lookup_tag_type(
+                    record_frame.name,
+                    true));
+            if (owner_type) {
+                return QualType(owner_type);
+            }
+        }
+        return QualType(nullptr);
+    };
+
+    auto resolve_or_declare_elaborated_friend_type =
+        [&](const std::string& tag_name,
+            bool is_union,
+            SrcLoc loc) -> QualType {
+        if (tag_name.empty()) {
+            return QualType(nullptr);
+        }
+        if (auto* existing_decl =
+                collect_->collect_lookup_tag_decl(tag_name, true)) {
+            auto* object_decl = dyn_cast<ObjectDecl>(existing_decl);
+            if (!object_decl || !object_decl->get_record_type()) {
+                error_custloc(
+                    "friend type names a tag previously declared with a different kind",
+                    loc);
+            }
+            auto object_type = object_decl->get_record_type();
+            if (object_type && object_type->is_union != is_union) {
+                error_custloc(
+                    "friend type names a tag previously declared with a different kind",
+                    loc);
+            }
+            return QualType(object_type);
+        }
+
+        auto object_type =
+            std::make_shared<ObjectType>(tag_name, is_union, true);
+        auto object_decl = collect_->collect_record_declaration(
+            tag_name,
+            object_type,
+            is_union,
+            loc);
+        if (!object_decl) {
+            return QualType(nullptr);
+        }
+        collect_->query_publish_record_semantics(
+            object_decl.get(),
+            RecordSemanticState{});
+        object_type->set_decl(object_decl.get());
+        collect_->collect_add_tag_decl(tag_name, object_decl.get());
+        cpp_transient_semantic_decls_.push_back(std::move(object_decl));
+        return QualType(object_type);
+    };
+
+    auto try_parse_cpp_type_friend_declaration = [&]() -> bool {
+        if (!is_cxx_mode_active() ||
+            !is_parsing_cpp_record_body() ||
+            !gentle_check(TokenType::FRIEND_KW)) {
+            return false;
+        }
+
+        size_t saved_idx = get_token_idx();
+        auto saved_split_state = tok_mgnt.get_split_token_state();
+        auto restore = [&]() {
+            set_token_idx(saved_idx);
+            tok_mgnt.set_split_token_state(saved_split_state);
+        };
+
+        Token friend_tok = current_token();
+        advance();
+
+        bool has_elaborated_key = false;
+        bool elaborated_is_union = false;
+        bool fallback_elaborated_name = false;
+        std::string fallback_name;
+        SrcLoc fallback_loc;
+        QualType friend_type = nullptr;
+
+        if (gentle_check(TokenType::CLASS) ||
+            gentle_check(TokenType::STRUCT) ||
+            gentle_check(TokenType::UNION)) {
+            has_elaborated_key = true;
+            elaborated_is_union = gentle_check(TokenType::UNION);
+            advance();
+
+            if (auto parsed_type = try_parse_cpp_named_type_specifier()) {
+                friend_type = parsed_type->type;
+            } else if (gentle_check(TokenType::IDENTIFIER)) {
+                fallback_name = current_token().value;
+                fallback_loc = current_token().loc;
+                fallback_elaborated_name = true;
+                advance();
+            }
+        } else if (auto parsed_type = try_parse_cpp_named_type_specifier()) {
+            friend_type = parsed_type->type;
+        }
+
+        if (!friend_type && !fallback_elaborated_name) {
+            restore();
+            return false;
+        }
+
+        if (!gentle_check(TokenType::SEMICOLON)) {
+            restore();
+            return false;
+        }
+
+        if (leading_virtual_specifier) {
+            error_custloc(
+                "'virtual' is not allowed on friend declarations",
+                friend_tok.loc);
+        }
+        if (fallback_elaborated_name) {
+            friend_type = resolve_or_declare_elaborated_friend_type(
+                fallback_name,
+                elaborated_is_union,
+                fallback_loc);
+        }
+        if (!friend_type) {
+            error_custloc("friend type declaration requires a type", friend_tok.loc);
+        }
+        if (!has_elaborated_key &&
+            canonical_type_kind(friend_type, ast_ctx.get()) != TypeKind::Object &&
+            !type_depends_on_template_parameters(friend_type, ast_ctx.get())) {
+            error_custloc(
+                "friend type declaration must name a class type",
+                friend_tok.loc);
+        }
+
+        auto friend_decl = make_ast<FriendDecl>(
+            *ast_ctx,
+            friend_type,
+            current_granting_record_type(),
+            friend_tok.loc);
+        fields.push_back(std::move(friend_decl));
+        check_and_consume(TokenType::SEMICOLON);
+        return true;
+    };
+
+    if (try_parse_cpp_type_friend_declaration()) {
+        return fields;
+    }
+
     DeclarationParser decl_parser(this);
     decl_parser.allow_typeless_conversion_function =
         is_cxx_mode_active() &&
@@ -4305,24 +4483,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     }
                 }
 
-                QualType granting_record_type = nullptr;
-                if (!cxx_record_parse_stack_.empty()) {
-                    const auto& record_frame = cxx_record_parse_stack_.back();
-                    if (record_frame.semantic_owner &&
-                        record_frame.semantic_owner->get_record_type()) {
-                        granting_record_type =
-                            QualType(record_frame.semantic_owner->get_record_type());
-                    }
-                    if (!granting_record_type && !record_frame.name.empty()) {
-                        auto owner_type = dyn_cast_shared<ObjectType>(
-                            collect_->collect_lookup_tag_type(
-                                record_frame.name,
-                                true));
-                        if (owner_type) {
-                            granting_record_type = QualType(owner_type);
-                        }
-                    }
-                }
+                QualType granting_record_type = current_granting_record_type();
 
                 auto friend_decl = make_ast<FriendDecl>(
                     *ast_ctx,

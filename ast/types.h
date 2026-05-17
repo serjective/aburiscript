@@ -1631,6 +1631,11 @@ struct RecordSemanticState {
         std::shared_ptr<Symbol> symbol = nullptr;
     };
 
+    struct FriendType {
+        QualType type;
+        const FriendDecl* decl = nullptr;
+    };
+
     struct Constructor {
         std::string name;
         QualType type;
@@ -1704,6 +1709,7 @@ struct RecordSemanticState {
     std::vector<NestedType> nested_types;
     std::vector<NestedTemplate> nested_templates;
     std::vector<FriendFunction> friend_functions;
+    std::vector<FriendType> friend_types;
     std::vector<EnumeratorMember> enumerator_members;
     std::vector<Constructor> constructors;
     std::vector<Destructor> destructors;

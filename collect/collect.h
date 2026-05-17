@@ -1337,6 +1337,7 @@ private:
         std::vector<RecordSemanticState::NestedType> nested_types;
         std::vector<RecordSemanticState::NestedTemplate> nested_templates;
         std::vector<RecordSemanticState::FriendFunction> friend_functions;
+        std::vector<RecordSemanticState::FriendType> friend_types;
         std::vector<RecordSemanticState::EnumeratorMember> enumerator_members;
         std::unordered_set<std::string> seen_static_data_member_names;
         std::vector<RecordSemanticState::Constructor> constructors;
@@ -1499,6 +1500,9 @@ private:
         QualType current_function_cpp_this_type = nullptr;
         // When in a friended function, this defines the function's friend class
         QualType current_function_cpp_friend_access_type = nullptr;
+        // Access checks sometimes need a dependent current-instantiation type
+        // while lookup still needs the concrete record type carried by this.
+        QualType current_function_cpp_access_context_type = nullptr;
         int loop_depth = 0;
         int switch_depth = 0;
         std::vector<SwitchContext> switch_context_stack;
@@ -1517,7 +1521,8 @@ private:
                 current_function_is_cpp_member,
                 current_function_is_static_cpp_member,
                 current_function_cpp_this_type,
-                current_function_cpp_friend_access_type
+                current_function_cpp_friend_access_type,
+                current_function_cpp_access_context_type
             };
         }
     };

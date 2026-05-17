@@ -4951,8 +4951,19 @@ std::unique_ptr<Expr> Collect::select_cpp_allocation_like_function(
                       session_.func_state_.current_function_cpp_this_type,
                       session_.func_state_.current_function_cpp_friend_access_type,
                       session_.current_cpp_record_lookup_type_,
-                      ast_ctx_.get())
+                      ast_ctx_.get(),
+                      session_.func_state_.current_function_cpp_access_context_type)
                 : nullptr;
+        QualType access_context_type =
+            lang_opts_.is_cxx_mode()
+                ? current_access_context_record_type(
+                      session_.func_state_.current_function_is_cpp_member,
+                      session_.func_state_.current_function_cpp_this_type,
+                      session_.func_state_.current_function_cpp_friend_access_type,
+                      session_.current_cpp_record_lookup_type_,
+                      ast_ctx_.get(),
+                      session_.func_state_.current_function_cpp_access_context_type)
+                : QualType(nullptr);
 
         for (const auto& member_match : member_candidates) {
             const auto* method = member_match.method;
@@ -4966,11 +4977,11 @@ std::unique_ptr<Expr> Collect::select_cpp_allocation_like_function(
             bool is_accessible = true;
             if (lang_opts_.is_cxx_mode() &&
                 method->declared_access == RecordMemberAccess::Private) {
-                const ObjectDecl* owner_decl =
-                    canonical_record_decl(member_match.owner_record_decl);
-                const ObjectDecl* context_decl =
-                    canonical_record_decl(access_context_decl);
-                if (!owner_decl || owner_decl != context_decl) {
+                if (!can_access_private_member_in_context(
+                        member_match.owner_record_decl,
+                        access_context_decl,
+                        ast_ctx_.get(),
+                        access_context_type)) {
                     saw_private_method = true;
                     is_accessible = false;
                 }
@@ -4980,7 +4991,9 @@ std::unique_ptr<Expr> Collect::select_cpp_allocation_like_function(
                     member_match.owner_record_decl,
                     access_context_decl,
                     member_match.owner_record_decl,
-                    true);
+                    true,
+                    ast_ctx_.get(),
+                    access_context_type);
                 if (!protected_ok) {
                     saw_protected_method = true;
                     is_accessible = false;

@@ -14,19 +14,26 @@ namespace {
 bool constructor_accessible_from_context(
     const RecordSemanticState::Constructor& ctor,
     const ObjectDecl* record_decl,
-    const ObjectDecl* access_context_decl) {
+    const ObjectDecl* access_context_decl,
+    const ASTContext* ast_ctx,
+    QualType access_context_type) {
     switch (ctor.declared_access) {
         case RecordMemberAccess::Public:
             return true;
         case RecordMemberAccess::Private:
             return collect_internal::can_access_private_member_in_context(
-                record_decl, access_context_decl);
+                record_decl,
+                access_context_decl,
+                ast_ctx,
+                access_context_type);
         case RecordMemberAccess::Protected:
             return collect_internal::can_access_protected_member_in_context(
                 record_decl,
                 access_context_decl,
                 record_decl,
-                /*is_static_member=*/false);
+                /*is_static_member=*/false,
+                ast_ctx,
+                access_context_type);
     }
     return false;
 }
@@ -453,7 +460,16 @@ Collect::evaluate_variable_constructor_candidate(
             session_.func_state_.current_function_cpp_this_type,
             session_.func_state_.current_function_cpp_friend_access_type,
             session_.current_cpp_record_lookup_type_,
-            ast_ctx_.get());
+            ast_ctx_.get(),
+            session_.func_state_.current_function_cpp_access_context_type);
+    QualType access_context_type =
+        collect_internal::current_access_context_record_type(
+            session_.func_state_.current_function_is_cpp_member,
+            session_.func_state_.current_function_cpp_this_type,
+            session_.func_state_.current_function_cpp_friend_access_type,
+            session_.current_cpp_record_lookup_type_,
+            ast_ctx_.get(),
+            session_.func_state_.current_function_cpp_access_context_type);
 
     if (ctor.is_implicit) {
         eval.is_synthesized_implicit_ctor = true;
@@ -486,7 +502,11 @@ Collect::evaluate_variable_constructor_candidate(
         }
 
         if (!constructor_accessible_from_context(
-                ctor, record_decl, access_context_decl) ||
+                ctor,
+                record_decl,
+                access_context_decl,
+                ast_ctx_.get(),
+                access_context_type) ||
             ctor.is_deleted ||
             (ctor_is_copy_initialization && ctor.is_explicit) ||
             ctor_args.size() < eval.required_user_param_count ||
@@ -519,7 +539,11 @@ Collect::evaluate_variable_constructor_candidate(
         ctor.is_deleted ||
         (ctor_is_copy_initialization && ctor.is_explicit) ||
         !constructor_accessible_from_context(
-            ctor, record_decl, access_context_decl) ||
+            ctor,
+            record_decl,
+            access_context_decl,
+            ast_ctx_.get(),
+            access_context_type) ||
         ctor_args.size() < eval.required_user_param_count ||
         ctor_args.size() > eval.max_user_param_count) {
         return eval;
@@ -557,12 +581,25 @@ std::string Collect::describe_variable_constructor_candidate(
             session_.func_state_.current_function_cpp_this_type,
             session_.func_state_.current_function_cpp_friend_access_type,
             session_.current_cpp_record_lookup_type_,
-            ast_ctx_.get());
+            ast_ctx_.get(),
+            session_.func_state_.current_function_cpp_access_context_type);
+    QualType access_context_type =
+        collect_internal::current_access_context_record_type(
+            session_.func_state_.current_function_is_cpp_member,
+            session_.func_state_.current_function_cpp_this_type,
+            session_.func_state_.current_function_cpp_friend_access_type,
+            session_.current_cpp_record_lookup_type_,
+            ast_ctx_.get(),
+            session_.func_state_.current_function_cpp_access_context_type);
     auto constructor_is_accessible =
         [&](const RecordSemanticState::Constructor* ctor) {
             return ctor &&
                    constructor_accessible_from_context(
-                       *ctor, record_decl, access_context_decl);
+                       *ctor,
+                       record_decl,
+                       access_context_decl,
+                       ast_ctx_.get(),
+                       access_context_type);
         };
 
     if (eval.is_synthesized_implicit_ctor && !eval.ctor) {

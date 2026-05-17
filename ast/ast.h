@@ -408,6 +408,7 @@ struct CppThisContext {
     bool is_static_member_function = false;
     QualType this_type = nullptr;
     QualType friend_access_type = nullptr;
+    QualType access_context_type = nullptr;
 };
 
 struct CppLambdaCapture {
@@ -949,6 +950,7 @@ inline bool function_decl_defines_entity(const FuncDecl* decl) {
 
 struct FriendDecl : Decl {
     std::unique_ptr<Decl> target_decl;
+    QualType friend_type;
     QualType granting_record_type;
     std::shared_ptr<Symbol> function_symbol;
     uint8_t friend_kind : 3;
@@ -962,8 +964,21 @@ struct FriendDecl : Decl {
                SrcLoc loc = SrcLoc())
         : Decl(DeclKind::FriendDecl, loc),
           target_decl(std::move(target_decl)),
+          friend_type(nullptr),
           granting_record_type(std::move(granting_record_type)),
           friend_kind(static_cast<uint8_t>(friend_kind)),
+          has_deferred_inline_body_tokens(false),
+          deferred_inline_body_begin_token_idx(0),
+          deferred_inline_body_end_token_idx(0) {}
+
+    FriendDecl(QualType friend_type,
+               QualType granting_record_type,
+               SrcLoc loc = SrcLoc())
+        : Decl(DeclKind::FriendDecl, loc),
+          target_decl(nullptr),
+          friend_type(std::move(friend_type)),
+          granting_record_type(std::move(granting_record_type)),
+          friend_kind(static_cast<uint8_t>(CppFriendKind::Type)),
           has_deferred_inline_body_tokens(false),
           deferred_inline_body_begin_token_idx(0),
           deferred_inline_body_end_token_idx(0) {}
