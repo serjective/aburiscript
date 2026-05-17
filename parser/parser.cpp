@@ -253,6 +253,81 @@ Token Parser::peek_token_shortcut(size_t offset) {
     if (offset == 0) return tok_mgnt.current_token();
     return tok_mgnt.peek_token(offset);
 }
+bool Parser::skip_balanced_tokens_for_lookahead(size_t& offset,
+                                                TokenType open_tok,
+                                                TokenType close_tok) {
+    if (peek_token_shortcut(offset).type != open_tok) {
+        return false;
+    }
+
+    int depth = 0;
+    while (peek_token_shortcut(offset).type != TokenType::Eof) {
+        TokenType tok = peek_token_shortcut(offset).type;
+        if (tok == open_tok) {
+            ++depth;
+        } else if (tok == close_tok) {
+            --depth;
+            if (depth == 0) {
+                ++offset;
+                return true;
+            }
+        }
+        ++offset;
+    }
+    return false;
+}
+bool Parser::skip_attribute_specifier_sequence_for_lookahead(size_t& offset) {
+    bool skipped_any = false;
+
+    while (true) {
+        if (is_gnu_attribute_token(peek_token_shortcut(offset))) {
+            ++offset;
+            if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN) {
+                skip_balanced_tokens_for_lookahead(
+                    offset,
+                    TokenType::LEFT_PAREN,
+                    TokenType::RIGHT_PAREN);
+            }
+            skipped_any = true;
+            continue;
+        }
+
+        if (peek_token_shortcut(offset).type == TokenType::ALIGNAS) {
+            ++offset;
+            if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN) {
+                skip_balanced_tokens_for_lookahead(
+                    offset,
+                    TokenType::LEFT_PAREN,
+                    TokenType::RIGHT_PAREN);
+            }
+            skipped_any = true;
+            continue;
+        }
+
+        if (peek_token_shortcut(offset).type == TokenType::LEFT_BRACKET &&
+            peek_token_shortcut(offset + 1).type == TokenType::LEFT_BRACKET) {
+            offset += 2;
+            bool closed_attribute = false;
+            while (peek_token_shortcut(offset).type != TokenType::Eof) {
+                if (peek_token_shortcut(offset).type == TokenType::RIGHT_BRACKET &&
+                    peek_token_shortcut(offset + 1).type ==
+                        TokenType::RIGHT_BRACKET) {
+                    offset += 2;
+                    closed_attribute = true;
+                    break;
+                }
+                ++offset;
+            }
+            if (!closed_attribute) {
+                return false;
+            }
+            skipped_any = true;
+            continue;
+        }
+
+        return skipped_any;
+    }
+}
 void Parser::advance() {
     tok_mgnt.advance();
 }

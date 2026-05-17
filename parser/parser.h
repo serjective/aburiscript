@@ -302,6 +302,10 @@ private:
     Token peek_token(size_t offset = 1);
 
     Token peek_token_shortcut(size_t offset);
+    bool skip_balanced_tokens_for_lookahead(size_t& offset,
+                                            TokenType open_tok,
+                                            TokenType close_tok);
+    bool skip_attribute_specifier_sequence_for_lookahead(size_t& offset);
 
     void advance();
     bool gentle_check_and_consume(TokenType type);

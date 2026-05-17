@@ -3659,46 +3659,27 @@ bool Parser::is_cpp_deduction_guide_declaration_start() {
         return false;
     }
 
-    auto skip_balanced_tokens =
-        [&](size_t& offset, TokenType open_tok, TokenType close_tok) -> bool {
-        if (peek_token_shortcut(offset).type != open_tok) {
-            return false;
-        }
-        int depth = 0;
-        while (peek_token_shortcut(offset).type != TokenType::Eof) {
-            TokenType tok = peek_token_shortcut(offset).type;
-            if (tok == open_tok) {
-                ++depth;
-            } else if (tok == close_tok) {
-                --depth;
-                if (depth == 0) {
-                    ++offset;
-                    return true;
-                }
-            }
-            ++offset;
-        }
-        return false;
-    };
-
     size_t offset = 0;
+    skip_attribute_specifier_sequence_for_lookahead(offset);
     if (peek_token_shortcut(offset).type == TokenType::EXPLICIT_KW) {
         ++offset;
         if (peek_token_shortcut(offset).type == TokenType::LEFT_PAREN &&
-            !skip_balanced_tokens(
+            !skip_balanced_tokens_for_lookahead(
                 offset,
                 TokenType::LEFT_PAREN,
                 TokenType::RIGHT_PAREN)) {
             return false;
         }
+        skip_attribute_specifier_sequence_for_lookahead(offset);
     }
+    skip_attribute_specifier_sequence_for_lookahead(offset);
 
     if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER ||
         peek_token_shortcut(offset + 1).type != TokenType::LEFT_PAREN) {
         return false;
     }
     offset += 1;
-    if (!skip_balanced_tokens(
+    if (!skip_balanced_tokens_for_lookahead(
             offset,
             TokenType::LEFT_PAREN,
             TokenType::RIGHT_PAREN)) {
@@ -4086,8 +4067,30 @@ Parser::parse_cpp_deduction_guide_declaration(
             guide_loc);
     }
 
+    const bool enter_template_pattern_context = !template_parameters.empty();
+    if (enter_template_pattern_context) {
+        ++template_pattern_depth_;
+    }
+    struct DeductionGuideTemplatePatternGuard {
+        uint32_t& depth;
+        bool active = false;
+        ~DeductionGuideTemplatePatternGuard() {
+            if (active) {
+                --depth;
+            }
+        }
+    } template_pattern_guard{
+        template_pattern_depth_,
+        enter_template_pattern_context};
+
+    auto guide_attrs = try_parse_attributes();
     CppExplicitSpecifier explicit_specifier =
         parse_cpp_optional_explicit_specifier();
+    auto post_explicit_attrs = try_parse_attributes();
+    guide_attrs.insert(
+        guide_attrs.end(),
+        std::make_move_iterator(post_explicit_attrs.begin()),
+        std::make_move_iterator(post_explicit_attrs.end()));
     Token guide_name_tok = current_token();
     check_and_consume(TokenType::IDENTIFIER);
 
@@ -4202,6 +4205,7 @@ Parser::parse_cpp_deduction_guide_declaration(
         template_loc.isInvalid() ? guide_loc : template_loc);
     guide->associated_constraint = std::move(leading_requires_clause);
     guide->explicit_specifier = std::move(explicit_specifier);
+    ast_ctx->append_attrs(guide->node_id, std::move(guide_attrs));
     set_template_decl_canonical_decl(guide.get(), guide.get());
     primary_class_template->add_deduction_guide(guide.get());
     return guide;
