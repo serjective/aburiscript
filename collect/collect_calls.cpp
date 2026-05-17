@@ -143,6 +143,16 @@ void append_unique_concept_candidate(
     }
     candidates.push_back(concept_decl);
 }
+
+bool builtin_call_preserves_argument_value_category(BuiltinKind kind) {
+    switch (kind) {
+        case BuiltinKind::ADDRESSOF:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // TODO: we need to do the type on the root of expr node soon, because every expr has an assc type
 void store_explicit_expr_type(Expr* candidate, QualType realized_type) {
     if (!candidate || !realized_type) {
@@ -4732,9 +4742,11 @@ std::unique_ptr<Expr> Collect::try_builtin_or_overloaded_varref_call(
                     loc);
                 return collect_make<ErrorExpr>("invalid builtin argument count", loc);
             }
-            for (auto& arg : call->args) {
-                arg = collect_apply_standard_conversions(
-                    std::move(arg), ExprUseContext::CallArgument);
+            if (!builtin_call_preserves_argument_value_category(builtin_info->kind)) {
+                for (auto& arg : call->args) {
+                    arg = collect_apply_standard_conversions(
+                        std::move(arg), ExprUseContext::CallArgument);
+                }
             }
             return builtin_call_expression(
                 builtin_info->kind, std::move(call->args), loc);

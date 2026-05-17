@@ -1178,6 +1178,15 @@ llvm::Constant* ASTToLLVM::emit_constant_initializer(Expr* expr) {
         }
     }
 
+    if (auto* builtin = dyn_cast<BuiltinCallExpr>(expr)) {
+        if (builtin->kind == BuiltinKind::ADDRESSOF &&
+            builtin->args.size() == 1 &&
+            builtin->args[0]) {
+            auto lvalue = get_lvalue(builtin->args[0].get());
+            return llvm::dyn_cast_or_null<llvm::Constant>(lvalue.address);
+        }
+    }
+
     // SizeOf / AlignOf — use frontend consteval compatibility lane
     if (auto* sizeOf = dyn_cast<SizeOfExpr>(expr)) {
         auto val = eval_constexpr_i64(sizeOf, ConstEvalMode::c_ice());

@@ -2126,6 +2126,18 @@ llvm::Value* ASTToLLVM::convert_builtin_call_expr(BuiltinCallExpr *expr) {
         // Compatibility behavior: treat __builtin_available(...) as always true.
         return llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 1);
     }
+    case BuiltinKind::ADDRESSOF: {
+        if (expr->args.empty() || !expr->args[0]) {
+            error("__builtin_addressof requires an operand", expr->location);
+            return nullptr;
+        }
+        auto lvalue = get_lvalue(expr->args[0].get());
+        if (!lvalue.address) {
+            error("__builtin_addressof operand is not addressable", expr->location);
+            return nullptr;
+        }
+        return lvalue.address;
+    }
     case BuiltinKind::VA_ARG_PACK: {
         // TODO(gcc-torture): Implement real vararg-pack forwarding semantics.
         // Current behavior is a compile-compatibility fallback only.

@@ -2169,6 +2169,32 @@ bool is_c23_address_constant_expr(Expr* expr, ConstEvalMode mode, size_t depth) 
 
 // ====== Unary, binary, and cast operator evaluation ======
 
+ConstEvalResult eval_address_of_operand(Expr* operand,
+                                        ConstEvalMode mode,
+                                        size_t depth,
+                                        SrcLoc loc) {
+    Expr* core = strip_noop_implicit_casts(operand);
+    if (auto* var_ref = dyn_cast<VarRef>(core)) {
+        if (var_ref->symref &&
+            var_ref->symref->kind == SymbolKind::FUNCTION) {
+            return ConstEvalResult::constant(
+                ConstValue::address(var_ref->symref));
+        }
+    }
+
+    InterpLocation location;
+    if (resolve_expr_location(operand, mode, depth + 1, location) &&
+        location.root_symbol) {
+        return ConstEvalResult::constant(
+            ConstValue::address(location.root_symbol, location.byte_offset));
+    }
+
+    return make_not_evaluated(
+        ConstEvalDiagCode::UnsupportedExpression,
+        "address-of expression is not a supported constant expression",
+        loc);
+}
+
 ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_t depth) {
     if (!unary || !unary->exp) {
         return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
@@ -2208,26 +2234,8 @@ ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_
     }
 
     if (unary->uop == UnaryOpTypes::ADDRESS_OF) {
-        Expr* core = strip_noop_implicit_casts(unary->exp.get());
-        if (auto* var_ref = dyn_cast<VarRef>(core)) {
-            if (var_ref->symref &&
-                var_ref->symref->kind == SymbolKind::FUNCTION) {
-                return ConstEvalResult::constant(
-                    ConstValue::address(var_ref->symref));
-            }
-        }
-
-        InterpLocation location;
-        if (resolve_expr_location(unary->exp.get(), mode, depth + 1, location) &&
-            location.root_symbol) {
-            return ConstEvalResult::constant(
-                ConstValue::address(location.root_symbol, location.byte_offset));
-        }
-
-        return make_not_evaluated(
-            ConstEvalDiagCode::UnsupportedExpression,
-            "address-of expression is not a supported constant expression",
-            unary->location);
+        return eval_address_of_operand(
+            unary->exp.get(), mode, depth, unary->location);
     }
 
     if (unary->uop == UnaryOpTypes::DEREFERENCE) {
@@ -4467,6 +4475,16 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
     if (auto* builtin_call = dyn_cast<BuiltinCallExpr>(expr)) {
         if (builtin_call->kind == BuiltinKind::IS_CONSTANT_EVALUATED) {
             return make_constant_int(ConstIntValue::from_signed(1, 64));
+        }
+        if (builtin_call->kind == BuiltinKind::ADDRESSOF) {
+            if (builtin_call->args.size() != 1 || !builtin_call->args[0]) {
+                return make_not_evaluated(
+                    ConstEvalDiagCode::UnsupportedExpression,
+                    "__builtin_addressof requires exactly 1 argument",
+                    expr->location);
+            }
+            return eval_address_of_operand(
+                builtin_call->args[0].get(), mode, depth, expr->location);
         }
         if (!builtin_call->const_value.has_value()) {
             return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,

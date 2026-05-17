@@ -83,6 +83,18 @@ std::optional<QualType> merge_cpp_conditional_glvalue_type(
     return make_reference_type(merged_referred, lhs_ref->reference_kind);
 }
 
+bool expression_can_be_addressed_without_overload(const Collect& collect,
+                                                  Expr* raw) {
+    if (!raw) {
+        return false;
+    }
+    QualType raw_type = raw->get_type();
+    if (raw_type && canonical_type_kind(raw_type) == TypeKind::Function) {
+        return true;
+    }
+    return collect.classify_value_category(raw) == Collect::ValueCategory::LValue;
+}
+
 void collect_lambda_local_symbols_from_decl(
     const Decl* decl,
     std::unordered_set<const Symbol*>& local_symbols);
@@ -8066,6 +8078,29 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_special_cases(
                 ret = void_ptr;
             }
             return collect_make<BuiltinCallExpr>(kind, std::move(args), ret, loc);
+        }
+        case BuiltinKind::ADDRESSOF: {
+            if (args.size() != 1 || !args[0]) {
+                report_error("__builtin_addressof requires exactly 1 argument", loc);
+                return collect_make<BuiltinCallExpr>(kind, std::move(args), void_ptr, loc);
+            }
+
+            Expr* raw = strip_implicit_casts(args[0].get());
+            QualType operand_type = raw ? raw->get_type() : args[0]->get_type();
+            if (!expression_can_be_addressed_without_overload(*this, raw)) {
+                report_error("__builtin_addressof requires an lvalue operand", loc);
+            }
+            if (auto* member = dyn_cast<MemberExpr>(raw)) {
+                if (member->is_bitfield) {
+                    report_error("cannot take address of bit-field", loc);
+                }
+            }
+
+            QualType pointee_type =
+                operand_type ? remove_reference(operand_type, ast_ctx_.get()) : void_type;
+            QualType result_type(std::make_shared<PointerType>(pointee_type));
+            return collect_make<BuiltinCallExpr>(
+                kind, std::move(args), result_type, loc);
         }
         case BuiltinKind::CLASSIFY_TYPE: {
             QualType arg_type = args.empty() ? QualType() : args[0]->get_type();

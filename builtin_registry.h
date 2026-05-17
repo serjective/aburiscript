@@ -89,6 +89,7 @@ enum class BuiltinKind {
     IA32_BZHI_SI,
 
     // Tier 2: Memory/string
+    ADDRESSOF,
     STPCPY,
     MEMPCPY,
     MEMCPY,

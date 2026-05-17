@@ -173,6 +173,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__builtin_ia32_bzhi_si", BuiltinKind::IA32_BZHI_SI, 2, 2, false, false});
 
     // Tier 2: Memory/string builtins
+    register_builtin({"__builtin_addressof", BuiltinKind::ADDRESSOF, 1, 1, false, false});
     register_builtin({"__builtin_memcpy", BuiltinKind::MEMCPY, 3, 3, false, false});
     register_builtin({"__builtin_memmove", BuiltinKind::MEMMOVE, 3, 3, false, false});
     register_builtin({"__builtin_memset", BuiltinKind::MEMSET, 3, 3, false, false});
