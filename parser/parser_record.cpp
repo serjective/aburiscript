@@ -98,6 +98,10 @@ bool can_parse_cxx_object_initializer_syntax(QualType declared_type) {
     return canonical_type_kind(declared_type) == TypeKind::Object;
 }
 
+bool cpp_in_class_definition_is_inline(bool explicitly_inline, bool is_definition) {
+    return explicitly_inline || is_definition;
+}
+
 bool is_defaultable_special_member_method(
     const CppMethodDecl* method_decl,
     QualType owner_type,
@@ -4506,6 +4510,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                                              suffix_loc);
                     }
                 }
+                friend_function->is_inline =
+                    cpp_in_class_definition_is_inline(
+                        friend_function->is_inline,
+                        friend_function->is_deleted ||
+                            friend_function->is_defaulted);
 
                 QualType granting_record_type = current_granting_record_type();
 
@@ -4741,6 +4750,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
 
                 bool has_inline_body = gentle_check(TokenType::LEFT_BRACE) ||
                     gentle_check(TokenType::TRY_KW);
+                bool ctor_is_inline =
+                    cpp_in_class_definition_is_inline(
+                        decl_parser.is_inline,
+                        has_inline_body || ctor_is_deleted || ctor_is_defaulted);
                 auto ctor_params = build_member_param_decls(decl_parser.func_args, field_type);
                 auto ctor_decl = make_ast<CppConstructorDecl>(
                     *ast_ctx,
@@ -4750,7 +4763,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     nullptr,
                     std::unordered_set<std::string>{},
                     decl_parser.str_class,
-                    decl_parser.is_inline,
+                    ctor_is_inline,
                     member_explicit,
                     t.loc);
                 ctor_decl->type = field_type;
@@ -4933,6 +4946,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             if (has_inline_body) {
                 auto method_params =
                     build_member_param_decls(decl_parser.func_args, field_type);
+                bool method_is_inline =
+                    cpp_in_class_definition_is_inline(
+                        decl_parser.is_inline,
+                        has_inline_body);
 
                 cpp_method = make_ast<CppMethodDecl>(
                     *ast_ctx,
@@ -4942,7 +4959,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     nullptr,
                     std::unordered_set<std::string>{},
                     decl_parser.str_class,
-                    decl_parser.is_inline,
+                    method_is_inline,
                     t.loc);
                 cpp_method->type = field_type;
                 cpp_method->is_constexpr = decl_parser.is_constexpr;
@@ -4986,7 +5003,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     std::move(parsed_method->body),
                     std::move(parsed_method->stmt_labels),
                     parsed_method->storage_class,
-                    parsed_method->is_inline != 0,
+                    cpp_in_class_definition_is_inline(
+                        parsed_method->is_inline != 0,
+                        parsed_method->is_deleted ||
+                            parsed_method->is_defaulted),
                     parsed_method->location);
                 cpp_method->node_id = parsed_method->node_id;
                 cpp_method->scope = parsed_method->scope;

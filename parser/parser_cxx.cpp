@@ -49,6 +49,10 @@ bool is_integer_pack_builtin_expr(const Expr* expr) {
     return false;
 }
 
+bool cpp_in_class_definition_is_inline(bool explicitly_inline, bool is_definition) {
+    return explicitly_inline || is_definition;
+}
+
 template <typename TemplateDeclT>
 TemplateDeclT* canonical_primary_template_for_partial_registration(
     TemplateDeclT* primary_template) {
@@ -7175,6 +7179,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     }
 
     if (is_deleted || is_defaulted) {
+        ctor_decl->is_inline =
+            cpp_in_class_definition_is_inline(ctor_decl->is_inline, true);
         if (!ctor_decl->ctor_initializers.empty()) {
             error("defaulted/deleted constructor cannot have a member initializer list");
         }
@@ -7191,6 +7197,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
 
     bool has_inline_body = gentle_check(TokenType::LEFT_BRACE);
     if (is_function_try_block) {
+        ctor_decl->is_inline =
+            cpp_in_class_definition_is_inline(ctor_decl->is_inline, true);
         if (!gentle_check(TokenType::LEFT_BRACE)) {
             error("constructor function-try-block requires a function body");
         }
@@ -7200,6 +7208,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
         ctor_decl->set_deferred_inline_body_token_range(
             body_begin_token_idx, body_end_token_idx);
     } else if (has_inline_body) {
+        ctor_decl->is_inline =
+            cpp_in_class_definition_is_inline(ctor_decl->is_inline, true);
         size_t body_begin_token_idx = get_token_idx();
         skip_balanced_token_sequence_tokens(
             TokenType::LEFT_BRACE,
@@ -7457,6 +7467,10 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
     }
 
     if (is_deleted || is_defaulted || is_pure) {
+        dtor_decl->is_inline =
+            cpp_in_class_definition_is_inline(
+                dtor_decl->is_inline,
+                is_deleted || is_defaulted);
         if (is_defaulted) {
             dtor_decl->body = make_ast<CompoundStmt>(
                 *ast_ctx,
@@ -7475,12 +7489,16 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
         error("pure virtual destructor cannot have a function body");
     }
     if (has_function_try_block) {
+        dtor_decl->is_inline =
+            cpp_in_class_definition_is_inline(dtor_decl->is_inline, true);
         size_t body_begin_token_idx = get_token_idx();
         skip_cpp_function_try_block_tokens(false);
         size_t body_end_token_idx = get_token_idx();
         dtor_decl->set_deferred_inline_body_token_range(
             body_begin_token_idx, body_end_token_idx);
     } else if (has_inline_body) {
+        dtor_decl->is_inline =
+            cpp_in_class_definition_is_inline(dtor_decl->is_inline, true);
         size_t body_begin_token_idx = get_token_idx();
         skip_balanced_token_sequence_tokens(
             TokenType::LEFT_BRACE,

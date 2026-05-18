@@ -767,6 +767,28 @@ bool ASTToLLVM::is_cxx_default_constructor_symbol(
     return false;
 }
 
+bool ASTToLLVM::function_decl_is_inline_equivalent(
+    const FuncDecl& decl) const {
+    bool is_function_template_specialization =
+        ast_ctx && get_func_decl_function_template_specialization(&decl);
+    return decl.is_inline ||
+           (lang_opts.is_cxx_mode() &&
+            (decl.is_constexpr ||
+             decl.is_consteval ||
+             is_function_template_specialization));
+}
+
+bool ASTToLLVM::function_symbol_is_inline_equivalent(
+    const Symbol& sym) const {
+    bool is_function_template_specialization =
+        ast_ctx && get_symbol_function_template_specialization(&sym);
+    return sym.is_inline ||
+           (lang_opts.is_cxx_mode() &&
+            (sym.is_constexpr ||
+             sym.is_consteval ||
+             is_function_template_specialization));
+}
+
 std::string ASTToLLVM::get_function_llvm_name(const FuncDecl& decl) const {
     if (decl.asm_label) {
         return get_asm_label_name(*decl.asm_label);
@@ -940,7 +962,7 @@ llvm::GlobalValue::LinkageTypes ASTToLLVM::get_function_definition_linkage(
         return llvm::GlobalValue::InternalLinkage;
     }
     if (lang_opts.is_cxx_mode() &&
-        (decl.is_inline || decl.is_constexpr || decl.is_consteval)) {
+        function_decl_is_inline_equivalent(decl)) {
         return llvm::GlobalValue::LinkOnceODRLinkage;
     }
     return llvm::GlobalValue::ExternalLinkage;
@@ -967,7 +989,7 @@ llvm::GlobalValue::LinkageTypes ASTToLLVM::get_function_symbol_linkage(
         return llvm::GlobalValue::ExternalLinkage;
     }
     if (lang_opts.is_cxx_mode() &&
-        (sym.is_inline || sym.is_constexpr || sym.is_consteval) &&
+        function_symbol_is_inline_equivalent(sym) &&
         sym.function_definition &&
         sym.function_definition->body) {
         return llvm::GlobalValue::LinkOnceODRLinkage;
@@ -1070,9 +1092,7 @@ void ASTToLLVM::mark_function_symbol_odr_used(
     }
 
     const bool is_inline_equivalent =
-        decl->is_inline ||
-        (lang_opts.is_cxx_mode() &&
-         (decl->is_constexpr || decl->is_consteval));
+        function_decl_is_inline_equivalent(*decl);
     if (!is_inline_equivalent && !is_lambda_invoker) {
         return;
     }

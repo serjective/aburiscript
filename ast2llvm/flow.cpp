@@ -1662,9 +1662,7 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
     if (!node) { error("convert_function_declaration(): unexpected subclass", decl->location); return; }
     const bool uses_gnu_inline_semantics = lang_opts.uses_gnu_inline_semantics();
     const bool is_inline_equivalent =
-        node->is_inline ||
-        (lang_opts.is_cxx_mode() &&
-         (node->is_constexpr || node->is_consteval));
+        function_decl_is_inline_equivalent(*node);
     const bool is_c_inline =
         node->is_inline && !lang_opts.is_cxx_mode();
     const bool suppress_external_definition =

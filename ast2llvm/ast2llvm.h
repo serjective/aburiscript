@@ -207,6 +207,8 @@ public:
     std::shared_ptr<Symbol> get_function_symbol_for_decl(const FuncDecl& decl) const;
     bool is_cxx_default_constructor_symbol(
         const std::shared_ptr<Symbol>& sym) const;
+    bool function_decl_is_inline_equivalent(const FuncDecl& decl) const;
+    bool function_symbol_is_inline_equivalent(const Symbol& sym) const;
     std::string get_function_llvm_name(const FuncDecl& decl) const;
     std::string get_function_llvm_name(const std::shared_ptr<Symbol>& sym,
                                        const std::string& fallback_spelling = "") const;
