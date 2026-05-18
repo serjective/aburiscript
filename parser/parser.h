@@ -101,6 +101,17 @@ private:
         }
     };
 
+    struct CppCtorBaseInitializerTarget {
+        QualType type = nullptr;
+        std::string base_name;
+        bool is_virtual = false;
+        bool found_non_base_type = false;
+
+        explicit operator bool() const {
+            return static_cast<bool>(type);
+        }
+    };
+
     struct CppDependentOwnerAnalysis {
         QualType owner_type = nullptr;
         bool is_current_instantiation = false;
@@ -670,6 +681,11 @@ private:
         const DeclContext* owner_context,
         QualType type,
         std::string_view name) const;
+    CppCtorBaseInitializerTarget resolve_cpp_ctor_base_initializer_target(
+        const RecordSemanticState& semantic_state,
+        QualType owner_type,
+        const std::string& initializer_name,
+        SrcLoc loc);
 
     std::vector<std::unique_ptr<Decl>> parse_struct_declaration(bool leading_virtual_specifier = false);
 

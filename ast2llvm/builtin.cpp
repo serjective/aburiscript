@@ -720,7 +720,8 @@ static BuiltinLoweringResult lower_builtin_atomic_and_sync_group(
         builder.SetInsertPoint(end_bb);
         return {true, builder.CreateZExt(success, llvm::Type::getInt8Ty(ctx), "cmpxchg_bool")};
     }
-    case BuiltinKind::ATOMIC_IS_LOCK_FREE: {
+    case BuiltinKind::ATOMIC_IS_LOCK_FREE:
+    case BuiltinKind::ATOMIC_ALWAYS_LOCK_FREE: {
         int64_t size = expr->args.empty()
             ? static_cast<int64_t>(module->getDataLayout().getPointerSize())
             : eval_constexpr_i64(expr->args[0].get(), ConstEvalMode::builtin_query()).value_or(

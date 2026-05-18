@@ -8528,6 +8528,18 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_atomic_cases(
     switch (kind) {
         case BuiltinKind::ATOMIC_IS_LOCK_FREE:
             return collect_make<BuiltinCallExpr>(kind, std::move(args), int_type, loc);
+        case BuiltinKind::ATOMIC_ALWAYS_LOCK_FREE: {
+            auto node = collect_make<BuiltinCallExpr>(kind, std::move(args), int_type, loc);
+            if (!node->args.empty() && node->args[0]) {
+                auto size = try_evaluate_with_consteval_compat(
+                    node->args[0].get(),
+                    ConstEvalMode::builtin_query());
+                if (size.has_value()) {
+                    node->const_value = (*size > 0 && *size <= 16) ? 1 : 0;
+                }
+            }
+            return node;
+        }
         case BuiltinKind::ATOMIC_FETCH_ADD:
         case BuiltinKind::ATOMIC_FETCH_SUB:
         case BuiltinKind::ATOMIC_FETCH_AND:

@@ -467,6 +467,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__atomic_compare_exchange", BuiltinKind::ATOMIC_COMPARE_EXCHANGE_N, 6, 6, false, false});
     register_builtin({"__atomic_compare_exchange_n", BuiltinKind::ATOMIC_COMPARE_EXCHANGE_N, 6, 6, false, false});
     register_builtin({"__atomic_is_lock_free", BuiltinKind::ATOMIC_IS_LOCK_FREE, 2, 2, false, false});
+    register_builtin({"__atomic_always_lock_free", BuiltinKind::ATOMIC_ALWAYS_LOCK_FREE, 2, 2, false, true});
     register_builtin({"__atomic_fetch_add", BuiltinKind::ATOMIC_FETCH_ADD, 3, 3, false, false});
     register_builtin({"__atomic_fetch_sub", BuiltinKind::ATOMIC_FETCH_SUB, 3, 3, false, false});
     register_builtin({"__atomic_fetch_and", BuiltinKind::ATOMIC_FETCH_AND, 3, 3, false, false});

@@ -796,31 +796,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                     return;
                 }
                 size_t saved_idx = get_token_idx();
-                struct BaseInitializerTarget {
-                    QualType type;
-                    bool is_virtual = false;
-                };
-                auto base_initializer_target_for_name =
-                    [&](const std::string& init_name)
-                    -> std::optional<BaseInitializerTarget> {
-                    for (const auto& base : owner_state->bases) {
-                        if (base.name == init_name) {
-                            BaseInitializerTarget target;
-                            target.type = base.type;
-                            target.is_virtual = base.is_virtual;
-                            return target;
-                        }
-                    }
-                    for (const auto& virtual_base : owner_state->virtual_bases) {
-                        if (virtual_base.name == init_name) {
-                            BaseInitializerTarget target;
-                            target.type = virtual_base.type;
-                            target.is_virtual = true;
-                            return target;
-                        }
-                    }
-                    return std::nullopt;
-                };
                 bool saw_base_initializer = false;
                 bool saw_delegating_initializer = false;
                 for (auto& mem_init : ctor->ctor_initializers) {
@@ -878,10 +853,17 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                     }
 
                     auto base_init_target =
-                        base_initializer_target_for_name(mem_init.member_name);
-                    if (base_init_target.has_value()) {
+                        resolve_cpp_ctor_base_initializer_target(
+                            *owner_state,
+                            QualType(owner_record_type),
+                            mem_init.member_name,
+                            mem_init.location);
+                    if (base_init_target) {
                         saw_base_initializer = true;
                         mem_init.is_base_initializer = true;
+                        mem_init.member_name = base_init_target.base_name;
+                    } else if (base_init_target.found_non_base_type) {
+                        continue;
                     }
 
                     MemberExpr* member_expr = nullptr;
@@ -919,7 +901,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                             mem_init.init_expr =
                                 collect_->collect_member_initializer_expression(
                                     std::move(args),
-                                    base_init_target->type,
+                                    base_init_target.type,
                                     false,
                                     mem_init.location,
                                     true);
@@ -958,7 +940,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                         mem_init.init_expr =
                             collect_->collect_member_initializer_expression(
                                 std::move(parsed_init),
-                                base_init_target->type,
+                                base_init_target.type,
                                 mem_init.location);
                     } else if (canonical_type_kind(member_expr->member_type) ==
                         TypeKind::Reference) {
