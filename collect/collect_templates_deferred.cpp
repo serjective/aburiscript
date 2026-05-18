@@ -1581,13 +1581,29 @@ bool Collect::decltype_expression_requires_deferred_resolution(
                 member->names_dependent_base) {
                 return true;
             }
-            if (member->base &&
-                type_depends_on_template_parameters(
-                    member->base->get_type(),
-                    ast_ctx_.get())) {
+            QualType base_type =
+                member->base ? member->base->get_type() : QualType();
+            if (type_depends_on_template_parameters(base_type, ast_ctx_.get()) ||
+                contains_deferred_semantic_type(base_type.get_shared()) ||
+                type_contains_undeduced_cxx_auto(base_type)) {
                 return true;
             }
-            return false;
+            if (!member->member_type || !member->declared_member_type) {
+                return true;
+            }
+            return type_depends_on_template_parameters(
+                       member->member_type,
+                       ast_ctx_.get()) ||
+                   contains_deferred_semantic_type(
+                       member->member_type.get_shared()) ||
+                   type_contains_undeduced_cxx_auto(member->member_type) ||
+                   type_depends_on_template_parameters(
+                       member->declared_member_type,
+                       ast_ctx_.get()) ||
+                   contains_deferred_semantic_type(
+                       member->declared_member_type.get_shared()) ||
+                   type_contains_undeduced_cxx_auto(
+                       member->declared_member_type);
         }
         default:
             break;
