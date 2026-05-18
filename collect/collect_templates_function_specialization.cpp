@@ -31,6 +31,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
     std::vector<TemplateArgument> normalized_arguments;
     bool specialization_is_dependent = false;
     FunctionTemplateSpecializationEntry* entry = nullptr;
+    TemplateSubstitutionPass* active_clone_pass = nullptr;
 
     FunctionTemplateSpecializationInstantiator(
         Collect& collect,
@@ -59,6 +60,53 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             entry->instantiation_failed = true;
         }
         return false;
+    }
+
+    struct ScopedActiveClonePass {
+        FunctionTemplateSpecializationInstantiator& instantiator;
+        TemplateSubstitutionPass* saved = nullptr;
+
+        ScopedActiveClonePass(
+            FunctionTemplateSpecializationInstantiator& instantiator,
+            TemplateSubstitutionPass* active)
+            : instantiator(instantiator),
+              saved(instantiator.active_clone_pass) {
+            instantiator.active_clone_pass = active;
+        }
+
+        ~ScopedActiveClonePass() {
+            instantiator.active_clone_pass = saved;
+        }
+    };
+
+    ASTCloneContext* active_clone_context() const {
+        return active_clone_pass ? &active_clone_pass->context() : nullptr;
+    }
+
+    QualType rewrite_function_template_type_for_bindings(
+        QualType type,
+        const TemplateArgumentBindings& bindings) {
+        auto rewritten = collect.substitute_template_type_with_bindings(
+            type,
+            function_template->parameters,
+            bindings,
+            loc,
+            false,
+            active_clone_context());
+        return collect.finalize_deferred_semantic_type(rewritten, loc);
+    }
+
+    std::vector<TemplateArgument>
+    rewrite_function_template_arguments_for_bindings(
+        const std::vector<TemplateArgument>& template_arguments,
+        const TemplateArgumentBindings& bindings) {
+        return collect.substitute_template_arguments_with_bindings(
+            template_arguments,
+            function_template->parameters,
+            bindings,
+            loc,
+            false,
+            active_clone_context());
     }
 
     static std::vector<std::string> split_qualifier_prefix(
@@ -539,22 +587,16 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 bool& effective_value_out) -> bool {
             auto rewrite_function_template_type =
                 [&](QualType type) -> QualType {
-                auto rewritten =
-                    collect.substitute_template_type_with_bindings(
-                        type,
-                        function_template->parameters,
-                        specialization_bindings,
-                        loc);
-                return collect.finalize_deferred_semantic_type(rewritten, loc);
+                return rewrite_function_template_type_for_bindings(
+                    type,
+                    specialization_bindings);
             };
             auto rewrite_function_template_arguments =
                 [&](const std::vector<TemplateArgument>& template_arguments)
                     -> std::vector<TemplateArgument> {
-                return collect.substitute_template_arguments_with_bindings(
+                return rewrite_function_template_arguments_for_bindings(
                     template_arguments,
-                    function_template->parameters,
-                    specialization_bindings,
-                    loc);
+                    specialization_bindings);
             };
             auto clone_pass_builder = make_template_binding_clone_pass_builder(
                 ast_ctx(),
@@ -568,6 +610,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 {},
                 {});
             auto clone_pass = clone_pass_builder.build_substitution_pass();
+            ScopedActiveClonePass scoped_active_clone_pass(*this, &clone_pass);
             QualType specialization_this_type =
                 template_sema_internal::implicit_this_type_for_specialized_function(
                     specialized_decl);
@@ -840,11 +883,9 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 if (function_specialization_info &&
                     function_specialization_info->primary_template) {
                     auto rewritten_arguments =
-                        collect.substitute_template_arguments_with_bindings(
+                        rewrite_function_template_arguments_for_bindings(
                             function_specialization_info->arguments,
-                            function_template->parameters,
-                            active_bindings,
-                            loc);
+                            active_bindings);
                     std::shared_ptr<Symbol> rewritten_symbol = nullptr;
                     auto* rewritten_decl =
                         collect.instantiate_function_template_specialization(
@@ -867,11 +908,9 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 }
 
                 auto rewritten_arguments =
-                    collect.substitute_template_arguments_with_bindings(
+                    rewrite_function_template_arguments_for_bindings(
                         variable_specialization_info->arguments,
-                        function_template->parameters,
-                        active_bindings,
-                        loc);
+                        active_bindings);
                 std::shared_ptr<Symbol> rewritten_symbol = nullptr;
                 auto* rewritten_decl =
                     collect.instantiate_variable_template_specialization(
@@ -886,22 +925,16 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             };
         auto rewrite_function_template_type =
             [&](QualType type) -> QualType {
-                auto rewritten =
-                    collect.substitute_template_type_with_bindings(
-                        type,
-                        function_template->parameters,
-                        specialization_bindings,
-                        loc);
-                return collect.finalize_deferred_semantic_type(rewritten, loc);
+                return rewrite_function_template_type_for_bindings(
+                    type,
+                    specialization_bindings);
             };
         auto rewrite_function_template_arguments =
             [&](const std::vector<TemplateArgument>& template_arguments)
                 -> std::vector<TemplateArgument> {
-                return collect.substitute_template_arguments_with_bindings(
+                return rewrite_function_template_arguments_for_bindings(
                     template_arguments,
-                    function_template->parameters,
-                    specialization_bindings,
-                    loc);
+                    specialization_bindings);
             };
         auto register_specialization_symbol =
             [&](const std::shared_ptr<Symbol>& sym) {
@@ -1022,24 +1055,15 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                             loc,
                             "function template non-type parameter requires a concrete integral value",
                             [&](QualType type) -> QualType {
-                                auto rewritten =
-                                    collect.substitute_template_type_with_bindings(
-                                        type,
-                                        function_template->parameters,
-                                        element_bindings,
-                                        loc);
-                                return collect.finalize_deferred_semantic_type(
-                                    rewritten,
-                                    loc);
+                                return rewrite_function_template_type_for_bindings(
+                                    type,
+                                    element_bindings);
                             },
                             [&](const std::vector<TemplateArgument>& template_arguments)
                                 -> std::vector<TemplateArgument> {
-                                return collect
-                                    .substitute_template_arguments_with_bindings(
-                                        template_arguments,
-                                        function_template->parameters,
-                                        element_bindings,
-                                        loc);
+                                return rewrite_function_template_arguments_for_bindings(
+                                    template_arguments,
+                                    element_bindings);
                             },
                             register_specialization_symbol,
                             rewrite_specialized_member_expr);
@@ -1132,23 +1156,15 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                     loc,
                     "function template non-type parameter requires a concrete integral value",
                     [&](QualType type) -> QualType {
-                        auto rewritten =
-                            collect.substitute_template_type_with_bindings(
-                                type,
-                                function_template->parameters,
-                                element_bindings,
-                                loc);
-                        return collect.finalize_deferred_semantic_type(
-                            rewritten,
-                            loc);
+                        return rewrite_function_template_type_for_bindings(
+                            type,
+                            element_bindings);
                     },
                     [&](const std::vector<TemplateArgument>& template_arguments)
                         -> std::vector<TemplateArgument> {
-                        return collect.substitute_template_arguments_with_bindings(
+                        return rewrite_function_template_arguments_for_bindings(
                             template_arguments,
-                            function_template->parameters,
-                            element_bindings,
-                            loc);
+                            element_bindings);
                     },
                     register_specialization_symbol,
                     rewrite_specialized_member_expr);
@@ -1215,6 +1231,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             };
         auto clone_pass = clone_pass_builder.build_substitution_pass();
         clone_pass_ptr = &clone_pass;
+        ScopedActiveClonePass scoped_active_clone_pass(*this, &clone_pass);
         auto resolution_pass =
             clone_pass_builder.build_dependent_resolution_pass(
                 clone_pass,
@@ -1254,13 +1271,9 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                     }
                     return QualType();
                 }
-                auto rewritten =
-                    collect.substitute_template_type_with_bindings(
-                        type,
-                        function_template->parameters,
-                        element_bindings,
-                        loc);
-                return collect.finalize_deferred_semantic_type(rewritten, loc);
+                return rewrite_function_template_type_for_bindings(
+                    type,
+                    element_bindings);
             };
 
         specialization_decl_ptr->parameters.clear();
