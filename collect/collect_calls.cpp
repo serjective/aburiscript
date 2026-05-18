@@ -3583,6 +3583,20 @@ bool Collect::resolve_dependent_expr_after_substitution(
                     std::move(explicit_cast->expr),
                     ExprUseContext::RValue);
             }
+        } else if (explicit_cast->expr &&
+                   explicit_cast->ctype &&
+                   !contains_deferred_semantic_type(
+                       explicit_cast->ctype.get_shared()) &&
+                   !type_depends_on_template_parameters(
+                       explicit_cast->ctype,
+                       ast_ctx_.get())) {
+            // collect_explicit_cast/collect_cpp_named_cast build non-const
+            // explicit casts from rvalue-normalized operands. Dependent lookup
+            // can materialize a new glvalue operand only after substitution, so
+            // restore the same invariant before codegen sees the cast.
+            explicit_cast->expr = collect_apply_standard_conversions(
+                std::move(explicit_cast->expr),
+                ExprUseContext::RValue);
         }
         return true;
     }
