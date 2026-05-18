@@ -1127,7 +1127,13 @@ QualType Collect::substitute_template_type_with_bindings(
             std::move(substituted_arguments),
             dependent,
             specialization->is_class_template_placeholder);
-        return QualType(rewritten, quals);
+        QualType rewritten_type(rewritten, quals);
+        cache_existing_class_template_specialization_resolved_type(
+            ast_ctx_.get(),
+            rewritten_type,
+            clone_context &&
+                clone_context->publish_type_resolution_to_persistent_store);
+        return rewritten_type;
     }
 
     if (auto dependent_name = dyn_cast_shared<DependentNameType>(raw)) {

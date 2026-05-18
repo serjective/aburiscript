@@ -188,14 +188,19 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                 if (!changed) {
                     return current_type;
                 }
-                return QualType(
+                auto rewritten_specialization =
                     std::make_shared<TemplateSpecializationType>(
                         specialization->template_name,
                         primary_template,
                         std::move(rewritten_arguments),
                         specialization->is_dependent,
-                        specialization->is_class_template_placeholder),
-                    quals);
+                        specialization->is_class_template_placeholder);
+                QualType rewritten_type(rewritten_specialization, quals);
+                cache_existing_class_template_specialization_resolved_type(
+                    ctx.ast_ctx,
+                    rewritten_type,
+                    ctx.publish_type_resolution_to_persistent_store);
+                return rewritten_type;
             }
             if (auto dependent_name =
                     dyn_cast_shared<DependentNameType>(raw)) {

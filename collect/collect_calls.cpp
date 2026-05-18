@@ -5191,7 +5191,7 @@ std::unique_ptr<Expr> Collect::prepare_call_finalization(
 std::unique_ptr<Expr> Collect::append_missing_call_default_arguments(
     FuncCall* call,
     const CallFinalizationContext& context,
-    SrcLoc loc) const {
+    SrcLoc loc) {
     if (!context.function_type->has_prototype ||
         call->args.size() >= context.explicit_named_param_count) {
         return nullptr;
@@ -5220,6 +5220,25 @@ std::unique_ptr<Expr> Collect::append_missing_call_default_arguments(
             return collect_make<ErrorExpr>(
                 "unsupported default argument expression", loc);
         }
+        std::string resolution_error;
+        if (!resolve_dependent_expr_after_substitution(
+                cloned_default,
+                QualType(),
+                &resolution_error)) {
+            std::string message = resolution_error.empty()
+                ? "default argument expression failed semantic finalization"
+                : "default argument expression failed semantic finalization: " +
+                      resolution_error;
+            report_error(message, default_expr->location);
+            return collect_make<ErrorExpr>(
+                "invalid default argument expression", loc);
+        }
+        realize_deferred_expr_type_after_substitution(
+            cloned_default.get(),
+            /*allow_finalize=*/true);
+        materialize_specialization_uses_for_evaluated_expression(
+            cloned_default.get(),
+            loc);
         call->args.push_back(std::move(cloned_default));
     }
     return nullptr;

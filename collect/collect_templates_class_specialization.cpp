@@ -4888,6 +4888,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             pending_body->template_parameter_remap;
         clone_pass.context().template_decl_remap =
             pending_body->template_decl_remap;
+        clone_pass.context().publish_type_resolution_to_persistent_store = true;
         clone_pass.refresh_callbacks();
 
         FuncDecl* specialized_func = pending_body->specialized_function;
@@ -4908,6 +4909,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                         error_out);
                 });
         member_resolution_pass.sync_from_substitution_pass(clone_pass);
+        member_resolution_pass.context()
+            .publish_type_resolution_to_persistent_store = true;
 
         std::string clone_error;
         auto pattern_ctor = dyn_cast<CppConstructorDecl>(pattern_func);

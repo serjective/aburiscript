@@ -1142,6 +1142,9 @@ public:
     bool expression_is_value_dependent_for_constant_evaluation(
         const Expr* expr,
         bool defer_unmaterialized_constexpr_calls = false) const ;
+    void materialize_specialization_uses_for_evaluated_expression(
+        const Expr* expr,
+        SrcLoc loc) const ;
     void materialize_specialization_uses_for_constant_evaluation(
         const Expr* expr,
         SrcLoc loc) const ;
@@ -2478,7 +2481,7 @@ private:
     std::unique_ptr<Expr> append_missing_call_default_arguments(
         FuncCall* call,
         const CallFinalizationContext& context,
-        SrcLoc loc) const ;
+        SrcLoc loc) ;
 
     std::unique_ptr<Expr> convert_call_argument_to_parameter(
         std::unique_ptr<Expr> arg,

@@ -2334,6 +2334,52 @@ void cache_template_specialization_resolved_type(
     }
 }
 
+void cache_existing_class_template_specialization_resolved_type(
+    ASTContext* ast_ctx,
+    QualType type,
+    bool publish_to_persistent_store) {
+    if (!type) {
+        return;
+    }
+
+    auto specialization =
+        dyn_cast_shared<TemplateSpecializationType>(type.get_shared());
+    if (!specialization || specialization->is_dependent) {
+        return;
+    }
+
+    auto* class_template =
+        dyn_cast<ClassTemplateDecl>(specialization->primary_template);
+    if (!class_template) {
+        return;
+    }
+
+    auto effective_ast_ctx = effective_ast_context(ast_ctx);
+    if (!effective_ast_ctx) {
+        return;
+    }
+
+    auto* entry = effective_ast_ctx->lookup_class_template_specialization(
+        class_template,
+        specialization->arguments);
+    if (!entry || !entry->specialization_type) {
+        return;
+    }
+
+    QualType resolved_type(entry->specialization_type);
+    if (publish_to_persistent_store && ast_ctx) {
+        ast_ctx->set_template_specialization_resolved_type(
+            std::move(type),
+            std::move(resolved_type));
+        return;
+    }
+
+    cache_template_specialization_resolved_type(
+        ast_ctx,
+        type,
+        std::move(resolved_type));
+}
+
 QualType lookup_dependent_name_resolved_type(
     const DependentNameType* type,
     const ASTContext* ast_ctx) {

@@ -1657,7 +1657,7 @@ bool Collect::expression_is_value_dependent_for_constant_evaluation(
             type_depends_on_template_parameters(expr_type, ast_ctx_.get()));
 }
 
-void Collect::materialize_specialization_uses_for_constant_evaluation(
+void Collect::materialize_specialization_uses_for_evaluated_expression(
     const Expr* expr,
     SrcLoc loc) const {
     std::unordered_set<const Expr*> active_exprs;
@@ -1674,6 +1674,12 @@ void Collect::materialize_specialization_uses_for_constant_evaluation(
         note_specialization_use,
         active_exprs,
         active_symbols);
+}
+
+void Collect::materialize_specialization_uses_for_constant_evaluation(
+    const Expr* expr,
+    SrcLoc loc) const {
+    materialize_specialization_uses_for_evaluated_expression(expr, loc);
 }
 
 void Collect::materialize_specialization_uses_for_noexcept_evaluation(

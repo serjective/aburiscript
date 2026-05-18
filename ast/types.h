@@ -664,6 +664,10 @@ void cache_template_specialization_resolved_type(
     ASTContext* ast_ctx,
     QualType type,
     QualType resolved_type);
+void cache_existing_class_template_specialization_resolved_type(
+    ASTContext* ast_ctx,
+    QualType type,
+    bool publish_to_persistent_store = false);
 QualType lookup_dependent_name_resolved_type(
     const DependentNameType* type,
     const ASTContext* ast_ctx);

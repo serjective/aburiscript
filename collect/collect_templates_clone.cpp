@@ -107,6 +107,9 @@ const ASTCloneContext& TemplateDependentResolutionPass::context() const {
 
 void TemplateDependentResolutionPass::sync_from_substitution_pass(
     const TemplateSubstitutionPass& substitution_pass) {
+    ctx.publish_type_resolution_to_persistent_store =
+        substitution_pass.context()
+            .publish_type_resolution_to_persistent_store;
     ctx.rewrite_type = substitution_pass.context().rewrite_type;
     ctx.rewrite_template_arguments =
         substitution_pass.context().rewrite_template_arguments;
@@ -182,6 +185,9 @@ TemplateClonePassBuilder::build_dependent_resolution_pass(
     const TemplateSubstitutionPass& substitution_pass,
     const std::function<bool(std::unique_ptr<Expr>&, std::string*)>& resolve_expr) const {
     auto pass = build_dependent_resolution_pass(resolve_expr);
+    pass.ctx.publish_type_resolution_to_persistent_store =
+        substitution_pass.context()
+            .publish_type_resolution_to_persistent_store;
     pass.ctx.rewrite_type = substitution_pass.context().rewrite_type;
     pass.ctx.rewrite_template_arguments =
         substitution_pass.context().rewrite_template_arguments;
