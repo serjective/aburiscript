@@ -312,6 +312,63 @@ bool rebuild_specialized_ctor_initializer_expression(
     return true;
 }
 
+bool resolve_specialized_condition_after_substitution(
+    Collect& collect,
+    std::unique_ptr<Expr>& condition,
+    const std::string& stmt_name,
+    std::string* error_out) {
+    if (!condition) {
+        return true;
+    }
+
+    strip_redundant_specialization_casts(condition);
+    auto cpp_this_context = collect.collect_current_cpp_this_context();
+    if (!collect.resolve_dependent_expr_after_substitution(
+            condition,
+            cpp_this_context.this_type,
+            error_out)) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "failed to resolve dependent " + stmt_name +
+                " condition after template substitution";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool finalize_specialized_condition_expression(
+    Collect& collect,
+    std::unique_ptr<Expr>& condition,
+    SrcLoc loc,
+    const std::string& stmt_name,
+    std::string* error_out) {
+    if (!resolve_specialized_condition_after_substitution(
+            collect,
+            condition,
+            stmt_name,
+            error_out)) {
+        return false;
+    }
+    if (!condition) {
+        return true;
+    }
+
+    condition = collect.collect_condition_expression(
+        std::move(condition),
+        loc,
+        stmt_name);
+    if (!condition) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "failed to finalize " + stmt_name +
+                " condition after template substitution";
+        }
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 QualType implicit_this_type_for_specialized_function(const FuncDecl* decl) {
@@ -530,12 +587,25 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
                 return false;
             }
             if (if_stmt->condition) {
-                strip_redundant_specialization_casts(if_stmt->condition);
+                if (!resolve_specialized_condition_after_substitution(
+                        collect,
+                        if_stmt->condition,
+                        "if",
+                        error_out)) {
+                    return false;
+                }
                 auto condition_info = collect.collect_if_condition(
                     std::move(if_stmt->condition),
                     if_stmt->statement_kind,
                     if_stmt->location);
                 if_stmt->condition = std::move(condition_info.condition);
+                if (!if_stmt->condition) {
+                    if (error_out && error_out->empty()) {
+                        *error_out =
+                            "failed to finalize if condition after template substitution";
+                    }
+                    return false;
+                }
                 if_stmt->constexpr_condition_value =
                     condition_info.constexpr_value;
             }
@@ -601,12 +671,13 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::SwitchStmt: {
             auto* switch_stmt = static_cast<SwitchStmt*>(stmt.get());
-            if (switch_stmt->condition) {
-                strip_redundant_specialization_casts(switch_stmt->condition);
-                switch_stmt->condition = collect.collect_condition_expression(
-                    std::move(switch_stmt->condition),
+            if (!finalize_specialized_condition_expression(
+                    collect,
+                    switch_stmt->condition,
                     switch_stmt->location,
-                    "switch");
+                    "switch",
+                    error_out)) {
+                return false;
             }
             return finalize_specialized_stmt_semantics(
                 collect,
@@ -616,12 +687,13 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::WhileStmt: {
             auto* while_stmt = static_cast<WhileStmt*>(stmt.get());
-            if (while_stmt->condition) {
-                strip_redundant_specialization_casts(while_stmt->condition);
-                while_stmt->condition = collect.collect_condition_expression(
-                    std::move(while_stmt->condition),
+            if (!finalize_specialized_condition_expression(
+                    collect,
+                    while_stmt->condition,
                     while_stmt->location,
-                    "while");
+                    "while",
+                    error_out)) {
+                return false;
             }
             return finalize_specialized_stmt_semantics(
                 collect,
@@ -638,12 +710,13 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
                     error_out)) {
                 return false;
             }
-            if (do_while_stmt->condition) {
-                strip_redundant_specialization_casts(do_while_stmt->condition);
-                do_while_stmt->condition = collect.collect_condition_expression(
-                    std::move(do_while_stmt->condition),
+            if (!finalize_specialized_condition_expression(
+                    collect,
+                    do_while_stmt->condition,
                     do_while_stmt->location,
-                    "do/while");
+                    "do/while",
+                    error_out)) {
+                return false;
             }
             return true;
         }
@@ -656,12 +729,13 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
                     error_out)) {
                 return false;
             }
-            if (for_stmt->cond) {
-                strip_redundant_specialization_casts(for_stmt->cond);
-                for_stmt->cond = collect.collect_condition_expression(
-                    std::move(for_stmt->cond),
+            if (!finalize_specialized_condition_expression(
+                    collect,
+                    for_stmt->cond,
                     for_stmt->location,
-                    "for");
+                    "for",
+                    error_out)) {
+                return false;
             }
             if (for_stmt->action) {
                 strip_redundant_specialization_casts(for_stmt->action);
@@ -710,12 +784,13 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
                     error_out)) {
                 return false;
             }
-            if (range_for->condition) {
-                strip_redundant_specialization_casts(range_for->condition);
-                range_for->condition = collect.collect_condition_expression(
-                    std::move(range_for->condition),
+            if (!finalize_specialized_condition_expression(
+                    collect,
+                    range_for->condition,
                     range_for->location,
-                    "range-for");
+                    "range-for",
+                    error_out)) {
+                return false;
             }
             if (range_for->increment) {
                 strip_redundant_specialization_casts(range_for->increment);

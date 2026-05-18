@@ -2122,7 +2122,9 @@ bool Collect::finalize_cpp_lambda_semantics(
         synthesized_method_type &&
         auto_type_utils::has_cxx_auto_type(
             synthesized_method_type->ret_type.get_shared());
-    if (needs_post_clone_auto_return_deduction) {
+    bool should_finalize_cloned_body =
+        !lambda.is_generic && synthesized_method->body != nullptr;
+    if (should_finalize_cloned_body) {
         std::string finalize_error;
         if (!with_function_definition_state(
                 synthesized_method.get(),
@@ -2144,7 +2146,7 @@ bool Collect::finalize_cpp_lambda_semantics(
             synthesized_method->body
                 ? dyn_cast<CompoundStmt>(synthesized_method->body.get())->scope
                 : nullptr;
-        if (written_method_type) {
+        if (needs_post_clone_auto_return_deduction && written_method_type) {
             written_method_type->ret_type = synthesized_method_type->ret_type;
         }
     }
