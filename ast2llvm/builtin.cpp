@@ -608,6 +608,82 @@ static BuiltinLoweringResult lower_builtin_atomic_and_sync_group(
         bool semantic_is_unsigned = semantic_type->isIntegerTy();
         return cast_llvm_type(value, semantic_type, semantic_is_unsigned);
     };
+    auto atomic_value_pointer_type =
+        [&](Expr* ptr_expr) -> std::pair<QualType, std::shared_ptr<PointerType>> {
+        auto value_info = get_atomic_pointer_value_type(ptr_expr, lower.ast_ctx.get());
+        if (!value_info.value_type) {
+            return {};
+        }
+        return {
+            value_info.value_type,
+            desugar_type(value_info.value_type, lower.ast_ctx.get())
+                .as_shared<PointerType>()};
+    };
+    auto atomic_pointer_stride_bytes =
+        [&](const std::shared_ptr<PointerType>& value_pointer_type) -> llvm::Value* {
+        if (!value_pointer_type || !value_pointer_type->pointed_type) {
+            return llvm::ConstantInt::get(
+                module->getDataLayout().getIntPtrType(ctx, 0), 1);
+        }
+
+        QualType pointed_type =
+            desugar_type(value_pointer_type->pointed_type, lower.ast_ctx.get());
+        auto pointed = pointed_type.get_shared();
+        if (pointed && type_contains_vla(pointed)) {
+            llvm::Value* stride = lower.emit_type_size_bytes(pointed, true);
+            llvm::Type* intptr_type = module->getDataLayout().getIntPtrType(ctx, 0);
+            if (stride && stride->getType() != intptr_type) {
+                stride = builder.CreateIntCast(
+                    stride, intptr_type, false, "atomic_ptr_stride_cast");
+            }
+            return stride;
+        }
+
+        int64_t size_bytes = pointed ? pointed->getWidthBytes() : 1;
+        if (size_bytes <= 0) {
+            size_bytes = 1;
+        }
+        return llvm::ConstantInt::get(
+            module->getDataLayout().getIntPtrType(ctx, 0),
+            static_cast<uint64_t>(size_bytes));
+    };
+    auto atomic_pointer_delta_bytes =
+        [&](Expr* delta_expr,
+            const std::shared_ptr<PointerType>& value_pointer_type,
+            bool scale_by_pointee) -> llvm::Value* {
+        llvm::Value* delta = convert_expression(delta_expr);
+        llvm::Type* intptr_type = module->getDataLayout().getIntPtrType(ctx, 0);
+        if (delta->getType()->isPointerTy()) {
+            delta = builder.CreatePtrToInt(delta, intptr_type, "atomic_ptr_delta_ptrtoint");
+        } else if (delta->getType()->isIntegerTy()) {
+            if (delta->getType() != intptr_type) {
+                bool src_unsigned =
+                    delta_expr && delta_expr->get_type() && delta_expr->get_type()->isUnsigned();
+                delta = builder.CreateIntCast(
+                    delta, intptr_type, !src_unsigned, "atomic_ptr_delta_cast");
+            }
+        } else if (delta->getType() != intptr_type) {
+            delta = cast_llvm_type(delta, intptr_type, false);
+        }
+
+        if (!scale_by_pointee) {
+            return delta;
+        }
+
+        llvm::Value* stride = atomic_pointer_stride_bytes(value_pointer_type);
+        if (!stride) {
+            return delta;
+        }
+        if (auto* stride_const = llvm::dyn_cast<llvm::ConstantInt>(stride);
+            stride_const && stride_const->isOne()) {
+            return delta;
+        }
+        if (stride->getType() != intptr_type) {
+            stride = builder.CreateIntCast(
+                stride, intptr_type, false, "atomic_ptr_stride_cast");
+        }
+        return builder.CreateMul(delta, stride, "atomic_ptr_delta_bytes");
+    };
 
     switch (expr->kind) {
     case BuiltinKind::ATOMIC_LOAD_N: {
@@ -773,6 +849,8 @@ static BuiltinLoweringResult lower_builtin_atomic_and_sync_group(
         builder.CreateStore(init_val, ptr);
         return {true, llvm::Constant::getNullValue(llvm::Type::getVoidTy(ctx))};
     }
+    case BuiltinKind::C11_ATOMIC_FETCH_ADD:
+    case BuiltinKind::C11_ATOMIC_FETCH_SUB:
     case BuiltinKind::ATOMIC_FETCH_ADD:
     case BuiltinKind::ATOMIC_FETCH_SUB:
     case BuiltinKind::ATOMIC_FETCH_AND:
@@ -780,20 +858,17 @@ static BuiltinLoweringResult lower_builtin_atomic_and_sync_group(
     case BuiltinKind::ATOMIC_FETCH_XOR:
     case BuiltinKind::ATOMIC_FETCH_NAND: {
         auto ptr = convert_expression(expr->args[0].get());
-        auto val = convert_expression(expr->args[1].get());
-        if (auto ptr_type = expr->args[0]->get_type().as_shared<PointerType>()) {
-            llvm::Type* pointee_type = convert_type(ptr_type->pointed_type);
-            if (pointee_type && val->getType() != pointee_type) {
-                bool src_unsigned = expr->args[1]->get_type() && expr->args[1]->get_type()->isUnsigned();
-                val = cast_llvm_type(val, pointee_type, src_unsigned);
-            }
-        }
+        auto [value_qt, value_pointer_type] =
+            atomic_value_pointer_type(expr->args[0].get());
+        llvm::Type* value_type = value_qt ? convert_type(value_qt) : nullptr;
         auto order_val = eval_constexpr_i64(
             expr->args[2].get(), ConstEvalMode::builtin_query()).value_or(5);
         auto ordering = map_memory_order(order_val);
         llvm::AtomicRMWInst::BinOp op;
         switch (expr->kind) {
+            case BuiltinKind::C11_ATOMIC_FETCH_ADD:
             case BuiltinKind::ATOMIC_FETCH_ADD: op = llvm::AtomicRMWInst::Add; break;
+            case BuiltinKind::C11_ATOMIC_FETCH_SUB:
             case BuiltinKind::ATOMIC_FETCH_SUB: op = llvm::AtomicRMWInst::Sub; break;
             case BuiltinKind::ATOMIC_FETCH_AND: op = llvm::AtomicRMWInst::And; break;
             case BuiltinKind::ATOMIC_FETCH_OR:  op = llvm::AtomicRMWInst::Or;  break;
@@ -801,6 +876,20 @@ static BuiltinLoweringResult lower_builtin_atomic_and_sync_group(
             case BuiltinKind::ATOMIC_FETCH_NAND: op = llvm::AtomicRMWInst::Nand; break;
             default: op = llvm::AtomicRMWInst::Add; break;
         }
+        if (value_pointer_type &&
+            (op == llvm::AtomicRMWInst::Add || op == llvm::AtomicRMWInst::Sub)) {
+            bool scale_by_pointee =
+                expr->kind == BuiltinKind::C11_ATOMIC_FETCH_ADD ||
+                expr->kind == BuiltinKind::C11_ATOMIC_FETCH_SUB;
+            auto val = atomic_pointer_delta_bytes(
+                expr->args[1].get(), value_pointer_type, scale_by_pointee);
+            auto* old = builder.CreateAtomicRMW(
+                op, ptr, val, llvm::MaybeAlign(0), ordering);
+            return {true, cast_from_atomic_storage_type(old, value_type)};
+        }
+
+        auto val = convert_expression(expr->args[1].get());
+        val = cast_to_atomic_semantic_type(expr->args[1].get(), val, value_type);
         return {true, builder.CreateAtomicRMW(op, ptr, val, llvm::MaybeAlign(0), ordering)};
     }
     case BuiltinKind::ATOMIC_ADD_FETCH:
@@ -810,14 +899,9 @@ static BuiltinLoweringResult lower_builtin_atomic_and_sync_group(
     case BuiltinKind::ATOMIC_XOR_FETCH:
     case BuiltinKind::ATOMIC_NAND_FETCH: {
         auto ptr = convert_expression(expr->args[0].get());
-        auto val = convert_expression(expr->args[1].get());
-        if (auto ptr_type = expr->args[0]->get_type().as_shared<PointerType>()) {
-            llvm::Type* pointee_type = convert_type(ptr_type->pointed_type);
-            if (pointee_type && val->getType() != pointee_type) {
-                bool src_unsigned = expr->args[1]->get_type() && expr->args[1]->get_type()->isUnsigned();
-                val = cast_llvm_type(val, pointee_type, src_unsigned);
-            }
-        }
+        auto [value_qt, value_pointer_type] =
+            atomic_value_pointer_type(expr->args[0].get());
+        llvm::Type* value_type = value_qt ? convert_type(value_qt) : nullptr;
         auto order_val = eval_constexpr_i64(
             expr->args[2].get(), ConstEvalMode::builtin_query()).value_or(5);
         auto ordering = map_memory_order(order_val);
@@ -831,6 +915,20 @@ static BuiltinLoweringResult lower_builtin_atomic_and_sync_group(
             case BuiltinKind::ATOMIC_NAND_FETCH: op = llvm::AtomicRMWInst::Nand; break;
             default: op = llvm::AtomicRMWInst::Add; break;
         }
+        if (value_pointer_type &&
+            (op == llvm::AtomicRMWInst::Add || op == llvm::AtomicRMWInst::Sub)) {
+            auto val = atomic_pointer_delta_bytes(
+                expr->args[1].get(), value_pointer_type, false);
+            auto* old = builder.CreateAtomicRMW(
+                op, ptr, val, llvm::MaybeAlign(0), ordering);
+            llvm::Value* result = op == llvm::AtomicRMWInst::Add
+                ? static_cast<llvm::Value*>(builder.CreateAdd(old, val, "add_fetch"))
+                : static_cast<llvm::Value*>(builder.CreateSub(old, val, "sub_fetch"));
+            return {true, cast_from_atomic_storage_type(result, value_type)};
+        }
+
+        auto val = convert_expression(expr->args[1].get());
+        val = cast_to_atomic_semantic_type(expr->args[1].get(), val, value_type);
         auto* old = builder.CreateAtomicRMW(op, ptr, val, llvm::MaybeAlign(0), ordering);
         // Compute new value: old OP val
         switch (expr->kind) {

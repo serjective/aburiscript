@@ -8566,6 +8566,8 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_atomic_cases(
         }
         case BuiltinKind::ATOMIC_FETCH_ADD:
         case BuiltinKind::ATOMIC_FETCH_SUB:
+        case BuiltinKind::C11_ATOMIC_FETCH_ADD:
+        case BuiltinKind::C11_ATOMIC_FETCH_SUB:
         case BuiltinKind::ATOMIC_FETCH_AND:
         case BuiltinKind::ATOMIC_FETCH_OR:
         case BuiltinKind::ATOMIC_FETCH_XOR:
