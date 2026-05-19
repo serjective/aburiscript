@@ -2308,6 +2308,19 @@ private:
         QualType target_type,
         std::string* error_out) const ;
 
+    enum class CppStaticCastCheckResult : uint8_t {
+        Valid,
+        Invalid,
+        Dependent
+    };
+
+    CppStaticCastCheckResult check_cpp_static_cast(
+        Expr* expr,
+        QualType source_type,
+        QualType target_type,
+        QualType target_no_ref,
+        std::string* error_out) const ;
+
     std::unique_ptr<Expr> cpp_const_named_cast(
         std::unique_ptr<Expr> expr,
         QualType target_type,

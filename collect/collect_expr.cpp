@@ -4463,7 +4463,8 @@ Collect::CppConstCastCheckResult Collect::check_cpp_const_cast(
                 contains_deferred_semantic_type(type.get_shared()));
     };
 
-    bool target_dependent = type_needs_deferred_check(target_type);
+    bool target_dependent =
+        type_needs_deferred_check(target_type);
     bool expr_dependent =
         expr && expression_depends_on_template_parameters(expr);
 
@@ -4475,7 +4476,8 @@ Collect::CppConstCastCheckResult Collect::check_cpp_const_cast(
 
     auto source_type = desugar_type(expr->get_type(), ast_ctx_.get());
     bool source_dependent =
-        expr_dependent || type_needs_deferred_check(source_type);
+        expr_dependent ||
+        type_needs_deferred_check(source_type);
     if (!source_type) {
         return source_dependent || target_dependent
             ? CppConstCastCheckResult::Dependent
@@ -4742,23 +4744,24 @@ std::unique_ptr<Expr> Collect::cpp_reinterpret_named_cast(
     return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
 }
 
-std::unique_ptr<Expr> Collect::cpp_static_named_cast(
-    std::unique_ptr<Expr> expr,
+Collect::CppStaticCastCheckResult Collect::check_cpp_static_cast(
+    Expr* expr,
     QualType source_type,
     QualType target_type,
     QualType target_no_ref,
-    SrcLoc loc) const {
-    auto source_object_type =
-        source_type.as_shared<ObjectType>();
-    auto target_object_type =
-        target_no_ref.as_shared<ObjectType>();
-    auto source_ptr = source_type.as_shared<PointerType>();
-    auto target_ptr = target_no_ref.as_shared<PointerType>();
-    auto source_member_ptr = source_type.as_shared<MemberPointerType>();
-    auto target_member_ptr = target_no_ref.as_shared<MemberPointerType>();
+    std::string* error_out) const {
+    auto set_error = [&](const std::string& message) {
+        if (error_out) {
+            *error_out = message;
+        }
+        return CppStaticCastCheckResult::Invalid;
+    };
 
-    bool source_integer_like = is_integer_or_enum_type(source_type, ast_ctx_.get());
-    bool target_integer_like = is_integer_or_enum_type(target_no_ref, ast_ctx_.get());
+    auto type_needs_deferred_check = [&](QualType type) {
+        return type &&
+               (type_depends_on_template_parameters(type, ast_ctx_.get()) ||
+                contains_deferred_semantic_type(type.get_shared()));
+    };
 
     auto member_pointer_static_cast_error =
         [](MemberPointerConversionIssue issue) -> std::string {
@@ -4782,6 +4785,43 @@ std::unique_ptr<Expr> Collect::cpp_static_named_cast(
         return "invalid static_cast between pointer-to-member types";
     };
 
+    bool target_dependent =
+        type_needs_deferred_check(target_type) ||
+        type_needs_deferred_check(target_no_ref);
+    bool expr_dependent =
+        expr && expression_depends_on_template_parameters(expr);
+    bool source_dependent =
+        expr_dependent ||
+        type_needs_deferred_check(source_type);
+
+    if (!expr) {
+        return target_dependent
+            ? CppStaticCastCheckResult::Dependent
+            : set_error("named cast requires a valid expression operand");
+    }
+    if (!source_type) {
+        return target_dependent || source_dependent
+            ? CppStaticCastCheckResult::Dependent
+            : set_error("named cast operand has unknown type");
+    }
+    if (!target_no_ref) {
+        return target_dependent
+            ? CppStaticCastCheckResult::Dependent
+            : set_error("named cast requires a valid target type");
+    }
+
+    if (target_dependent || source_dependent) {
+        return CppStaticCastCheckResult::Dependent;
+    }
+
+    auto source_ptr = source_type.as_shared<PointerType>();
+    auto target_ptr = target_no_ref.as_shared<PointerType>();
+    auto source_member_ptr = source_type.as_shared<MemberPointerType>();
+    auto target_member_ptr = target_no_ref.as_shared<MemberPointerType>();
+
+    bool source_integer_like = is_integer_or_enum_type(source_type, ast_ctx_.get());
+    bool target_integer_like = is_integer_or_enum_type(target_no_ref, ast_ctx_.get());
+
     if (source_ptr && target_ptr) {
         bool target_points_to_void =
             target_ptr->pointed_type && target_ptr->pointed_type->isVoid();
@@ -4790,34 +4830,67 @@ std::unique_ptr<Expr> Collect::cpp_static_named_cast(
         if (!target_points_to_void &&
             !source_points_to_void &&
             !pointers_to_compatible_types(target_no_ref, source_type)) {
-            return named_cast_error(
-                "invalid static_cast between unrelated pointer types", loc);
+            return set_error(
+                "invalid static_cast between unrelated pointer types");
         }
 
         if (target_ptr->pointed_type.equals_unqualified(source_ptr->pointed_type) &&
             !target_ptr->pointed_type.has_all_qualifiers_of(source_ptr->pointed_type)) {
-            return named_cast_error("static_cast cannot cast away qualifiers", loc);
+            return set_error("static_cast cannot cast away qualifiers");
         }
     } else if (source_member_ptr && target_member_ptr) {
         auto conversion = analyze_member_pointer_conversion(source_type, target_no_ref);
         if (!conversion.viable) {
-            return named_cast_error(member_pointer_static_cast_error(conversion.issue), loc);
+            return set_error(member_pointer_static_cast_error(conversion.issue));
         }
     } else if (target_ptr && source_integer_like) {
-        if (!is_null_pointer_constant_expr(expr.get())) {
-            return named_cast_error("invalid static_cast from integer to pointer type", loc);
+        if (!is_null_pointer_constant_expr(expr)) {
+            return set_error("invalid static_cast from integer to pointer type");
         }
     } else if (target_member_ptr && source_integer_like) {
-        if (!is_null_pointer_constant_expr(expr.get())) {
-            return named_cast_error(
-                "invalid static_cast from integer to member pointer type", loc);
+        if (!is_null_pointer_constant_expr(expr)) {
+            return set_error(
+                "invalid static_cast from integer to member pointer type");
         }
     } else if (source_ptr && target_integer_like) {
-        return named_cast_error("invalid static_cast from pointer to integer type", loc);
+        return set_error("invalid static_cast from pointer to integer type");
     } else if (source_member_ptr && target_integer_like) {
-        return named_cast_error(
-            "invalid static_cast from member pointer to integer type", loc);
+        return set_error(
+            "invalid static_cast from member pointer to integer type");
     }
+
+    return CppStaticCastCheckResult::Valid;
+}
+
+std::unique_ptr<Expr> Collect::cpp_static_named_cast(
+    std::unique_ptr<Expr> expr,
+    QualType source_type,
+    QualType target_type,
+    QualType target_no_ref,
+    SrcLoc loc) const {
+    std::string static_cast_error;
+    auto static_cast_check =
+        check_cpp_static_cast(
+            expr.get(),
+            source_type,
+            target_type,
+            target_no_ref,
+            &static_cast_error);
+    if (static_cast_check == CppStaticCastCheckResult::Invalid) {
+        return named_cast_error(static_cast_error, loc);
+    }
+    if (static_cast_check == CppStaticCastCheckResult::Dependent) {
+        return collect_make<ExplicitCast>(
+            std::move(expr),
+            target_type,
+            loc,
+            ExplicitCastKind::CppStaticCast);
+    }
+
+    auto source_object_type =
+        source_type.as_shared<ObjectType>();
+    auto target_object_type =
+        target_no_ref.as_shared<ObjectType>();
 
     if (lang_opts_.is_cxx_mode() &&
         (source_object_type || target_object_type)) {
@@ -4851,7 +4924,11 @@ std::unique_ptr<Expr> Collect::cpp_static_named_cast(
         }
     }
 
-    return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
+    return collect_make<ExplicitCast>(
+        std::move(expr),
+        target_type,
+        loc,
+        ExplicitCastKind::CppStaticCast);
 }
 
 std::unique_ptr<Expr> Collect::collect_cpp_named_cast(CppNamedCastKind cast_kind,
