@@ -108,6 +108,10 @@ bool is_same_type_object_prvalue_initializer(
     if (!target_type || !init) {
         return false;
     }
+    if (const auto* init_list = dyn_cast<InitListExpr>(init);
+        init_list && init_list->elements.empty()) {
+        return false;
+    }
     QualType source_type = const_cast<Expr*>(init)->get_type();
     if (!source_type) {
         return false;
@@ -141,20 +145,24 @@ bool is_same_type_object_prvalue_initializer(
 
 bool empty_class_initialization_needs_default_constructor_overload(
     const RecordSemanticState* record_state,
-    const Expr* init) {
+    const Expr* init,
+    bool aggregate_initialization_candidate) {
     const auto* init_list = dyn_cast<InitListExpr>(init);
     if (!record_state || !init_list || !init_list->elements.empty()) {
         return false;
     }
 
     for (const auto& ctor : record_state->constructors) {
-        if (!ctor.symbol || !ctor.decl) {
+        if (!ctor.decl) {
             continue;
         }
         if (!cpp_constructor_is_viable_default_candidate(
                 ctor,
                 /*allow_protected_access=*/false)) {
             continue;
+        }
+        if (!aggregate_initialization_candidate) {
+            return true;
         }
         return !ctor.decl->ctor_initializers.empty();
     }
@@ -490,6 +498,8 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
             declared_type,
             init.get(),
             ast_ctx_.get());
+    bool aggregate_initialization_candidate =
+        record_type && is_aggregate_type(declared_type.get_shared());
     analysis.should_use_constructor_overload =
         record_state &&
         !defer_initializer_semantics &&
@@ -499,7 +509,8 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
          record_state->definition_data.has_user_declared_constructor ||
          empty_class_initialization_needs_default_constructor_overload(
              record_state,
-             init.get()) ||
+             init.get(),
+             aggregate_initialization_candidate) ||
          should_use_implicit_special_member_constructor_overload(
              declared_type,
              record_state,

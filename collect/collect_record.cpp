@@ -1008,13 +1008,37 @@ bool type_needs_generated_default_constructor_initializer(
     if (!canonical) {
         return false;
     }
-    if (canonical_type_kind(canonical, ast_ctx) == TypeKind::Object) {
-        return true;
-    }
     if (auto array_type = canonical.as_shared<ArrayType>()) {
         return type_needs_generated_default_constructor_initializer(
             array_type->element_type,
             ast_ctx);
+    }
+    if (canonical_type_kind(canonical, ast_ctx) == TypeKind::Object) {
+        auto object_type = canonical.as_shared<ObjectType>();
+        const ObjectDecl* object_decl =
+            object_type
+                ? canonical_cpp_record_decl(
+                      dyn_cast<ObjectDecl>(object_type->get_decl()))
+                : nullptr;
+        const RecordSemanticState* object_state =
+            object_decl ? record_semantics_cache_lookup(object_decl, ast_ctx)
+                        : nullptr;
+        if (!object_state || object_state->constructors.empty()) {
+            return true;
+        }
+        for (const auto& ctor : object_state->constructors) {
+            if (!cpp_constructor_is_viable_default_candidate(
+                    ctor,
+                    /*allow_protected_access=*/false)) {
+                continue;
+            }
+            if (!ctor.is_implicit || ctor.symbol ||
+                (ctor.decl && !ctor.decl->ctor_initializers.empty())) {
+                return true;
+            }
+            return false;
+        }
+        return true;
     }
     return false;
 }

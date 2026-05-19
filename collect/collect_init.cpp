@@ -48,6 +48,42 @@ bool string_array_element_types_compatible(const QualType& target_elem,
     return target_builtin->isInteger() && literal_builtin->isInteger() &&
            target_builtin->getWidth() == literal_builtin->getWidth();
 }
+
+bool is_same_type_object_prvalue_for_initialization(
+    const Collect& collect,
+    Expr* expr,
+    QualType target_type,
+    const ASTContext* ast_ctx) {
+    if (!expr || !target_type) {
+        return false;
+    }
+
+    QualType source_type = expr->get_type();
+    if (!source_type) {
+        return false;
+    }
+
+    QualType canonical_target =
+        collect_internal::remove_reference_and_desugar(target_type, ast_ctx);
+    QualType canonical_source =
+        collect_internal::remove_reference_and_desugar(source_type, ast_ctx);
+    if (!canonical_target ||
+        !canonical_source ||
+        canonical_target->kind != TypeKind::Object ||
+        canonical_source->kind != TypeKind::Object) {
+        return false;
+    }
+
+    bool same_object_type =
+        canonical_source.equals_unqualified(canonical_target) ||
+        types_equivalent_after_template_argument_canonicalization(
+            source_type,
+            target_type,
+            ast_ctx,
+            /*ignore_top_level_qualifiers=*/true);
+    return same_object_type &&
+           collect.classify_value_category(expr) == Collect::ValueCategory::PRValue;
+}
 }
 
 void Collect::find_field_recursive(const ObjectType* record, const std::string& name, std::vector<uint32_t>& path, size_t base_offset, FieldLookupResult& result) const {
@@ -581,6 +617,13 @@ std::unique_ptr<Expr> Collect::transform_init_value(std::unique_ptr<Expr> expr, 
         type &&
         canonical_type_kind(QualType(type), ast_ctx_.get()) == TypeKind::Object &&
         !is_aggregate_type(type)) {
+        if (is_same_type_object_prvalue_for_initialization(
+                *this,
+                expr.get(),
+                QualType(type),
+                ast_ctx_.get())) {
+            return expr;
+        }
         SrcLoc loc = expr->location;
         std::vector<std::unique_ptr<Expr>> init_args;
         init_args.push_back(std::move(expr));
