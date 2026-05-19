@@ -51,6 +51,22 @@ QualType strip_top_level_qualifiers(QualType type) {
     return QualType(type.get_shared());
 }
 
+bool deduced_type_arguments_match(QualType existing_type, QualType deduced_type) {
+    if (!existing_type || !deduced_type) {
+        return existing_type.equals_qualified(deduced_type);
+    }
+    if (existing_type.equals_qualified(deduced_type)) {
+        return true;
+    }
+
+    // Repeated deductions must name the same type; substituted dependent
+    // aliases may only become comparable after side-table-backed desugaring.
+    auto existing_canonical = desugar_type(existing_type);
+    auto deduced_canonical = desugar_type(deduced_type);
+    return existing_canonical && deduced_canonical &&
+           existing_canonical.equals_qualified(deduced_canonical);
+}
+
 struct TemplateSpecializationMatchInfo {
     const Decl* primary_template = nullptr;
     std::string_view template_name;
@@ -810,7 +826,7 @@ bool bind_deduced_template_argument(
     const auto* existing_single = existing.single_argument();
     return existing_single &&
            existing_single->kind == TemplateArgumentKind::Type &&
-           existing_single->type.equals_qualified(deduced_type);
+           deduced_type_arguments_match(existing_single->type, deduced_type);
 }
 
 bool bind_deduced_template_template_argument(
