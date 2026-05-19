@@ -8059,6 +8059,27 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 nested_template.decl = class_template_decl;
                 state.nested_templates.push_back(std::move(nested_template));
                 changed = true;
+            } else if (auto* alias_template_decl =
+                           dyn_cast<AliasTemplateDecl>(member_decl)) {
+                auto* alias_decl = alias_template_decl->alias_decl();
+                if (!alias_decl || alias_decl->name.empty()) {
+                    return;
+                }
+                for (const auto& existing_nested_template :
+                     state.nested_templates) {
+                    if (existing_nested_template.decl == alias_template_decl) {
+                        return;
+                    }
+                }
+
+                RecordSemanticState::NestedTemplate nested_template;
+                nested_template.name = alias_decl->name;
+                nested_template.declared_access = member_access;
+                nested_template.kind =
+                    RecordSemanticState::NestedTemplateKind::Alias;
+                nested_template.decl = alias_template_decl;
+                state.nested_templates.push_back(std::move(nested_template));
+                changed = true;
             } else if (auto* method_decl = dyn_cast<CppMethodDecl>(member_decl)) {
                 for (const auto& existing_method : state.methods) {
                     if (existing_method.decl == method_decl) {

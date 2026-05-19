@@ -357,6 +357,46 @@ Parser::CppTypeComponentResolution Parser::resolve_cpp_unqualified_type_componen
     if (!isa<AliasTemplateDecl>(primary_template) &&
         !isa<ClassTemplateDecl>(primary_template) &&
         !isa<TemplateTemplateParmDecl>(primary_template)) {
+        QualType owner_lookup_type =
+            collect_->collect_current_cpp_record_lookup_type();
+        const auto* nested_template =
+            collect_->collect_lookup_record_nested_template(
+                owner_lookup_type,
+                component_name);
+        if (!nested_template || !nested_template->decl) {
+            return result;
+        }
+
+        bool is_dependent =
+            type_depends_on_template_parameters(
+                owner_lookup_type,
+                ast_ctx.get());
+        for (const auto& argument : component_arguments) {
+            if (template_argument_depends_on_template_parameters(
+                    argument,
+                    ast_ctx.get())) {
+                is_dependent = true;
+                break;
+            }
+        }
+
+        if (nested_template->kind ==
+                RecordSemanticState::NestedTemplateKind::Class &&
+            is_dependent) {
+            result.type = QualType(
+                std::make_shared<TemplateSpecializationType>(
+                    component_name,
+                    nested_template->decl,
+                    component_arguments,
+                    true));
+            return result;
+        }
+
+        result.type = collect_->collect_lookup_record_nested_template_type(
+            owner_lookup_type,
+            component_name,
+            component_arguments,
+            component_loc);
         return result;
     }
 
