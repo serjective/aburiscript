@@ -3485,6 +3485,19 @@ bool Collect::resolve_dependent_expr_after_substitution(
         return false;
     }
 
+    if (auto* this_expr = dyn_cast<CppThisExpr>(expr.get())) {
+        if (implicit_this_type &&
+            (type_depends_on_template_parameters(
+                 this_expr->this_type,
+                 ast_ctx_.get()) ||
+             (this_expr->this_type &&
+              contains_deferred_semantic_type(
+                  this_expr->this_type.get_shared())))) {
+            this_expr->this_type = implicit_this_type;
+        }
+        return true;
+    }
+
     if (auto* implicit_cast = dyn_cast<ImplicitCast>(expr.get())) {
         if (implicit_cast->expr &&
             !resolve_dependent_expr_after_substitution(
@@ -3656,6 +3669,58 @@ bool Collect::resolve_dependent_expr_after_substitution(
             if (error_out && error_out->empty()) {
                 *error_out =
                     "failed to resolve function-style cast after substitution";
+            }
+            return false;
+        }
+        expr = std::move(rewritten);
+        return true;
+    }
+    if (auto* member = dyn_cast<MemberExpr>(expr.get())) {
+        if (member->base &&
+            !resolve_dependent_expr_after_substitution(
+                member->base,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        strip_stale_dependent_implicit_casts(member->base);
+        realize_deferred_expr_type_after_substitution(
+            member->base.get(),
+            /*allow_finalize=*/true);
+        realize_deferred_expr_type_after_substitution(
+            member,
+            /*allow_finalize=*/true);
+
+        bool base_still_dependent =
+            !member->base ||
+            expression_depends_on_template_parameters(member->base.get()) ||
+            type_depends_on_template_parameters(
+                member->base->get_type(),
+                ast_ctx_.get());
+        bool member_type_still_dependent =
+            type_depends_on_template_parameters(
+                member->member_type,
+                ast_ctx_.get()) ||
+            (member->member_type &&
+             contains_deferred_semantic_type(
+                 member->member_type.get_shared()));
+        if (base_still_dependent || !member_type_still_dependent) {
+            return true;
+        }
+
+        auto owned_member = std::unique_ptr<MemberExpr>(
+            static_cast<MemberExpr*>(expr.release()));
+        auto rewritten = collect_member_expression(
+            std::move(owned_member->base),
+            owned_member->get_member_name(),
+            owned_member->isArrow != 0,
+            owned_member->location,
+            /*allow_overloaded_method_set=*/false,
+            owned_member->suppress_virtual_dispatch != 0);
+        if (!rewritten) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to rebind member access after substitution";
             }
             return false;
         }
@@ -3983,6 +4048,17 @@ bool Collect::resolve_dependent_expr_after_substitution(
         [&](std::unique_ptr<UnresolvedMemberExpr> owned_member,
             bool allow_overloaded_method_set)
             -> std::unique_ptr<Expr> {
+            if (owned_member->base &&
+                !resolve_dependent_expr_after_substitution(
+                    owned_member->base,
+                    implicit_this_type,
+                    error_out)) {
+                return nullptr;
+            }
+            strip_stale_dependent_implicit_casts(owned_member->base);
+            realize_deferred_expr_type_after_substitution(
+                owned_member->base.get(),
+                /*allow_finalize=*/true);
             return collect_member_expression(
                 std::move(owned_member->base),
                 owned_member->member_name,
@@ -4002,6 +4078,26 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 owned_lookup->location,
                 implicit_this_type);
         };
+
+    auto resolve_call_arguments_after_substitution =
+        [&](std::vector<std::unique_ptr<Expr>>& args) -> bool {
+        for (auto& arg : args) {
+            if (arg &&
+                !resolve_dependent_expr_after_substitution(
+                    arg,
+                    implicit_this_type,
+                    error_out)) {
+                return false;
+            }
+        }
+        for (auto& arg : args) {
+            strip_stale_dependent_implicit_casts(arg);
+            realize_deferred_expr_type_after_substitution(
+                arg.get(),
+                /*allow_finalize=*/true);
+        }
+        return true;
+    };
 
     auto find_stale_lambda_object_call_symbol =
         [&](const FuncCall* call) -> std::shared_ptr<Symbol> {
@@ -4340,19 +4436,10 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 error_out)) {
             return false;
         }
-        for (auto& arg : owned_call->args) {
-            if (arg &&
-                !resolve_dependent_expr_after_substitution(
-                    arg,
-                    implicit_this_type,
-                    error_out)) {
-                return false;
-            }
+        if (!resolve_call_arguments_after_substitution(owned_call->args)) {
+            return false;
         }
         strip_stale_dependent_implicit_casts(owned_call->func);
-        for (auto& arg : owned_call->args) {
-            strip_stale_dependent_implicit_casts(arg);
-        }
 
         auto expr_or_type_still_dependent =
             [&](const std::unique_ptr<Expr>& candidate) -> bool {
@@ -4468,19 +4555,10 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 error_out)) {
             return false;
         }
-        for (auto& arg : owned_call->args) {
-            if (arg &&
-                !resolve_dependent_expr_after_substitution(
-                    arg,
-                    implicit_this_type,
-                    error_out)) {
-                return false;
-            }
+        if (!resolve_call_arguments_after_substitution(owned_call->args)) {
+            return false;
         }
         strip_stale_dependent_implicit_casts(owned_call->callee);
-        for (auto& arg : owned_call->args) {
-            strip_stale_dependent_implicit_casts(arg);
-        }
 
         bool arguments_still_dependent = false;
         for (const auto& arg : owned_call->args) {
@@ -4584,6 +4662,9 @@ bool Collect::resolve_dependent_expr_after_substitution(
             }
             return false;
         }
+        if (!resolve_call_arguments_after_substitution(owned_call->args)) {
+            return false;
+        }
         auto rewritten = has_explicit_template_args
             ? collect_explicit_template_call_impl(
                   std::move(concrete_callee),
@@ -4645,6 +4726,9 @@ bool Collect::resolve_dependent_expr_after_substitution(
             *error_out =
                 "failed to materialize dependent qualified callee after substitution";
         }
+        return false;
+    }
+    if (!resolve_call_arguments_after_substitution(owned_call->args)) {
         return false;
     }
     auto rewritten = has_explicit_template_args
