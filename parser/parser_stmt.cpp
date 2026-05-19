@@ -354,6 +354,7 @@ std::unique_ptr<Stmt> Parser::parse_stmt() {
         check_and_consume(TokenType::SEMICOLON);
         return collect_->collect_expression_statement(std::move(exp), t.loc);
     }
+    // todo: make checking this a function
     if (is_integer_literal(current_token().type) || is_floating_literal(current_token().type)
         || gentle_check(TokenType::INCREMENT)
     || gentle_check(TokenType::DECREMENT) || gentle_check(TokenType::LEFT_PAREN)
@@ -369,6 +370,7 @@ std::unique_ptr<Stmt> Parser::parse_stmt() {
     || gentle_check(TokenType::PLUS) || gentle_check(TokenType::NEGATE)
     || gentle_check(TokenType::LOGICAL_AND)
     || gentle_check(TokenType::NEW) || gentle_check(TokenType::DELETE)
+    || (is_cxx_mode_active() && gentle_check(TokenType::SCOPE_RESOLUTION))
     || (is_cxx_mode_active() &&
         tentative_syntax_probe::can_start_cxx_function_style_cast_statement(
             current_token().type))) {
