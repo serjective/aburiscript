@@ -91,6 +91,11 @@ private:
         std::string spelling;
     };
 
+    enum class CppTypeNameParseContext {
+        General,
+        BaseSpecifier,
+    };
+
     struct CppTypeComponentResolution {
         QualType type = nullptr;
         std::shared_ptr<Symbol> typedef_symbol = nullptr;
@@ -612,7 +617,8 @@ private:
     bool try_consume_cpp_decltype_specifier_for_lookahead();
     bool can_start_cpp_named_type_specifier_for_lookahead();
     QualType parse_cpp_decltype_type_specifier();
-    std::optional<ParsedCppTypeNameSpecifier> try_parse_cpp_named_type_specifier();
+    std::optional<ParsedCppTypeNameSpecifier> try_parse_cpp_named_type_specifier(
+        CppTypeNameParseContext context = CppTypeNameParseContext::General);
     std::unique_ptr<Expr> try_parse_cpp_constraint_name_expression(
         bool append_placeholder_type_argument,
         uint32_t depth,

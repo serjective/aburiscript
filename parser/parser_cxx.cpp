@@ -1503,10 +1503,12 @@ std::vector<TemplateArgument> Parser::parse_cpp_template_argument_list() {
 }
 
 std::optional<Parser::ParsedCppTypeNameSpecifier>
-Parser::try_parse_cpp_named_type_specifier() {
+Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
     if (!is_cxx_mode_active()) {
         return std::nullopt;
     }
+    const bool allow_implicit_typename =
+        context == CppTypeNameParseContext::BaseSpecifier;
 
     Token start_tok = current_token();
     if (!(start_tok.type == TokenType::TYPENAME ||
@@ -1559,6 +1561,10 @@ Parser::try_parse_cpp_named_type_specifier() {
         components.push_back(parse_component());
         while (is_cpp_scope_resolution_here()) {
             consume_cpp_scope_resolution();
+            if (gentle_check(TokenType::TEMPLATE) && allow_implicit_typename) {
+                restore();
+                return std::nullopt;
+            }
             components.push_back(parse_component());
         }
 
@@ -1942,6 +1948,8 @@ Parser::try_parse_cpp_named_type_specifier() {
         }
 
         QualType resolved_type;
+        const bool terminal_is_known_type =
+            saw_typename_keyword || allow_implicit_typename;
         if (terminal_component.has_template_argument_list) {
             if (owner_chain.is_dependent_context()) {
                 resolved_type = QualType(std::make_shared<DependentNameType>(
@@ -1949,7 +1957,7 @@ Parser::try_parse_cpp_named_type_specifier() {
                     terminal_component.name,
                     terminal_component.template_arguments,
                     owner_chain.is_current_instantiation,
-                    saw_typename_keyword,
+                    terminal_is_known_type,
                     true));
             } else {
                 resolved_type =
@@ -1961,7 +1969,7 @@ Parser::try_parse_cpp_named_type_specifier() {
             }
         } else {
             if (owner_chain.is_dependent_context()) {
-                if (!saw_typename_keyword &&
+                if (!terminal_is_known_type &&
                     owner_chain.requires_typename_keyword()) {
                     diagnose_missing_cpp_typename_keyword(
                         owner_chain.qualifier_chain_spelling,
@@ -1973,7 +1981,7 @@ Parser::try_parse_cpp_named_type_specifier() {
                     terminal_component.name,
                     std::vector<TemplateArgument>{},
                     owner_chain.is_current_instantiation,
-                    saw_typename_keyword,
+                    terminal_is_known_type,
                     false));
             } else {
                 resolved_type =
@@ -2133,6 +2141,8 @@ Parser::try_parse_cpp_named_type_specifier() {
         }
 
         const bool is_terminal_component = !has_more_qualifiers;
+        const bool terminal_is_known_type =
+            saw_typename_keyword || allow_implicit_typename;
         if (!member_has_template_argument_list && is_terminal_component) {
             if (saw_typename_keyword &&
                 !state.is_dependent &&
@@ -2141,13 +2151,13 @@ Parser::try_parse_cpp_named_type_specifier() {
                     "'typename' is only allowed before qualified dependent type names",
                     start_tok.loc);
             }
-            if (!saw_typename_keyword &&
+            if (!terminal_is_known_type &&
                 state.requires_typename_keyword() &&
                 gentle_check(TokenType::LEFT_PAREN)) {
                 restore();
                 return std::nullopt;
             }
-            if (!saw_typename_keyword &&
+            if (!terminal_is_known_type &&
                 state.requires_typename_keyword()) {
                 diagnose_missing_cpp_typename_keyword(
                     current_qualifier_spelling,
@@ -2176,7 +2186,7 @@ Parser::try_parse_cpp_named_type_specifier() {
                     member_name,
                     std::move(member_arguments),
                     state.is_current_instantiation,
-                    is_terminal_component && saw_typename_keyword,
+                    is_terminal_component && terminal_is_known_type,
                     true));
                 state.is_dependent = true;
                 state.is_current_instantiation = false;
@@ -2210,7 +2220,7 @@ Parser::try_parse_cpp_named_type_specifier() {
                     member_name,
                     std::vector<TemplateArgument>{},
                     state.is_current_instantiation,
-                    is_terminal_component && saw_typename_keyword,
+                    is_terminal_component && terminal_is_known_type,
                     false));
                 state.is_dependent = true;
                 state.is_current_instantiation = false;
@@ -7578,9 +7588,15 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
 
         auto parse_base_type_name =
             [&]() -> ParsedCppTypeNameSpecifier {
+                if (gentle_check(TokenType::TYPENAME)) {
+                    error_custloc(
+                        "'typename' is not allowed in a base-specifier",
+                        current_token().loc);
+                }
                 size_t saved_idx = get_token_idx();
                 auto saved_split_state = tok_mgnt.get_split_token_state();
-                if (auto parsed = try_parse_cpp_named_type_specifier()) {
+                if (auto parsed = try_parse_cpp_named_type_specifier(
+                        CppTypeNameParseContext::BaseSpecifier)) {
                     return *parsed;
                 }
                 set_token_idx(saved_idx);
