@@ -767,7 +767,8 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
     QualType member_type,
     bool is_list_init,
     SrcLoc loc,
-    bool allow_abstract_object_type_instantiation) {
+    bool allow_abstract_object_type_instantiation,
+    bool is_copy_initialization) {
     if (!member_type) {
         report_error("constructor member initializer has invalid member type", loc);
         return collect_make<ErrorExpr>("invalid member type", loc);
@@ -835,6 +836,7 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
         return init_list;
     }
     VariableDeclFlags ctor_flags = {
+        .is_copy_initialization = is_copy_initialization,
         .allow_abstract_object_type_instantiation = allow_abstract_object_type_instantiation,
     };
     auto temp_decl = collect_variable_declaration(

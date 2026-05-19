@@ -32,6 +32,48 @@ void strip_redundant_specialization_casts(std::unique_ptr<Expr>& expr) {
     }
 }
 
+void strip_stale_object_initializer_cast(std::unique_ptr<Expr>& expr,
+                                         QualType target_type) {
+    if (!expr || !target_type ||
+        canonical_type_kind(target_type) != TypeKind::Object) {
+        return;
+    }
+
+    while (auto* implicit_cast = dyn_cast<ImplicitCast>(expr.get())) {
+        if (!implicit_cast->expr) {
+            return;
+        }
+        bool object_target_cast =
+            (implicit_cast->kind == ImplicitCastTypes::ARITH_CAST ||
+             implicit_cast->kind == ImplicitCastTypes::RAW_CAST) &&
+            implicit_cast->get_type() &&
+            (implicit_cast->get_type().equals_unqualified(target_type) ||
+             types_equivalent_after_template_argument_canonicalization(
+                 implicit_cast->get_type(),
+                 target_type,
+                 nullptr,
+                 /*ignore_top_level_qualifiers=*/true));
+        if (!object_target_cast) {
+            return;
+        }
+
+        auto source_type = implicit_cast->expr->get_type();
+        if (source_type &&
+            (source_type.equals_unqualified(target_type) ||
+             types_equivalent_after_template_argument_canonicalization(
+                 source_type,
+                 target_type,
+                 nullptr,
+                 /*ignore_top_level_qualifiers=*/true))) {
+            return;
+        }
+
+        auto owned_cast = std::unique_ptr<ImplicitCast>(
+            static_cast<ImplicitCast*>(expr.release()));
+        expr = std::move(owned_cast->expr);
+    }
+}
+
 QualType specialized_ctor_owner_type(const CppConstructorDecl* ctor_decl) {
     if (!ctor_decl) {
         return QualType();
@@ -251,9 +293,6 @@ bool rebuild_specialized_ctor_initializer_expression(
     strip_redundant_specialization_casts(initializer.init_expr);
 
     auto* init_list = dyn_cast<InitListExpr>(initializer.init_expr.get());
-    if (!init_list) {
-        return true;
-    }
 
     QualType target_type = lookup_ctor_initializer_target_type(ctor_decl, initializer);
     if (!target_type) {
@@ -267,15 +306,17 @@ bool rebuild_specialized_ctor_initializer_expression(
     }
 
     bool has_designators = false;
-    for (const auto& element : init_list->elements) {
-        if (!element.designators.empty()) {
-            has_designators = true;
-            break;
+    if (init_list) {
+        for (const auto& element : init_list->elements) {
+            if (!element.designators.empty()) {
+                has_designators = true;
+                break;
+            }
         }
     }
 
     std::unique_ptr<Expr> rebuilt_init;
-    if (!has_designators &&
+    if (init_list && !has_designators &&
         (init_list->is_paren_init || init_list->elements.empty() ||
          canonical_type_kind(target_type) == TypeKind::Object)) {
         auto owned_list = std::unique_ptr<InitListExpr>(
@@ -291,11 +332,24 @@ bool rebuild_specialized_ctor_initializer_expression(
             !owned_list->is_paren_init,
             initializer.location,
             initializer.is_base_initializer);
-    } else {
+    } else if (init_list) {
         rebuilt_init = collect.collect_member_initializer_expression(
             std::move(initializer.init_expr),
             target_type,
             initializer.location);
+    } else if (canonical_type_kind(target_type) == TypeKind::Object &&
+               !isa<CppConstructExpr>(initializer.init_expr.get())) {
+        strip_stale_object_initializer_cast(initializer.init_expr, target_type);
+        std::vector<std::unique_ptr<Expr>> init_args;
+        init_args.push_back(std::move(initializer.init_expr));
+        rebuilt_init = collect.collect_member_initializer_expression(
+            std::move(init_args),
+            target_type,
+            initializer.is_list_init,
+            initializer.location,
+            initializer.is_base_initializer);
+    } else {
+        return true;
     }
 
     if (!rebuilt_init) {

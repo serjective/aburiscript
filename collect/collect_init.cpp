@@ -272,8 +272,47 @@ bool Collect::is_aggregate_type(const std::shared_ptr<CType>& type) const {
     if (!type) {
         return false;
     }
-    auto canonical_kind = canonical_type_kind(type, ast_ctx_.get());
-    return canonical_kind == TypeKind::Array || canonical_kind == TypeKind::Object;
+    auto canonical_type = desugar_type(type, ast_ctx_.get());
+    if (!canonical_type) {
+        return false;
+    }
+    if (canonical_type->kind == TypeKind::Array) {
+        return true;
+    }
+    if (canonical_type->kind != TypeKind::Object) {
+        return false;
+    }
+    if (!lang_opts_.is_cxx_mode()) {
+        return true;
+    }
+
+    auto record_type = dyn_cast_shared<ObjectType>(canonical_type);
+    auto* record_decl =
+        record_type ? dyn_cast<ObjectDecl>(record_type->get_decl()) : nullptr;
+    const RecordSemanticState* record_state =
+        record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
+
+    if (!record_state) {
+        return true;
+    }
+
+    if (record_state->definition_data.has_user_declared_constructor ||
+        record_state->is_polymorphic) {
+        return false;
+    }
+    for (const auto& base : record_state->bases) {
+        if (base.is_virtual ||
+            base.declared_access != RecordMemberAccess::Public) {
+            return false;
+        }
+    }
+    for (const auto& field : record_state->fields) {
+        if (!field.is_base_subobject &&
+            field.declared_access != RecordMemberAccess::Public) {
+            return false;
+        }
+    }
+    return true;
 }
 
 
@@ -529,7 +568,7 @@ bool Collect::resolve_initializer_designators(const std::vector<Designator>& des
 }
 
 
-std::unique_ptr<Expr> Collect::transform_init_value(std::unique_ptr<Expr> expr, std::shared_ptr<CType> type) const {
+std::unique_ptr<Expr> Collect::transform_init_value(std::unique_ptr<Expr> expr, std::shared_ptr<CType> type) {
 
     if (!expr) {
         return nullptr;
@@ -537,6 +576,21 @@ std::unique_ptr<Expr> Collect::transform_init_value(std::unique_ptr<Expr> expr, 
     if (auto* inner_list = dyn_cast<InitListExpr>(expr.get())) {
         auto owned = std::unique_ptr<InitListExpr>(static_cast<InitListExpr*>(expr.release()));
         return process_init_list_expression(std::move(owned), type);
+    }
+    if (lang_opts_.is_cxx_mode() &&
+        type &&
+        canonical_type_kind(QualType(type), ast_ctx_.get()) == TypeKind::Object &&
+        !is_aggregate_type(type)) {
+        SrcLoc loc = expr->location;
+        std::vector<std::unique_ptr<Expr>> init_args;
+        init_args.push_back(std::move(expr));
+        return collect_member_initializer_expression(
+            std::move(init_args),
+            QualType(type),
+            /*is_list_init=*/false,
+            loc,
+            /*allow_abstract_object_type_instantiation=*/false,
+            /*is_copy_initialization=*/true);
     }
     expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::InitScalar);
     if (type) {
@@ -565,7 +619,7 @@ std::unique_ptr<Expr> Collect::transform_init_value(std::unique_ptr<Expr> expr, 
 }
 
 
-std::unique_ptr<Expr> Collect::init_from_single_value(std::unique_ptr<Expr> value, std::shared_ptr<CType> type, SrcLoc loc) const {
+std::unique_ptr<Expr> Collect::init_from_single_value(std::unique_ptr<Expr> value, std::shared_ptr<CType> type, SrcLoc loc) {
 
     if (!type) {
         report_error("invalid type in initializer", loc);
@@ -645,7 +699,7 @@ std::unique_ptr<Expr> Collect::init_from_single_value(std::unique_ptr<Expr> valu
 }
 
 
-std::unique_ptr<Expr> Collect::consume_for_type(std::vector<InitElement>& elements, size_t& index, std::shared_ptr<CType> type, bool ignore_first_designators, size_t array_start_index) const {
+std::unique_ptr<Expr> Collect::consume_for_type(std::vector<InitElement>& elements, size_t& index, std::shared_ptr<CType> type, bool ignore_first_designators, size_t array_start_index) {
 
     if (index >= elements.size()) {
         return nullptr;
@@ -741,6 +795,12 @@ std::unique_ptr<Expr> Collect::consume_for_type(std::vector<InitElement>& elemen
             return nullptr;
         }
 
+        if (!is_aggregate_type(type)) {
+            auto value = std::move(elem.value);
+            ++index;
+            return transform_init_value(std::move(value), type);
+        }
+
         if (elem.value && !isa<InitListExpr>(elem.value.get())) {
             auto original_type =
                 desugar_type(elem.value->get_type(), ast_ctx_.get());
@@ -806,7 +866,7 @@ std::unique_ptr<Expr> Collect::consume_for_type(std::vector<InitElement>& elemen
 }
 
 
-std::unique_ptr<Expr> Collect::process_init_list_expression(std::unique_ptr<InitListExpr> init_list, std::shared_ptr<CType> type) const {
+std::unique_ptr<Expr> Collect::process_init_list_expression(std::unique_ptr<InitListExpr> init_list, std::shared_ptr<CType> type) {
 
     if (!init_list) {
         return nullptr;
@@ -878,6 +938,25 @@ std::unique_ptr<Expr> Collect::process_init_list_expression(std::unique_ptr<Init
                 report_error("designated initializer is only valid for aggregates", elem.loc);
                 return nullptr;
             }
+        }
+        if (lang_opts_.is_cxx_mode() &&
+            canonical_type_kind(QualType(type), ast_ctx_.get()) == TypeKind::Object) {
+            std::vector<std::unique_ptr<Expr>> init_args;
+            init_args.reserve(init_list->elements.size());
+            for (auto& elem : init_list->elements) {
+                if (!elem.value) {
+                    report_error("missing initializer expression", elem.loc);
+                    continue;
+                }
+                init_args.push_back(std::move(elem.value));
+            }
+            return collect_member_initializer_expression(
+                std::move(init_args),
+                QualType(type),
+                /*is_list_init=*/true,
+                init_list->location,
+                /*allow_abstract_object_type_instantiation=*/false,
+                /*is_copy_initialization=*/true);
         }
         size_t idx = 0;
         return consume_for_type(init_list->elements, idx, type, false, 0);

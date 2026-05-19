@@ -1464,6 +1464,30 @@ void ASTToLLVM::emit_init_list_store(InitListExpr* initList, llvm::Value* base_p
             }
         }
 
+        if (auto* ctor_init = dyn_cast<CppConstructExpr>(action.value.get())) {
+            for (const auto& path : action.paths) {
+                InitPathInfo info = resolve_path(base_ptr, semantic_type, path, action.loc);
+                if (!info.ptr) {
+                    return;
+                }
+                if (info.bitfield) {
+                    error("emit_init_list_store(): bitfield initialized with constructor expression",
+                          action.loc);
+                    return;
+                }
+                if (!emit_cpp_construct_call(
+                        ctor_init,
+                        info.ptr,
+                        action.loc,
+                        "emit_init_list_store()")) {
+                    error("emit_init_list_store(): failed to lower aggregate element constructor",
+                          action.loc);
+                    return;
+                }
+            }
+            continue;
+        }
+
         llvm::Value* val = convert_expression(action.value.get());
         if (!val) {
             return;

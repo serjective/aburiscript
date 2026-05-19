@@ -1170,7 +1170,8 @@ public:
         QualType member_type,
         bool is_list_init,
         SrcLoc loc,
-        bool allow_abstract_object_type_instantiation = false) ;
+        bool allow_abstract_object_type_instantiation = false,
+        bool is_copy_initialization = false) ;
 
     // === Template operations ===
 
@@ -2084,20 +2085,20 @@ private:
                                          bool& has_range) const ;
 
     std::unique_ptr<Expr> transform_init_value(std::unique_ptr<Expr> expr,
-                                                       std::shared_ptr<CType> type) const ;
+                                                       std::shared_ptr<CType> type) ;
 
     std::unique_ptr<Expr> init_from_single_value(std::unique_ptr<Expr> value,
                                                          std::shared_ptr<CType> type,
-                                                         SrcLoc loc) const ;
+                                                         SrcLoc loc) ;
 
     std::unique_ptr<Expr> consume_for_type(std::vector<InitElement>& elements,
                                                    size_t& index,
                                                    std::shared_ptr<CType> type,
                                                    bool ignore_first_designators,
-                                                   size_t array_start_index = 0) const ;
+                                                   size_t array_start_index = 0) ;
 
     std::unique_ptr<Expr> process_init_list_expression(std::unique_ptr<InitListExpr> init_list,
-                                                               std::shared_ptr<CType> type) const ;
+                                                               std::shared_ptr<CType> type) ;
 
     std::unique_ptr<Expr> process_initializer_for_type(std::unique_ptr<Expr> init,
                                                                QualType declared_type,
