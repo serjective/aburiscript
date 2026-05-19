@@ -65,6 +65,35 @@ static bool is_valid_atomic_store_order(int order) {
     }
 }
 
+static QualType strip_atomic_value_qualifier(QualType type) {
+    if (!type || !type.is_atomic()) {
+        return type;
+    }
+    return QualType(
+        type.get_shared(),
+        static_cast<uint8_t>(type.get_qualifiers() & ~QUAL_ATOMIC));
+}
+
+struct AtomicPointerValueType {
+    std::shared_ptr<PointerType> pointer_type;
+    QualType value_type;
+};
+
+static AtomicPointerValueType get_atomic_pointer_value_type(
+    Expr* ptr_expr,
+    const ASTContext* ast_ctx) {
+    if (!ptr_expr) {
+        return {};
+    }
+
+    auto ptr_type =
+        desugar_type(ptr_expr->get_type(), ast_ctx).as_shared<PointerType>();
+    if (!ptr_type) {
+        return {};
+    }
+    return {ptr_type, strip_atomic_value_qualifier(ptr_type->pointed_type)};
+}
+
 struct BuiltinLoweringResult {
     bool handled = false;
     llvm::Value* value = nullptr;
@@ -535,9 +564,10 @@ static BuiltinLoweringResult lower_builtin_atomic_and_sync_group(
     };
     auto get_atomic_semantic_type =
         [&](Expr* ptr_expr) -> std::pair<std::shared_ptr<PointerType>, llvm::Type*> {
-        auto ptr_ctype = ptr_expr->get_type().as_shared<PointerType>();
-        llvm::Type* semantic_type = ptr_ctype ? convert_type(ptr_ctype->pointed_type) : nullptr;
-        return {ptr_ctype, semantic_type};
+        auto value_info = get_atomic_pointer_value_type(ptr_expr, lower.ast_ctx.get());
+        llvm::Type* semantic_type =
+            value_info.value_type ? convert_type(value_info.value_type) : nullptr;
+        return {value_info.pointer_type, semantic_type};
     };
     auto get_atomic_storage_type =
         [&](const std::shared_ptr<PointerType>& ptr_ctype,
@@ -731,8 +761,10 @@ static BuiltinLoweringResult lower_builtin_atomic_and_sync_group(
     }
     case BuiltinKind::C11_ATOMIC_INIT: {
         auto ptr = convert_expression(expr->args[0].get());
-        auto ptr_ctype = expr->args[0]->get_type().as_shared<PointerType>();
-        llvm::Type* value_type = ptr_ctype ? convert_type(ptr_ctype->pointed_type) : nullptr;
+        auto value_info =
+            get_atomic_pointer_value_type(expr->args[0].get(), lower.ast_ctx.get());
+        llvm::Type* value_type =
+            value_info.value_type ? convert_type(value_info.value_type) : nullptr;
         auto init_val = convert_expression(expr->args[1].get());
         if (value_type && init_val->getType() != value_type) {
             bool src_unsigned = expr->args[1]->get_type() && expr->args[1]->get_type()->isUnsigned();

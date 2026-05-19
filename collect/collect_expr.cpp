@@ -95,6 +95,28 @@ bool expression_can_be_addressed_without_overload(const Collect& collect,
     return collect.classify_value_category(raw) == Collect::ValueCategory::LValue;
 }
 
+QualType strip_atomic_value_qualifier(QualType type) {
+    if (!type || !type.is_atomic()) {
+        return type;
+    }
+    return QualType(
+        type.get_shared(),
+        static_cast<uint8_t>(type.get_qualifiers() & ~QUAL_ATOMIC));
+}
+
+QualType atomic_builtin_value_type_from_pointer_arg(Expr* arg,
+                                                    const ASTContext* ast_ctx) {
+    if (!arg) {
+        return {};
+    }
+
+    auto ptr = desugar_type(arg->get_type(), ast_ctx).as_shared<PointerType>();
+    if (!ptr) {
+        return {};
+    }
+    return strip_atomic_value_qualifier(ptr->pointed_type);
+}
+
 void collect_lambda_local_symbols_from_decl(
     const Decl* decl,
     std::unordered_set<const Symbol*>& local_symbols);
@@ -8141,10 +8163,10 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_special_cases(
             }
             QualType ret = int_type;
             if (!args.empty()) {
-                auto arg_type = args[0] ? args[0]->get_type() : QualType();
-                auto ptr = arg_type.as_shared<PointerType>();
-                if (ptr) {
-                    ret = ptr->pointed_type;
+                auto value_type =
+                    atomic_builtin_value_type_from_pointer_arg(args[0].get(), ast_ctx_.get());
+                if (value_type) {
+                    ret = value_type;
                 }
             }
             return collect_make<BuiltinCallExpr>(kind, std::move(args), ret, loc);
@@ -8156,10 +8178,10 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_special_cases(
             }
             QualType ret = int_type;
             if (!args.empty()) {
-                auto arg_type = args[0] ? args[0]->get_type() : QualType();
-                auto ptr = arg_type.as_shared<PointerType>();
-                if (ptr) {
-                    ret = ptr->pointed_type;
+                auto value_type =
+                    atomic_builtin_value_type_from_pointer_arg(args[0].get(), ast_ctx_.get());
+                if (value_type) {
+                    ret = value_type;
                 }
             }
             return collect_make<BuiltinCallExpr>(kind, std::move(args), ret, loc);
@@ -8570,10 +8592,10 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_atomic_cases(
         case BuiltinKind::SYNC_VAL_COMPARE_AND_SWAP: {
             QualType ret = int_type;
             if (!args.empty()) {
-                auto arg_type = args[0] ? args[0]->get_type() : QualType();
-                auto ptr = arg_type.as_shared<PointerType>();
-                if (ptr) {
-                    ret = ptr->pointed_type;
+                auto value_type =
+                    atomic_builtin_value_type_from_pointer_arg(args[0].get(), ast_ctx_.get());
+                if (value_type) {
+                    ret = value_type;
                 }
             }
             return collect_make<BuiltinCallExpr>(kind, std::move(args), ret, loc);
