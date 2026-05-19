@@ -250,12 +250,14 @@ std::unique_ptr<Decl> Collect::collect_static_assert_declaration(
     std::string message,
     bool has_message,
     SrcLoc loc,
-    bool defer_unmaterialized_constexpr_calls) const {
+    bool defer_in_template_definition) const {
 
     if (!condition) {
         report_error("static assertion requires a constant expression", loc);
         return collect_make<NopDecl>(loc);
     }
+    const bool defer_cpp_template_definition_assert =
+        lang_opts_.is_cxx_mode() && defer_in_template_definition;
     if (current_constexpr_if_branch_state() !=
         CppConstexprIfBranchState::Active) {
         return collect_make<StaticAssertDecl>(
@@ -263,7 +265,7 @@ std::unique_ptr<Decl> Collect::collect_static_assert_declaration(
     }
     if (expression_is_value_dependent_for_constant_evaluation(
             condition.get(),
-            defer_unmaterialized_constexpr_calls)) {
+            defer_in_template_definition)) {
         return collect_make<StaticAssertDecl>(
             std::move(condition), std::move(message), has_message, loc);
     }
@@ -280,12 +282,22 @@ std::unique_ptr<Decl> Collect::collect_static_assert_declaration(
                          ? "static assertion expression is not a constant expression"
                          : "static assertion expression is not an integer constant expression",
                      loc);
-    } else if (*val == 0) {
+        return collect_make<NopDecl>(loc);
+    }
+    if (*val == 0) {
+        if (defer_cpp_template_definition_assert) {
+            return collect_make<StaticAssertDecl>(
+                std::move(condition), std::move(message), has_message, loc);
+        }
         std::string text = "static assertion failed";
         if (has_message && !message.empty()) {
             text += ": " + message;
         }
         report_error(text, loc);
+    }
+    if (defer_cpp_template_definition_assert) {
+        return collect_make<StaticAssertDecl>(
+            std::move(condition), std::move(message), has_message, loc);
     }
     // Static assertions are compile-time only and should not reach codegen.
     return collect_make<NopDecl>(loc);

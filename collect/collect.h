@@ -873,7 +873,7 @@ public:
                                                             std::string message,
                                                             bool has_message,
                                                             SrcLoc loc,
-                                                            bool defer_unmaterialized_constexpr_calls = false) const ;
+                                                            bool defer_in_template_definition = false) const ;
 
     std::unique_ptr<FuncDecl> collect_function_declaration(const std::string& name,
                                                            std::shared_ptr<CType> type,
