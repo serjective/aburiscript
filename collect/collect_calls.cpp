@@ -2929,6 +2929,25 @@ void Collect::realize_deferred_expr_type_after_substitution(
             value_init->ctype = realize_type(value_init->ctype);
             return;
         }
+        case StmtKind::CppNewExpr: {
+            auto* new_expr = static_cast<CppNewExpr*>(expr);
+            new_expr->allocated_type = realize_type(new_expr->allocated_type);
+            new_expr->result_type = realize_type(new_expr->result_type);
+            for (auto& arg : new_expr->placement_args) {
+                realize_deferred_expr_type_after_substitution(
+                    arg.get(),
+                    allow_finalize);
+            }
+            realize_deferred_expr_type_after_substitution(
+                new_expr->initializer.get(),
+                allow_finalize);
+            for (auto& arg : new_expr->constructor_args) {
+                realize_deferred_expr_type_after_substitution(
+                    arg.get(),
+                    allow_finalize);
+            }
+            return;
+        }
         case StmtKind::FuncCall: {
             auto* call = static_cast<FuncCall*>(expr);
             realize_deferred_expr_type_after_substitution(
@@ -3022,6 +3041,24 @@ void Collect::realize_deferred_expr_type_after_substitution(
                 subscript->index.get(),
                 allow_finalize);
             subscript->ctype = realize_type(subscript->ctype);
+            return;
+        }
+        case StmtKind::InitListExpr: {
+            auto* init_list = static_cast<InitListExpr*>(expr);
+            init_list->type = realize_type(init_list->type);
+            for (auto& element : init_list->elements) {
+                realize_deferred_expr_type_after_substitution(
+                    element.value.get(),
+                    allow_finalize);
+                for (auto& designator : element.designators) {
+                    realize_deferred_expr_type_after_substitution(
+                        designator.index.get(),
+                        allow_finalize);
+                    realize_deferred_expr_type_after_substitution(
+                        designator.range_end.get(),
+                        allow_finalize);
+                }
+            }
             return;
         }
         case StmtKind::DependentArraySubscriptExpr: {
@@ -3669,6 +3706,147 @@ bool Collect::resolve_dependent_expr_after_substitution(
             if (error_out && error_out->empty()) {
                 *error_out =
                     "failed to resolve function-style cast after substitution";
+            }
+            return false;
+        }
+        expr = std::move(rewritten);
+        return true;
+    }
+    if (auto* init_list = dyn_cast<InitListExpr>(expr.get())) {
+        for (auto& element : init_list->elements) {
+            if (element.value &&
+                !resolve_dependent_expr_after_substitution(
+                    element.value,
+                    implicit_this_type,
+                    error_out)) {
+                return false;
+            }
+            strip_stale_dependent_implicit_casts(element.value);
+            realize_deferred_expr_type_after_substitution(
+                element.value.get(),
+                /*allow_finalize=*/true);
+            for (auto& designator : element.designators) {
+                if (designator.index &&
+                    !resolve_dependent_expr_after_substitution(
+                        designator.index,
+                        implicit_this_type,
+                        error_out)) {
+                    return false;
+                }
+                if (designator.range_end &&
+                    !resolve_dependent_expr_after_substitution(
+                        designator.range_end,
+                        implicit_this_type,
+                        error_out)) {
+                    return false;
+                }
+                strip_stale_dependent_implicit_casts(designator.index);
+                strip_stale_dependent_implicit_casts(designator.range_end);
+                realize_deferred_expr_type_after_substitution(
+                    designator.index.get(),
+                    /*allow_finalize=*/true);
+                realize_deferred_expr_type_after_substitution(
+                    designator.range_end.get(),
+                    /*allow_finalize=*/true);
+            }
+        }
+        realize_deferred_expr_type_after_substitution(
+            init_list,
+            /*allow_finalize=*/true);
+        return true;
+    }
+    if (auto* new_expr = dyn_cast<CppNewExpr>(expr.get())) {
+        auto type_or_expr_still_dependent =
+            [&](const std::unique_ptr<Expr>& candidate) {
+            if (!candidate) {
+                return false;
+            }
+            return expression_depends_on_template_parameters(candidate.get()) ||
+                   type_depends_on_template_parameters(
+                       candidate->get_type(),
+                       ast_ctx_.get()) ||
+                   (candidate->get_type() &&
+                    contains_deferred_semantic_type(
+                        candidate->get_type().get_shared()));
+        };
+        auto type_still_dependent = [&](QualType type) {
+            return type &&
+                   (type_depends_on_template_parameters(type, ast_ctx_.get()) ||
+                    contains_deferred_semantic_type(type.get_shared()) ||
+                    auto_type_utils::auto_type_flavors_in(
+                        type.get_shared()) != 0);
+        };
+
+        for (auto& arg : new_expr->placement_args) {
+            if (arg &&
+                !resolve_dependent_expr_after_substitution(
+                    arg,
+                    implicit_this_type,
+                    error_out)) {
+                return false;
+            }
+            strip_stale_dependent_implicit_casts(arg);
+            realize_deferred_expr_type_after_substitution(
+                arg.get(),
+                /*allow_finalize=*/true);
+        }
+        if (new_expr->initializer &&
+            !resolve_dependent_expr_after_substitution(
+                new_expr->initializer,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        strip_stale_dependent_implicit_casts(new_expr->initializer);
+        realize_deferred_expr_type_after_substitution(
+            new_expr->initializer.get(),
+            /*allow_finalize=*/true);
+        for (auto& arg : new_expr->constructor_args) {
+            if (arg &&
+                !resolve_dependent_expr_after_substitution(
+                    arg,
+                    implicit_this_type,
+                    error_out)) {
+                return false;
+            }
+            strip_stale_dependent_implicit_casts(arg);
+            realize_deferred_expr_type_after_substitution(
+                arg.get(),
+                /*allow_finalize=*/true);
+        }
+        realize_deferred_expr_type_after_substitution(
+            new_expr,
+            /*allow_finalize=*/true);
+
+        bool child_still_dependent =
+            type_or_expr_still_dependent(new_expr->initializer);
+        for (const auto& arg : new_expr->placement_args) {
+            child_still_dependent =
+                child_still_dependent || type_or_expr_still_dependent(arg);
+        }
+        for (const auto& arg : new_expr->constructor_args) {
+            child_still_dependent =
+                child_still_dependent || type_or_expr_still_dependent(arg);
+        }
+
+        if (new_expr->allocator_sym ||
+            type_still_dependent(new_expr->allocated_type) ||
+            child_still_dependent) {
+            return true;
+        }
+
+        auto owned_new = std::unique_ptr<CppNewExpr>(
+            static_cast<CppNewExpr*>(expr.release()));
+        auto rewritten = collect_cpp_new_expression(
+            owned_new->allocated_type,
+            std::move(owned_new->placement_args),
+            std::move(owned_new->initializer),
+            owned_new->is_global_allocation != 0,
+            owned_new->location);
+        if (!rewritten) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to resolve dependent new-expression after substitution";
             }
             return false;
         }

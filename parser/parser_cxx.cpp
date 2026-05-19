@@ -3287,6 +3287,16 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
         return parameters;
     }
 
+    auto parse_template_parameter_default_argument =
+        [&]() -> TemplateArgument {
+        ++template_pattern_depth_;
+        struct TemplateParameterDefaultPatternGuard {
+            uint32_t& depth;
+            ~TemplateParameterDefaultPatternGuard() { --depth; }
+        } template_parameter_default_pattern_guard{template_pattern_depth_};
+        return parse_cpp_template_argument();
+    };
+
     while (true) {
         Token param_tok = current_token();
         if (lang_opts.is_cxx20_or_later() &&
@@ -3357,7 +3367,8 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
                             current_token().loc);
                     }
                     advance();
-                    default_argument = parse_cpp_template_argument();
+                    default_argument =
+                        parse_template_parameter_default_argument();
                 }
                 if (default_argument.has_value()) {
                     if (default_argument->kind != TemplateArgumentKind::Type) {
@@ -3455,7 +3466,8 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
                         current_token().loc);
                 }
                 advance();
-                default_argument = parse_cpp_template_argument();
+                default_argument =
+                    parse_template_parameter_default_argument();
             }
 
             auto param_decl = make_ast<TemplateTemplateParmDecl>(
@@ -3514,7 +3526,8 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
                         current_token().loc);
                 }
                 advance();
-                default_argument = parse_cpp_template_argument();
+                default_argument =
+                    parse_template_parameter_default_argument();
             }
 
             auto param_type = std::make_shared<TemplateTypeParmType>(
@@ -3590,7 +3603,8 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
                         current_token().loc);
                 }
                 advance();
-                default_argument = parse_cpp_template_argument();
+                default_argument =
+                    parse_template_parameter_default_argument();
             }
 
             SrcLoc param_loc = param_parser.loc.isInvalid()

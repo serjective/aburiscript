@@ -5114,26 +5114,60 @@ std::unique_ptr<Expr> Collect::collect_cpp_new_expression(
     std::unique_ptr<Expr> initializer,
     bool is_global_allocation,
     SrcLoc loc) {
+    auto type_has_template_dependency = [&](QualType type) {
+        return type &&
+               (type_depends_on_template_parameters(type, ast_ctx_.get()) ||
+                auto_type_utils::auto_type_flavors_in(type.get_shared()) != 0);
+    };
+    auto type_needs_deferred_new_semantics = [&](QualType type) {
+        return type &&
+               (type_has_template_dependency(type) ||
+                contains_deferred_semantic_type(type.get_shared()));
+    };
+    auto expr_needs_deferred_new_semantics =
+        [&](const std::unique_ptr<Expr>& expr) {
+        if (!expr) {
+            return false;
+        }
+        QualType expr_type = expr->get_type();
+        return expression_depends_on_template_parameters(expr.get()) ||
+               type_needs_deferred_new_semantics(expr_type);
+    };
+    auto any_expr_needs_deferred_new_semantics =
+        [&](const std::vector<std::unique_ptr<Expr>>& exprs) {
+        for (const auto& expr : exprs) {
+            if (expr_needs_deferred_new_semantics(expr)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     if (!allocated_type) {
         report_error("new-expression requires a valid allocated type", loc);
         return collect_error_expression("new-expression requires a valid allocated type", loc);
     }
     if (contains_deferred_semantic_type(allocated_type.get_shared())) {
-        allocated_type = finalize_deferred_semantic_type(allocated_type, loc);
+        if (type_has_template_dependency(allocated_type)) {
+            if (QualType realized_type =
+                    try_realize_deferred_semantic_type(allocated_type)) {
+                allocated_type = realized_type;
+            }
+        }
+        if (contains_deferred_semantic_type(allocated_type.get_shared()) &&
+            !type_has_template_dependency(allocated_type)) {
+            allocated_type = finalize_deferred_semantic_type(allocated_type, loc);
+        }
     }
     if (!allocated_type) {
         report_error("new-expression requires a valid allocated type", loc);
         return collect_error_expression("new-expression requires a valid allocated type", loc);
     }
 
-    for (auto& placement_arg : placement_args) {
-        placement_arg = collect_apply_standard_conversions(
-            std::move(placement_arg),
-            ExprUseContext::CallArgument);
-    }
-
     QualType canonical_allocated = desugar_type(allocated_type);
     bool is_array_form = canonical_type_kind(canonical_allocated) == TypeKind::Array;
+    bool allocated_type_is_dependent =
+        type_needs_deferred_new_semantics(allocated_type);
 
     QualType pointee_type = allocated_type;
     if (is_array_form) {
@@ -5145,7 +5179,7 @@ std::unique_ptr<Expr> Collect::collect_cpp_new_expression(
         bool has_known_bound = array_type->size_kind == ArraySizeKind::Variable ||
             (array_type->size_kind == ArraySizeKind::Constant &&
              array_type->size.has_value());
-        if (!has_known_bound) {
+        if (!has_known_bound && !allocated_type_is_dependent) {
             report_error("new-expression array type requires a bound", loc);
             return collect_error_expression("new-expression array type requires a bound", loc);
         }
@@ -5153,6 +5187,24 @@ std::unique_ptr<Expr> Collect::collect_cpp_new_expression(
     }
 
     pointee_type = remove_reference(pointee_type);
+    QualType result_type(std::make_shared<PointerType>(pointee_type));
+
+    if (allocated_type_is_dependent) {
+        return collect_make<CppNewExpr>(
+            allocated_type,
+            result_type,
+            std::move(placement_args),
+            std::move(initializer),
+            std::vector<std::unique_ptr<Expr>>{},
+            nullptr,
+            nullptr,
+            nullptr,
+            is_array_form,
+            is_global_allocation,
+            false,
+            loc);
+    }
+
     QualType canonical_pointee = desugar_type(pointee_type);
     auto pointee_kind = canonical_type_kind(canonical_pointee);
 
@@ -5193,7 +5245,29 @@ std::unique_ptr<Expr> Collect::collect_cpp_new_expression(
         return collect_error_expression("cannot instantiate abstract class type", loc);
     }
 
-    QualType result_type(std::make_shared<PointerType>(pointee_type));
+    if (any_expr_needs_deferred_new_semantics(placement_args) ||
+        expr_needs_deferred_new_semantics(initializer)) {
+        return collect_make<CppNewExpr>(
+            allocated_type,
+            result_type,
+            std::move(placement_args),
+            std::move(initializer),
+            std::vector<std::unique_ptr<Expr>>{},
+            nullptr,
+            nullptr,
+            nullptr,
+            is_array_form,
+            is_global_allocation,
+            false,
+            loc);
+    }
+
+    for (auto& placement_arg : placement_args) {
+        placement_arg = collect_apply_standard_conversions(
+            std::move(placement_arg),
+            ExprUseContext::CallArgument);
+    }
+
     std::string allocator_name = is_array_form ? "operatornew[]" : "operatornew";
     std::string deallocator_name = is_array_form ? "operatordelete[]" : "operatordelete";
 

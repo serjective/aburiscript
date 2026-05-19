@@ -653,6 +653,30 @@ bool expr_structurally_matches(const Expr* lhs, const Expr* rhs) {
                        lhs_cast->args,
                        rhs_cast->args);
         }
+        case StmtKind::CppNewExpr: {
+            const auto* lhs_new = static_cast<const CppNewExpr*>(lhs);
+            const auto* rhs_new = static_cast<const CppNewExpr*>(rhs);
+            return lhs_new->allocated_type.equals_qualified(
+                       rhs_new->allocated_type) &&
+                   lhs_new->result_type.equals_qualified(
+                       rhs_new->result_type) &&
+                   lhs_new->allocator_sym == rhs_new->allocator_sym &&
+                   lhs_new->deallocator_sym == rhs_new->deallocator_sym &&
+                   lhs_new->ctor_sym == rhs_new->ctor_sym &&
+                   lhs_new->is_array_form == rhs_new->is_array_form &&
+                   lhs_new->is_global_allocation ==
+                       rhs_new->is_global_allocation &&
+                   lhs_new->is_list_init == rhs_new->is_list_init &&
+                   expr_vector_structurally_matches(
+                       lhs_new->placement_args,
+                       rhs_new->placement_args) &&
+                   expr_structurally_matches(
+                       lhs_new->initializer.get(),
+                       rhs_new->initializer.get()) &&
+                   expr_vector_structurally_matches(
+                       lhs_new->constructor_args,
+                       rhs_new->constructor_args);
+        }
         case StmtKind::CppImmediateInvocationExpr: {
             const auto* lhs_immediate =
                 static_cast<const CppImmediateInvocationExpr*>(lhs);
@@ -1066,6 +1090,37 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
                 return true;
             }
             for (const auto& arg : cast->args) {
+                if (expr_depends_on_template_parameters_for_type(
+                        arg.get(),
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case StmtKind::CppNewExpr: {
+            const auto* new_expr = static_cast<const CppNewExpr*>(expr);
+            if (type_depends_on_template_parameters(
+                    new_expr->allocated_type,
+                    ast_ctx) ||
+                type_depends_on_template_parameters(
+                    new_expr->result_type,
+                    ast_ctx)) {
+                return true;
+            }
+            for (const auto& arg : new_expr->placement_args) {
+                if (expr_depends_on_template_parameters_for_type(
+                        arg.get(),
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            if (expr_depends_on_template_parameters_for_type(
+                    new_expr->initializer.get(),
+                    ast_ctx)) {
+                return true;
+            }
+            for (const auto& arg : new_expr->constructor_args) {
                 if (expr_depends_on_template_parameters_for_type(
                         arg.get(),
                         ast_ctx)) {

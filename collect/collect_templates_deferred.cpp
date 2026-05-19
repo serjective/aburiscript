@@ -894,6 +894,40 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
             }
             return false;
         }
+        case StmtKind::CppNewExpr: {
+            const auto* new_expr = static_cast<const CppNewExpr*>(stripped);
+            if (type_depends_on_template_parameters(
+                    new_expr->allocated_type,
+                    ast_ctx) ||
+                type_depends_on_template_parameters(
+                    new_expr->result_type,
+                    ast_ctx)) {
+                return true;
+            }
+            for (const auto& arg : new_expr->placement_args) {
+                if (expr_depends_on_template_parameters_impl(
+                        arg.get(),
+                        ast_ctx,
+                        active_variable_symbols)) {
+                    return true;
+                }
+            }
+            if (expr_depends_on_template_parameters_impl(
+                    new_expr->initializer.get(),
+                    ast_ctx,
+                    active_variable_symbols)) {
+                return true;
+            }
+            for (const auto& arg : new_expr->constructor_args) {
+                if (expr_depends_on_template_parameters_impl(
+                        arg.get(),
+                        ast_ctx,
+                        active_variable_symbols)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         case StmtKind::MemberExpr:
             return expr_depends_on_template_parameters_impl(
                 static_cast<const MemberExpr*>(stripped)->base.get(),
