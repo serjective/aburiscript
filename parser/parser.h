@@ -94,6 +94,7 @@ private:
     enum class CppTypeNameParseContext {
         General,
         BaseSpecifier,
+        TypeRequirement,
     };
 
     struct CppTypeComponentResolution {

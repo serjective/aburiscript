@@ -1509,6 +1509,8 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
     }
     const bool allow_implicit_typename =
         context == CppTypeNameParseContext::BaseSpecifier;
+    const bool is_type_requirement =
+        context == CppTypeNameParseContext::TypeRequirement;
 
     Token start_tok = current_token();
     if (!(start_tok.type == TokenType::TYPENAME ||
@@ -1949,7 +1951,8 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
 
         QualType resolved_type;
         const bool terminal_is_known_type =
-            saw_typename_keyword || allow_implicit_typename;
+            saw_typename_keyword || allow_implicit_typename ||
+            is_type_requirement;
         if (terminal_component.has_template_argument_list) {
             if (owner_chain.is_dependent_context()) {
                 resolved_type = QualType(std::make_shared<DependentNameType>(
@@ -2021,6 +2024,15 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                 try_parse_decltype_qualified_type(true)) {
             return decltype_qualified;
         }
+        if (is_type_requirement) {
+            size_t after_typename_idx = get_token_idx();
+            auto after_typename_split_state = tok_mgnt.get_split_token_state();
+            if (auto concrete = try_parse_concrete_named_type()) {
+                return concrete;
+            }
+            set_token_idx(after_typename_idx);
+            tok_mgnt.set_split_token_state(after_typename_split_state);
+        }
     }
     if (consume_cpp_scope_resolution()) {
         if (saw_typename_keyword) {
@@ -2085,6 +2097,25 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
     }
 
     if (!is_cpp_scope_resolution_here()) {
+        if (saw_typename_keyword && is_type_requirement) {
+            auto resolution = resolve_cpp_unqualified_type_component(
+                qualifier_name,
+                qualifier_arguments,
+                qualifier_has_template_argument_list,
+                qualifier_loc);
+            if (!resolution || !resolution.type) {
+                restore();
+                return std::nullopt;
+            }
+            ParsedCppTypeNameSpecifier result;
+            result.type = resolution.type;
+            result.typedef_symbol = resolution.typedef_symbol;
+            result.spelling = format_component_spelling(
+                qualifier_name,
+                qualifier_arguments,
+                qualifier_has_template_argument_list);
+            return result;
+        }
         if (saw_typename_keyword) {
             error_custloc("expected qualified type name after 'typename'",
                           qualifier_loc);
@@ -2142,9 +2173,11 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
 
         const bool is_terminal_component = !has_more_qualifiers;
         const bool terminal_is_known_type =
-            saw_typename_keyword || allow_implicit_typename;
+            saw_typename_keyword || allow_implicit_typename ||
+            is_type_requirement;
         if (!member_has_template_argument_list && is_terminal_component) {
             if (saw_typename_keyword &&
+                !is_type_requirement &&
                 !state.is_dependent &&
                 !state.is_current_instantiation) {
                 error_custloc(
@@ -4983,11 +5016,11 @@ std::unique_ptr<Expr> Parser::parse_cpp_requires_expression() {
 
         if (gentle_check(TokenType::TYPENAME)) {
             requirement.kind = ConstraintRequirementKind::Type;
-            advance(); // 'typename'
-            auto parsed_type = try_parse_cpp_named_type_specifier();
+            auto parsed_type = try_parse_cpp_named_type_specifier(
+                CppTypeNameParseContext::TypeRequirement);
             if (!parsed_type) {
                 error_custloc(
-                    "expected qualified type name after 'typename'",
+                    "expected type name in type requirement",
                     current_token().loc);
             }
             requirement.type_requirement = parsed_type->type;
