@@ -399,23 +399,9 @@ static const ObjectDecl* cpp_base_record_decl_from_type(QualType base_type) {
     return base_object ? dyn_cast<ObjectDecl>(base_object->get_decl()) : nullptr;
 }
 
-static bool cpp_base_type_is_dependent(QualType base_type) {
-    auto dependent_base_raw = desugar_type(base_type).get_shared();
-    if (!dependent_base_raw) {
-        return false;
-    }
-
-    if (dependent_base_raw->kind == TypeKind::TemplateTypeParm ||
-        dependent_base_raw->kind == TypeKind::DependentName) {
-        return true;
-    }
-
-    if (auto specialization =
-            dyn_cast_shared<TemplateSpecializationType>(dependent_base_raw)) {
-        return specialization->is_dependent;
-    }
-
-    return false;
+static bool cpp_base_type_is_dependent(QualType base_type,
+                                       const ASTContext* ast_ctx) {
+    return type_depends_on_template_parameters(base_type, ast_ctx);
 }
 
 static bool template_argument_names_template_parameter(
@@ -975,7 +961,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
 
         QualType resolved_base_type = base_spec.type;
         if (resolved_base_type &&
-            !cpp_base_type_is_dependent(resolved_base_type)) {
+            !cpp_base_type_is_dependent(resolved_base_type, ast_ctx.get())) {
             resolved_base_type =
                 collect_->collect_try_realize_deferred_semantic_type(
                     resolved_base_type);
@@ -1001,7 +987,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             }
         }
         if (!base_record_decl) {
-            if (!resolved_base_type || !cpp_base_type_is_dependent(resolved_base_type)) {
+            if (!resolved_base_type ||
+                !cpp_base_type_is_dependent(resolved_base_type, ast_ctx.get())) {
                 error_custloc(
                     "base type '" + base_name +
                         "' does not name a class or struct",

@@ -125,23 +125,9 @@ size_t collect_requested_alignment_from_attrs(Collect& collect,
     return best;
 }
 
-bool cpp_base_type_is_dependent(QualType base_type) {
-    auto dependent_base_raw = desugar_type(base_type).get_shared();
-    if (!dependent_base_raw) {
-        return false;
-    }
-
-    if (dependent_base_raw->kind == TypeKind::TemplateTypeParm ||
-        dependent_base_raw->kind == TypeKind::DependentName) {
-        return true;
-    }
-
-    if (auto specialization =
-            dyn_cast_shared<TemplateSpecializationType>(dependent_base_raw)) {
-        return specialization->is_dependent;
-    }
-
-    return false;
+bool cpp_base_type_is_dependent(QualType base_type,
+                                const ASTContext* ast_ctx) {
+    return type_depends_on_template_parameters(base_type, ast_ctx);
 }
 
 std::string make_virtual_slot_key(const std::string& method_name,
@@ -1957,7 +1943,7 @@ void Collect::collect_record_resolve_bases(CollectRecordBuildContext& ctx) const
 
         QualType resolved_base_type = base_spec.type;
         if (resolved_base_type &&
-            !cpp_base_type_is_dependent(resolved_base_type)) {
+            !cpp_base_type_is_dependent(resolved_base_type, ast_ctx_.get())) {
             resolved_base_type =
                 const_cast<Collect*>(this)
                     ->collect_try_realize_deferred_semantic_type(
@@ -1978,7 +1964,7 @@ void Collect::collect_record_resolve_bases(CollectRecordBuildContext& ctx) const
 
         if (!base_record_decl) {
             if (!resolved_base_type ||
-                !cpp_base_type_is_dependent(resolved_base_type)) {
+                !cpp_base_type_is_dependent(resolved_base_type, ast_ctx_.get())) {
                 report_error(
                     "base type '" + base_name +
                         "' does not name a class or struct",

@@ -7716,6 +7716,13 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 set_token_idx(saved_idx);
                 tok_mgnt.set_split_token_state(saved_split_state);
 
+                if (gentle_check(TokenType::DECLTYPE_KW)) {
+                    ParsedCppTypeNameSpecifier parsed;
+                    parsed.type = parse_cpp_decltype_type_specifier();
+                    parsed.spelling = parsed.type.to_string();
+                    return parsed;
+                }
+
                 bool has_global_qualifier = consume_cpp_scope_resolution();
                 auto parse_component =
                     [&](bool preceded_by_template_keyword)
