@@ -1212,7 +1212,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 ctor_decl->is_deleted,
                 ctor_decl->is_defaulted,
                 QualType(record_type),
-                ctor_prefix);
+                ctor_prefix,
+                ctor_decl->trailing_requires_clause.get());
             if (ctor_sym) {
                 set_symbol_owner_record_type(ctor_sym.get(), QualType(record_type));
                 if (!ctor_prefix.empty()) {
@@ -1222,6 +1223,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                     ctor_sym->function_definition =
                         const_cast<CppConstructorDecl*>(ctor_decl);
                 }
+                ctor_sym->function_trailing_requires_clause =
+                    ctor_decl->trailing_requires_clause.get();
                 append_decl_attrs_to_symbol(ctor_decl, ctor_sym);
             }
 
@@ -1270,7 +1273,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 dtor_decl->is_deleted,
                 dtor_decl->is_defaulted,
                 QualType(record_type),
-                dtor_prefix);
+                dtor_prefix,
+                dtor_decl->trailing_requires_clause.get());
             if (dtor_sym) {
                 set_symbol_owner_record_type(dtor_sym.get(), QualType(record_type));
                 if (!dtor_prefix.empty()) {
@@ -1280,6 +1284,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                     dtor_sym->function_definition =
                         const_cast<CppDestructorDecl*>(dtor_decl);
                 }
+                dtor_sym->function_trailing_requires_clause =
+                    dtor_decl->trailing_requires_clause.get();
                 append_decl_attrs_to_symbol(dtor_decl, dtor_sym);
             }
 
@@ -1377,7 +1383,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 method_decl->is_deleted,
                 method_decl->is_defaulted,
                 QualType(record_type),
-                method_prefix);
+                method_prefix,
+                method_decl->trailing_requires_clause.get());
             if (method_sym) {
                 set_symbol_owner_record_type(method_sym.get(), QualType(record_type));
                 if (!method_prefix.empty()) {
@@ -1387,6 +1394,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                     method_sym->function_definition =
                         const_cast<CppMethodDecl*>(method_decl);
                 }
+                method_sym->function_trailing_requires_clause =
+                    method_decl->trailing_requires_clause.get();
                 append_decl_attrs_to_symbol(method_decl, method_sym);
             }
 
@@ -3583,7 +3592,10 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             declaration_language_linkage,
             false,
             false,
-            false);
+            false,
+            QualType(),
+            std::nullopt,
+            decl_parser.trailing_requires_clause.get());
         if (predecl_sym && declaration_is_consteval) {
             predecl_sym->is_consteval = true;
             predecl_sym->is_constexpr = true;
@@ -3615,7 +3627,12 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             declaration_language_linkage,
             false,
             func_decl_check && func_decl_check->is_deleted,
-            func_decl_check && func_decl_check->is_defaulted);
+            func_decl_check && func_decl_check->is_defaulted,
+            QualType(),
+            std::nullopt,
+            func_decl_check
+                ? func_decl_check->trailing_requires_clause.get()
+                : nullptr);
         if (final_sym && declaration_is_consteval) {
             final_sym->is_consteval = true;
             final_sym->is_constexpr = true;
@@ -3628,9 +3645,13 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             if (predecl_sym) {
                 predecl_sym->is_hidden_friend = false;
                 predecl_sym->function_definition = func_decl_check;
+                predecl_sym->function_trailing_requires_clause =
+                    func_decl_check->trailing_requires_clause.get();
             }
             if (final_sym) {
                 final_sym->function_definition = func_decl_check;
+                final_sym->function_trailing_requires_clause =
+                    func_decl_check->trailing_requires_clause.get();
             }
         }
         if (func_decl_check && final_sym && final_sym != predecl_sym) {
@@ -4833,12 +4854,17 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                         friend_function_ptr->get_language_linkage(),
                         false,
                         friend_function_ptr->is_deleted,
-                        friend_function_ptr->is_defaulted);
+                        friend_function_ptr->is_defaulted,
+                        QualType(),
+                        std::nullopt,
+                        friend_function_ptr->trailing_requires_clause.get());
                     if (friend_sym) {
                         if (is_definition) {
                             friend_sym->function_definition =
                                 friend_function_ptr;
                         }
+                        friend_sym->function_trailing_requires_clause =
+                            friend_function_ptr->trailing_requires_clause.get();
                         friend_sym->is_hidden_friend =
                             !has_visible_matching_namespace_decl;
                         register_function_default_arguments(
@@ -5009,6 +5035,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 ctor_decl->explicit_specifier =
                     std::move(member_explicit_specifier);
                 ctor_decl->is_constexpr = decl_parser.is_constexpr;
+                ctor_decl->trailing_requires_clause =
+                    std::move(decl_parser.trailing_requires_clause);
                 ctor_decl->is_deleted = ctor_is_deleted;
                 ctor_decl->is_defaulted = ctor_is_defaulted;
                 ctor_decl->is_defaulted_on_first_declaration =
@@ -5217,6 +5245,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->is_final = method_is_final;
                 cpp_method->is_pure = method_is_pure;
                 cpp_method->set_language_linkage(current_decl_language_linkage());
+                cpp_method->trailing_requires_clause =
+                    std::move(decl_parser.trailing_requires_clause);
 
                 if (auto* existing_prefix =
                         get_func_decl_cxx_qualifier_prefix(cpp_method.get())) {
@@ -5267,6 +5297,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->is_final = method_is_final;
                 cpp_method->is_pure = method_is_pure;
                 cpp_method->set_language_linkage(parsed_method->get_language_linkage());
+                cpp_method->trailing_requires_clause =
+                    std::move(parsed_method->trailing_requires_clause);
                 if (parsed_method->asm_label) {
                     cpp_method->set_asm_label(*parsed_method->asm_label);
                 }

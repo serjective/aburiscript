@@ -100,6 +100,7 @@ struct Symbol {
     AttributeList sym_attrs;  // Merged attributes across declarations
     std::optional<std::string> asm_label;
     const FuncDecl* function_definition = nullptr;
+    const Expr* function_trailing_requires_clause = nullptr;
     const VariableDecl* variable_definition = nullptr;
     const TemplateParameterDecl* template_parameter_decl = nullptr;
 

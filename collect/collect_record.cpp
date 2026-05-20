@@ -2642,7 +2642,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 ctor_decl->is_deleted,
                 ctor_decl->is_defaulted,
                 QualType(ctx.record_type),
-                ctor_prefix);
+                ctor_prefix,
+                ctor_decl->trailing_requires_clause.get());
             collect_record_register_function_default_arguments(
                 ctor_sym,
                 ctor_decl,
@@ -2658,6 +2659,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 if (is_definition) {
                     ctor_sym->function_definition = ctor_decl;
                 }
+                ctor_sym->function_trailing_requires_clause =
+                    ctor_decl->trailing_requires_clause.get();
                 append_decl_attrs_to_symbol(ctor_decl, ctor_sym);
             }
 
@@ -2751,7 +2754,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 dtor_decl->is_deleted,
                 dtor_decl->is_defaulted,
                 QualType(ctx.record_type),
-                dtor_prefix);
+                dtor_prefix,
+                dtor_decl->trailing_requires_clause.get());
             if (dtor_sym) {
                 set_symbol_cxx_qualifier_prefix(dtor_sym.get(), dtor_prefix);
                 set_symbol_owner_record_type(
@@ -2763,6 +2767,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 if (is_definition) {
                     dtor_sym->function_definition = dtor_decl;
                 }
+                dtor_sym->function_trailing_requires_clause =
+                    dtor_decl->trailing_requires_clause.get();
                 append_decl_attrs_to_symbol(dtor_decl, dtor_sym);
             }
 
@@ -2908,7 +2914,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             method_decl->is_deleted,
             method_decl->is_defaulted,
             QualType(ctx.record_type),
-            method_prefix);
+            method_prefix,
+            method_decl->trailing_requires_clause.get());
         collect_record_register_function_default_arguments(
             method_sym,
             method_decl,
@@ -2924,6 +2931,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             if (is_definition) {
                 method_sym->function_definition = method_decl;
             }
+            method_sym->function_trailing_requires_clause =
+                method_decl->trailing_requires_clause.get();
             append_decl_attrs_to_symbol(method_decl, method_sym);
         }
 

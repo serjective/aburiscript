@@ -7111,6 +7111,15 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     }
 
     auto trailing_attrs = try_parse_attributes();
+    std::unique_ptr<Expr> trailing_requires_clause = nullptr;
+    if (lang_opts.is_cxx20_or_later() &&
+        gentle_check(TokenType::REQUIRES_KW)) {
+        advance(); // consume 'requires'
+        trailing_requires_clause = parse_cpp_constraint_expression();
+        if (!trailing_requires_clause) {
+            error("invalid trailing requires-clause");
+        }
+    }
     bool is_function_try_block = false;
     size_t function_try_begin_token_idx = 0;
     if (gentle_check(TokenType::TRY_KW)) {
@@ -7239,6 +7248,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     }
     ctor_decl->is_deleted = is_deleted;
     ctor_decl->is_defaulted = is_defaulted;
+    ctor_decl->trailing_requires_clause =
+        std::move(trailing_requires_clause);
     ctor_decl->is_defaulted_on_first_declaration =
         is_defaulted && is_parsing_cpp_record_body();
     ctor_decl->set_language_linkage(current_decl_language_linkage());
@@ -7491,6 +7502,15 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
     }
 
     auto trailing_attrs = try_parse_attributes();
+    std::unique_ptr<Expr> trailing_requires_clause = nullptr;
+    if (lang_opts.is_cxx20_or_later() &&
+        gentle_check(TokenType::REQUIRES_KW)) {
+        advance(); // consume 'requires'
+        trailing_requires_clause = parse_cpp_constraint_expression();
+        if (!trailing_requires_clause) {
+            error("invalid trailing requires-clause");
+        }
+    }
 
     bool is_deleted = false;
     bool is_defaulted = false;
@@ -7534,6 +7554,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
         tilde_tok.loc);
     dtor_decl->type = dtor_fn_type;
     dtor_decl->is_constexpr = is_constexpr;
+    dtor_decl->trailing_requires_clause =
+        std::move(trailing_requires_clause);
     dtor_decl->is_deleted = is_deleted;
     dtor_decl->is_defaulted = is_defaulted;
     dtor_decl->is_defaulted_on_first_declaration =
@@ -8258,7 +8280,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     method_decl->is_deleted,
                     method_decl->is_defaulted,
                     semantic_owner_record_type,
-                    qualifier_prefix);
+                    qualifier_prefix,
+                    method_decl->trailing_requires_clause.get());
                 collect_->collect_record_register_function_default_arguments(
                     method_sym,
                     method_decl,
@@ -8275,6 +8298,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     if (is_definition) {
                         method_sym->function_definition = method_decl;
                     }
+                    method_sym->function_trailing_requires_clause =
+                        method_decl->trailing_requires_clause.get();
                 }
 
                 RecordSemanticState::Method semantic_method;

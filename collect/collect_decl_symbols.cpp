@@ -415,7 +415,8 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
     bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage,
     bool is_cpp_member_function, bool is_deleted, bool is_defaulted,
     QualType cpp_member_owner_type,
-    std::optional<std::string> cpp_member_qualifier_prefix) {
+    std::optional<std::string> cpp_member_qualifier_prefix,
+    const Expr* trailing_requires_clause) {
 
     if (!scope || name.empty()) {
         return nullptr;
@@ -548,9 +549,24 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
             }
             return candidate->type.get_shared() == type.get_shared();
         };
+        auto function_constraints_match =
+            [&](const std::shared_ptr<Symbol>& candidate) {
+            if (!candidate) {
+                return false;
+            }
+            const Expr* existing_requires =
+                candidate->function_trailing_requires_clause;
+            if (!existing_requires || !trailing_requires_clause) {
+                return existing_requires == trailing_requires_clause;
+            }
+            return expressions_have_same_structural_shape(
+                existing_requires,
+                trailing_requires_clause);
+        };
 
         bool same_type = function_types_match(existing);
-        if (lang_opts_.is_cxx_mode() && !same_type) {
+        if (lang_opts_.is_cxx_mode()) {
+            same_type = same_type && function_constraints_match(existing);
             auto cands = owner_matched_function_candidates;
             if (cands.empty()) {
                 for (const auto& cand :
@@ -568,8 +584,12 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
             }
             std::shared_ptr<Symbol> signature_match = nullptr;
             for (const auto& cand : cands) {
-                if (!function_types_match(cand)) {
+                bool candidate_constraints_match =
+                    function_constraints_match(cand);
+                if (!function_types_match(cand) ||
+                    !candidate_constraints_match) {
                     if (!signature_match &&
+                        candidate_constraints_match &&
                         function_signatures_match_ignoring_return_type(cand->type, type)) {
                         signature_match = cand;
                     }
@@ -657,6 +677,10 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
             if (is_defaulted) {
                 existing->is_defaulted = true;
             }
+            if (!existing->function_trailing_requires_clause) {
+                existing->function_trailing_requires_clause =
+                    trailing_requires_clause;
+            }
             if (existing->storage_class == StorageClass::STATIC) {
                 existing->linkage =
                     function_symbol_linkage_for_storage(
@@ -706,6 +730,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
     sym->is_consteval = is_consteval;
     sym->is_deleted = is_deleted;
     sym->is_defaulted = is_defaulted;
+    sym->function_trailing_requires_clause = trailing_requires_clause;
     sym->set_language_linkage(requested_language_linkage);
     if (global_scope) {
         record_global_scope_mutation(global_scope);
@@ -719,7 +744,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
 }
 
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix, const Expr* trailing_requires_clause) {
 
     return collect_declare_function_symbol(
         std::move(scope),
@@ -737,7 +762,8 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         is_deleted,
         is_defaulted,
         cpp_member_owner_type,
-        cpp_member_qualifier_prefix);
+        cpp_member_qualifier_prefix,
+        trailing_requires_clause);
 }
 
 
@@ -762,7 +788,7 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::stri
         cpp_member_qualifier_prefix);
 }
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_consteval, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_consteval, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix, const Expr* trailing_requires_clause) {
 
     return collect_declare_function_symbol(
         session_.current_scope_,
@@ -780,10 +806,11 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::stri
         is_deleted,
         is_defaulted,
         cpp_member_owner_type,
-        cpp_member_qualifier_prefix);
+        cpp_member_qualifier_prefix,
+        trailing_requires_clause);
 }
 
-std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix) {
+std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix, const Expr* trailing_requires_clause) {
 
     return collect_declare_function_symbol(
         std::move(scope),
@@ -800,7 +827,8 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         is_deleted,
         is_defaulted,
         cpp_member_owner_type,
-        cpp_member_qualifier_prefix);
+        cpp_member_qualifier_prefix,
+        trailing_requires_clause);
 }
 
 std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(const std::string& name, QualType type, StorageClass storage_class, bool is_inline, bool is_definition, SrcLoc loc, LanguageLinkage language_linkage, bool is_cpp_member_function, bool is_deleted, bool is_defaulted, QualType cpp_member_owner_type, std::optional<std::string> cpp_member_qualifier_prefix) {

@@ -1515,6 +1515,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             symbol->is_defaulted = decl->is_defaulted;
             symbol->is_defined = is_definition;
             symbol->set_language_linkage(decl->get_language_linkage());
+            symbol->function_trailing_requires_clause =
+                decl->trailing_requires_clause.get();
             if (is_definition) {
                 symbol->function_definition = const_cast<FuncDecl*>(decl);
             }
@@ -1539,6 +1541,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         synthesized_symbol->is_defaulted = decl->is_defaulted;
         synthesized_symbol->set_language_linkage(
             decl->get_language_linkage());
+        synthesized_symbol->function_trailing_requires_clause =
+            decl->trailing_requires_clause.get();
         synthesized_symbol->function_definition =
             is_definition ? const_cast<FuncDecl*>(decl) : nullptr;
         if (decl->asm_label) {
@@ -3135,7 +3139,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 function_decl->location);
         }
 
-        auto copy_common_function_state = [&](FuncDecl* cloned_decl) {
+        auto copy_common_function_state = [&](FuncDecl* cloned_decl) -> bool {
             cloned_decl->location = function_decl->location;
             cloned_decl->name = function_decl->name;
             cloned_decl->type = canonical_type;
@@ -3149,18 +3153,37 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 function_decl->is_defaulted_on_first_declaration;
             cloned_decl->set_language_linkage(
                 function_decl->get_language_linkage());
+            if (function_decl->trailing_requires_clause) {
+                std::string clone_error;
+                cloned_decl->trailing_requires_clause =
+                    clone_pass.clone_expr(
+                        function_decl->trailing_requires_clause.get(),
+                        &clone_error);
+                if (!cloned_decl->trailing_requires_clause) {
+                    return false;
+                }
+            }
+            return true;
         };
 
         std::unique_ptr<FuncDecl> cloned_function_decl;
         if (ctor_decl) {
             auto cloned_ctor_decl = collect.collect_make<CppConstructorDecl>();
-            copy_common_function_state(cloned_ctor_decl.get());
+            if (!copy_common_function_state(cloned_ctor_decl.get())) {
+                return fail_instantiation(
+                    "failed to clone class template member template requires-clause",
+                    function_decl->location);
+            }
             cloned_ctor_decl->is_explicit = ctor_decl->is_explicit;
             cloned_ctor_decl->explicit_specifier = ctor_decl->explicit_specifier;
             cloned_function_decl = std::move(cloned_ctor_decl);
         } else {
             auto cloned_method_decl = collect.collect_make<CppMethodDecl>();
-            copy_common_function_state(cloned_method_decl.get());
+            if (!copy_common_function_state(cloned_method_decl.get())) {
+                return fail_instantiation(
+                    "failed to clone class template member template requires-clause",
+                    function_decl->location);
+            }
             cloned_method_decl->is_virtual = method_decl->is_virtual;
             cloned_method_decl->is_override = method_decl->is_override;
             cloned_method_decl->is_final = method_decl->is_final;
@@ -3533,6 +3556,20 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_defaulted_on_first_declaration =
             method_decl->is_defaulted_on_first_declaration;
         cloned_decl->set_language_linkage(method_decl->get_language_linkage());
+        if (method_decl->trailing_requires_clause) {
+            std::string clone_error;
+            cloned_decl->trailing_requires_clause =
+                clone_pass.clone_expr(
+                    method_decl->trailing_requires_clause.get(),
+                    &clone_error);
+            if (!cloned_decl->trailing_requires_clause) {
+                return fail_instantiation(
+                    clone_error.empty()
+                        ? "failed to clone class template method requires-clause"
+                        : clone_error,
+                    method_decl->trailing_requires_clause->location);
+            }
+        }
         cloned_decl->is_virtual = method_decl->is_virtual;
         cloned_decl->is_override = method_decl->is_override;
         cloned_decl->is_final = method_decl->is_final;
@@ -3598,6 +3635,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             QualType(canonical_type),
             namespace_prefix ? &*namespace_prefix : nullptr,
             true);
+        if (cloned_symbol) {
+            cloned_symbol->function_trailing_requires_clause =
+                cloned_decl->trailing_requires_clause.get();
+        }
         map_function_symbol_aliases_to_specialized_symbol(
             method_decl,
             cloned_symbol);
@@ -3675,6 +3716,20 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_defaulted = ctor_decl->is_defaulted;
         cloned_decl->is_defaulted_on_first_declaration =
             ctor_decl->is_defaulted_on_first_declaration;
+        if (ctor_decl->trailing_requires_clause) {
+            std::string clone_error;
+            cloned_decl->trailing_requires_clause =
+                clone_pass.clone_expr(
+                    ctor_decl->trailing_requires_clause.get(),
+                    &clone_error);
+            if (!cloned_decl->trailing_requires_clause) {
+                return fail_instantiation(
+                    clone_error.empty()
+                        ? "failed to clone class template constructor requires-clause"
+                        : clone_error,
+                    ctor_decl->trailing_requires_clause->location);
+            }
+        }
         if (ctor_decl->asm_label) {
             cloned_decl->set_asm_label(*ctor_decl->asm_label);
         }
@@ -3710,6 +3765,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         map_function_symbol_aliases_to_specialized_symbol(
             ctor_decl,
             cloned_symbol);
+        if (cloned_symbol) {
+            cloned_symbol->function_trailing_requires_clause =
+                cloned_decl->trailing_requires_clause.get();
+        }
 
         RecordSemanticState::Constructor semantic_ctor;
         semantic_ctor.name = cloned_decl->name;
@@ -3770,6 +3829,20 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_override = dtor_decl->is_override;
         cloned_decl->is_final = dtor_decl->is_final;
         cloned_decl->is_pure = dtor_decl->is_pure;
+        if (dtor_decl->trailing_requires_clause) {
+            std::string clone_error;
+            cloned_decl->trailing_requires_clause =
+                clone_pass.clone_expr(
+                    dtor_decl->trailing_requires_clause.get(),
+                    &clone_error);
+            if (!cloned_decl->trailing_requires_clause) {
+                return fail_instantiation(
+                    clone_error.empty()
+                        ? "failed to clone class template destructor requires-clause"
+                        : clone_error,
+                    dtor_decl->trailing_requires_clause->location);
+            }
+        }
         if (dtor_decl->asm_label) {
             cloned_decl->set_asm_label(*dtor_decl->asm_label);
         }
@@ -3801,6 +3874,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         map_function_symbol_aliases_to_specialized_symbol(
             dtor_decl,
             cloned_symbol);
+        if (cloned_symbol) {
+            cloned_symbol->function_trailing_requires_clause =
+                cloned_decl->trailing_requires_clause.get();
+        }
 
         RecordSemanticState::Destructor semantic_dtor;
         semantic_dtor.name = cloned_decl->name;

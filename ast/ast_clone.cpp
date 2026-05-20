@@ -2565,6 +2565,8 @@ std::shared_ptr<Symbol> clone_symbol_shallow(const std::shared_ptr<Symbol>& sym,
     cloned->enum_val = sym->enum_val;
     cloned->uid = sym->uid;
     cloned->asm_label = sym->asm_label;
+    cloned->function_trailing_requires_clause =
+        sym->function_trailing_requires_clause;
     cloned->set_language_linkage(sym->get_language_linkage());
     return cloned;
 }

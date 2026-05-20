@@ -2089,6 +2089,11 @@ bool template_arguments_have_same_lookup_shape(
     return template_arguments_have_same_lookup_shape_impl(lhs, rhs);
 }
 
+bool expressions_have_same_structural_shape(const Expr* lhs,
+                                            const Expr* rhs) {
+    return expr_structurally_matches(lhs, rhs);
+}
+
 bool types_equivalent_after_template_argument_canonicalization(
     QualType lhs,
     QualType rhs,

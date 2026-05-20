@@ -579,6 +579,8 @@ bool template_argument_has_same_lookup_shape(const TemplateArgument& lhs,
 bool template_arguments_have_same_lookup_shape(
     const std::vector<TemplateArgument>& lhs,
     const std::vector<TemplateArgument>& rhs);
+bool expressions_have_same_structural_shape(const Expr* lhs,
+                                            const Expr* rhs);
 bool types_equivalent_after_template_argument_canonicalization(
     QualType lhs,
     QualType rhs,

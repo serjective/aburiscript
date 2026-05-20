@@ -600,6 +600,8 @@ public:
         const TemplateDecl* template_decl,
         const TemplateArgumentBindings& bindings,
         SrcLoc loc) ;
+    bool are_function_constraints_satisfied(const Symbol* symbol,
+                                            SrcLoc loc) const ;
 
     std::unique_ptr<Expr> collect_builtin_choose_expression(std::unique_ptr<Expr> const_expr,
                                                             std::unique_ptr<Expr> true_expr,
@@ -992,7 +994,8 @@ public:
                                                             bool is_deleted = false,
                                                             bool is_defaulted = false,
                                                             QualType cpp_member_owner_type = QualType(),
-                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt) ;
+                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt,
+                                                            const Expr* trailing_requires_clause = nullptr) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(std::shared_ptr<Scope> scope,
                                                             std::shared_ptr<GlobalIdentTracker> global_scope,
@@ -1008,7 +1011,8 @@ public:
                                                             bool is_deleted = false,
                                                             bool is_defaulted = false,
                                                             QualType cpp_member_owner_type = QualType(),
-                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt) ;
+                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt,
+                                                            const Expr* trailing_requires_clause = nullptr) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(std::shared_ptr<Scope> scope,
                                                             std::shared_ptr<GlobalIdentTracker> global_scope,
@@ -1023,7 +1027,8 @@ public:
                                                             bool is_deleted = false,
                                                             bool is_defaulted = false,
                                                             QualType cpp_member_owner_type = QualType(),
-                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt) ;
+                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt,
+                                                            const Expr* trailing_requires_clause = nullptr) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(const std::string& name,
                                                             QualType type,
@@ -1038,7 +1043,8 @@ public:
                                                             bool is_deleted = false,
                                                             bool is_defaulted = false,
                                                             QualType cpp_member_owner_type = QualType(),
-                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt) ;
+                                                            std::optional<std::string> cpp_member_qualifier_prefix = std::nullopt,
+                                                            const Expr* trailing_requires_clause = nullptr) ;
 
     std::shared_ptr<Symbol> collect_declare_function_symbol(const std::string& name,
                                                             QualType type,

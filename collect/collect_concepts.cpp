@@ -978,3 +978,31 @@ bool Collect::are_template_constraints_satisfied_with_bindings(
 
     return true;
 }
+
+bool Collect::are_function_constraints_satisfied(const Symbol* symbol,
+                                                 SrcLoc loc) const {
+    const Expr* trailing_requires =
+        symbol ? symbol->function_trailing_requires_clause : nullptr;
+    if (!trailing_requires) {
+        return true;
+    }
+
+    auto* mutable_requires = const_cast<Expr*>(trailing_requires);
+    if (expression_depends_on_template_parameters(mutable_requires)) {
+        return true;
+    }
+    auto& mutable_self = const_cast<Collect&>(*this);
+    if (!refresh_constraint_expr_satisfaction(
+            mutable_self,
+            mutable_requires,
+            loc)) {
+        return false;
+    }
+
+    bool satisfied = false;
+    return evaluate_constraint_expr_to_bool(
+               mutable_requires,
+               loc,
+               satisfied) &&
+           satisfied;
+}

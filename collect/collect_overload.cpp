@@ -2873,7 +2873,15 @@ void Collect::collect_viable_overload_candidates(
     candidate_set.viable_indices.clear();
     candidate_set.viable_indices.reserve(candidate_set.evaluated.size());
     for (size_t idx = 0; idx < candidate_set.evaluated.size(); ++idx) {
-        if (candidate_set.evaluated[idx].viable) {
+        auto& evaluated = candidate_set.evaluated[idx];
+        if (evaluated.viable &&
+            !are_function_constraints_satisfied(evaluated.symbol.get(),
+                                                SrcLoc())) {
+            evaluated.viable = false;
+            evaluated.failure.kind = OverloadFailureKind::NotCallable;
+            evaluated.failure.note = "constraints not satisfied";
+        }
+        if (evaluated.viable) {
             candidate_set.viable_indices.push_back(idx);
         }
     }
@@ -3143,6 +3151,15 @@ bool Collect::is_better_overload_candidate(
     if (lhs_is_template_specialization != rhs_is_template_specialization) {
         return !lhs_is_template_specialization && rhs_is_template_specialization;
     }
+
+    bool lhs_has_constraints =
+        lhs.symbol && lhs.symbol->function_trailing_requires_clause;
+    bool rhs_has_constraints =
+        rhs.symbol && rhs.symbol->function_trailing_requires_clause;
+    if (lhs_has_constraints != rhs_has_constraints) {
+        return lhs_has_constraints && !rhs_has_constraints;
+    }
+
     if (lhs.provenance ==
             OverloadCandidateProvenance::FunctionTemplateSpecialization &&
         rhs.provenance ==
