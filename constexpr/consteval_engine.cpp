@@ -1771,6 +1771,42 @@ ConstEvalResult eval_expr_as_typed_const_value(Expr* expr,
     return ConstEvalResult::constant(*casted);
 }
 
+ConstEvalResult eval_parameter_argument_as_const_value(Expr* argument,
+                                                       const ParamDecl* parameter,
+                                                       ConstEvalMode mode,
+                                                       size_t depth,
+                                                       SrcLoc loc,
+                                                       std::string_view missing_parameter_message,
+                                                       std::string_view reference_bind_message) {
+    if (!parameter || !parameter->type) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            std::string(missing_parameter_message),
+            loc);
+    }
+    if (!argument) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            "constexpr interpreter encountered a missing argument expression",
+            loc);
+    }
+
+    ConstEvalResult result =
+        eval_expr_as_typed_const_value(argument, parameter->type, mode, depth);
+    if (result.status != ConstEvalStatus::Constant ||
+        !result.value.has_value()) {
+        return result;
+    }
+    if (canonical_type_kind(parameter->type) == TypeKind::Reference &&
+        result.value->kind != ConstValueKind::Address) {
+        return make_not_evaluated(
+            ConstEvalDiagCode::UnsupportedExpression,
+            std::string(reference_bind_message),
+            loc);
+    }
+    return result;
+}
+
 ConstEvalResult eval_cpp_lambda_expr(CppLambdaExpr* lambda,
                                      ConstEvalMode mode,
                                      size_t depth) {
@@ -3751,52 +3787,29 @@ ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size
             call->location);
     }
 
-    std::vector<ConstValue> argument_values;
-    argument_values.reserve(call->args.size());
-    for (const auto& arg : call->args) {
-        ConstEvalResult arg_result = eval_expr(arg.get(), mode, depth + 1);
-        if (arg_result.status != ConstEvalStatus::Constant || !arg_result.value.has_value()) {
-            return arg_result;
+    std::vector<ConstValue> parameter_values;
+    parameter_values.reserve(required_param_count);
+    for (size_t i = 0; i < required_param_count; ++i) {
+        const ParamDecl* param = params[i];
+        ConstEvalResult argument_value =
+            eval_parameter_argument_as_const_value(
+                call->args[i].get(),
+                param,
+                mode,
+                depth,
+                call->location,
+                "constexpr interpreter encountered unsupported parameter declaration",
+                "constexpr interpreter failed to bind reference parameter");
+        if (argument_value.status != ConstEvalStatus::Constant ||
+            !argument_value.value.has_value()) {
+            return argument_value;
         }
-        argument_values.push_back(arg_result.value.value());
+        parameter_values.push_back(*argument_value.value);
     }
 
     for (size_t i = 0; i < required_param_count; ++i) {
         const ParamDecl* param = params[i];
-        if (canonical_type_kind(param->type) == TypeKind::Reference) {
-            InterpLocation argument_location;
-            if (!resolve_expr_location(
-                    call->args[i].get(),
-                    mode,
-                    depth + 1,
-                    argument_location) ||
-                !argument_location.root_symbol) {
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "constexpr interpreter failed to bind reference parameter",
-                    call->location);
-            }
-            ConstValue reference_value = ConstValue::address(
-                argument_location.root_symbol,
-                argument_location.byte_offset);
-            if (!bind_interpreter_local(
-                    param->sym,
-                    param->get_name(),
-                    reference_value)) {
-                return make_not_evaluated(
-                    ConstEvalDiagCode::UnsupportedExpression,
-                    "constexpr interpreter failed to bind reference parameter",
-                    call->location);
-            }
-            continue;
-        }
-        auto casted = cast_const_value_to_type(argument_values[i], param->type);
-        if (!casted.has_value()) {
-            return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
-                "constexpr interpreter failed to convert argument to parameter type",
-                call->location);
-        }
-        if (!bind_interpreter_local(param->sym, param->get_name(), casted.value())) {
+        if (!bind_interpreter_local(param->sym, param->get_name(), parameter_values[i])) {
             return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
                 "constexpr interpreter failed to bind function parameter",
                 call->location);
@@ -3984,18 +3997,32 @@ ConstEvalResult eval_cpp_construct_expr(CppConstructExpr* construct,
             construct->location);
     }
 
+    std::vector<ConstValue> constructor_arg_values;
+    constructor_arg_values.reserve(construct->args.size());
     for (size_t arg_index = 0; arg_index < construct->args.size(); ++arg_index) {
+        const ParamDecl* param = params[user_param_start + arg_index];
         ConstEvalResult arg_result =
-            eval_expr(construct->args[arg_index].get(), mode, depth + 1);
+            eval_parameter_argument_as_const_value(
+                construct->args[arg_index].get(),
+                param,
+                mode,
+                depth,
+                construct->location,
+                "constexpr interpreter encountered unsupported constructor parameter declaration",
+                "constexpr interpreter failed to bind constructor reference argument");
         if (arg_result.status != ConstEvalStatus::Constant ||
             !arg_result.value.has_value()) {
             return arg_result;
         }
+        constructor_arg_values.push_back(*arg_result.value);
+    }
+
+    for (size_t arg_index = 0; arg_index < constructor_arg_values.size(); ++arg_index) {
         const ParamDecl* param = params[user_param_start + arg_index];
-        auto casted_arg =
-            cast_const_value_to_type(*arg_result.value, param->type);
-        if (!casted_arg.has_value() ||
-            !bind_interpreter_local(param->sym, param->get_name(), *casted_arg)) {
+        if (!bind_interpreter_local(
+                param->sym,
+                param->get_name(),
+                constructor_arg_values[arg_index])) {
             return make_not_evaluated(
                 ConstEvalDiagCode::UnsupportedExpression,
                 "constexpr interpreter failed to bind constructor argument",

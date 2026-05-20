@@ -1984,6 +1984,24 @@ std::unique_ptr<Expr> Parser::parse_block_literal_expression() {
 
 std::unique_ptr<Expr> Parser::parse_primary_expression() {
     Token tok = current_token();
+    auto collect_unqualified_id_expression_after_name =
+        [&](std::string name, SrcLoc loc) -> std::unique_ptr<Expr> {
+        bool looks_like_call = gentle_check(TokenType::LEFT_PAREN);
+        bool might_be_template_id = looks_like_call;
+        if (!looks_like_call &&
+            is_cxx_mode_active() &&
+            gentle_check(TokenType::LESS_THAN)) {
+            size_t offset = 0;
+            if (skip_template_argument_list_for_expression_probe(offset)) {
+                might_be_template_id = true;
+                looks_like_call =
+                    peek_token_shortcut(offset).type == TokenType::LEFT_PAREN;
+            }
+        }
+        // todo: when we get typedefs this can be ambgioous. But we should realize that at cast_expression not here
+        return collect_->collect_unqualified_identifier_expression(
+            name, looks_like_call, might_be_template_id, loc);
+    };
     if (is_cxx_mode_active()) {
         if (auto type_construction = try_parse_cpp_type_construction_expression()) {
             return type_construction;
@@ -2008,6 +2026,17 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
         }
         if (tok.type == TokenType::LEFT_BRACKET) {
             return parse_cpp_lambda_expression();
+        }
+        if (tok.type == TokenType::OPERATOR_KW) {
+            auto operator_name = try_parse_cpp_operator_function_id_name();
+            if (!operator_name) {
+                error_custloc(
+                    "expected operator-function-id in expression",
+                    tok.loc);
+            }
+            return collect_unqualified_id_expression_after_name(
+                std::move(*operator_name),
+                tok.loc);
         }
     }
     if (is_imaginary_integer_literal(tok.type)) {
@@ -2447,22 +2476,11 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
             }
             return collect_->collect_integer_literal("1", type_ctx->get_builtin(BuiltinTypes::Int), tok.loc);
         }
-        bool looks_like_call = (peek_token().type == TokenType::LEFT_PAREN);
-        bool might_be_template_id = looks_like_call;
-        if (!looks_like_call &&
-            is_cxx_mode_active() &&
-            peek_token().type == TokenType::LESS_THAN) {
-            size_t offset = 1;
-            if (skip_template_argument_list_for_expression_probe(offset)) {
-                might_be_template_id = true;
-                looks_like_call =
-                    peek_token_shortcut(offset).type == TokenType::LEFT_PAREN;
-            }
-        }
-        // todo: when we get typedefs this can be ambgioous. But we should realize that at cast_expression not here
+        std::string name = tok.value;
         advance();
-        return collect_->collect_unqualified_identifier_expression(
-            tok.value, looks_like_call, might_be_template_id, tok.loc);
+        return collect_unqualified_id_expression_after_name(
+            std::move(name),
+            tok.loc);
     }
     diag_engine->report_error("unexpected token \"" + tok.value +
           "\" in parse_primary_expression", tok.loc);
