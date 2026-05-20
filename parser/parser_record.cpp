@@ -5220,6 +5220,38 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             error("'consteval' can only be applied to function declarations");
         }
 
+        auto parse_default_member_initializer =
+            [&](QualType member_type,
+                SrcLoc member_loc,
+                CppDefaultMemberInitializerKind& initializer_kind)
+                -> std::unique_ptr<Expr> {
+            initializer_kind = CppDefaultMemberInitializerKind::None;
+            if (!is_cxx_mode_active()) {
+                return nullptr;
+            }
+
+            std::unique_ptr<Expr> initializer;
+            if (gentle_check_and_consume(TokenType::ASSIGN)) {
+                initializer_kind = CppDefaultMemberInitializerKind::Equal;
+                if (gentle_check(TokenType::LEFT_BRACE)) {
+                    initializer = parse_init_list();
+                } else {
+                    initializer = parse_assignment_expression();
+                }
+            } else if (gentle_check(TokenType::LEFT_BRACE)) {
+                initializer_kind = CppDefaultMemberInitializerKind::Brace;
+                initializer = parse_init_list();
+            }
+
+            if (!initializer) {
+                return nullptr;
+            }
+            return collect_->collect_member_initializer_expression(
+                std::move(initializer),
+                member_type,
+                member_loc);
+        };
+
         // Check for bitfield syntax: field_name : width or just : width (anonymous)
         if (gentle_check_and_consume(TokenType::COLON)) {
             if (is_static_data_member_decl) {
@@ -5246,14 +5278,26 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
 
             // GCC accepts attributes after the bitfield width.
             auto field_attrs_after_width = try_parse_attributes();
+            QualType member_type(field_type, decl_parser.qualifiers);
+            CppDefaultMemberInitializerKind default_initializer_kind =
+                CppDefaultMemberInitializerKind::None;
+            auto default_initializer =
+                parse_default_member_initializer(
+                    member_type,
+                    t.loc,
+                    default_initializer_kind);
 
             auto field_decl = collect_->collect_field_declaration(
-                QualType(field_type, decl_parser.qualifiers),
+                member_type,
                 field_name,
                 static_cast<uint32_t>(bitfield_width),
                 t.loc);
             if (auto* parsed_field = dyn_cast<FieldDecl>(field_decl.get())) {
                 parsed_field->is_mutable = decl_parser.is_mutable;
+                parsed_field->default_member_initializer =
+                    std::move(default_initializer);
+                parsed_field->default_member_initializer_kind =
+                    default_initializer_kind;
             }
             ast_ctx->append_attrs(field_decl->node_id, std::move(decl_parser.leading_attrs));
             ast_ctx->append_attrs(field_decl->node_id, std::move(field_attrs_before_colon));
@@ -5338,12 +5382,24 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     return {};
                 }
             }
+            QualType member_type(field_type, decl_parser.qualifiers);
+            CppDefaultMemberInitializerKind default_initializer_kind =
+                CppDefaultMemberInitializerKind::None;
+            auto default_initializer =
+                parse_default_member_initializer(
+                    member_type,
+                    t.loc,
+                    default_initializer_kind);
             auto field_decl = collect_->collect_field_declaration(
-                QualType(field_type, decl_parser.qualifiers),
+                member_type,
                 field_name,
                 t.loc);
             if (auto* parsed_field = dyn_cast<FieldDecl>(field_decl.get())) {
                 parsed_field->is_mutable = decl_parser.is_mutable;
+                parsed_field->default_member_initializer =
+                    std::move(default_initializer);
+                parsed_field->default_member_initializer_kind =
+                    default_initializer_kind;
             }
             ast_ctx->append_attrs(field_decl->node_id, std::move(decl_parser.leading_attrs));
             ast_ctx->append_attrs(field_decl->node_id, std::move(field_attrs_before_colon));

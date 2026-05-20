@@ -1383,8 +1383,21 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
                 }
 
                 const auto& field = constructor_record_state->fields[field_index];
-                if (field.is_bitfield || field.is_base_subobject ||
-                    field.is_virtual_base_storage) {
+                if (field.is_base_subobject || field.is_virtual_base_storage) {
+                    continue;
+                }
+                if (field.decl && field.decl->has_default_member_initializer()) {
+                    if (!emit_cpp_default_member_initializer(
+                            field,
+                            constructor_this_addr,
+                            ctor_decl->location,
+                            "emit_function_body()")) {
+                        error("emit_function_body(): failed to lower default member initializer",
+                              ctor_decl->location);
+                    }
+                    continue;
+                }
+                if (field.is_bitfield) {
                     continue;
                 }
 

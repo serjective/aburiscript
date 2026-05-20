@@ -33,6 +33,7 @@ struct CppDestructorDecl;
 struct FriendDecl;
 struct FuncDecl;
 struct VariableDecl;
+struct FieldDecl;
 struct FunctionType;
 struct CppBaseSpecifier;
 struct Symbol;
@@ -1434,29 +1435,33 @@ struct ObjectType : TagType {
         // C++ member access metadata.
         RecordMemberAccess declared_access = RecordMemberAccess::Public;
         bool is_mutable = false;
+        const FieldDecl* decl = nullptr;
 
         // Constructor for regular fields
         Field(std::string name, QualType type, size_t offset = 0,
               RecordMemberAccess declared_access = RecordMemberAccess::Public,
-              bool is_mutable = false)
+              bool is_mutable = false,
+              const FieldDecl* decl = nullptr)
             : name(std::move(name)), type(std::move(type)), offset(offset),
               is_bitfield(false), bit_offset(0), bit_width(0), storage_size(0),
               forced_alignment(0), is_base_subobject(false),
               is_virtual_base_storage(false), storage_size_override(0),
               storage_alignment_override(0), declared_access(declared_access),
-              is_mutable(is_mutable) {}
+              is_mutable(is_mutable), decl(decl) {}
 
         // Constructor for bitfields
         Field(std::string name, QualType type, size_t offset,
               uint32_t bit_offset, uint32_t bit_width, uint32_t storage_size,
               RecordMemberAccess declared_access = RecordMemberAccess::Public,
-              bool is_mutable = false)
+              bool is_mutable = false,
+              const FieldDecl* decl = nullptr)
             : name(std::move(name)), type(std::move(type)), offset(offset),
               is_bitfield(true), bit_offset(bit_offset), bit_width(bit_width),
               storage_size(storage_size), forced_alignment(0),
               is_base_subobject(false), is_virtual_base_storage(false),
               storage_size_override(0), storage_alignment_override(0),
-              declared_access(declared_access), is_mutable(is_mutable) {}
+              declared_access(declared_access), is_mutable(is_mutable),
+              decl(decl) {}
     };
 
     bool is_union;                    // True if union, false if struct

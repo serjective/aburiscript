@@ -542,6 +542,40 @@ bool finalize_specialized_decl_semantics(Collect& collect,
             }
             return true;
         }
+        case DeclKind::FieldDecl: {
+            auto* field = static_cast<FieldDecl*>(decl.get());
+            if (!field->default_member_initializer) {
+                return true;
+            }
+            strip_redundant_specialization_casts(
+                field->default_member_initializer);
+            if (!collect.resolve_dependent_expr_after_substitution(
+                    field->default_member_initializer,
+                    QualType(),
+                    error_out)) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "failed to resolve field default member initializer after template substitution";
+                }
+                return false;
+            }
+            field->type =
+                collect_decl_internal::clone_top_level_incomplete_array(
+                    field->type);
+            auto rebuilt_init = collect.collect_member_initializer_expression(
+                std::move(field->default_member_initializer),
+                field->type,
+                field->location);
+            if (!rebuilt_init) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "failed to finalize field default member initializer after template substitution";
+                }
+                return false;
+            }
+            field->default_member_initializer = std::move(rebuilt_init);
+            return true;
+        }
         case DeclKind::StaticAssertDecl: {
             auto owned_static_assert = std::unique_ptr<StaticAssertDecl>(
                 static_cast<StaticAssertDecl*>(decl.release()));

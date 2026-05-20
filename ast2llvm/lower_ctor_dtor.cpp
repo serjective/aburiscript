@@ -1,5 +1,6 @@
 #include "ast2llvm.h"
 #include "const_lowering.h"
+#include "lower_helpers.h"
 #include "../helpers/casting.h"
 #include "../ast/special_members.h"
 #include "../constexpr/consteval_compat.h"
@@ -134,6 +135,114 @@ std::shared_ptr<Symbol> ASTToLLVM::select_record_default_constructor_symbol(
     return nullptr;
 }
 
+bool ASTToLLVM::emit_cpp_default_member_initializer(
+    const ObjectType::Field& field,
+    llvm::Value* object_addr,
+    SrcLoc loc,
+    const std::string& construction_context) {
+    if (!field.decl || !field.decl->default_member_initializer || !object_addr) {
+        return false;
+    }
+
+    Expr* initializer =
+        const_cast<Expr*>(field.decl->default_member_initializer.get());
+    SrcLoc init_loc = initializer ? initializer->location : loc;
+    llvm::Value* member_addr = object_addr;
+    if (field.offset != 0) {
+        member_addr = builder.CreateInBoundsGEP(
+            llvm::Type::getInt8Ty(*context),
+            object_addr,
+            llvm::ConstantInt::get(
+                llvm::Type::getInt64Ty(*context),
+                static_cast<uint64_t>(field.offset)),
+            field.is_bitfield ? "nsdmi.bitfield.storage.addr"
+                              : "nsdmi.member.addr");
+    }
+
+    if (field.is_bitfield) {
+        if (isa<InitListExpr>(initializer)) {
+            error("default member initializer for bitfield cannot be an initializer list",
+                  init_loc);
+            return false;
+        }
+        llvm::Value* init_val = convert_expression(initializer);
+        if (!init_val) {
+            error("failed to lower bitfield default member initializer",
+                  init_loc);
+            return false;
+        }
+        store_bitfield(member_addr,
+                       field.storage_size,
+                       field.bit_offset,
+                       field.bit_width,
+                       init_val);
+        return true;
+    }
+
+    if (auto* init_list = dyn_cast<InitListExpr>(initializer)) {
+        emit_init_list_store(init_list,
+                             member_addr,
+                             field.type.get_shared(),
+                             false,
+                             false);
+        return true;
+    }
+
+    if (canonical_type_kind(field.type, ast_ctx.get()) == TypeKind::Reference) {
+        Expr* binding_expr = unwrap_lvalue_to_rvalue_casts(initializer);
+        llvm::Value* bound_addr = get_lvalue(binding_expr).address;
+        if (!bound_addr) {
+            error("reference default member initializer did not produce an address",
+                  init_loc);
+            return false;
+        }
+
+        llvm::Type* reference_storage_type = convert_type(field.type);
+        if (!reference_storage_type) {
+            error("failed to lower reference default member initializer type",
+                  init_loc);
+            return false;
+        }
+        if (bound_addr->getType() != reference_storage_type) {
+            bound_addr = cast_llvm_type(
+                bound_addr,
+                reference_storage_type,
+                false);
+        }
+
+        builder.CreateStore(bound_addr, member_addr);
+        return true;
+    }
+
+    if (auto* ctor_init = dyn_cast<CppConstructExpr>(initializer)) {
+        return emit_cpp_construct_call(ctor_init,
+                                       member_addr,
+                                       init_loc,
+                                       construction_context);
+    }
+
+    llvm::Value* init_val = convert_expression(initializer);
+    if (!init_val) {
+        error("failed to lower default member initializer expression",
+              init_loc);
+        return false;
+    }
+
+    llvm::Type* member_llvm_type = convert_type(field.type);
+    if (!member_llvm_type) {
+        error("failed to lower default member initializer type", init_loc);
+        return false;
+    }
+    if (init_val->getType() != member_llvm_type) {
+        init_val = cast_llvm_type(
+            init_val,
+            member_llvm_type,
+            field.type && field.type->isUnsigned());
+    }
+    builder.CreateStore(init_val, member_addr);
+    return true;
+}
+
 bool ASTToLLVM::emit_cpp_object_default_construction_recursive(
     const QualType& object_type,
     llvm::Value* object_addr,
@@ -191,6 +300,17 @@ bool ASTToLLVM::emit_cpp_object_default_construction_recursive(
                 emit_cpp_vptr_store(object_type, object_addr, loc, construction_context);
             }
         }
+        for (const auto& field : object_state->fields) {
+            if (field.is_base_subobject || field.is_virtual_base_storage ||
+                !field.decl || !field.decl->has_default_member_initializer()) {
+                continue;
+            }
+            return emit_cpp_default_member_initializer(
+                field,
+                object_addr,
+                loc,
+                construction_context);
+        }
         return true;
     }
 
@@ -214,8 +334,14 @@ bool ASTToLLVM::emit_cpp_object_default_construction_recursive(
     }
     bool has_record_field_work = false;
     for (const auto& field : object_state->fields) {
-        if (field.is_bitfield || field.is_base_subobject ||
-            field.is_virtual_base_storage) {
+        if (field.is_base_subobject || field.is_virtual_base_storage) {
+            continue;
+        }
+        if (field.decl && field.decl->has_default_member_initializer()) {
+            has_record_field_work = true;
+            break;
+        }
+        if (field.is_bitfield) {
             continue;
         }
         if (canonical_type_kind(field.type, ast_ctx.get()) != TypeKind::Object) {
@@ -305,8 +431,20 @@ bool ASTToLLVM::emit_cpp_object_default_construction_recursive(
     }
 
     for (const auto& field : object_state->fields) {
-        if (field.is_bitfield || field.is_base_subobject ||
-            field.is_virtual_base_storage) {
+        if (field.is_base_subobject || field.is_virtual_base_storage) {
+            continue;
+        }
+        if (field.decl && field.decl->has_default_member_initializer()) {
+            if (!emit_cpp_default_member_initializer(
+                    field,
+                    object_addr,
+                    loc,
+                    construction_context)) {
+                return false;
+            }
+            continue;
+        }
+        if (field.is_bitfield) {
             continue;
         }
         auto field_record =

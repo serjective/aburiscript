@@ -2128,6 +2128,66 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             substituted_type,
             field_decl->location);
 
+        std::string clone_error;
+        auto cloned_field_decl_base = clone_pass.clone_decl(
+            field_decl,
+            &clone_error);
+        auto* cloned_field_decl =
+            dyn_cast<FieldDecl>(cloned_field_decl_base.get());
+        if (!cloned_field_decl_base || !cloned_field_decl) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to clone class template field"
+                    : clone_error,
+                field_decl->location);
+        }
+
+        auto resolution_pass =
+            clone_pass_builder.build_dependent_resolution_pass(
+                clone_pass,
+                [this](std::unique_ptr<Expr>& expr, std::string* error_out)
+                    -> bool {
+                    return collect.resolve_dependent_expr_after_substitution(
+                        expr,
+                        QualType(),
+                        error_out);
+                });
+        if (!resolution_pass.resolve_decl_in_place(
+                cloned_field_decl_base,
+                &clone_error)) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to resolve class template field after substitution"
+                    : clone_error,
+                field_decl->location);
+        }
+
+        cloned_field_decl = dyn_cast<FieldDecl>(cloned_field_decl_base.get());
+        if (!cloned_field_decl) {
+            return fail_instantiation(
+                "internal error: class template field lost its declaration kind during substitution",
+                field_decl->location);
+        }
+        cloned_field_decl->type = substituted_type;
+        if (!template_sema_internal::finalize_specialized_decl_semantics(
+                collect,
+                cloned_field_decl_base,
+                &clone_error)) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to finalize class template field after substitution"
+                    : clone_error,
+                field_decl->location);
+        }
+
+        cloned_field_decl = dyn_cast<FieldDecl>(cloned_field_decl_base.get());
+        if (!cloned_field_decl) {
+            return fail_instantiation(
+                "internal error: class template field lost its declaration kind during finalization",
+                field_decl->location);
+        }
+        substituted_type = cloned_field_decl->type;
+
         auto canonical_field_type = desugar_type(substituted_type);
         auto* field_object_type = canonical_field_type.as<ObjectType>();
         if (field_object_type && field_object_type->isIncomplete()) {
@@ -2137,42 +2197,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         }
 
         size_t forced_alignment = 0;
-        if (ast_ctx() && ast_ctx()->has_attrs(field_decl->node_id)) {
-            std::string clone_error;
-            auto cloned_field_decl_base = clone_pass.clone_decl(
-                field_decl,
-                &clone_error);
-            auto* cloned_field_decl = dyn_cast<FieldDecl>(cloned_field_decl_base.get());
-            if (!cloned_field_decl_base || !cloned_field_decl) {
-                return fail_instantiation(
-                    clone_error.empty()
-                        ? "failed to clone class template field attributes"
-                        : clone_error,
-                    field_decl->location);
-            }
-
-            auto resolution_pass =
-                clone_pass_builder.build_dependent_resolution_pass(
-                    clone_pass,
-                    [this](std::unique_ptr<Expr>& expr, std::string* error_out)
-                        -> bool {
-                        return collect.resolve_dependent_expr_after_substitution(
-                            expr,
-                            QualType(),
-                            error_out);
-                    });
-            if (!resolution_pass.resolve_decl_in_place(
-                    cloned_field_decl_base,
-                    &clone_error)) {
-                return fail_instantiation(
-                    clone_error.empty()
-                        ? "failed to resolve class template field attributes after substitution"
-                        : clone_error,
-                    field_decl->location);
-            }
-
+        if (ast_ctx() && ast_ctx()->has_attrs(cloned_field_decl->node_id)) {
             std::string alignment_error;
-            SrcLoc alignment_error_loc = field_decl->location;
+            SrcLoc alignment_error_loc = cloned_field_decl->location;
             forced_alignment = requested_alignment_from_decl_attrs(
                 collect,
                 ast_ctx(),
@@ -2185,25 +2212,28 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
         }
 
-        if (field_decl->is_bitfield()) {
-            user_fields.emplace_back(field_decl->name,
+        if (cloned_field_decl->is_bitfield()) {
+            user_fields.emplace_back(cloned_field_decl->name,
                                      substituted_type,
                                      0,
                                      0,
-                                     field_decl->bitfield_width,
+                                     cloned_field_decl->bitfield_width,
                                      0,
                                      declared_access,
-                                     field_decl->is_mutable);
+                                     cloned_field_decl->is_mutable,
+                                     cloned_field_decl);
             user_fields.back().forced_alignment = forced_alignment;
         } else {
             user_fields.emplace_back(
-                field_decl->name,
+                cloned_field_decl->name,
                 substituted_type,
                 0,
                 declared_access,
-                field_decl->is_mutable);
+                cloned_field_decl->is_mutable,
+                cloned_field_decl);
             user_fields.back().forced_alignment = forced_alignment;
         }
+        entry->member_decls.push_back(std::move(cloned_field_decl_base));
         return true;
     }
 

@@ -293,6 +293,11 @@ public:
     std::shared_ptr<Symbol> select_record_destructor_symbol(
         const RecordSemanticState* state,
         bool require_public_access) const;
+    bool emit_cpp_default_member_initializer(
+        const ObjectType::Field& field,
+        llvm::Value* object_addr,
+        SrcLoc loc,
+        const std::string& construction_context);
     bool emit_cpp_object_default_construction_recursive(
         const QualType& object_type,
         llvm::Value* object_addr,

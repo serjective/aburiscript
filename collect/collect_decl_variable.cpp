@@ -228,8 +228,11 @@ Collect::ArrayBoundResult Collect::collect_array_bound_expression(std::unique_pt
         return result;
     }
 
+    auto bound_eval_mode = lang_opts_.is_cxx_mode()
+        ? ConstEvalMode::cpp_core_constant_expression()
+        : ConstEvalMode::c_ice();
     auto eval_result = try_evaluate_with_consteval_compat(
-        expr.get(), ConstEvalMode::c_ice());
+        expr.get(), bound_eval_mode);
     if (eval_result.has_value() && *eval_result >= 0) {
         result.constant_size = static_cast<size_t>(*eval_result);
         return result;

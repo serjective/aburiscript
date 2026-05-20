@@ -1759,6 +1759,12 @@ bool rewrite_decl_tree_in_place_impl(std::unique_ptr<Decl>& decl,
         case DeclKind::FieldDecl: {
             auto* field_decl = static_cast<FieldDecl*>(decl.get());
             field_decl->type = rewrite_type(field_decl->type, ctx);
+            if (!rewrite_expr_tree(
+                    field_decl->default_member_initializer,
+                    ctx,
+                    error_out)) {
+                return false;
+            }
             if (ctx.ast_ctx && ctx.ast_ctx->has_attrs(field_decl->node_id) &&
                 !rewrite_attribute_list_in_place(
                     ctx.ast_ctx->get_attrs_mut(field_decl->node_id),
@@ -2572,6 +2578,18 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                     field_decl->location);
             }
             result->is_mutable = field_decl->is_mutable;
+            result->default_member_initializer_kind =
+                field_decl->default_member_initializer_kind;
+            if (field_decl->default_member_initializer) {
+                result->default_member_initializer =
+                    clone_expr_with_substitution(
+                        field_decl->default_member_initializer.get(),
+                        ctx,
+                        error_out);
+                if (!result->default_member_initializer) {
+                    return nullptr;
+                }
+            }
             assign_node_id(result.get(), ctx.ast_ctx);
             if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;

@@ -2882,13 +2882,22 @@ private:
     }
 };
 
+enum class CppDefaultMemberInitializerKind : uint8_t {
+    None,
+    Equal,
+    Brace,
+};
+
 // Struct/union field declaration (C11 6.7.2.1)
-// Unlike VariableDecl, fields have no storage class, no linkage,
-// no symbol table entry, and no initializer (in C).
+// Unlike VariableDecl, fields have no storage class, no linkage, and no
+// symbol table entry. In C++ they may carry a default member initializer.
 struct FieldDecl : Decl {
     QualType type;
     std::string name;  // Empty for anonymous fields / anonymous bitfields
     bool is_mutable = false;
+    std::unique_ptr<Expr> default_member_initializer = nullptr;
+    CppDefaultMemberInitializerKind default_member_initializer_kind =
+        CppDefaultMemberInitializerKind::None;
 
     // Bitfield support: UINT32_MAX means "not a bitfield".
     static constexpr uint32_t k_no_bitfield_width = UINT32_MAX;
@@ -2896,6 +2905,9 @@ struct FieldDecl : Decl {
 
     bool is_bitfield() const { return bitfield_width != k_no_bitfield_width; }
     bool is_const() const { return type.is_const(); }
+    bool has_default_member_initializer() const {
+        return default_member_initializer != nullptr;
+    }
 
     // Regular field constructor
     FieldDecl(QualType type, const std::string &name, SrcLoc loc = SrcLoc())

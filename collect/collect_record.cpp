@@ -2228,6 +2228,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
         return type;
     };
     RecordMemberAccess current_access = encode_cpp_access(ctx.record->default_access);
+    const FieldDecl* union_default_member_initializer_field = nullptr;
     for (const auto& member : ctx.record->members) {
         if (const auto* access_spec = dyn_cast<CppAccessSpecDecl>(member.get())) {
             current_access = encode_cpp_access(access_spec->access);
@@ -2486,6 +2487,17 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             if (!alignment_error.empty()) {
                 report_error(alignment_error, alignment_error_loc);
             }
+            if (ctx.record_type && ctx.record_type->is_union &&
+                field_decl->has_default_member_initializer()) {
+                if (union_default_member_initializer_field &&
+                    union_default_member_initializer_field != field_decl) {
+                    report_error(
+                        "union cannot have more than one default member initializer",
+                        field_decl->location);
+                } else {
+                    union_default_member_initializer_field = field_decl;
+                }
+            }
             if (field_decl->is_bitfield()) {
                 ctx.fields.emplace_back(
                     field_decl->name,
@@ -2495,7 +2507,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                     field_decl->bitfield_width,
                     0,
                     current_access,
-                    field_decl->is_mutable);
+                    field_decl->is_mutable,
+                    field_decl);
                 ctx.fields.back().forced_alignment = forced_alignment;
             } else {
                 ctx.fields.emplace_back(
@@ -2503,12 +2516,14 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                     field_decl->type,
                     0,
                     current_access,
-                    field_decl->is_mutable);
+                    field_decl->is_mutable,
+                    field_decl);
                 ctx.fields.back().forced_alignment = forced_alignment;
             }
             bool requires_ctor_member_init =
-                field_decl->type.is_const() ||
-                canonical_type_kind(field_decl->type) == TypeKind::Reference;
+                !field_decl->has_default_member_initializer() &&
+                (field_decl->type.is_const() ||
+                 canonical_type_kind(field_decl->type) == TypeKind::Reference);
             if (requires_ctor_member_init) {
                 ctx.required_ctor_member_init_fields.push_back(field_decl);
             }
