@@ -1013,9 +1013,17 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
     const EnumDecl* qualified_owner_enum_decl = nullptr;
     if (owner_chain.has_owner_type() &&
         !owner_chain.is_dependent_context()) {
+        QualType lookup_owner_type = owner_chain.owner_type;
+        if (!owner_chain.is_current_instantiation && collect_) {
+            if (auto realized_owner =
+                    collect_->collect_try_realize_deferred_semantic_type(
+                        lookup_owner_type)) {
+                lookup_owner_type = realized_owner;
+            }
+        }
         QualType qualified_owner_canonical =
             desugar_type(
-                remove_reference(owner_chain.owner_type, ast_ctx.get()),
+                remove_reference(lookup_owner_type, ast_ctx.get()),
                 ast_ctx.get());
         qualified_owner_type = qualified_owner_canonical.as_shared<ObjectType>();
         qualified_owner_record_decl =
