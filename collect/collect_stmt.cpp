@@ -415,8 +415,21 @@ std::unique_ptr<Expr> Collect::collect_switch_condition(std::unique_ptr<Expr> co
         return nullptr;
     }
     auto cond_type = condition->get_type();
+    bool condition_is_dependent =
+        lang_opts_.is_cxx_mode() &&
+        (expression_depends_on_template_parameters(condition.get()) ||
+         (cond_type &&
+          (type_depends_on_template_parameters(cond_type, ast_ctx_.get()) ||
+           contains_deferred_semantic_type(cond_type.get_shared()) ||
+           auto_type_utils::has_cxx_auto_type(cond_type.get_shared()))));
     if (!cond_type) {
+        if (condition_is_dependent) {
+            return condition;
+        }
         report_error("switch condition has unknown type", loc);
+        return condition;
+    }
+    if (condition_is_dependent) {
         return condition;
     }
     if (!is_integer_or_enum_type(cond_type, ast_ctx_.get())) {

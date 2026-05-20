@@ -423,6 +423,32 @@ bool finalize_specialized_condition_expression(
     return true;
 }
 
+bool finalize_specialized_switch_condition_expression(
+    Collect& collect,
+    std::unique_ptr<Expr>& condition,
+    SrcLoc loc,
+    std::string* error_out) {
+    if (!resolve_specialized_condition_after_substitution(
+            collect,
+            condition,
+            "switch",
+            error_out)) {
+        return false;
+    }
+    if (!condition) {
+        return true;
+    }
+
+    condition = collect.collect_switch_condition(std::move(condition), loc);
+    if (!condition) {
+        if (error_out && error_out->empty()) {
+            *error_out = "failed to finalize switch condition after template substitution";
+        }
+        return false;
+    }
+    return true;
+}
+
 bool finalize_specialized_control_condition_declaration(
     Collect& collect,
     ControlCondition& condition,
@@ -788,11 +814,10 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
                     error_out)) {
                 return false;
             }
-            if (!finalize_specialized_condition_expression(
+            if (!finalize_specialized_switch_condition_expression(
                     collect,
                     switch_stmt->condition.expression,
                     switch_stmt->location,
-                    "switch",
                     error_out)) {
                 return false;
             }
