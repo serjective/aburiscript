@@ -692,6 +692,10 @@ private:
         SrcLoc loc);
     QualType lookup_cpp_current_record_nested_type(
         const std::string& component_name) const;
+    const RecordSemanticState::NestedTemplate*
+    lookup_cpp_current_record_nested_type_template(
+        const std::string& component_name,
+        QualType* owner_lookup_type_out = nullptr) const;
     QualType prepare_cpp_qualified_type_owner(
         QualType owner_type,
         bool is_current_instantiation = false);

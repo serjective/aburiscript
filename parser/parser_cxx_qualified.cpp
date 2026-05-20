@@ -111,6 +111,39 @@ QualType Parser::lookup_cpp_current_record_nested_type(
         component_name);
 }
 
+const RecordSemanticState::NestedTemplate*
+Parser::lookup_cpp_current_record_nested_type_template(
+    const std::string& component_name,
+    QualType* owner_lookup_type_out) const {
+    if (owner_lookup_type_out) {
+        *owner_lookup_type_out = QualType();
+    }
+    if (!collect_ || component_name.empty()) {
+        return nullptr;
+    }
+
+    QualType current_record_lookup_type =
+        collect_->collect_current_cpp_record_lookup_type();
+    if (!current_record_lookup_type) {
+        return nullptr;
+    }
+    if (owner_lookup_type_out) {
+        *owner_lookup_type_out = current_record_lookup_type;
+    }
+
+    const auto* nested_template =
+        collect_->collect_lookup_record_nested_template(
+            current_record_lookup_type,
+            component_name);
+    if (!nested_template ||
+        !nested_template->decl ||
+        (!isa<AliasTemplateDecl>(nested_template->decl) &&
+         !isa<ClassTemplateDecl>(nested_template->decl))) {
+        return nullptr;
+    }
+    return nested_template;
+}
+
 QualType Parser::prepare_cpp_qualified_type_owner(
     QualType owner_type,
     bool is_current_instantiation) {
@@ -357,12 +390,11 @@ Parser::CppTypeComponentResolution Parser::resolve_cpp_unqualified_type_componen
     if (!isa<AliasTemplateDecl>(primary_template) &&
         !isa<ClassTemplateDecl>(primary_template) &&
         !isa<TemplateTemplateParmDecl>(primary_template)) {
-        QualType owner_lookup_type =
-            collect_->collect_current_cpp_record_lookup_type();
+        QualType owner_lookup_type;
         const auto* nested_template =
-            collect_->collect_lookup_record_nested_template(
-                owner_lookup_type,
-                component_name);
+            lookup_cpp_current_record_nested_type_template(
+                component_name,
+                &owner_lookup_type);
         if (!nested_template || !nested_template->decl) {
             return result;
         }
@@ -894,12 +926,11 @@ Parser::resolve_cpp_qualified_owner_chain(
                 allow_enclosing_lookup,
                 component.name);
             if (!primary_template && allow_enclosing_lookup && collect_) {
-                QualType owner_lookup_type =
-                    collect_->collect_current_cpp_record_lookup_type();
+                QualType owner_lookup_type;
                 const auto* nested_template =
-                    collect_->collect_lookup_record_nested_template(
-                        owner_lookup_type,
-                        component.name);
+                    lookup_cpp_current_record_nested_type_template(
+                        component.name,
+                        &owner_lookup_type);
                 if (nested_template && nested_template->decl) {
                     bool is_dependent =
                         type_depends_on_template_parameters(

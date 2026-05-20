@@ -1029,10 +1029,19 @@ bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
             size_t component_idx) -> const Decl* {
         if (!has_global_qualifier && component_idx == 0) {
             auto scope = collect_->collect_current_scope();
-            return lookup_cpp_unqualified_type_template_decl(
-                components[component_idx].name,
-                scope,
-                /*allow_enclosing_lookup=*/true);
+            if (const Decl* primary_template =
+                    lookup_cpp_unqualified_type_template_decl(
+                        components[component_idx].name,
+                        scope,
+                        /*allow_enclosing_lookup=*/true)) {
+                return primary_template;
+            }
+            if (const auto* nested_template =
+                    lookup_cpp_current_record_nested_type_template(
+                        components[component_idx].name)) {
+                return nested_template->decl;
+            }
+            return nullptr;
         }
 
         LookupEngine::QualifiedNameSpec name_spec;
@@ -1046,6 +1055,23 @@ bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
         }
         name_spec.terminal_name = components[component_idx].name;
         return lookup_qualified_type_template(name_spec);
+    };
+
+    auto lookup_unqualified_type_template_at =
+        [&](const ProbeComponent& component) -> const Decl* {
+        auto scope = collect_->collect_current_scope();
+        if (const Decl* primary_template =
+                lookup_cpp_unqualified_type_template_decl(
+                    component.name,
+                    scope,
+                    /*allow_enclosing_lookup=*/true)) {
+            return primary_template;
+        }
+        if (const auto* nested_template =
+                lookup_cpp_current_record_nested_type_template(component.name)) {
+            return nested_template->decl;
+        }
+        return nullptr;
     };
 
     auto qualified_terminal_names_type =
@@ -1070,11 +1096,7 @@ bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
 
         if (terminal.has_template_argument_list) {
             if (!has_global_qualifier && terminal_idx == 0) {
-                auto scope = collect_->collect_current_scope();
-                return lookup_cpp_unqualified_type_template_decl(
-                           terminal.name,
-                           scope,
-                           /*allow_enclosing_lookup=*/true) != nullptr;
+                return lookup_unqualified_type_template_at(terminal) != nullptr;
             }
             return lookup_qualified_type_template(name_spec) != nullptr;
         }
@@ -1740,12 +1762,11 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                         allow_enclosing_lookup,
                         component.name);
                     if (!primary_template && collect_) {
-                        QualType owner_lookup_type =
-                            collect_->collect_current_cpp_record_lookup_type();
+                        QualType owner_lookup_type;
                         const auto* nested_template =
-                            collect_->collect_lookup_record_nested_template(
-                                owner_lookup_type,
-                                component.name);
+                            lookup_cpp_current_record_nested_type_template(
+                                component.name,
+                                &owner_lookup_type);
                         if (nested_template && nested_template->decl) {
                             bool is_dependent =
                                 type_depends_on_template_parameters(
