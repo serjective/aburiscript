@@ -3811,6 +3811,84 @@ bool Collect::resolve_dependent_expr_after_substitution(
                     /*allow_finalize=*/true);
             }
         }
+        if (auto placeholder =
+                get_class_template_placeholder_type(init_list->type)) {
+            auto* primary_class_template =
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<Decl*>(placeholder->primary_template));
+            if (const auto* canonical_template =
+                    get_template_decl_canonical_decl(primary_class_template)) {
+                primary_class_template =
+                    dyn_cast<ClassTemplateDecl>(
+                        const_cast<TemplateDecl*>(canonical_template));
+            }
+            if (!primary_class_template) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "class template argument deduction requires a class template";
+                }
+                return false;
+            }
+
+            std::vector<Expr*> ctad_args;
+            ctad_args.reserve(init_list->elements.size());
+            bool deduction_is_still_dependent = false;
+            for (const auto& element : init_list->elements) {
+                if (!element.designators.empty()) {
+                    if (error_out && error_out->empty()) {
+                        *error_out =
+                            "class template argument deduction does not support designated initializers";
+                    }
+                    return false;
+                }
+                ctad_args.push_back(element.value.get());
+                if (element.value &&
+                    (expression_depends_on_template_parameters(
+                         element.value.get()) ||
+                     type_depends_on_template_parameters(
+                         element.value->get_type(),
+                         ast_ctx_.get()))) {
+                    deduction_is_still_dependent = true;
+                }
+            }
+            if (deduction_is_still_dependent) {
+                return true;
+            }
+
+            QualType deduced_type;
+            if (!resolve_class_template_argument_deduction(
+                    primary_class_template,
+                    ctad_args,
+                    !init_list->is_paren_init,
+                    /*is_copy_initialization=*/false,
+                    init_list->location,
+                    deduced_type) ||
+                !deduced_type) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "failed to resolve class template argument deduction after substitution";
+                }
+                return false;
+            }
+
+            auto owned_list = std::unique_ptr<InitListExpr>(
+                static_cast<InitListExpr*>(expr.release()));
+            SrcLoc list_loc = owned_list->location;
+            owned_list->type = deduced_type;
+            auto rebuilt = collect_cpp_type_list_initialization_expression(
+                deduced_type,
+                std::move(owned_list),
+                list_loc);
+            if (!rebuilt) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "failed to rebuild class template list-initialization after substitution";
+                }
+                return false;
+            }
+            expr = std::move(rebuilt);
+            return true;
+        }
         realize_deferred_expr_type_after_substitution(
             init_list,
             /*allow_finalize=*/true);

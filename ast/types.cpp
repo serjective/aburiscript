@@ -4055,6 +4055,24 @@ std::shared_ptr<CType> desugar_typedefs(const std::shared_ptr<CType>& type) {
     return desugar_typedefs(QualType(type)).get_shared();
 }
 
+std::shared_ptr<TemplateSpecializationType>
+get_class_template_placeholder_type(QualType type) {
+    if (!type) {
+        return nullptr;
+    }
+    auto specialization =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_typedefs(type).get_shared());
+    if (!specialization || !specialization->is_class_template_placeholder) {
+        return nullptr;
+    }
+    return specialization;
+}
+
+bool is_class_template_placeholder_type(QualType type) {
+    return static_cast<bool>(get_class_template_placeholder_type(type));
+}
+
 QualType desugar_type(QualType type) {
     return desugar_type(type, get_active_side_table_ast_context());
 }

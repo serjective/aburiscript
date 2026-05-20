@@ -1893,6 +1893,9 @@ struct TypeContext {
 // Narrow helper: remove typedef sugar only.
 QualType desugar_typedefs(QualType type);
 std::shared_ptr<CType> desugar_typedefs(const std::shared_ptr<CType>& type);
+std::shared_ptr<TemplateSpecializationType>
+get_class_template_placeholder_type(QualType type);
+bool is_class_template_placeholder_type(QualType type);
 
 // General sugar-removal hook. Today this forwards to typedef desugaring, but
 // it is intended to grow as C++ sugar forms are introduced.

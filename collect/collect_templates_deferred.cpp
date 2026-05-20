@@ -1521,6 +1521,9 @@ bool Collect::contains_deferred_semantic_type(
             typedef_type->underlying_type.get_shared());
     }
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(type)) {
+        if (specialization->is_class_template_placeholder) {
+            return false;
+        }
         auto resolved_type =
             query_lookup_template_specialization_resolved_type(
                 specialization.get());
@@ -2126,6 +2129,9 @@ QualType Collect::resolve_deferred_template_specialization_type(
     QualType original_type,
     SrcLoc loc,
     DeferredTypeResolutionMode mode) {
+    if (specialization.is_class_template_placeholder) {
+        return original_type;
+    }
     rewrite_deferred_template_arguments_in_place(
         specialization.arguments,
         loc,

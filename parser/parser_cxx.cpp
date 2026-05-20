@@ -1699,7 +1699,6 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                     }
                     if (!resolved_type &&
                         is_last_component &&
-                        !is_in_template_pattern_context() &&
                         lang_opts.is_cxx17_or_later()) {
                         const Decl* primary_template =
                             lookup_type_template_in_scope(

@@ -18,6 +18,11 @@ const BlockExpr* returned_block_literal_expr(Expr* expr) {
     return dyn_cast<BlockExpr>(expr);
 }
 
+bool is_raw_braced_init_list_expr(const Expr* expr) {
+    const auto* init_list = dyn_cast<InitListExpr>(expr);
+    return init_list && !init_list->type;
+}
+
 uint64_t next_cpp_range_for_id() {
     static std::atomic<uint64_t> counter{0};
     return counter.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -812,7 +817,7 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
 
             QualType deduction_source_type = implicit_void;
             if (return_expr) {
-                if (isa<InitListExpr>(return_expr.get())) {
+                if (is_raw_braced_init_list_expr(return_expr.get())) {
                     if (deducing_decltype_auto) {
                         report_error(
                             "cannot deduce return type from initializer list",

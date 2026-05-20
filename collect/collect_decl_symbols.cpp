@@ -15,16 +15,6 @@ using namespace collect_decl_internal;
 
 namespace {
 
-bool is_class_template_placeholder_type(QualType type) {
-    if (!type) {
-        return false;
-    }
-    auto specialization =
-        dyn_cast_shared<TemplateSpecializationType>(
-            desugar_typedefs(type).get_shared());
-    return specialization && specialization->is_class_template_placeholder;
-}
-
 bool same_member_owner_type(QualType lhs,
                             QualType rhs,
                             const ASTContext* ast_ctx) {

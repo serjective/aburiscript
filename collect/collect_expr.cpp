@@ -4551,7 +4551,8 @@ std::unique_ptr<Expr> Collect::collect_cpp_type_list_initialization_expression(
         return collect_make<ErrorExpr>("invalid type construction target", loc);
     }
 
-    if (contains_deferred_semantic_type(target_type.get_shared())) {
+    if (!is_class_template_placeholder_type(target_type) &&
+        contains_deferred_semantic_type(target_type.get_shared())) {
         target_type = resolve_typeof_types(target_type, loc);
     }
 

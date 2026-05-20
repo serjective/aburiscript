@@ -29,20 +29,6 @@ bool any_initializer_argument_depends_on_template_parameters(
     return false;
 }
 
-std::shared_ptr<TemplateSpecializationType>
-class_template_placeholder_type(QualType type) {
-    if (!type) {
-        return nullptr;
-    }
-    auto specialization =
-        dyn_cast_shared<TemplateSpecializationType>(
-            desugar_typedefs(type).get_shared());
-    if (!specialization || !specialization->is_class_template_placeholder) {
-        return nullptr;
-    }
-    return specialization;
-}
-
 const Expr* extract_first_value_init_list(const Expr* init) {
     if (!init) {
         return nullptr;
@@ -324,7 +310,7 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
     bool caller_tracks_symbol_definition = flags.caller_tracks_symbol_definition;
 
     if (declared_type &&
-        !class_template_placeholder_type(declared_type) &&
+        !is_class_template_placeholder_type(declared_type) &&
         contains_deferred_semantic_type(declared_type.get_shared())) {
         declared_type = resolve_typeof_types(declared_type, loc);
     }
@@ -339,7 +325,7 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         report_error("'constexpr' cannot be combined with 'auto'", loc);
     }
 
-    if (auto placeholder = class_template_placeholder_type(declared_type)) {
+    if (auto placeholder = get_class_template_placeholder_type(declared_type)) {
         auto* primary_class_template =
             dyn_cast<ClassTemplateDecl>(
                 const_cast<Decl*>(placeholder->primary_template));
@@ -380,22 +366,42 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
                     "class template argument deduction does not support designated initializers",
                     loc);
             } else {
-                QualType deduced_type;
-                bool is_list_initialization = false;
-                if (auto* init_list = dyn_cast<InitListExpr>(init.get())) {
-                    is_list_initialization = !init_list->is_paren_init;
+                bool deduction_is_dependent =
+                    type_depends_on_template_parameters(
+                        declared_type,
+                        ast_ctx_.get());
+                for (Expr* arg : ctad_args) {
+                    if (arg &&
+                        (expression_depends_on_template_parameters(arg) ||
+                         type_depends_on_template_parameters(
+                             arg->get_type(),
+                             ast_ctx_.get()))) {
+                        deduction_is_dependent = true;
+                        break;
+                    }
                 }
-                if (resolve_class_template_argument_deduction(
-                        primary_class_template,
-                        ctad_args,
-                        is_list_initialization,
-                        is_copy_initialization,
-                        loc,
-                        deduced_type) &&
-                    deduced_type) {
-                    declared_type = deduced_type;
-                    if (sym) {
-                        sym->type = declared_type;
+                if (deduction_is_dependent) {
+                    if (auto* init_list = dyn_cast<InitListExpr>(init.get())) {
+                        init_list->type = declared_type;
+                    }
+                } else {
+                    QualType deduced_type;
+                    bool is_list_initialization = false;
+                    if (auto* init_list = dyn_cast<InitListExpr>(init.get())) {
+                        is_list_initialization = !init_list->is_paren_init;
+                    }
+                    if (resolve_class_template_argument_deduction(
+                            primary_class_template,
+                            ctad_args,
+                            is_list_initialization,
+                            is_copy_initialization,
+                            loc,
+                            deduced_type) &&
+                        deduced_type) {
+                        declared_type = deduced_type;
+                        if (sym) {
+                            sym->type = declared_type;
+                        }
                     }
                 }
             }
