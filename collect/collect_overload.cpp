@@ -282,6 +282,9 @@ void append_unique_function_template_candidate(
     if (!function_template) {
         return;
     }
+    if (function_template->is_hidden_friend) {
+        return;
+    }
     for (auto*& existing : candidates) {
         if (!template_decls_share_lookup_identity(existing, function_template)) {
             continue;
@@ -985,7 +988,8 @@ void Collect::append_adl_friend_overload_candidates(
     std::string_view function_name,
     OverloadImplicitObjectArgKind implicit_arg_kind,
     const std::vector<Expr*>& associated_args,
-    std::vector<OverloadCallCandidate>& candidates_out) {
+    std::vector<OverloadCallCandidate>& candidates_out,
+    SrcLoc loc) {
 
     if (!lang_opts_.is_cxx_mode()) {
         return;
@@ -1005,6 +1009,17 @@ void Collect::append_adl_friend_overload_candidates(
             existing_symbols.insert(candidate.symbol.get());
         }
     }
+    auto candidate_already_present =
+        [&](const std::shared_ptr<Symbol>& symbol) {
+        for (const auto& candidate : candidates_out) {
+            if (overload_symbols_refer_to_same_candidate(
+                    candidate.symbol,
+                    symbol)) {
+                return true;
+            }
+        }
+        return false;
+    };
     for (const auto* record_decl : entities.records) {
         const auto* state =
             record_semantics_cache_lookup(record_decl, ast_ctx_.get());
@@ -1023,6 +1038,30 @@ void Collect::append_adl_friend_overload_candidates(
             call_candidate.implicit_object_arg_kind = implicit_arg_kind;
             candidates_out.push_back(std::move(call_candidate));
             existing_symbols.insert(friend_function.symbol.get());
+        }
+        for (const auto& friend_function : state->friend_functions) {
+            if (friend_function.name != function_name ||
+                !friend_function.function_template) {
+                continue;
+            }
+            std::shared_ptr<Symbol> specialization_symbol = nullptr;
+            if (!probe_function_template_call_specialization(
+                    friend_function.function_template,
+                    associated_args,
+                    loc,
+                    specialization_symbol)) {
+                continue;
+            }
+            if (!specialization_symbol ||
+                existing_symbols.contains(specialization_symbol.get()) ||
+                candidate_already_present(specialization_symbol)) {
+                continue;
+            }
+            OverloadCallCandidate call_candidate;
+            call_candidate.symbol = std::move(specialization_symbol);
+            call_candidate.implicit_object_arg_kind = implicit_arg_kind;
+            existing_symbols.insert(call_candidate.symbol.get());
+            candidates_out.push_back(std::move(call_candidate));
         }
     }
 }
@@ -1185,6 +1224,30 @@ void Collect::append_adl_overload_candidates(
             candidate.implicit_object_arg_kind = implicit_arg_kind;
             candidates_out.push_back(std::move(candidate));
             existing_symbols.insert(friend_function.symbol.get());
+        }
+        for (const auto& friend_function : state->friend_functions) {
+            if (friend_function.name != function_name ||
+                !friend_function.function_template) {
+                continue;
+            }
+            std::shared_ptr<Symbol> specialization_symbol = nullptr;
+            if (!probe_function_template_call_specialization(
+                    friend_function.function_template,
+                    deduction_args,
+                    loc,
+                    specialization_symbol)) {
+                continue;
+            }
+            if (!specialization_symbol ||
+                existing_symbols.contains(specialization_symbol.get()) ||
+                candidate_already_present(specialization_symbol)) {
+                continue;
+            }
+            OverloadCallCandidate candidate;
+            candidate.symbol = std::move(specialization_symbol);
+            candidate.implicit_object_arg_kind = implicit_arg_kind;
+            existing_symbols.insert(candidate.symbol.get());
+            candidates_out.push_back(std::move(candidate));
         }
     }
 }

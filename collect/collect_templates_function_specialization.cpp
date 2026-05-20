@@ -763,6 +763,9 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialization_decl = std::move(specialized_function);
         }
 
+        if (specialization_decl) {
+            specialization_decl->friend_access_type = pattern->friend_access_type;
+        }
         apply_specialization_decl_metadata(specialization_decl.get());
         return specialization_decl;
     }

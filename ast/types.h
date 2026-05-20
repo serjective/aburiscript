@@ -1639,6 +1639,7 @@ struct RecordSemanticState {
         QualType type;
         const FriendDecl* decl = nullptr;
         const FuncDecl* function_decl = nullptr;
+        const FunctionTemplateDecl* function_template = nullptr;
         std::shared_ptr<Symbol> symbol = nullptr;
     };
 

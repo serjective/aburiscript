@@ -674,6 +674,7 @@ struct FuncDecl: Decl {
     std::vector<TemplateArgument> explicit_specialization_arguments;
     std::shared_ptr<Scope> scope;
     const std::string* asm_label;
+    QualType friend_access_type = nullptr;
     StorageClass storage_class;
     std::unique_ptr<Expr> trailing_requires_clause;
     bool has_explicit_specialization_argument_list = false;
@@ -998,6 +999,11 @@ struct FriendDecl : Decl {
     const FuncDecl* function_decl() const {
         return dyn_cast<const FuncDecl>(target_decl.get());
     }
+
+    FunctionTemplateDecl* function_template_decl();
+    const FunctionTemplateDecl* function_template_decl() const;
+    FuncDecl* function_pattern_decl();
+    const FuncDecl* function_pattern_decl() const;
 
     bool has_deferred_inline_body() const {
         return has_deferred_inline_body_tokens != 0 &&
@@ -3229,13 +3235,16 @@ struct TemplateExplicitSpecializationDecl : Decl {
 };
 
 struct FunctionTemplateDecl : TemplateDecl {
+    uint8_t is_hidden_friend : 1;
+
     FunctionTemplateDecl(TemplateParameterList parameters,
                          std::unique_ptr<Decl> templated_decl,
                          SrcLoc loc = SrcLoc())
         : TemplateDecl(DeclKind::FunctionTemplateDecl,
                        std::move(parameters),
                        std::move(templated_decl),
-                       loc) {}
+                       loc),
+          is_hidden_friend(false) {}
 
     FuncDecl* function_decl() {
         return static_cast<FuncDecl*>(templated_decl.get());
@@ -3249,6 +3258,34 @@ struct FunctionTemplateDecl : TemplateDecl {
         return d->get_kind() == DeclKind::FunctionTemplateDecl;
     }
 };
+
+inline FunctionTemplateDecl* FriendDecl::function_template_decl() {
+    return dyn_cast<FunctionTemplateDecl>(target_decl.get());
+}
+
+inline const FunctionTemplateDecl* FriendDecl::function_template_decl() const {
+    return dyn_cast<const FunctionTemplateDecl>(target_decl.get());
+}
+
+inline FuncDecl* FriendDecl::function_pattern_decl() {
+    if (auto* function = function_decl()) {
+        return function;
+    }
+    if (auto* function_template = function_template_decl()) {
+        return function_template->function_decl();
+    }
+    return nullptr;
+}
+
+inline const FuncDecl* FriendDecl::function_pattern_decl() const {
+    if (auto* function = function_decl()) {
+        return function;
+    }
+    if (auto* function_template = function_template_decl()) {
+        return function_template->function_decl();
+    }
+    return nullptr;
+}
 
 struct ClassTemplateDecl;
 

@@ -625,7 +625,7 @@ void Parser::build_cpp_record_parse_deferred_bodies(
     auto parse_deferred_inline_friend_body =
         [&](FriendDecl* friend_decl) {
         auto* function_decl =
-            friend_decl ? friend_decl->function_decl() : nullptr;
+            friend_decl ? friend_decl->function_pattern_decl() : nullptr;
         if (!friend_decl || !function_decl ||
             !friend_decl->has_deferred_inline_body() ||
             function_decl->body) {
@@ -786,6 +786,74 @@ void Parser::build_cpp_record_parse_deferred_bodies(
 
         parse_deferred_inline_method_body(templated_method);
     };
+    auto parse_deferred_inline_friend_template_body =
+        [&](FriendDecl* friend_decl) {
+        auto* friend_template =
+            friend_decl ? friend_decl->function_template_decl() : nullptr;
+        if (!friend_template || !friend_template->function_decl()) {
+            return;
+        }
+
+        collect_->collect_enter_scope(ScopeFlags::TemplateParameterScope);
+        struct TemplateScopeGuard {
+            Collect* collect = nullptr;
+            ~TemplateScopeGuard() {
+                if (collect) {
+                    collect->collect_leave_scope();
+                }
+            }
+        } template_scope_guard{collect_.get()};
+
+        active_template_parameter_stack_.push_back({});
+        struct ActiveTemplateParameterGuard {
+            std::vector<std::vector<const TemplateParameterDecl*>>* stack = nullptr;
+            ~ActiveTemplateParameterGuard() {
+                if (stack && !stack->empty()) {
+                    stack->pop_back();
+                }
+            }
+        } active_template_parameter_guard{&active_template_parameter_stack_};
+        ++template_pattern_depth_;
+        struct TemplatePatternGuard {
+            uint32_t* depth = nullptr;
+            ~TemplatePatternGuard() {
+                if (depth) {
+                    --(*depth);
+                }
+            }
+        } template_pattern_guard{&template_pattern_depth_};
+
+        auto& active_parameters = active_template_parameter_stack_.back();
+        active_parameters.reserve(friend_template->parameters.size());
+        for (const auto& parameter : friend_template->parameters) {
+            const auto* template_parameter = parameter.get();
+            if (!template_parameter) {
+                continue;
+            }
+            active_parameters.push_back(template_parameter);
+            if (auto* type_parameter =
+                    dyn_cast<TemplateTypeParmDecl>(parameter.get())) {
+                if (!type_parameter->name.empty()) {
+                    collect_->collect_declare_type_name_symbol(
+                        type_parameter->name,
+                        QualType(type_parameter->type),
+                        type_parameter->location);
+                }
+                continue;
+            }
+            if (auto* non_type_parameter =
+                    dyn_cast<TemplateNonTypeParmDecl>(parameter.get())) {
+                if (!non_type_parameter->name.empty() &&
+                    non_type_parameter->sym) {
+                    collect_->collect_bind_symbol_in_current_scope(
+                        non_type_parameter->name,
+                        non_type_parameter->sym);
+                }
+            }
+        }
+
+        parse_deferred_inline_friend_body(friend_decl);
+    };
 
     for (const auto& member : ctx.record.members) {
         auto* method_decl = dyn_cast<CppMethodDecl>(member.get());
@@ -816,6 +884,10 @@ void Parser::build_cpp_record_parse_deferred_bodies(
     for (const auto& member : ctx.record.members) {
         auto* friend_decl = dyn_cast<FriendDecl>(member.get());
         if (!friend_decl) {
+            continue;
+        }
+        if (friend_decl->function_template_decl()) {
+            parse_deferred_inline_friend_template_body(friend_decl);
             continue;
         }
         parse_deferred_inline_friend_body(friend_decl);

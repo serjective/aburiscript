@@ -272,7 +272,8 @@ bool clone_function_body_for_specialization(
     TemplateDependentResolutionPass& resolution_pass,
     const std::string& failure_context,
     bool finalize_body_semantics,
-    std::string* error_out);
+    std::string* error_out,
+    QualType friend_access_type = QualType());
 
 bool clone_ctor_initializers_for_specialization(
     const CppConstructorDecl* pattern,

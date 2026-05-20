@@ -589,6 +589,8 @@ private:
     bool is_in_template_pattern_context() const;
     bool is_parsing_cpp_record_body() const;
     std::string current_cpp_record_qualifier_prefix() const;
+    std::shared_ptr<Scope> nearest_cpp_friend_namespace_scope() const;
+    void register_cpp_friend_function_template_decl(FriendDecl* friend_decl);
 
     // === Template and qualified-name parsing ===
     // These helpers are parser-owned classification/resolution seams used by

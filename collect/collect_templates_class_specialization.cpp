@@ -3356,7 +3356,201 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return true;
     }
 
+    bool handle_friend_function_template_member(
+        const FriendDecl* friend_decl,
+        const FunctionTemplateDecl* function_template_decl) {
+        auto* function_decl =
+            function_template_decl ? function_template_decl->function_decl() : nullptr;
+        if (!friend_decl || !function_template_decl || !function_decl) {
+            return fail_instantiation(
+                "internal error: missing class template friend function template pattern",
+                friend_decl ? friend_decl->location : loc);
+        }
+
+        auto rewritten_type =
+            clone_pass.rewrite_type(QualType(function_decl->type));
+        auto canonical_type =
+            desugar_type(rewritten_type, ast_ctx()).as_shared<FunctionType>();
+        if (!canonical_type) {
+            return fail_instantiation(
+                "internal error: class template friend function template specialization did not produce a function type",
+                function_decl->location);
+        }
+
+        auto cloned_function = collect.collect_make<FuncDecl>();
+        cloned_function->location = function_decl->location;
+        cloned_function->name = function_decl->name;
+        cloned_function->type = canonical_type;
+        cloned_function->storage_class = StorageClass::NONE;
+        cloned_function->is_inline = function_decl->is_inline;
+        cloned_function->is_constexpr = function_decl->is_constexpr;
+        cloned_function->is_consteval = function_decl->is_consteval;
+        cloned_function->is_deleted = function_decl->is_deleted;
+        cloned_function->is_defaulted = function_decl->is_defaulted;
+        cloned_function->is_defaulted_on_first_declaration =
+            function_decl->is_defaulted_on_first_declaration;
+        cloned_function->friend_access_type = owner_type;
+        cloned_function->set_language_linkage(function_decl->get_language_linkage());
+        if (function_decl->asm_label) {
+            cloned_function->set_asm_label(*function_decl->asm_label);
+        }
+        if (function_decl->trailing_requires_clause) {
+            std::string clone_error;
+            cloned_function->trailing_requires_clause =
+                clone_pass.clone_expr(
+                    function_decl->trailing_requires_clause.get(),
+                    &clone_error);
+            if (!cloned_function->trailing_requires_clause) {
+                return fail_instantiation(
+                    clone_error.empty()
+                        ? "failed to clone class template friend function template requires-clause"
+                        : clone_error,
+                    function_decl->trailing_requires_clause->location);
+            }
+        }
+        std::string attr_error;
+        if (!copy_decl_side_tables(
+                function_decl,
+                cloned_function.get(),
+                clone_pass.context(),
+                &attr_error)) {
+            return fail_instantiation(
+                attr_error.empty()
+                    ? "failed to copy class template friend function template attributes"
+                    : attr_error,
+                function_decl->location);
+        }
+
+        auto cloned_template_decl = collect.collect_make<FunctionTemplateDecl>(
+            TemplateParameterList{},
+            std::move(cloned_function),
+            function_template_decl->location);
+        cloned_template_decl->is_hidden_friend =
+            function_template_decl->is_hidden_friend;
+        set_template_decl_canonical_decl(
+            cloned_template_decl.get(),
+            cloned_template_decl.get());
+        cloned_template_decl->set_pattern_template_decl(function_template_decl);
+
+        PendingMethodTemplateClone pending_friend_template;
+        pending_friend_template.pattern_template = function_template_decl;
+        pending_friend_template.pattern_function = function_decl;
+        pending_friend_template.specialized_template = cloned_template_decl.get();
+        pending_friend_template.parameter_rebinds.reserve(
+            function_template_decl->parameters.size());
+        pending_friend_template.symbol_remap.reserve(
+            function_template_decl->parameters.size());
+
+        for (const auto& parameter : function_template_decl->parameters) {
+            if (!parameter) {
+                return fail_instantiation(
+                    "internal error: missing class template friend function template parameter",
+                    function_template_decl->location);
+            }
+
+            if (auto* type_parameter =
+                    dyn_cast<TemplateTypeParmDecl>(parameter.get())) {
+                auto cloned_parameter_type =
+                    std::make_shared<TemplateTypeParmType>(
+                        type_parameter->name,
+                        type_parameter->depth,
+                        type_parameter->index,
+                        type_parameter->is_parameter_pack);
+                auto cloned_parameter =
+                    collect.collect_make<TemplateTypeParmDecl>(
+                        type_parameter->name,
+                        type_parameter->depth,
+                        type_parameter->index,
+                        cloned_parameter_type,
+                        type_parameter->is_parameter_pack,
+                        type_parameter->location);
+                cloned_parameter_type->parameter_decl = cloned_parameter.get();
+                pending_friend_template.parameter_rebinds.emplace(
+                    type_parameter,
+                    cloned_parameter.get());
+                cloned_template_decl->parameters.push_back(
+                    std::move(cloned_parameter));
+                continue;
+            }
+
+            if (auto* non_type_parameter =
+                    dyn_cast<TemplateNonTypeParmDecl>(parameter.get())) {
+                auto rewritten_parameter_type =
+                    remap_template_parameter_types_in_type(
+                        clone_pass.rewrite_type(non_type_parameter->type),
+                        pending_friend_template.parameter_rebinds);
+                std::shared_ptr<Symbol> cloned_parameter_symbol = nullptr;
+                if (non_type_parameter->sym) {
+                    cloned_parameter_symbol =
+                        clone_symbol_shallow_for_specialization(
+                            non_type_parameter->sym,
+                            remap_template_parameter_types_in_type(
+                                clone_pass.rewrite_type(
+                                    non_type_parameter->sym->type),
+                                pending_friend_template.parameter_rebinds));
+                    pending_friend_template.symbol_remap.emplace(
+                        non_type_parameter->sym.get(),
+                        cloned_parameter_symbol);
+                }
+
+                auto cloned_parameter =
+                    collect.collect_make<TemplateNonTypeParmDecl>(
+                        non_type_parameter->name,
+                        non_type_parameter->depth,
+                        non_type_parameter->index,
+                        rewritten_parameter_type,
+                        cloned_parameter_symbol,
+                        non_type_parameter->is_parameter_pack,
+                        non_type_parameter->location);
+                pending_friend_template.parameter_rebinds.emplace(
+                    non_type_parameter,
+                    cloned_parameter.get());
+                cloned_template_decl->parameters.push_back(
+                    std::move(cloned_parameter));
+                continue;
+            }
+
+            return fail_instantiation(
+                "class template friend function template instantiation for this template parameter kind is not supported yet",
+                parameter->location);
+        }
+
+        auto* cloned_template_ptr = cloned_template_decl.get();
+        auto cloned_friend = collect.collect_make<FriendDecl>(
+            std::move(cloned_template_decl),
+            owner_type,
+            friend_decl->get_friend_kind(),
+            friend_decl->location);
+        auto* cloned_function_ptr = cloned_friend->function_pattern_decl();
+        if (!cloned_function_ptr) {
+            return fail_instantiation(
+                "internal error: class template friend function template clone lost its function target",
+                friend_decl->location);
+        }
+
+        RecordSemanticState::FriendFunction semantic_friend;
+        semantic_friend.name = cloned_function_ptr->name;
+        semantic_friend.type = QualType(canonical_type);
+        semantic_friend.decl = cloned_friend.get();
+        semantic_friend.function_decl = cloned_function_ptr;
+        semantic_friend.function_template = cloned_template_ptr;
+        friend_functions.push_back(std::move(semantic_friend));
+        semantic_state.friend_functions = friend_functions;
+
+        pending_method_template_clones.push_back(
+            std::move(pending_friend_template));
+        entry->member_decls.push_back(std::move(cloned_friend));
+        return true;
+    }
+
     bool handle_friend_member(const FriendDecl* friend_decl) {
+        auto* function_template_decl =
+            friend_decl ? friend_decl->function_template_decl() : nullptr;
+        if (function_template_decl) {
+            return handle_friend_function_template_member(
+                friend_decl,
+                function_template_decl);
+        }
         auto* function_decl = friend_decl ? friend_decl->function_decl() : nullptr;
         if (!friend_decl) {
             return fail_instantiation(
@@ -3413,6 +3607,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_function->is_defaulted = function_decl->is_defaulted;
         cloned_function->is_defaulted_on_first_declaration =
             function_decl->is_defaulted_on_first_declaration;
+        cloned_function->friend_access_type = owner_type;
         cloned_function->set_language_linkage(function_decl->get_language_linkage());
         if (function_decl->asm_label) {
             cloned_function->set_asm_label(*function_decl->asm_label);
@@ -4608,6 +4803,36 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     pattern_function->location);
             }
             specialized_function->type = canonical_member_template_type;
+            for (auto& friend_function : semantic_state.friend_functions) {
+                if (friend_function.function_decl == specialized_function) {
+                    friend_function.type = QualType(canonical_member_template_type);
+                    break;
+                }
+            }
+
+            if (!clone_template_associated_constraint(
+                    pattern_template,
+                    specialized_template,
+                    member_template_clone_pass,
+                    "class template function template")) {
+                return false;
+            }
+            if (pattern_function->trailing_requires_clause) {
+                std::string requires_error;
+                auto cloned_requires =
+                    member_template_clone_pass.clone_expr(
+                        pattern_function->trailing_requires_clause.get(),
+                        &requires_error);
+                if (!cloned_requires) {
+                    return fail_instantiation(
+                        requires_error.empty()
+                            ? "failed to clone class template function template trailing requires-clause"
+                            : requires_error,
+                        pattern_function->trailing_requires_clause->location);
+                }
+                specialized_function->trailing_requires_clause =
+                    std::move(cloned_requires);
+            }
 
             for (size_t index = 0;
                  index < pattern_template->parameters.size() &&

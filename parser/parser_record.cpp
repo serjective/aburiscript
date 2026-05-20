@@ -1153,13 +1153,18 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
         }
 
         if (const auto* friend_decl = dyn_cast<FriendDecl>(member.get())) {
-            if (const auto* function_decl = friend_decl->function_decl()) {
+            if (const auto* function_decl =
+                    friend_decl->function_pattern_decl()) {
                 RecordSemanticState::FriendFunction friend_function;
                 friend_function.name = function_decl->name;
                 friend_function.type = QualType(function_decl->type);
                 friend_function.decl = friend_decl;
                 friend_function.function_decl = function_decl;
-                friend_function.symbol = friend_decl->function_symbol;
+                friend_function.function_template =
+                    friend_decl->function_template_decl();
+                friend_function.symbol = friend_function.function_template
+                    ? nullptr
+                    : friend_decl->function_symbol;
                 friend_functions.push_back(std::move(friend_function));
             } else if (friend_decl->get_friend_kind() == CppFriendKind::Type &&
                        friend_decl->friend_type) {
@@ -4836,6 +4841,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     CppFriendKind::Function,
                     t.loc);
                 auto* friend_function_ptr = friend_decl->function_decl();
+                if (friend_function_ptr) {
+                    friend_function_ptr->friend_access_type =
+                        granting_record_type;
+                }
                 if (friend_function_ptr &&
                     friend_function_ptr->is_defaulted &&
                     !is_defaultable_comparison_function(

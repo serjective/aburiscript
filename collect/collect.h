@@ -1107,6 +1107,12 @@ public:
                                     const Decl* decl,
                                     LookupNamespace lookup_namespace) ;
 
+    void collect_bind_template_decl_in_scope(
+        const std::shared_ptr<Scope>& scope,
+        const std::string& name,
+        const Decl* decl,
+        LookupNamespace lookup_namespace) ;
+
     void collect_add_function_template_decl(const std::string& name,
                                             const Decl* decl) ;
 
@@ -2587,7 +2593,8 @@ private:
         std::string_view function_name,
         OverloadImplicitObjectArgKind implicit_arg_kind,
         const std::vector<Expr*>& associated_args,
-        std::vector<OverloadCallCandidate>& candidates_out) ;
+        std::vector<OverloadCallCandidate>& candidates_out,
+        SrcLoc loc) ;
     void append_adl_overload_candidates(
         std::string_view function_name,
         Expr* implicit_object_arg,

@@ -1103,6 +1103,14 @@ void Collect::collect_bind_template_decl(const std::string& name,
     bind_template_decl_in_scope(session_.current_scope_, name, decl, lookup_namespace);
 }
 
+void Collect::collect_bind_template_decl_in_scope(
+    const std::shared_ptr<Scope>& scope,
+    const std::string& name,
+    const Decl* decl,
+    LookupNamespace lookup_namespace) {
+    bind_template_decl_in_scope(scope, name, decl, lookup_namespace);
+}
+
 void Collect::collect_add_function_template_decl(const std::string& name,
                                                  const Decl* decl) {
     collect_bind_template_decl(name, decl, LookupNamespace::Ordinary);

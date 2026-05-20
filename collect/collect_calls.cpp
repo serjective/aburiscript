@@ -100,6 +100,9 @@ void append_unique_function_template_candidate(
     if (!function_template) {
         return;
     }
+    if (function_template->is_hidden_friend) {
+        return;
+    }
     for (auto*& existing : candidates) {
         if (!template_decls_share_lookup_identity(existing, function_template)) {
             continue;
@@ -870,7 +873,8 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
             callee_name,
             OverloadImplicitObjectArgKind::None,
             raw_call_args,
-            adl_friend_candidates);
+            adl_friend_candidates,
+            loc);
         function_candidates.reserve(
             function_candidates.size() + adl_friend_candidates.size());
         for (auto& candidate : adl_friend_candidates) {

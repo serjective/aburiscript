@@ -6451,7 +6451,8 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
                 op_name,
                 OverloadImplicitObjectArgKind::Regular,
                 adl_args,
-                overload_candidates);
+                overload_candidates,
+                loc);
             append_unqualified_function_template_overload_candidates(
                 op_name,
                 expr.get(),

@@ -1766,7 +1766,8 @@ bool clone_function_body_for_specialization(Collect& collect,
                                             TemplateDependentResolutionPass& resolution_pass,
                                             const std::string& failure_context,
                                             bool finalize_body_semantics,
-                                            std::string* error_out) {
+                                            std::string* error_out,
+                                            QualType friend_access_type) {
     if (!pattern || !specialization) {
         return false;
     }
@@ -1792,6 +1793,9 @@ bool clone_function_body_for_specialization(Collect& collect,
         SemanticFinalization,
     };
     BodyCloneFailurePhase failure_phase = BodyCloneFailurePhase::None;
+    QualType effective_friend_access_type =
+        friend_access_type ? friend_access_type
+                           : specialization->friend_access_type;
     if (!collect.with_function_definition_state(
             specialization,
             [&]() {
@@ -1811,7 +1815,8 @@ bool clone_function_body_for_specialization(Collect& collect,
                     return false;
                 }
                 return true;
-            })) {
+            },
+            effective_friend_access_type)) {
         if (error_out) {
             const char* phase_message =
                 failure_phase == BodyCloneFailurePhase::DependentResolution

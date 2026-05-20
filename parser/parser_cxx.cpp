@@ -401,6 +401,19 @@ std::string Parser::current_cpp_record_qualifier_prefix() const {
     return qualifier;
 }
 
+std::shared_ptr<Scope> Parser::nearest_cpp_friend_namespace_scope() const {
+    if (!collect_) {
+        return nullptr;
+    }
+    auto scope = collect_->collect_current_scope();
+    while (scope &&
+           !scope_flags_contains(scope->flags, ScopeFlags::FileScope) &&
+           !scope_flags_contains(scope->flags, ScopeFlags::NamespaceScope)) {
+        scope = scope->parent;
+    }
+    return scope ? scope : collect_->collect_current_scope();
+}
+
 const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
     CppRecordKind record_kind,
     const std::string& name,
@@ -4192,6 +4205,69 @@ void Parser::finalize_primary_template_decl(
         conflict_loc);
 }
 
+void Parser::register_cpp_friend_function_template_decl(FriendDecl* friend_decl) {
+    auto* function_template =
+        friend_decl ? friend_decl->function_template_decl() : nullptr;
+    auto* function_decl =
+        function_template ? function_template->function_decl() : nullptr;
+    if (!friend_decl || !function_template || !function_decl ||
+        function_decl->name.empty() || !collect_) {
+        return;
+    }
+
+    auto friend_scope = nearest_cpp_friend_namespace_scope();
+    bool has_visible_matching_namespace_decl = false;
+    const FunctionTemplateDecl* visible_canonical_template = nullptr;
+    if (friend_scope) {
+        if (const DeclBinding* binding =
+                LookupEngine::lookup_unqualified_template_binding(
+                    function_decl->name,
+                    friend_scope,
+                    false,
+                    LookupNamespace::Ordinary)) {
+            auto consider_candidate = [&](const Decl* candidate) {
+                auto* candidate_template =
+                    dyn_cast<FunctionTemplateDecl>(
+                        const_cast<Decl*>(candidate));
+                if (!candidate_template ||
+                    candidate_template->is_hidden_friend ||
+                    !cpp_template_decls_match_for_redeclaration(
+                        candidate_template,
+                        function_template)) {
+                    return;
+                }
+                has_visible_matching_namespace_decl = true;
+                const TemplateDecl* canonical =
+                    get_template_decl_canonical_decl(candidate_template);
+                visible_canonical_template =
+                    dyn_cast<FunctionTemplateDecl>(
+                        const_cast<TemplateDecl*>(
+                            canonical ? canonical : candidate_template));
+            };
+            consider_candidate(binding->template_decl);
+            for (const auto* candidate :
+                 binding->template_overload_candidates) {
+                consider_candidate(candidate);
+            }
+        }
+    }
+
+    function_template->is_hidden_friend =
+        !has_visible_matching_namespace_decl;
+    if (visible_canonical_template) {
+        set_template_decl_canonical_decl(
+            function_template,
+            visible_canonical_template);
+    }
+    if (has_visible_matching_namespace_decl && friend_scope) {
+        collect_->collect_bind_template_decl_in_scope(
+            friend_scope,
+            function_decl->name,
+            function_template,
+            LookupNamespace::Ordinary);
+    }
+}
+
 VariableTemplateDecl*
 Parser::try_publish_pending_primary_variable_template_pattern(
     const std::string& name,
@@ -4995,6 +5071,45 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
             concept_decl->name,
             LookupNamespace::Ordinary);
         collect_->collect_add_concept_decl(concept_decl->name, concept_decl);
+        wrapped_decls.push_back(std::move(templated_decls.front()));
+        return wrapped_decls;
+    }
+
+    if (auto* friend_decl =
+            dyn_cast<FriendDecl>(templated_decls.front().get())) {
+        auto* function_decl = friend_decl->function_decl();
+        if (!function_decl) {
+            fail_cpp_unsupported(
+                "friend template declaration form",
+                friend_decl->location);
+        }
+        if (isa<CppDestructorDecl>(function_decl)) {
+            error_custloc(
+                "destructor cannot be a template",
+                function_decl->location);
+        }
+        if (function_decl->name.empty()) {
+            fail_cpp_unsupported(
+                "unnamed friend function template",
+                function_decl->location);
+        }
+
+        std::string template_name = function_decl->name;
+        auto function_pattern = std::move(friend_decl->target_decl);
+        auto template_decl = make_ast<FunctionTemplateDecl>(
+            *ast_ctx,
+            std::move(parameters),
+            std::move(function_pattern),
+            template_tok.loc);
+        template_decl->associated_constraint =
+            std::move(leading_requires_clause);
+        finalize_primary_template_decl(
+            template_decl.get(),
+            template_name,
+            LookupNamespace::Ordinary);
+        friend_decl->target_decl = std::move(template_decl);
+        friend_decl->function_symbol.reset();
+        register_cpp_friend_function_template_decl(friend_decl);
         wrapped_decls.push_back(std::move(templated_decls.front()));
         return wrapped_decls;
     }
