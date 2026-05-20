@@ -3348,6 +3348,184 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
         return parse_cpp_template_argument();
     };
 
+    auto is_scope_resolution_at = [&](size_t offset) {
+        return peek_token_shortcut(offset).type == TokenType::SCOPE_RESOLUTION ||
+               (peek_token_shortcut(offset).type == TokenType::COLON &&
+                peek_token_shortcut(offset + 1).type == TokenType::COLON);
+    };
+
+    auto skip_template_argument_list_for_lookahead =
+        [&](size_t& offset) -> bool {
+        if (peek_token_shortcut(offset).type != TokenType::LESS_THAN) {
+            return false;
+        }
+
+        int depth_count = 0;
+        while (peek_token_shortcut(offset).type != TokenType::Eof) {
+            TokenType tok = peek_token_shortcut(offset).type;
+            if (tok == TokenType::LESS_THAN) {
+                ++depth_count;
+                ++offset;
+                continue;
+            }
+            if (tok == TokenType::GREATER_THAN) {
+                --depth_count;
+                ++offset;
+                if (depth_count == 0) {
+                    return true;
+                }
+                continue;
+            }
+            if (tok == TokenType::RIGHT_SHIFT) {
+                if (depth_count <= 0) {
+                    return false;
+                }
+                depth_count -= depth_count >= 2 ? 2 : 1;
+                ++offset;
+                if (depth_count == 0) {
+                    return true;
+                }
+                continue;
+            }
+            if (tok == TokenType::ASSIGN_RSHIFT) {
+                if (depth_count <= 0) {
+                    return false;
+                }
+                depth_count -= depth_count >= 2 ? 2 : 1;
+                ++offset;
+                if (depth_count == 0) {
+                    return true;
+                }
+                continue;
+            }
+            ++offset;
+        }
+        return false;
+    };
+
+    auto typename_starts_qualified_type_specifier = [&]() -> bool {
+        if (!gentle_check(TokenType::TYPENAME)) {
+            return false;
+        }
+
+        size_t offset = 1;
+        if (peek_token_shortcut(offset).type == TokenType::DECLTYPE_KW) {
+            ++offset;
+            if (!skip_balanced_tokens_for_lookahead(
+                    offset,
+                    TokenType::LEFT_PAREN,
+                    TokenType::RIGHT_PAREN)) {
+                return false;
+            }
+            return is_scope_resolution_at(offset);
+        }
+
+        if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER) {
+            return false;
+        }
+        ++offset;
+        if (peek_token_shortcut(offset).type == TokenType::LESS_THAN &&
+            !skip_template_argument_list_for_lookahead(offset)) {
+            return false;
+        }
+        return is_scope_resolution_at(offset);
+    };
+
+    auto parse_non_type_template_parameter =
+        [&](Token param_tok) -> std::unique_ptr<TemplateNonTypeParmDecl> {
+        DeclarationParser param_parser(this);
+        auto parsed_type = param_parser.parse_declaration();
+        if (!parsed_type) {
+            error_custloc(
+                "expected non-type template parameter declaration",
+                param_tok.loc);
+        }
+        if (param_parser.str_class != StorageClass::NONE) {
+            error_custloc(
+                "storage class specifier is not allowed in template parameter",
+                param_tok.loc);
+        }
+        bool is_parameter_pack = param_parser.is_parameter_pack;
+        if (gentle_check_and_consume(TokenType::ELLIPSIS)) {
+            if (is_parameter_pack) {
+                error_custloc(
+                    "duplicate ellipsis in non-type template parameter pack",
+                    current_token().loc);
+            }
+            is_parameter_pack = true;
+            if (param_parser.name.empty() &&
+                gentle_check(TokenType::IDENTIFIER)) {
+                param_parser.name = current_token().value;
+                if (param_parser.loc.isInvalid()) {
+                    param_parser.loc = current_token().loc;
+                }
+                advance();
+            }
+        }
+        std::optional<TemplateArgument> default_argument;
+        if (gentle_check(TokenType::ASSIGN)) {
+            if (is_parameter_pack) {
+                fail_cpp_unsupported(
+                    "default template argument on non-type template parameter pack",
+                    current_token().loc);
+            }
+            advance();
+            default_argument =
+                parse_template_parameter_default_argument();
+        }
+
+        SrcLoc param_loc = param_parser.loc.isInvalid()
+            ? param_tok.loc
+            : param_parser.loc;
+        QualType parameter_type(parsed_type, param_parser.qualifiers);
+        parameter_type =
+            collect_->collect_try_realize_deferred_semantic_type(
+                parameter_type);
+        if (!is_supported_non_type_template_parameter_type(
+                parameter_type,
+                ast_ctx.get())) {
+            fail_cpp_unsupported("non-type template parameter type", param_loc);
+        }
+        if (auto_type_utils::has_cxx_auto_type(parameter_type.get_shared())) {
+            parameter_type = QualType(
+                auto_type_utils::retag_cxx_auto_placeholders(
+                    parameter_type.get_shared(),
+                    AutoTypeFlavor::TemplateNonType),
+                parameter_type.get_qualifiers());
+        }
+
+        std::shared_ptr<Symbol> parameter_symbol = nullptr;
+        if (!param_parser.name.empty()) {
+            parameter_symbol = collect_->collect_declare_variable_symbol(
+                param_parser.name,
+                parameter_type,
+                StorageClass::NONE,
+                true,
+                false,
+                param_loc);
+        }
+        auto param_decl = make_ast<TemplateNonTypeParmDecl>(
+            *ast_ctx,
+            param_parser.name,
+            depth,
+            static_cast<uint32_t>(parameters.size()),
+            parameter_type,
+            parameter_symbol,
+            is_parameter_pack,
+            param_loc);
+        if (default_argument.has_value()) {
+            if (default_argument->kind != TemplateArgumentKind::Value) {
+                error_custloc(
+                    "non-type template parameter default must be a constant expression",
+                    param_loc);
+            }
+            set_template_parameter_default_argument(
+                param_decl.get(),
+                std::move(default_argument));
+        }
+        return param_decl;
+    };
+
     while (true) {
         Token param_tok = current_token();
         if (lang_opts.is_cxx20_or_later() &&
@@ -3551,6 +3729,14 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
                 active_template_parameter_stack_.back().push_back(
                     parameters.back().get());
             }
+        } else if (param_tok.type == TokenType::TYPENAME &&
+                   typename_starts_qualified_type_specifier()) {
+            auto param_decl = parse_non_type_template_parameter(param_tok);
+            parameters.push_back(std::move(param_decl));
+            if (!active_template_parameter_stack_.empty()) {
+                active_template_parameter_stack_.back().push_back(
+                    parameters.back().get());
+            }
         } else if (param_tok.type == TokenType::TYPENAME ||
             param_tok.type == TokenType::CLASS) {
             advance();
@@ -3617,96 +3803,7 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
                     parameters.back().get());
             }
         } else {
-            DeclarationParser param_parser(this);
-            auto parsed_type = param_parser.parse_declaration();
-            if (!parsed_type) {
-                error_custloc(
-                    "expected non-type template parameter declaration",
-                    param_tok.loc);
-            }
-            if (param_parser.str_class != StorageClass::NONE) {
-                error_custloc(
-                    "storage class specifier is not allowed in template parameter",
-                    param_tok.loc);
-            }
-            bool is_parameter_pack = param_parser.is_parameter_pack;
-            if (gentle_check_and_consume(TokenType::ELLIPSIS)) {
-                if (is_parameter_pack) {
-                    error_custloc(
-                        "duplicate ellipsis in non-type template parameter pack",
-                        current_token().loc);
-                }
-                is_parameter_pack = true;
-                if (param_parser.name.empty() &&
-                    gentle_check(TokenType::IDENTIFIER)) {
-                    param_parser.name = current_token().value;
-                    if (param_parser.loc.isInvalid()) {
-                        param_parser.loc = current_token().loc;
-                    }
-                    advance();
-                }
-            }
-            std::optional<TemplateArgument> default_argument;
-            if (gentle_check(TokenType::ASSIGN)) {
-                if (is_parameter_pack) {
-                    fail_cpp_unsupported(
-                        "default template argument on non-type template parameter pack",
-                        current_token().loc);
-                }
-                advance();
-                default_argument =
-                    parse_template_parameter_default_argument();
-            }
-
-            SrcLoc param_loc = param_parser.loc.isInvalid()
-                ? param_tok.loc
-                : param_parser.loc;
-            QualType parameter_type(parsed_type, param_parser.qualifiers);
-            parameter_type =
-                collect_->collect_try_realize_deferred_semantic_type(
-                    parameter_type);
-            if (!is_supported_non_type_template_parameter_type(
-                    parameter_type,
-                    ast_ctx.get())) {
-                fail_cpp_unsupported("non-type template parameter type", param_loc);
-            }
-            if (auto_type_utils::has_cxx_auto_type(parameter_type.get_shared())) {
-                parameter_type = QualType(
-                    auto_type_utils::retag_cxx_auto_placeholders(
-                        parameter_type.get_shared(),
-                        AutoTypeFlavor::TemplateNonType),
-                    parameter_type.get_qualifiers());
-            }
-
-            std::shared_ptr<Symbol> parameter_symbol = nullptr;
-            if (!param_parser.name.empty()) {
-                parameter_symbol = collect_->collect_declare_variable_symbol(
-                    param_parser.name,
-                    parameter_type,
-                    StorageClass::NONE,
-                    true,
-                    false,
-                    param_loc);
-            }
-            auto param_decl = make_ast<TemplateNonTypeParmDecl>(
-                *ast_ctx,
-                param_parser.name,
-                depth,
-                static_cast<uint32_t>(parameters.size()),
-                parameter_type,
-                parameter_symbol,
-                is_parameter_pack,
-                param_loc);
-            if (default_argument.has_value()) {
-                if (default_argument->kind != TemplateArgumentKind::Value) {
-                    error_custloc(
-                        "non-type template parameter default must be a constant expression",
-                        param_loc);
-                }
-                set_template_parameter_default_argument(
-                    param_decl.get(),
-                    std::move(default_argument));
-            }
+            auto param_decl = parse_non_type_template_parameter(param_tok);
             parameters.push_back(std::move(param_decl));
             if (!active_template_parameter_stack_.empty()) {
                 active_template_parameter_stack_.back().push_back(
