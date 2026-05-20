@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "../helpers/auto_type_utils.h"
 
 namespace {
 bool is_lone_unnamed_void_parameter_list(
@@ -1266,7 +1267,8 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
             // Parsed operator-function declarator name.
         } else if (in_function_parameter &&
                    pars->is_cxx_mode_active() &&
-                   pars->is_in_template_pattern_context() &&
+                   (pars->is_in_template_pattern_context() ||
+                    auto_type_utils::has_ordinary_cxx_auto_type(old_type)) &&
                    mgnt->gentle_check_and_consume(TokenType::ELLIPSIS)) {
             is_parameter_pack = true;
             if (mgnt->gentle_check(TokenType::IDENTIFIER)) {

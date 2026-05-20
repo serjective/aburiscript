@@ -134,6 +134,7 @@ void Parser::lower_cxx_auto_function_parameter_placeholders(
             continue;
         }
 
+        const bool is_parameter_pack = param_decl->is_parameter_pack;
         auto rewritten_type =
             auto_type_utils::replace_cxx_auto_placeholders_with_callback(
                 param_decl->type.get_shared(),
@@ -149,14 +150,14 @@ void Parser::lower_cxx_auto_function_parameter_placeholders(
                             invented_name,
                             parameter_depth,
                             parameter_index,
-                            false);
+                            is_parameter_pack);
                     auto parameter_decl = make_ast<TemplateTypeParmDecl>(
                         *ast_ctx,
                         invented_name,
                         parameter_depth,
                         parameter_index,
                         parameter_type,
-                        false,
+                        is_parameter_pack,
                         param_decl->location);
                     parameter_type->parameter_decl = parameter_decl.get();
                     if (auto_type.type_constraint) {
