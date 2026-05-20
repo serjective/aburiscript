@@ -202,12 +202,36 @@ void Collect::resolve_auto_variable_type_from_expr(
     }
 
     if (treat_as_decltype_auto) {
+        auto initializer_is_template_dependent = [&]() {
+            if (expression_depends_on_template_parameters(init_expr)) {
+                return true;
+            }
+            QualType init_type = const_cast<Expr*>(init_expr)->get_type();
+            return init_type &&
+                   (type_depends_on_template_parameters(init_type, ast_ctx_.get()) ||
+                    contains_deferred_semantic_type(init_type.get_shared()));
+        };
         QualType deduced_type = resolve_decltype_expression_type(
             const_cast<Expr*>(init_expr),
             true,
             declared_type,
             loc,
-            DeferredTypeResolutionMode::Finalize);
+            DeferredTypeResolutionMode::TryRealize);
+        bool unresolved_placeholder =
+            deduced_type &&
+            auto_type_utils::auto_type_flavors_in(deduced_type.get_shared()) != 0;
+        if ((!deduced_type || unresolved_placeholder) &&
+            initializer_is_template_dependent()) {
+            return;
+        }
+        if (!deduced_type || unresolved_placeholder) {
+            deduced_type = resolve_decltype_expression_type(
+                const_cast<Expr*>(init_expr),
+                true,
+                declared_type,
+                loc,
+                DeferredTypeResolutionMode::Finalize);
+        }
         if (!deduced_type) {
             report_error("cannot deduce type for 'decltype(auto)'", loc);
             return;

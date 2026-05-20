@@ -1251,6 +1251,10 @@ std::unique_ptr<Expr> Collect::process_initializer_for_type(std::unique_ptr<Expr
     if (!type) {
         return init;
     }
+    if (lang_opts_.is_cxx_mode() &&
+        auto_type_utils::has_cxx_auto_type(declared_type.get_shared())) {
+        return init;
+    }
 
     if (type->kind == TypeKind::Reference) {
         auto ref_type = type.as_shared<ReferenceType>();
