@@ -137,6 +137,29 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                 }
                 return QualType(rebound->type, quals);
             }
+            if (auto auto_type = dyn_cast_shared<AutoType>(raw)) {
+                if (!auto_type->type_constraint) {
+                    return current_type;
+                }
+                bool changed = false;
+                auto rewritten_constraint =
+                    std::make_shared<CppTypeConstraint>(
+                        *auto_type->type_constraint);
+                for (auto& argument :
+                     rewritten_constraint->template_arguments) {
+                    auto rewritten_argument = remap_template_argument(argument);
+                    changed = changed || !rewritten_argument.equals(argument);
+                    argument = std::move(rewritten_argument);
+                }
+                if (!changed) {
+                    return current_type;
+                }
+                return QualType(
+                    std::make_shared<AutoType>(
+                        auto_type->flavor,
+                        std::move(rewritten_constraint)),
+                    quals);
+            }
             if (auto typedef_type = dyn_cast_shared<TypedefType>(raw)) {
                 auto rewritten = self(self, typedef_type->underlying_type);
                 if (rewritten.equals_qualified(typedef_type->underlying_type)) {

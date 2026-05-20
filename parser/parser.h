@@ -357,6 +357,7 @@ private:
     std::unique_ptr<Expr> parse_cpp_requires_expression();
     std::optional<CppTypeConstraint> parse_cpp_type_constraint(
         bool diagnose_on_failure = true);
+    bool can_start_cpp_constrained_placeholder_type_specifier_for_lookahead();
     std::unique_ptr<Expr> parse_block_literal_expression();
     std::unique_ptr<Expr> parse_cpp_lambda_expression();
     bool is_lambda_declarator_parameter_clause_ahead();
@@ -1011,6 +1012,7 @@ struct DeclarationParser {
     bool parse_new_type_id_context;
     std::shared_ptr<CType> typedef_resolved_type = nullptr; // set when an identifier type-name is used as type specifier
     uint8_t typedef_resolved_qualifiers = QUAL_NONE;
+    std::shared_ptr<CppTypeConstraint> pending_cxx_auto_type_constraint = nullptr;
     struct TypeTally {
         int void_count = 0, char_count = 0, short_count = 0, int_count = 0,
             long_count = 0, float_count = 0, double_count = 0, bool_count = 0,

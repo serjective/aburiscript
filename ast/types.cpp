@@ -17,6 +17,27 @@
 #include <unordered_set>
 
 namespace {
+bool cpp_type_constraints_equal(const CppTypeConstraint* lhs,
+                                const CppTypeConstraint* rhs) {
+    if (lhs == rhs) {
+        return true;
+    }
+    if (!lhs || !rhs) {
+        return false;
+    }
+    if (lhs->concept_decl != rhs->concept_decl ||
+        lhs->concept_name != rhs->concept_name ||
+        lhs->template_arguments.size() != rhs->template_arguments.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < lhs->template_arguments.size(); ++idx) {
+        if (!lhs->template_arguments[idx].equals(rhs->template_arguments[idx])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void set_template_binding_error(std::string* error_out,
                                 const std::string& message) {
     if (error_out && error_out->empty()) {
@@ -2597,6 +2618,39 @@ const TemplateArgumentBinding* TemplateEnvironmentFrame::lookup(
         }
     }
     return nullptr;
+}
+
+std::string AutoType::to_string() const {
+    std::string base;
+    switch (flavor) {
+        case AutoTypeFlavor::Gnu:
+            base = "__auto_type";
+            break;
+        case AutoTypeFlavor::DecltypeAuto:
+        case AutoTypeFlavor::DecltypeAutoTemplateNonType:
+            base = "decltype(auto)";
+            break;
+        case AutoTypeFlavor::Cxx:
+        case AutoTypeFlavor::TemplateNonType:
+            base = "auto";
+            break;
+    }
+    if (type_constraint && !type_constraint->concept_name.empty() &&
+        base != "__auto_type") {
+        return type_constraint->concept_name + " " + base;
+    }
+    return base.empty() ? "auto" : base;
+}
+
+bool AutoType::equals(const CType& other) {
+    if (other.kind != TypeKind::Auto) {
+        return false;
+    }
+    const auto* rhs = static_cast<const AutoType*>(&other);
+    return rhs->flavor == flavor &&
+           cpp_type_constraints_equal(
+               type_constraint.get(),
+               rhs->type_constraint.get());
 }
 
 TemplateArgumentBinding* TemplateEnvironmentFrame::lookup(

@@ -110,6 +110,7 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
         begin_loc = mgnt->current_token().loc;
         typedef_resolved_type = nullptr;
         typedef_resolved_qualifiers = QUAL_NONE;
+        pending_cxx_auto_type_constraint = nullptr;
         is_block_byref = false;
         is_constexpr = false;
         is_consteval = false;
@@ -500,6 +501,42 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                         mgnt->advance();
                         continue;
                     }
+                    if (pars->is_cxx_mode_active() &&
+                        pars->lang_opts.is_cxx20_or_later() &&
+                        !pending_cxx_auto_type_constraint &&
+                        (t.type == TokenType::IDENTIFIER ||
+                         t.type == TokenType::SCOPE_RESOLUTION ||
+                         (t.type == TokenType::COLON &&
+                          mgnt->peek_token().type == TokenType::COLON))) {
+                        Parser::RevertingTentativeParsingAction tentative(*pars);
+                        std::optional<CppTypeConstraint> type_constraint;
+                        try {
+                            type_constraint =
+                                pars->parse_cpp_type_constraint(
+                                    /*diagnose_on_failure=*/false);
+                        } catch (const ParseError&) {
+                            type_constraint = std::nullopt;
+                        } catch (const FatalErrorLimitReached&) {
+                            throw;
+                        }
+                        bool followed_by_placeholder =
+                            type_constraint &&
+                            (mgnt->current_token().type == TokenType::AUTO ||
+                             (mgnt->current_token().type ==
+                                  TokenType::DECLTYPE_KW &&
+                              mgnt->peek_token(1).type ==
+                                  TokenType::LEFT_PAREN &&
+                              mgnt->peek_token(2).type == TokenType::AUTO &&
+                              mgnt->peek_token(3).type ==
+                                  TokenType::RIGHT_PAREN));
+                        if (followed_by_placeholder) {
+                            tentative.commit();
+                            pending_cxx_auto_type_constraint =
+                                std::make_shared<CppTypeConstraint>(
+                                    std::move(*type_constraint));
+                            continue;
+                        }
+                    }
                     if (is_gnu_attribute_token(t)) {
                         auto parsed_attrs = pars->try_parse_attributes();
                         leading_attrs.insert(leading_attrs.end(),
@@ -689,7 +726,10 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
         // Handle C++ auto placeholder type deduction
         if (tally.cxx_auto_count > 0) {
             validateTally(tally);
-            auto auto_placeholder = std::make_shared<AutoType>(AutoTypeFlavor::Cxx);
+            auto auto_placeholder = std::make_shared<AutoType>(
+                AutoTypeFlavor::Cxx,
+                pending_cxx_auto_type_constraint);
+            pending_cxx_auto_type_constraint = nullptr;
             auto resolved = apply_declspec_type_attributes(auto_placeholder);
             first_half = resolved;
             if (run_second_half) {
@@ -708,7 +748,10 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     begin_loc);
             }
             auto auto_placeholder =
-                std::make_shared<AutoType>(AutoTypeFlavor::DecltypeAuto);
+                std::make_shared<AutoType>(
+                    AutoTypeFlavor::DecltypeAuto,
+                    pending_cxx_auto_type_constraint);
+            pending_cxx_auto_type_constraint = nullptr;
             auto resolved = apply_declspec_type_attributes(auto_placeholder);
             first_half = resolved;
             if (run_second_half) {

@@ -619,6 +619,70 @@ std::optional<bool> Collect::evaluate_concept_specialization(
     return satisfaction;
 }
 
+std::optional<bool> Collect::evaluate_cpp_type_constraint(
+    const CppTypeConstraint& type_constraint,
+    QualType candidate_type,
+    SrcLoc loc) {
+    if (!type_constraint.concept_decl || !candidate_type) {
+        return false;
+    }
+    if (type_depends_on_template_parameters(candidate_type, ast_ctx_.get()) ||
+        template_arguments_depend_on_template_parameters(
+            type_constraint.template_arguments)) {
+        return std::nullopt;
+    }
+
+    SrcLoc constraint_loc =
+        type_constraint.location.isInvalid() ? loc : type_constraint.location;
+    std::vector<TemplateArgument> concept_arguments;
+    concept_arguments.push_back(TemplateArgument(candidate_type));
+    concept_arguments.insert(
+        concept_arguments.end(),
+        type_constraint.template_arguments.begin(),
+        type_constraint.template_arguments.end());
+    auto concept_expr =
+        collect_concept_specialization_expression(
+            type_constraint.concept_decl,
+            type_constraint.concept_name,
+            std::move(concept_arguments),
+            constraint_loc);
+    auto* concept_specialization =
+        dyn_cast<ConceptSpecializationExpr>(concept_expr.get());
+    if (!concept_specialization ||
+        !concept_specialization->satisfaction.has_value()) {
+        return std::nullopt;
+    }
+    return *concept_specialization->satisfaction;
+}
+
+bool Collect::require_deduced_auto_type_constraint(
+    const AutoType* auto_type,
+    QualType deduced_type,
+    SrcLoc loc,
+    const std::string& context) {
+    if (!auto_type || !auto_type->type_constraint) {
+        return true;
+    }
+    auto satisfaction =
+        evaluate_cpp_type_constraint(
+            *auto_type->type_constraint,
+            deduced_type,
+            loc);
+    if (!satisfaction.has_value()) {
+        return true;
+    }
+    if (*satisfaction) {
+        return true;
+    }
+    report_error(
+        "deduced type '" + deduced_type.to_string() +
+            "' for constrained auto " + context +
+            " does not satisfy constraint '" +
+            auto_type->type_constraint->concept_name + "'",
+        loc);
+    return false;
+}
+
 std::unique_ptr<Expr> Collect::collect_requires_expression(
     std::vector<std::unique_ptr<ParamDecl>> parameters,
     std::vector<ConstraintRequirement> requirements,

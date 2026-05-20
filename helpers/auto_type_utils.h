@@ -61,12 +61,15 @@ std::shared_ptr<CType> replace_auto_placeholder(
 
 std::shared_ptr<CType> replace_cxx_auto_placeholders_with_callback(
     const std::shared_ptr<CType>& type,
-    const std::function<QualType(size_t)>& replacement_for_placeholder,
+    const std::function<QualType(size_t, const AutoType&)>& replacement_for_placeholder,
     size_t* next_placeholder_index = nullptr);
 
 std::shared_ptr<CType> retag_cxx_auto_placeholders(
     const std::shared_ptr<CType>& type,
     AutoTypeFlavor new_flavor);
+
+const AutoType* find_first_constrained_auto_placeholder(
+    const std::shared_ptr<CType>& type);
 
 } // namespace auto_type_utils
 

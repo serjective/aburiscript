@@ -63,12 +63,15 @@ std::shared_ptr<CType> retag_cxx_auto_placeholders(
     if (type->kind == TypeKind::Auto) {
         auto* auto_type = static_cast<AutoType*>(type.get());
         if (auto_type->flavor == AutoTypeFlavor::Cxx) {
-            return std::make_shared<AutoType>(new_flavor);
+            return std::make_shared<AutoType>(
+                new_flavor,
+                auto_type->type_constraint);
         }
         if (auto_type->flavor == AutoTypeFlavor::DecltypeAuto &&
             new_flavor == AutoTypeFlavor::TemplateNonType) {
             return std::make_shared<AutoType>(
-                AutoTypeFlavor::DecltypeAutoTemplateNonType);
+                AutoTypeFlavor::DecltypeAutoTemplateNonType,
+                auto_type->type_constraint);
         }
         return type;
     }
@@ -281,7 +284,7 @@ std::shared_ptr<CType> replace_auto_placeholder(
 
 std::shared_ptr<CType> replace_cxx_auto_placeholders_with_callback(
     const std::shared_ptr<CType>& type,
-    const std::function<QualType(size_t)>& replacement_for_placeholder,
+    const std::function<QualType(size_t, const AutoType&)>& replacement_for_placeholder,
     size_t* next_placeholder_index) {
     if (!type) {
         return type;
@@ -299,7 +302,9 @@ std::shared_ptr<CType> replace_cxx_auto_placeholders_with_callback(
         }
         QualType replacement =
             replacement_for_placeholder
-                ? replacement_for_placeholder((*next_placeholder_index)++)
+                ? replacement_for_placeholder(
+                      (*next_placeholder_index)++,
+                      *auto_type)
                 : QualType();
         if (!replacement) {
             return type;
@@ -399,6 +404,59 @@ std::shared_ptr<CType> replace_cxx_auto_placeholders_with_callback(
             alias->typedef_decl);
     }
     return type;
+}
+
+const AutoType* find_first_constrained_auto_placeholder(
+    const std::shared_ptr<CType>& type) {
+    if (!type) {
+        return nullptr;
+    }
+    if (type->kind == TypeKind::Auto) {
+        auto* auto_type = static_cast<AutoType*>(type.get());
+        return auto_type->type_constraint ? auto_type : nullptr;
+    }
+    if (auto ptr = std::dynamic_pointer_cast<PointerType>(type)) {
+        return find_first_constrained_auto_placeholder(
+            ptr->pointed_type.get_shared());
+    }
+    if (auto ref = std::dynamic_pointer_cast<ReferenceType>(type)) {
+        return find_first_constrained_auto_placeholder(
+            ref->referred_type.get_shared());
+    }
+    if (auto mem_ptr = std::dynamic_pointer_cast<MemberPointerType>(type)) {
+        if (auto found = find_first_constrained_auto_placeholder(
+                mem_ptr->class_type.get_shared())) {
+            return found;
+        }
+        return find_first_constrained_auto_placeholder(
+            mem_ptr->member_type.get_shared());
+    }
+    if (auto blk = std::dynamic_pointer_cast<BlockPointerType>(type)) {
+        return find_first_constrained_auto_placeholder(
+            blk->pointed_type.get_shared());
+    }
+    if (auto arr = std::dynamic_pointer_cast<ArrayType>(type)) {
+        return find_first_constrained_auto_placeholder(
+            arr->element_type.get_shared());
+    }
+    if (auto func = std::dynamic_pointer_cast<FunctionType>(type)) {
+        if (auto found = find_first_constrained_auto_placeholder(
+                func->ret_type.get_shared())) {
+            return found;
+        }
+        for (const auto& param : func->parameters) {
+            if (auto found = find_first_constrained_auto_placeholder(
+                    param.get_shared())) {
+                return found;
+            }
+        }
+        return nullptr;
+    }
+    if (auto alias = std::dynamic_pointer_cast<TypedefType>(type)) {
+        return find_first_constrained_auto_placeholder(
+            alias->underlying_type.get_shared());
+    }
+    return nullptr;
 }
 
 } // namespace auto_type_utils

@@ -866,6 +866,15 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
                         loc);
                     return fallback_return;
                 }
+                if (!require_deduced_auto_type_constraint(
+                        auto_type_utils::find_first_constrained_auto_placeholder(
+                            return_pattern.get_shared()),
+                        deduced_return,
+                        loc,
+                        "return type of function '" +
+                            session_.func_state_.current_function_name + "'")) {
+                    return fallback_return;
+                }
                 return deduced_return;
             }
 
@@ -909,6 +918,16 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
                 deduced_raw = std::make_shared<PointerType>(arr->element_type);
             } else if (deduced_raw->kind == TypeKind::Function) {
                 deduced_raw = std::make_shared<PointerType>(QualType(deduced_raw));
+            }
+
+            if (!require_deduced_auto_type_constraint(
+                    auto_type_utils::find_first_constrained_auto_placeholder(
+                        return_pattern.get_shared()),
+                    QualType(deduced_raw),
+                    loc,
+                    "return type of function '" +
+                        session_.func_state_.current_function_name + "'")) {
+                return fallback_return;
             }
 
             auto replaced_raw = replace_auto_type(

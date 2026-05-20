@@ -137,7 +137,7 @@ void Parser::lower_cxx_auto_function_parameter_placeholders(
         auto rewritten_type =
             auto_type_utils::replace_cxx_auto_placeholders_with_callback(
                 param_decl->type.get_shared(),
-                [&](size_t) -> QualType {
+                [&](size_t, const AutoType& auto_type) -> QualType {
                     const uint32_t parameter_index =
                         static_cast<uint32_t>(template_parameters.size());
                     std::string invented_name =
@@ -159,6 +159,21 @@ void Parser::lower_cxx_auto_function_parameter_placeholders(
                         false,
                         param_decl->location);
                     parameter_type->parameter_decl = parameter_decl.get();
+                    if (auto_type.type_constraint) {
+                        std::vector<TemplateArgument> concept_arguments;
+                        concept_arguments.push_back(
+                            TemplateArgument(QualType(parameter_type)));
+                        concept_arguments.insert(
+                            concept_arguments.end(),
+                            auto_type.type_constraint->template_arguments.begin(),
+                            auto_type.type_constraint->template_arguments.end());
+                        parameter_decl->type_constraint =
+                            collect_->collect_concept_specialization_expression(
+                                auto_type.type_constraint->concept_decl,
+                                auto_type.type_constraint->concept_name,
+                                std::move(concept_arguments),
+                                auto_type.type_constraint->location);
+                    }
                     template_parameters.push_back(std::move(parameter_decl));
                     return QualType(parameter_type);
                 });

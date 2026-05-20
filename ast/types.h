@@ -45,6 +45,7 @@ struct TemplateTemplateParmDecl;
 struct TemplateSpecializationType;
 struct DependentNameType;
 struct TemplateDecl;
+struct CppTypeConstraint;
 struct AliasTemplateDecl;
 struct FunctionTemplateDecl;
 struct VariableTemplateDecl;
@@ -154,30 +155,17 @@ struct PlaceholderType: CType {
 
 // Represents __auto_type before type deduction (transient: replaced by sema)
 struct AutoType : CType {
-    explicit AutoType(AutoTypeFlavor flavor = AutoTypeFlavor::Gnu)
-        : CType(TypeKind::Auto), flavor(flavor) {}
+    explicit AutoType(
+        AutoTypeFlavor flavor = AutoTypeFlavor::Gnu,
+        std::shared_ptr<const CppTypeConstraint> type_constraint = nullptr)
+        : CType(TypeKind::Auto),
+          flavor(flavor),
+          type_constraint(std::move(type_constraint)) {}
     AutoTypeFlavor flavor = AutoTypeFlavor::Gnu;
+    std::shared_ptr<const CppTypeConstraint> type_constraint = nullptr;
     bool isIncomplete() const override { return true; }
-    std::string to_string() const override {
-        switch (flavor) {
-            case AutoTypeFlavor::Gnu:
-                return "__auto_type";
-            case AutoTypeFlavor::DecltypeAuto:
-            case AutoTypeFlavor::DecltypeAutoTemplateNonType:
-                return "decltype(auto)";
-            case AutoTypeFlavor::Cxx:
-            case AutoTypeFlavor::TemplateNonType:
-                return "auto";
-        }
-        return "auto";
-    }
-    bool equals(const CType& other) override {
-        if (other.kind != TypeKind::Auto) {
-            return false;
-        }
-        const auto* rhs = static_cast<const AutoType*>(&other);
-        return rhs->flavor == flavor;
-    }
+    std::string to_string() const override;
+    bool equals(const CType& other) override;
     static bool classof(const CType *t) { return t->kind == TypeKind::Auto; }
 };
 

@@ -6612,6 +6612,9 @@ bool Parser::isTokenDeclarationSpec(Token s) {
                     return true;
                 }
                 if (is_cxx_mode_active()) {
+                    if (can_start_cpp_constrained_placeholder_type_specifier_for_lookahead()) {
+                        return true;
+                    }
                     QualType current_record_lookup_type =
                         collect_->collect_current_cpp_record_lookup_type();
                     if (current_record_lookup_type &&

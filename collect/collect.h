@@ -585,6 +585,15 @@ public:
         const ConceptDecl* concept_decl,
         const std::vector<TemplateArgument>& arguments,
         SrcLoc loc) ;
+    std::optional<bool> evaluate_cpp_type_constraint(
+        const CppTypeConstraint& type_constraint,
+        QualType candidate_type,
+        SrcLoc loc) ;
+    bool require_deduced_auto_type_constraint(
+        const AutoType* auto_type,
+        QualType deduced_type,
+        SrcLoc loc,
+        const std::string& context) ;
     std::unique_ptr<Expr> collect_requires_expression(
         std::vector<std::unique_ptr<ParamDecl>> parameters,
         std::vector<ConstraintRequirement> requirements,

@@ -3329,6 +3329,36 @@ Parser::parse_cpp_type_constraint(bool diagnose_on_failure) {
     return constraint;
 }
 
+bool Parser::can_start_cpp_constrained_placeholder_type_specifier_for_lookahead() {
+    if (!is_cxx_mode_active() || !lang_opts.is_cxx20_or_later()) {
+        return false;
+    }
+
+    RevertingTentativeParsingAction tentative(*this);
+    std::optional<CppTypeConstraint> type_constraint;
+    try {
+        type_constraint =
+            parse_cpp_type_constraint(/*diagnose_on_failure=*/false);
+    } catch (const ParseError&) {
+        return false;
+    } catch (const FatalErrorLimitReached&) {
+        throw;
+    }
+    if (!type_constraint) {
+        return false;
+    }
+    if (gentle_check(TokenType::AUTO)) {
+        return true;
+    }
+    if (gentle_check(TokenType::DECLTYPE_KW) &&
+        peek_token(1).type == TokenType::LEFT_PAREN &&
+        peek_token(2).type == TokenType::AUTO &&
+        peek_token(3).type == TokenType::RIGHT_PAREN) {
+        return true;
+    }
+    return false;
+}
+
 TemplateParameterList
 Parser::parse_cpp_template_parameter_list(uint32_t depth) {
     TemplateParameterList parameters;

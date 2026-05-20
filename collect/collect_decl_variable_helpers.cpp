@@ -218,6 +218,14 @@ void Collect::resolve_auto_variable_type_from_expr(
                 loc);
             return;
         }
+        if (!require_deduced_auto_type_constraint(
+                auto_type_utils::find_first_constrained_auto_placeholder(
+                    declared_type.get_shared()),
+                deduced_type,
+                loc,
+                name.empty() ? "variable" : "variable '" + name + "'")) {
+            return;
+        }
         declared_type =
             replace_auto_placeholder_qualtype(declared_type, deduced_type);
         if (sym) {
@@ -273,6 +281,15 @@ void Collect::resolve_auto_variable_type_from_expr(
             return;
         }
         deduced_placeholder = *extracted;
+    }
+
+    if (!require_deduced_auto_type_constraint(
+            auto_type_utils::find_first_constrained_auto_placeholder(
+                declared_type.get_shared()),
+            deduced_placeholder,
+            loc,
+            name.empty() ? "variable" : "variable '" + name + "'")) {
+        return;
     }
 
     declared_type =
