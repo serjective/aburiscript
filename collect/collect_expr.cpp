@@ -4169,15 +4169,40 @@ std::unique_ptr<Expr> Collect::collect_builtin_convertvector_expression(std::uni
 
 
 std::unique_ptr<Expr> Collect::collect_offsetof_expression(QualType type_operand, const std::string& member_name, std::vector<OffsetOfComponent> designator_path, SrcLoc loc) {
-
-    if (contains_deferred_semantic_type(type_operand.get_shared())) {
-        type_operand = resolve_typeof_types(type_operand, loc);
-    }
     auto node = collect_make<OffsetOfExpr>(type_operand, member_name, loc);
     node->designator_path = std::move(designator_path);
     node->result_type = QualType(get_builtin_ulong());
+    return finalize_offsetof_node(std::move(node), loc);
+}
 
-    auto object_type = desugar_type(type_operand).as_shared<ObjectType>();
+std::unique_ptr<Expr> Collect::finalize_offsetof_node(
+    std::unique_ptr<OffsetOfExpr> node,
+    SrcLoc loc) {
+    if (!node) {
+        return nullptr;
+    }
+
+    auto size_t_type = get_builtin_ulong();
+    node->result_type = size_t_type ? QualType(size_t_type) : QualType(get_builtin_int());
+    if (!node->type_operand) {
+        report_error("__builtin_offsetof requires a class/struct/union type", loc);
+        return node;
+    }
+
+    if (type_depends_on_template_parameters(node->type_operand, ast_ctx_.get())) {
+        return node;
+    }
+
+    QualType type_operand = finalize_deferred_semantic_type(node->type_operand, loc);
+    if (!type_operand ||
+        type_depends_on_template_parameters(type_operand, ast_ctx_.get())) {
+        node->type_operand = type_operand ? type_operand : node->type_operand;
+        return node;
+    }
+    type_operand = desugar_type(type_operand, ast_ctx_.get());
+    node->type_operand = type_operand;
+
+    auto object_type = type_operand.as_shared<ObjectType>();
     if (!object_type) {
         report_error("__builtin_offsetof requires a class/struct/union type", loc);
         return node;
@@ -4191,13 +4216,13 @@ std::unique_ptr<Expr> Collect::collect_offsetof_expression(QualType type_operand
 
     FieldLookupResult lookup;
     std::vector<uint32_t> path;
-    find_field_recursive(object_type.get(), member_name, path, 0, lookup);
+    find_field_recursive(object_type.get(), node->member_name, path, 0, lookup);
     if (lookup.matches == 0 || lookup.field == nullptr) {
-        report_error("no member named '" + member_name + "' in class/struct/union", loc);
+        report_error("no member named '" + node->member_name + "' in class/struct/union", loc);
         return node;
     }
     if (lookup.matches > 1) {
-        report_error("member '" + member_name + "' is ambiguous in __builtin_offsetof", loc);
+        report_error("member '" + node->member_name + "' is ambiguous in __builtin_offsetof", loc);
         return node;
     }
 
@@ -4231,6 +4256,22 @@ std::unique_ptr<Expr> Collect::collect_offsetof_expression(QualType type_operand
                 return node;
             }
             if (comp.array_index_expr) {
+                if (expression_depends_on_template_parameters(
+                        comp.array_index_expr.get()) ||
+                    type_depends_on_template_parameters(
+                        comp.array_index_expr->get_type(),
+                        ast_ctx_.get())) {
+                    return node;
+                }
+                auto idx_val = try_evaluate_with_consteval_compat(
+                    comp.array_index_expr.get(), ConstEvalMode::c_ice());
+                if (idx_val.has_value()) {
+                    offset += *idx_val * elem_size;
+                    comp.array_index = *idx_val;
+                    comp.array_index_expr.reset();
+                    current_type = arr->element_type;
+                    continue;
+                }
                 auto scale = collect_integer_literal(
                     std::to_string(elem_size), get_builtin_ulong(), loc);
                 auto term = collect_binary_operation(
@@ -4276,7 +4317,6 @@ std::unique_ptr<Expr> Collect::collect_offsetof_expression(QualType type_operand
     node->computed_offset = offset;
     return node;
 }
-
 
 std::unique_ptr<Expr> Collect::collect_explicit_cast(std::unique_ptr<Expr> expr, QualType target_type, SrcLoc loc) {
 

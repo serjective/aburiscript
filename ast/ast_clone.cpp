@@ -1632,6 +1632,15 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
             auto* offsetof_expr = static_cast<OffsetOfExpr*>(expr.get());
             offsetof_expr->type_operand =
                 rewrite_type(offsetof_expr->type_operand, ctx);
+            for (auto& component : offsetof_expr->designator_path) {
+                if (component.array_index_expr &&
+                    !rewrite_expr_tree(
+                        component.array_index_expr,
+                        ctx,
+                        error_out)) {
+                    return false;
+                }
+            }
             offsetof_expr->result_type =
                 rewrite_type(offsetof_expr->result_type, ctx);
             return true;

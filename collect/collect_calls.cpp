@@ -4078,6 +4078,55 @@ bool Collect::resolve_dependent_expr_after_substitution(
             alignof_expr->location);
         return true;
     }
+    if (auto* offsetof_expr = dyn_cast<OffsetOfExpr>(expr.get())) {
+        if (offsetof_expr->type_operand &&
+            (contains_deferred_semantic_type(
+                 offsetof_expr->type_operand.get_shared()) ||
+             type_depends_on_template_parameters(
+                 offsetof_expr->type_operand,
+                 ast_ctx_.get()))) {
+            QualType realized_type =
+                try_realize_deferred_semantic_type(offsetof_expr->type_operand);
+            if (realized_type) {
+                offsetof_expr->type_operand = realized_type;
+            }
+        }
+
+        for (auto& component : offsetof_expr->designator_path) {
+            if (!component.array_index_expr) {
+                continue;
+            }
+            if (!resolve_dependent_expr_after_substitution(
+                    component.array_index_expr,
+                    implicit_this_type,
+                    error_out)) {
+                return false;
+            }
+            strip_stale_dependent_implicit_casts(component.array_index_expr);
+            realize_deferred_expr_type_after_substitution(
+                component.array_index_expr.get(),
+                /*allow_finalize=*/true);
+            if (expression_depends_on_template_parameters(
+                    component.array_index_expr.get()) ||
+                type_depends_on_template_parameters(
+                    component.array_index_expr->get_type(),
+                    ast_ctx_.get())) {
+                return true;
+            }
+        }
+
+        if (type_depends_on_template_parameters(
+                offsetof_expr->type_operand,
+                ast_ctx_.get())) {
+            return true;
+        }
+
+        SrcLoc offsetof_loc = offsetof_expr->location;
+        auto owned_offsetof = std::unique_ptr<OffsetOfExpr>(
+            static_cast<OffsetOfExpr*>(expr.release()));
+        expr = finalize_offsetof_node(std::move(owned_offsetof), offsetof_loc);
+        return true;
+    }
     if (auto* noexcept_expr = dyn_cast<CppNoexceptExpr>(expr.get())) {
         while (auto* cast =
                    dyn_cast<ImplicitCast>(noexcept_expr->operand.get())) {

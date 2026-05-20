@@ -997,6 +997,24 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
                        alignof_expr->type_operand,
                        ast_ctx);
         }
+        case StmtKind::OffsetOfExpr: {
+            const auto* offsetof_expr =
+                static_cast<const OffsetOfExpr*>(stripped);
+            if (type_depends_on_template_parameters(
+                    offsetof_expr->type_operand,
+                    ast_ctx)) {
+                return true;
+            }
+            for (const auto& component : offsetof_expr->designator_path) {
+                if (expr_depends_on_template_parameters_impl(
+                        component.array_index_expr.get(),
+                        ast_ctx,
+                        active_variable_symbols)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         case StmtKind::CppNoexceptExpr:
             return expr_depends_on_template_parameters_impl(
                 static_cast<const CppNoexceptExpr*>(stripped)->operand.get(),
@@ -1370,6 +1388,7 @@ void materialize_expr_for_constant_evaluation(
             break;
         case StmtKind::SizeOfExpr:
         case StmtKind::AlignOfExpr:
+        case StmtKind::OffsetOfExpr:
         case StmtKind::CppTypeIdExpr:
             break;
         case StmtKind::GenericExpr: {

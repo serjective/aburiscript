@@ -2210,6 +2210,10 @@ private:
                                const std::shared_ptr<CType>& target_type,
                                SrcLoc loc) ;
 
+    std::unique_ptr<Expr> finalize_offsetof_node(
+        std::unique_ptr<OffsetOfExpr> node,
+        SrcLoc loc) ;
+
     void report_error(const std::string& message, SrcLoc loc) const ;
 
     void report_warning(const std::string& message, SrcLoc loc) const ;
