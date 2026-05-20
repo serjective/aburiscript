@@ -274,51 +274,13 @@ TemplateParameterList Parser::lower_generic_lambda_parameter_placeholders(
     const std::string& closure_name,
     uint32_t parameter_depth,
     SrcLoc lambda_loc) {
-    if (!ast_ctx) {
-        error_custloc(
-            "internal error: missing AST context for generic lambda",
-            lambda_loc);
-    }
-
-    for (auto& parameter : parameters) {
-        auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
-        if (!param_decl || !param_decl->type ||
-            !auto_type_utils::has_cxx_auto_type(param_decl->type.get_shared())) {
-            continue;
-        }
-
-        auto rewritten_type = auto_type_utils::replace_cxx_auto_placeholders_with_callback(
-            param_decl->type.get_shared(),
-            [&](size_t) -> QualType {
-                const uint32_t parameter_index =
-                    static_cast<uint32_t>(template_parameters.size());
-                std::string invented_name =
-                    closure_name + "__T" + std::to_string(parameter_index);
-                auto parameter_type = std::make_shared<TemplateTypeParmType>(
-                    invented_name,
-                    parameter_depth,
-                    parameter_index,
-                    false);
-                auto parameter_decl = make_ast<TemplateTypeParmDecl>(
-                    *ast_ctx,
-                    invented_name,
-                    parameter_depth,
-                    parameter_index,
-                    parameter_type,
-                    false,
-                    param_decl->location);
-                parameter_type->parameter_decl = parameter_decl.get();
-                template_parameters.push_back(std::move(parameter_decl));
-                return QualType(parameter_type);
-            });
-
-        param_decl->type = QualType(
-            rewritten_type,
-            param_decl->type.get_qualifiers());
-        if (param_decl->sym) {
-            param_decl->sym->type = param_decl->type;
-        }
-    }
+    (void)closure_name;
+    lower_cxx_auto_function_parameter_placeholders(
+        parameters,
+        nullptr,
+        template_parameters,
+        parameter_depth,
+        lambda_loc);
 
     return template_parameters;
 }

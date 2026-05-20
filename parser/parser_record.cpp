@@ -3143,8 +3143,19 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         } record_parse_scope_guard{&cxx_record_parse_stack_};
 
         merge_function_asm_label(decl_parser, method_sym, declarator_token.loc);
+        TemplateParameterList out_of_line_abbreviated_template_parameters;
         auto parsed_method_decl =
-            parse_function(&decl_parser, declarator_token.loc, method_sym);
+            parse_function(
+                &decl_parser,
+                declarator_token.loc,
+                method_sym,
+                &out_of_line_abbreviated_template_parameters);
+        if (!out_of_line_abbreviated_template_parameters.empty()) {
+            fail_cpp_future_work(
+                "out-of-line abbreviated member function templates",
+                "out_of_line_abbreviated_member_function_template",
+                declarator_token.loc);
+        }
         auto* parsed_method_func_raw = dyn_cast<FuncDecl>(parsed_method_decl.get());
         if (!parsed_method_func_raw) {
             error_custloc(
@@ -3560,9 +3571,16 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         declarator_token.loc);
     bool preserve_function_explicit_specialization_decl =
         is_parsing_cpp_explicit_specialization();
+    bool has_abbreviated_function_parameters =
+        is_cxx_mode_active() &&
+        function_type_has_ordinary_cxx_auto_parameters(parsed_decl_type);
+    bool active_template_declaration_will_wrap_abbreviated_function =
+        active_abbreviated_function_template_parameters() != nullptr;
     bool suppress_primary_function_template_symbol_binding =
         is_cxx_mode_active() &&
-        template_pattern_depth_ > 0 &&
+        ((template_pattern_depth_ > 0 &&
+          !preserve_function_explicit_specialization_decl) ||
+         has_abbreviated_function_parameters) &&
         !preserve_function_explicit_specialization_decl;
     std::shared_ptr<Symbol> predecl_sym = nullptr;
     if (!preserve_function_explicit_specialization_decl &&
@@ -3590,7 +3608,12 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         }
         merge_function_asm_label(decl_parser, predecl_sym, declarator_token.loc);
     }
-    auto funct = parse_function(&decl_parser, declarator_token.loc, predecl_sym);
+    TemplateParameterList abbreviated_template_parameters;
+    auto funct = parse_function(
+        &decl_parser,
+        declarator_token.loc,
+        predecl_sym,
+        &abbreviated_template_parameters);
     auto* func_decl_check = dyn_cast<FuncDecl>(funct.get());
     if (func_decl_check && func_decl_check->is_defaulted) {
         error_custloc(
@@ -3664,6 +3687,14 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
     }
     ast_ctx->append_attrs(funct->node_id, std::move(decl_parser.leading_attrs));
     ast_ctx->append_attrs(funct->node_id, std::move(trailing_attrs));
+    if (!abbreviated_template_parameters.empty()) {
+        funct = wrap_abbreviated_function_template_if_needed(
+            std::move(funct),
+            std::move(abbreviated_template_parameters),
+            declarator_token.loc,
+            !active_template_declaration_will_wrap_abbreviated_function &&
+                !preserve_function_explicit_specialization_decl);
+    }
     ret_vec.push_back(std::move(funct));
     return is_definition ? DeclaratorHandlingResult::Return
                          : DeclaratorHandlingResult::Continue;
@@ -4525,7 +4556,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
 
     auto build_member_param_decls =
         [&](std::vector<std::unique_ptr<DeclarationParser>>& parsed_params,
-            const std::shared_ptr<CType>& function_type)
+            const std::shared_ptr<CType>& function_type,
+            TemplateParameterList* abbreviated_template_parameters = nullptr,
+            SrcLoc function_loc = SrcLoc())
         -> std::vector<std::unique_ptr<Decl>> {
         std::vector<std::unique_ptr<Decl>> member_params;
         bool seen_void_param = false;
@@ -4567,7 +4600,29 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             }
             member_params.push_back(std::move(param_decl));
         }
-        if (auto* func_ty = dyn_cast<FunctionType>(function_type.get())) {
+        auto func_ty = dyn_cast_shared<FunctionType>(function_type);
+        validate_function_parameter_auto_placeholders(func_ty, function_loc);
+        if (func_ty &&
+            function_type_has_ordinary_cxx_auto_parameters(func_ty)) {
+            TemplateParameterList local_abbreviated_template_parameters;
+            TemplateParameterList* target_template_parameters =
+                active_abbreviated_function_template_parameters();
+            if (!target_template_parameters) {
+                target_template_parameters =
+                    &local_abbreviated_template_parameters;
+            }
+            lower_cxx_auto_function_parameter_placeholders(
+                member_params,
+                func_ty,
+                *target_template_parameters,
+                active_abbreviated_function_template_parameter_depth(),
+                function_loc);
+            if (abbreviated_template_parameters &&
+                !active_abbreviated_function_template_parameters()) {
+                *abbreviated_template_parameters =
+                    std::move(local_abbreviated_template_parameters);
+            }
+        } else if (func_ty) {
             func_ty->parameter_pack_flags.clear();
             func_ty->parameter_pack_flags.reserve(member_params.size());
             for (const auto& member_param : member_params) {
@@ -4579,7 +4634,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             func_ty->normalize_parameter_pack_flags();
         }
         if (seen_void_param) {
-            auto* func_ty = dyn_cast<FunctionType>(function_type.get());
             if (func_ty && func_ty->is_variadic) {
                 error("'void' parameter cannot be combined with '...'");
             }
@@ -4727,9 +4781,19 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     decl_parser.asm_label,
                     t.loc,
                     current_decl_language_linkage());
+                TemplateParameterList friend_abbreviated_template_parameters;
                 friend_function->parameters =
-                    build_member_param_decls(decl_parser.func_args,
-                                             friend_function->type);
+                    build_member_param_decls(
+                        decl_parser.func_args,
+                        friend_function->type,
+                        &friend_abbreviated_template_parameters,
+                        t.loc);
+                if (!friend_abbreviated_template_parameters.empty()) {
+                    fail_cpp_future_work(
+                        "abbreviated friend function templates",
+                        "abbreviated_friend_function_template",
+                        t.loc);
+                }
                 friend_function->is_constexpr = decl_parser.is_constexpr;
                 friend_function->is_consteval = decl_parser.is_consteval;
                 if (friend_function->is_consteval) {
@@ -5006,7 +5070,12 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     cpp_in_class_definition_is_inline(
                         decl_parser.is_inline,
                         has_inline_body || ctor_is_deleted || ctor_is_defaulted);
-                auto ctor_params = build_member_param_decls(decl_parser.func_args, field_type);
+                TemplateParameterList ctor_abbreviated_template_parameters;
+                auto ctor_params = build_member_param_decls(
+                    decl_parser.func_args,
+                    field_type,
+                    &ctor_abbreviated_template_parameters,
+                    t.loc);
                 auto ctor_decl = make_ast<CppConstructorDecl>(
                     *ast_ctx,
                     record_name,
@@ -5098,13 +5167,20 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                                       std::move(decl_parser.leading_attrs));
                 ast_ctx->append_attrs(ctor_decl->node_id,
                                       std::move(field_attrs_before_colon));
-                fields.push_back(std::move(ctor_decl));
+                auto* ctor_for_control_flow = ctor_decl.get();
+                std::unique_ptr<Decl> ctor_member = std::move(ctor_decl);
+                ctor_member = wrap_abbreviated_function_template_if_needed(
+                    std::move(ctor_member),
+                    std::move(ctor_abbreviated_template_parameters),
+                    t.loc,
+                    false);
+                fields.push_back(std::move(ctor_member));
 
-                if (auto* ctor = dyn_cast<CppConstructorDecl>(fields.back().get());
-                    ctor &&
-                    !ctor->is_defaulted &&
-                    !ctor->is_deleted &&
-                    (ctor->body != nullptr || ctor->has_deferred_inline_body())) {
+                if (ctor_for_control_flow &&
+                    !ctor_for_control_flow->is_defaulted &&
+                    !ctor_for_control_flow->is_deleted &&
+                    (ctor_for_control_flow->body != nullptr ||
+                     ctor_for_control_flow->has_deferred_inline_body())) {
                     // In-class constructor definitions do not require a trailing semicolon.
                     return fields;
                 }
@@ -5196,10 +5272,15 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             }
             std::unique_ptr<CppMethodDecl> cpp_method;
             std::string method_qualifier_prefix;
+            TemplateParameterList method_abbreviated_template_parameters;
 
             if (has_inline_body) {
                 auto method_params =
-                    build_member_param_decls(decl_parser.func_args, field_type);
+                    build_member_param_decls(
+                        decl_parser.func_args,
+                        field_type,
+                        &method_abbreviated_template_parameters,
+                        t.loc);
                 bool method_is_inline =
                     cpp_in_class_definition_is_inline(
                         decl_parser.is_inline,
@@ -5244,7 +5325,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     cpp_method.get(),
                     "expected '}' to close class member function body");
             } else {
-                auto parsed_method_decl = parse_function(&decl_parser, t.loc);
+                auto parsed_method_decl = parse_function(
+                    &decl_parser,
+                    t.loc,
+                    nullptr,
+                    &method_abbreviated_template_parameters);
                 auto parsed_method =
                     std::unique_ptr<FuncDecl>(dyn_cast<FuncDecl>(parsed_method_decl.release()));
                 if (!parsed_method) {
@@ -5390,10 +5475,18 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                                   std::move(decl_parser.leading_attrs));
             ast_ctx->append_attrs(cpp_method->node_id,
                                   std::move(field_attrs_before_colon));
-            fields.push_back(std::move(cpp_method));
+            auto* method_for_control_flow = cpp_method.get();
+            std::unique_ptr<Decl> method_member = std::move(cpp_method);
+            method_member = wrap_abbreviated_function_template_if_needed(
+                std::move(method_member),
+                std::move(method_abbreviated_template_parameters),
+                t.loc,
+                false);
+            fields.push_back(std::move(method_member));
 
-            if (auto* method = dyn_cast<CppMethodDecl>(fields.back().get());
-                method && (method->body != nullptr || method->has_deferred_inline_body())) {
+            if (method_for_control_flow &&
+                (method_for_control_flow->body != nullptr ||
+                 method_for_control_flow->has_deferred_inline_body())) {
                 // In-class method definitions do not require a trailing semicolon.
                 return fields;
             }

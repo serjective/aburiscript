@@ -366,6 +366,24 @@ private:
         const std::string& closure_name,
         uint32_t parameter_depth,
         SrcLoc lambda_loc);
+    bool function_type_has_ordinary_cxx_auto_parameters(
+        const std::shared_ptr<CType>& type) const;
+    void validate_function_parameter_auto_placeholders(
+        const std::shared_ptr<FunctionType>& function_type,
+        SrcLoc loc);
+    void lower_cxx_auto_function_parameter_placeholders(
+        std::vector<std::unique_ptr<Decl>>& parameters,
+        const std::shared_ptr<FunctionType>& function_type,
+        TemplateParameterList& template_parameters,
+        uint32_t parameter_depth,
+        SrcLoc loc);
+    TemplateParameterList* active_abbreviated_function_template_parameters();
+    uint32_t active_abbreviated_function_template_parameter_depth() const;
+    std::unique_ptr<Decl> wrap_abbreviated_function_template_if_needed(
+        std::unique_ptr<Decl> function_decl,
+        TemplateParameterList template_parameters,
+        SrcLoc loc,
+        bool publish_namespace_template);
     std::unique_ptr<Expr> maybe_parse_pack_expansion_expression(
         std::unique_ptr<Expr> expr);
     std::unique_ptr<Expr> parse_assignment_expression_with_optional_pack_expansion();
@@ -420,7 +438,9 @@ private:
     std::unique_ptr<Stmt> parse_compound_stmt(std::shared_ptr<Scope> use_scope = nullptr);
     std::unique_ptr<Decl> parse_function(DeclarationParser *decl_parser,
                                          SrcLoc loc,
-                                         std::shared_ptr<Symbol> predecl_sym = nullptr);
+                                         std::shared_ptr<Symbol> predecl_sym = nullptr,
+                                         TemplateParameterList*
+                                             abbreviated_template_parameters_out = nullptr);
     void parse_kr_declaration_list(DeclarationParser *decl_parser, FuncDecl *func_decl);
     std::unique_ptr<Decl> parse_translation_unit();
 
@@ -896,6 +916,12 @@ private:
     uint32_t template_head_requires_clause_depth_ = 0;
     uint32_t lambda_template_requires_clause_depth_ = 0;
     uint32_t cpp_explicit_specialization_parse_depth_ = 0;
+    struct ActiveAbbreviatedFunctionTemplateContext {
+        TemplateParameterList* parameters = nullptr;
+        uint32_t parameter_depth = 0;
+    };
+    ActiveAbbreviatedFunctionTemplateContext*
+        active_abbreviated_function_template_context_ = nullptr;
     std::vector<std::vector<const TemplateParameterDecl*>>
         active_template_parameter_stack_;
     std::optional<PendingCppExplicitSpecializationInfo>

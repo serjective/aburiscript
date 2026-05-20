@@ -4595,8 +4595,38 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
         }
         return std::nullopt;
     };
+    struct AbbreviatedFunctionTemplateContextGuard {
+        Parser* parser = nullptr;
+        ActiveAbbreviatedFunctionTemplateContext context;
+        ActiveAbbreviatedFunctionTemplateContext* previous = nullptr;
+
+        AbbreviatedFunctionTemplateContextGuard(Parser* parser,
+                                                TemplateParameterList* parameters,
+                                                uint32_t parameter_depth)
+            : parser(parser),
+              context{parameters, parameter_depth},
+              previous(parser
+                           ? parser->active_abbreviated_function_template_context_
+                           : nullptr) {
+            if (parser) {
+                parser->active_abbreviated_function_template_context_ =
+                    &context;
+            }
+        }
+
+        ~AbbreviatedFunctionTemplateContextGuard() {
+            if (parser) {
+                parser->active_abbreviated_function_template_context_ =
+                    previous;
+            }
+        }
+    };
 
     if (member_template_constructor_name_offset().has_value()) {
+        AbbreviatedFunctionTemplateContextGuard abbreviated_context_guard{
+            this,
+            &parameters,
+            parameter_depth};
         templated_decls.push_back(parse_cpp_constructor_member());
     } else if (gentle_check(TokenType::CLASS) ||
         gentle_check(TokenType::STRUCT) ||
@@ -4635,6 +4665,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                gentle_check(TokenType::USING)) {
         templated_decls = parse_cpp_using_alias_declaration();
     } else if (member_template_declaration) {
+        AbbreviatedFunctionTemplateContextGuard abbreviated_context_guard{
+            this,
+            &parameters,
+            parameter_depth};
         templated_decls = parse_struct_declaration(false);
     } else {
         struct PendingVariableTemplatePatternGuard {
@@ -4649,6 +4683,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
         };
         pending_primary_variable_template_pattern_ =
             &pending_variable_template_pattern;
+        AbbreviatedFunctionTemplateContextGuard abbreviated_context_guard{
+            this,
+            &parameters,
+            parameter_depth};
         templated_decls = parse_declaration();
     }
 
@@ -7322,6 +7360,29 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     ctor_fn_type->has_explicit_exception_spec = ctor_has_exception_spec;
     ctor_fn_type->exception_spec = ctor_exception_spec;
     ctor_fn_type->exception_spec_expr = ctor_exception_spec_expr;
+    validate_function_parameter_auto_placeholders(
+        ctor_fn_type,
+        ctor_name_tok.loc);
+    TemplateParameterList ctor_abbreviated_template_parameters;
+    if (function_type_has_ordinary_cxx_auto_parameters(ctor_fn_type)) {
+        TemplateParameterList local_abbreviated_template_parameters;
+        TemplateParameterList* target_template_parameters =
+            active_abbreviated_function_template_parameters();
+        if (!target_template_parameters) {
+            target_template_parameters =
+                &local_abbreviated_template_parameters;
+        }
+        lower_cxx_auto_function_parameter_placeholders(
+            params,
+            ctor_fn_type,
+            *target_template_parameters,
+            active_abbreviated_function_template_parameter_depth(),
+            ctor_name_tok.loc);
+        if (!active_abbreviated_function_template_parameters()) {
+            ctor_abbreviated_template_parameters =
+                std::move(local_abbreviated_template_parameters);
+        }
+    }
 
     auto ctor_decl = make_ast<CppConstructorDecl>(
         *ast_ctx,
@@ -7405,7 +7466,12 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
         }
         check_and_consume(TokenType::SEMICOLON);
         ast_ctx->append_attrs(ctor_decl->node_id, std::move(trailing_attrs));
-        return ctor_decl;
+        std::unique_ptr<Decl> ctor_result = std::move(ctor_decl);
+        return wrap_abbreviated_function_template_if_needed(
+            std::move(ctor_result),
+            std::move(ctor_abbreviated_template_parameters),
+            ctor_name_tok.loc,
+            false);
     }
 
     bool has_inline_body = gentle_check(TokenType::LEFT_BRACE);
@@ -7439,7 +7505,12 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     }
 
     ast_ctx->append_attrs(ctor_decl->node_id, std::move(trailing_attrs));
-    return ctor_decl;
+    std::unique_ptr<Decl> ctor_result = std::move(ctor_decl);
+    return wrap_abbreviated_function_template_if_needed(
+        std::move(ctor_result),
+        std::move(ctor_abbreviated_template_parameters),
+        ctor_name_tok.loc,
+        false);
 }
 
 std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {

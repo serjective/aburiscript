@@ -63,9 +63,195 @@ void Parser::register_function_default_arguments(
     error_custloc("redefinition of default argument", conflict_loc);
 }
 
+bool Parser::function_type_has_ordinary_cxx_auto_parameters(
+    const std::shared_ptr<CType>& type) const {
+    auto function_type = dyn_cast_shared<FunctionType>(type);
+    if (!function_type) {
+        return false;
+    }
+    for (const auto& param_type : function_type->parameters) {
+        if (auto_type_utils::has_ordinary_cxx_auto_type(param_type.get_shared())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Parser::validate_function_parameter_auto_placeholders(
+    const std::shared_ptr<FunctionType>& function_type,
+    SrcLoc loc) {
+    if (!function_type) {
+        return;
+    }
+
+    bool has_ordinary_cxx_auto_param = false;
+    bool has_decltype_auto_param = false;
+    bool has_gnu_auto_param = false;
+    for (const auto& param_type : function_type->parameters) {
+        has_ordinary_cxx_auto_param |=
+            auto_type_utils::has_ordinary_cxx_auto_type(param_type.get_shared());
+        has_decltype_auto_param |=
+            auto_type_utils::has_decltype_auto_type(param_type.get_shared());
+        has_gnu_auto_param |=
+            auto_type_utils::has_gnu_auto_type(param_type.get_shared());
+    }
+
+    if (has_decltype_auto_param) {
+        error_custloc(
+            "'decltype(auto)' is not allowed in function parameter declarations",
+            loc);
+    }
+    if (has_gnu_auto_param) {
+        error_custloc(
+            "'__auto_type' is not allowed in function parameter declarations",
+            loc);
+    }
+    if (has_ordinary_cxx_auto_param && !lang_opts.is_cxx20_or_later()) {
+        error_custloc(
+            "'auto' in function parameter declarations requires C++20",
+            loc);
+    }
+}
+
+void Parser::lower_cxx_auto_function_parameter_placeholders(
+    std::vector<std::unique_ptr<Decl>>& parameters,
+    const std::shared_ptr<FunctionType>& function_type,
+    TemplateParameterList& template_parameters,
+    uint32_t parameter_depth,
+    SrcLoc loc) {
+    if (!ast_ctx) {
+        error_custloc(
+            "internal error: missing AST context for abbreviated function template",
+            loc);
+    }
+
+    bool changed = false;
+    for (auto& parameter : parameters) {
+        auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
+        if (!param_decl || !param_decl->type ||
+            !auto_type_utils::has_ordinary_cxx_auto_type(
+                param_decl->type.get_shared())) {
+            continue;
+        }
+
+        auto rewritten_type =
+            auto_type_utils::replace_cxx_auto_placeholders_with_callback(
+                param_decl->type.get_shared(),
+                [&](size_t) -> QualType {
+                    const uint32_t parameter_index =
+                        static_cast<uint32_t>(template_parameters.size());
+                    std::string invented_name =
+                        "__aburi_auto_param_" +
+                        std::to_string(parameter_depth) + "_" +
+                        std::to_string(parameter_index);
+                    auto parameter_type =
+                        std::make_shared<TemplateTypeParmType>(
+                            invented_name,
+                            parameter_depth,
+                            parameter_index,
+                            false);
+                    auto parameter_decl = make_ast<TemplateTypeParmDecl>(
+                        *ast_ctx,
+                        invented_name,
+                        parameter_depth,
+                        parameter_index,
+                        parameter_type,
+                        false,
+                        param_decl->location);
+                    parameter_type->parameter_decl = parameter_decl.get();
+                    template_parameters.push_back(std::move(parameter_decl));
+                    return QualType(parameter_type);
+                });
+
+        param_decl->type = QualType(
+            rewritten_type,
+            param_decl->type.get_qualifiers());
+        if (param_decl->sym) {
+            param_decl->sym->type = param_decl->type;
+        }
+        changed = true;
+    }
+
+    if (!changed || !function_type) {
+        return;
+    }
+
+    function_type->clear_parameters();
+    function_type->parameters.reserve(parameters.size());
+    function_type->parameter_pack_flags.reserve(parameters.size());
+    for (const auto& parameter : parameters) {
+        auto* param_decl = dyn_cast<ParamDecl>(parameter.get());
+        if (!param_decl) {
+            error_custloc(
+                "internal error: function parameter did not produce ParamDecl",
+                loc);
+        }
+        function_type->push_parameter(
+            param_decl->type,
+            param_decl->is_parameter_pack);
+    }
+}
+
+TemplateParameterList*
+Parser::active_abbreviated_function_template_parameters() {
+    if (!active_abbreviated_function_template_context_) {
+        return nullptr;
+    }
+    return active_abbreviated_function_template_context_->parameters;
+}
+
+uint32_t
+Parser::active_abbreviated_function_template_parameter_depth() const {
+    if (!active_abbreviated_function_template_context_) {
+        return template_parameter_depth_;
+    }
+    return active_abbreviated_function_template_context_->parameter_depth;
+}
+
+std::unique_ptr<Decl> Parser::wrap_abbreviated_function_template_if_needed(
+    std::unique_ptr<Decl> function_decl,
+    TemplateParameterList template_parameters,
+    SrcLoc loc,
+    bool publish_namespace_template) {
+    if (template_parameters.empty()) {
+        return function_decl;
+    }
+    auto* function = dyn_cast<FuncDecl>(function_decl.get());
+    if (!function) {
+        error_custloc(
+            "internal error: abbreviated function template target is not a function",
+            loc);
+    }
+    if (isa<CppDestructorDecl>(function)) {
+        error_custloc("destructor cannot be a template", function->location);
+    }
+    if (function->name.empty()) {
+        fail_cpp_unsupported("unnamed function template", function->location);
+    }
+
+    std::string template_name = function->name;
+    auto template_decl = make_ast<FunctionTemplateDecl>(
+        *ast_ctx,
+        std::move(template_parameters),
+        std::move(function_decl),
+        loc);
+    finalize_primary_template_decl(
+        template_decl.get(),
+        template_name,
+        LookupNamespace::Ordinary);
+    if (publish_namespace_template) {
+        collect_->collect_add_function_template_decl(
+            template_name,
+            template_decl.get());
+    }
+    return template_decl;
+}
+
 std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
                                              SrcLoc loc,
-                                             std::shared_ptr<Symbol> predecl_sym) {
+                                             std::shared_ptr<Symbol> predecl_sym,
+                                             TemplateParameterList*
+                                                 abbreviated_template_parameters_out) {
 
     /*
      * high level overmap is to check words for basic types/quantifiers,
@@ -163,27 +349,8 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
             predecl_sym->had_non_inline_declaration != 0;
     }
     if (auto fin_fn_type = dyn_cast_shared<FunctionType>(fin_funcdecl->type)) {
-        bool has_cxx_auto_param = false;
-        bool has_decltype_auto_param = false;
-        bool has_gnu_auto_param = false;
         size_t user_param_count = fin_fn_type->parameters.size();
-        for (const auto& param_type : fin_fn_type->parameters) {
-            has_cxx_auto_param |=
-                auto_type_utils::has_cxx_auto_type(param_type.get_shared());
-            has_decltype_auto_param |=
-                auto_type_utils::has_decltype_auto_type(param_type.get_shared());
-            has_gnu_auto_param |=
-                auto_type_utils::has_gnu_auto_type(param_type.get_shared());
-        }
-        if (has_decltype_auto_param) {
-            error("'decltype(auto)' is not allowed in function parameter declarations");
-        }
-        if (has_cxx_auto_param && !has_decltype_auto_param) {
-            fail_cpp_unsupported("auto in function parameter declarations", loc);
-        }
-        if (has_gnu_auto_param) {
-            error("'__auto_type' is not allowed in function parameter declarations");
-        }
+        validate_function_parameter_auto_placeholders(fin_fn_type, loc);
         if (auto_type_utils::has_gnu_auto_type(fin_fn_type->ret_type.get_shared())) {
             error("'__auto_type' is not allowed in function return types");
         }
@@ -284,6 +451,26 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
             if (fin_funcdecl->parameters.size() != 1) {
                 error("mixed up 'void' with other function arguments in declaration");
             }
+        }
+    }
+    if (auto fin_fn_type = dyn_cast_shared<FunctionType>(fin_funcdecl->type);
+        fin_fn_type &&
+        function_type_has_ordinary_cxx_auto_parameters(fin_fn_type)) {
+        TemplateParameterList local_abbreviated_template_parameters;
+        TemplateParameterList* target_template_parameters =
+            active_abbreviated_function_template_parameters();
+        if (!target_template_parameters) {
+            target_template_parameters = &local_abbreviated_template_parameters;
+        }
+        lower_cxx_auto_function_parameter_placeholders(
+            fin_funcdecl->parameters,
+            fin_fn_type,
+            *target_template_parameters,
+            active_abbreviated_function_template_parameter_depth(),
+            loc);
+        if (abbreviated_template_parameters_out) {
+            *abbreviated_template_parameters_out =
+                std::move(local_abbreviated_template_parameters);
         }
     }
     register_function_default_arguments(predecl_sym, fin_funcdecl.get(), loc);
