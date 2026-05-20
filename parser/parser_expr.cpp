@@ -1566,7 +1566,7 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
                 uint32_t& depth;
                 ~TemplateRequiresParseGuard() { --depth; }
             } template_requires_guard{lambda_template_requires_clause_depth_};
-            template_requires_clause = parse_cpp_constraint_expression();
+            template_requires_clause = parse_cpp_template_constraint_expression();
             if (!template_requires_clause) {
                 error_custloc(
                     "invalid lambda template requires-clause",
@@ -1773,7 +1773,9 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
         if (lang_opts.is_cxx20_or_later() &&
             gentle_check(TokenType::REQUIRES_KW)) {
             advance(); // 'requires'
-            trailing_requires_clause = parse_cpp_constraint_expression();
+            trailing_requires_clause = is_generic
+                ? parse_cpp_template_constraint_expression()
+                : parse_cpp_constraint_expression();
             if (!trailing_requires_clause) {
                 error_custloc(
                     "invalid lambda trailing requires-clause",

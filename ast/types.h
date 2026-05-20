@@ -74,6 +74,8 @@ enum class AutoTypeFlavor : uint8_t {
     Gnu,
     Cxx,
     TemplateNonType,
+    DecltypeAuto,
+    DecltypeAutoTemplateNonType,
 };
 
 enum class ReferenceKind : uint8_t {
@@ -157,7 +159,17 @@ struct AutoType : CType {
     AutoTypeFlavor flavor = AutoTypeFlavor::Gnu;
     bool isIncomplete() const override { return true; }
     std::string to_string() const override {
-        return flavor == AutoTypeFlavor::Gnu ? "__auto_type" : "auto";
+        switch (flavor) {
+            case AutoTypeFlavor::Gnu:
+                return "__auto_type";
+            case AutoTypeFlavor::DecltypeAuto:
+            case AutoTypeFlavor::DecltypeAutoTemplateNonType:
+                return "decltype(auto)";
+            case AutoTypeFlavor::Cxx:
+            case AutoTypeFlavor::TemplateNonType:
+                return "auto";
+        }
+        return "auto";
     }
     bool equals(const CType& other) override {
         if (other.kind != TypeKind::Auto) {

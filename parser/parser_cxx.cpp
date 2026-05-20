@@ -4334,7 +4334,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
             uint32_t& depth;
             ~TemplateHeadRequiresParseGuard() { --depth; }
         } template_head_requires_guard{template_head_requires_clause_depth_};
-        leading_requires_clause = parse_cpp_constraint_expression();
+        leading_requires_clause = parse_cpp_template_constraint_expression();
     }
     if (parameters.empty()) {
         collect_->collect_leave_scope();
@@ -4944,6 +4944,16 @@ std::unique_ptr<Expr> Parser::parse_cpp_constraint_logical_or_expression() {
 
 std::unique_ptr<Expr> Parser::parse_cpp_constraint_expression() {
     return parse_cpp_constraint_logical_or_expression();
+}
+
+std::unique_ptr<Expr> Parser::parse_cpp_template_constraint_expression() {
+    ++template_pattern_depth_;
+    struct TemplateConstraintPatternGuard {
+        uint32_t& depth;
+        ~TemplateConstraintPatternGuard() { --depth; }
+    } template_constraint_pattern_guard{template_pattern_depth_};
+
+    return parse_cpp_constraint_expression();
 }
 
 std::unique_ptr<Expr> Parser::parse_cpp_requires_expression() {

@@ -8,9 +8,13 @@ uint8_t auto_type_flavors_in(const std::shared_ptr<CType>& type) {
     }
     if (type->kind == TypeKind::Auto) {
         auto* auto_type = static_cast<AutoType*>(type.get());
-        return auto_type->flavor == AutoTypeFlavor::Gnu
-            ? kGnuAutoFlavor
-            : kCxxAutoFlavor;
+        if (auto_type->flavor == AutoTypeFlavor::Gnu) {
+            return kGnuAutoFlavor;
+        }
+        if (is_decltype_auto_flavor(auto_type->flavor)) {
+            return kDecltypeAutoFlavor;
+        }
+        return kCxxAutoFlavor;
     }
     if (type->kind == TypeKind::Pointer) {
         auto ptr = std::static_pointer_cast<PointerType>(type);
@@ -58,10 +62,15 @@ std::shared_ptr<CType> retag_cxx_auto_placeholders(
     }
     if (type->kind == TypeKind::Auto) {
         auto* auto_type = static_cast<AutoType*>(type.get());
-        if (auto_type->flavor != AutoTypeFlavor::Cxx) {
-            return type;
+        if (auto_type->flavor == AutoTypeFlavor::Cxx) {
+            return std::make_shared<AutoType>(new_flavor);
         }
-        return std::make_shared<AutoType>(new_flavor);
+        if (auto_type->flavor == AutoTypeFlavor::DecltypeAuto &&
+            new_flavor == AutoTypeFlavor::TemplateNonType) {
+            return std::make_shared<AutoType>(
+                AutoTypeFlavor::DecltypeAutoTemplateNonType);
+        }
+        return type;
     }
     if (auto ptr = std::dynamic_pointer_cast<PointerType>(type)) {
         return std::make_shared<PointerType>(QualType(

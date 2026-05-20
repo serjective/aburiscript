@@ -454,6 +454,17 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     continue; // don't advance, we already consumed
                 }
                 case TokenType::DECLTYPE_KW: {
+                    if (pars->is_cxx_mode_active() &&
+                        mgnt->peek_token(1).type == TokenType::LEFT_PAREN &&
+                        mgnt->peek_token(2).type == TokenType::AUTO &&
+                        mgnt->peek_token(3).type == TokenType::RIGHT_PAREN) {
+                        mgnt->advance(); // decltype
+                        mgnt->check_and_consume(TokenType::LEFT_PAREN);
+                        mgnt->check_and_consume(TokenType::AUTO);
+                        mgnt->check_and_consume(TokenType::RIGHT_PAREN);
+                        tally.decltype_auto_count++;
+                        continue;
+                    }
                     QualType decltype_type =
                         pars->parse_cpp_decltype_type_specifier();
                     typedef_resolved_type = decltype_type.get_shared();
@@ -560,6 +571,7 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                             tally.signed_count || tally.unsigned_count ||
                             tally.int128_count || tally.auto_type_count ||
                             tally.cxx_auto_count ||
+                            tally.decltype_auto_count ||
                             tally.complex_count);
                         if (!has_type_specifier && !struct_obj && !enum_obj) {
                             if (pars->is_cxx_mode_active()) {
@@ -678,6 +690,25 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
         if (tally.cxx_auto_count > 0) {
             validateTally(tally);
             auto auto_placeholder = std::make_shared<AutoType>(AutoTypeFlavor::Cxx);
+            auto resolved = apply_declspec_type_attributes(auto_placeholder);
+            first_half = resolved;
+            if (run_second_half) {
+                return parse_declarator(resolved);
+            } else {
+                return first_half;
+            }
+        }
+
+        // Handle C++ decltype(auto) placeholder type deduction
+        if (tally.decltype_auto_count > 0) {
+            validateTally(tally);
+            if (qualifiers != QUAL_NONE) {
+                error_custloc(
+                    "'decltype(auto)' cannot be combined with cv-qualifiers",
+                    begin_loc);
+            }
+            auto auto_placeholder =
+                std::make_shared<AutoType>(AutoTypeFlavor::DecltypeAuto);
             auto resolved = apply_declspec_type_attributes(auto_placeholder);
             first_half = resolved;
             if (run_second_half) {

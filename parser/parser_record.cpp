@@ -3692,8 +3692,14 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
 
     bool declarator_has_gnu_auto_type = has_gnu_auto_type(parsed_decl_type);
     bool declarator_has_cxx_auto_type = has_cxx_auto_type(parsed_decl_type);
+    bool declarator_has_decltype_auto_type =
+        auto_type_utils::has_decltype_auto_type(parsed_decl_type);
     if (declarator_has_gnu_auto_type && declarator_has_cxx_auto_type) {
         error("cannot mix '__auto_type' and 'auto' in the same declaration");
+    }
+    if (declarator_has_decltype_auto_type &&
+        !auto_type_utils::is_decltype_auto_placeholder(parsed_decl_type)) {
+        error("'decltype(auto)' cannot be used with pointers, references, arrays, or function declarators");
     }
     if (declarator_has_gnu_auto_type && !gentle_check(TokenType::ASSIGN)) {
         error("'__auto_type' requires an initializer");
@@ -4626,6 +4632,17 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
 
         // Parse attributes that appear right after the declarator.
         auto field_attrs_before_colon = try_parse_attributes();
+
+        if (auto_type_utils::has_decltype_auto_type(field_type)) {
+            if (auto fn_type = dyn_cast_shared<FunctionType>(field_type)) {
+                if (!auto_type_utils::is_decltype_auto_placeholder(
+                        fn_type->ret_type.get_shared())) {
+                    error("'decltype(auto)' can only be used as a function return placeholder");
+                }
+            } else if (!auto_type_utils::is_decltype_auto_placeholder(field_type)) {
+                error("'decltype(auto)' cannot be used with pointers, references, arrays, or function declarators");
+            }
+        }
 
         // In C++ record bodies, function declarators are methods/constructors, not fields.
         if (is_cxx_mode_active() &&

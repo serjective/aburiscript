@@ -164,15 +164,21 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     }
     if (auto fin_fn_type = dyn_cast_shared<FunctionType>(fin_funcdecl->type)) {
         bool has_cxx_auto_param = false;
+        bool has_decltype_auto_param = false;
         bool has_gnu_auto_param = false;
         size_t user_param_count = fin_fn_type->parameters.size();
         for (const auto& param_type : fin_fn_type->parameters) {
             has_cxx_auto_param |=
                 auto_type_utils::has_cxx_auto_type(param_type.get_shared());
+            has_decltype_auto_param |=
+                auto_type_utils::has_decltype_auto_type(param_type.get_shared());
             has_gnu_auto_param |=
                 auto_type_utils::has_gnu_auto_type(param_type.get_shared());
         }
-        if (has_cxx_auto_param) {
+        if (has_decltype_auto_param) {
+            error("'decltype(auto)' is not allowed in function parameter declarations");
+        }
+        if (has_cxx_auto_param && !has_decltype_auto_param) {
             fail_cpp_unsupported("auto in function parameter declarations", loc);
         }
         if (has_gnu_auto_param) {
@@ -180,6 +186,12 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
         }
         if (auto_type_utils::has_gnu_auto_type(fin_fn_type->ret_type.get_shared())) {
             error("'__auto_type' is not allowed in function return types");
+        }
+        if (auto_type_utils::has_decltype_auto_type(
+                fin_fn_type->ret_type.get_shared()) &&
+            !auto_type_utils::is_decltype_auto_placeholder(
+                fin_fn_type->ret_type.get_shared())) {
+            error("'decltype(auto)' can only be used as a function return placeholder");
         }
         if (decl_parser->is_conversion_function && user_param_count != 0) {
             error_custloc(

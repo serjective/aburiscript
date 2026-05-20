@@ -140,18 +140,40 @@ void Collect::resolve_auto_variable_type_from_expr(
         auto_type_utils::auto_type_flavors_in(declared_type.get_shared());
     bool has_gnu_auto_type =
         (auto_flavors & auto_type_utils::kGnuAutoFlavor) != 0;
-    bool has_cxx_auto_type =
+    bool has_ordinary_cxx_auto_type =
         (auto_flavors & auto_type_utils::kCxxAutoFlavor) != 0;
-    if (has_gnu_auto_type && has_cxx_auto_type) {
+    bool has_decltype_auto_type =
+        (auto_flavors & auto_type_utils::kDecltypeAutoFlavor) != 0;
+    if (has_gnu_auto_type &&
+        (has_ordinary_cxx_auto_type || has_decltype_auto_type)) {
         report_error("cannot mix '__auto_type' and 'auto' in the same declaration", loc);
     }
-    bool treat_as_cxx_auto = has_cxx_auto_type && !has_gnu_auto_type;
+    if (has_ordinary_cxx_auto_type && has_decltype_auto_type) {
+        report_error("cannot mix 'auto' and 'decltype(auto)' in the same declaration", loc);
+    }
+    bool treat_as_decltype_auto =
+        has_decltype_auto_type && !has_gnu_auto_type && !has_ordinary_cxx_auto_type;
+    bool treat_as_cxx_auto =
+        has_ordinary_cxx_auto_type && !has_gnu_auto_type && !has_decltype_auto_type;
 
-    if (!treat_as_cxx_auto && !session_.func_state_.in_function) {
+    if (has_gnu_auto_type && !session_.func_state_.in_function) {
         report_error("'__auto_type' is not allowed at file scope", loc);
     }
+    if (treat_as_decltype_auto &&
+        !auto_type_utils::is_decltype_auto_placeholder(
+            declared_type.get_shared())) {
+        report_error(
+            "'decltype(auto)' cannot be used with pointers, references, arrays, or function declarators",
+            loc);
+        return;
+    }
     if (!init_expr) {
-        if (treat_as_cxx_auto) {
+        if (treat_as_decltype_auto) {
+            report_error(
+                "declaration of variable '" + name +
+                    "' with deduced type 'decltype(auto)' requires an initializer",
+                loc);
+        } else if (treat_as_cxx_auto) {
             report_error(
                 "declaration of variable '" + name +
                     "' with deduced type 'auto' requires an initializer",
@@ -165,12 +187,41 @@ void Collect::resolve_auto_variable_type_from_expr(
     // only raw braced-init-lists need the unsupported auto-list-deduction path.
     if (auto* init_list = dyn_cast<InitListExpr>(init_expr);
         init_list && (!treat_as_cxx_auto || !init_list->type)) {
-        if (treat_as_cxx_auto) {
+        if (treat_as_decltype_auto) {
+            report_error(
+                "cannot deduce 'decltype(auto)' from initializer list",
+                loc);
+        } else if (treat_as_cxx_auto) {
             report_error(
                 "C++ parser unsupported syntax: auto braced-init-list deduction",
                 loc);
         } else {
             report_error("cannot use '__auto_type' with initializer list", loc);
+        }
+        return;
+    }
+
+    if (treat_as_decltype_auto) {
+        QualType deduced_type = resolve_decltype_expression_type(
+            const_cast<Expr*>(init_expr),
+            true,
+            declared_type,
+            loc,
+            DeferredTypeResolutionMode::Finalize);
+        if (!deduced_type) {
+            report_error("cannot deduce type for 'decltype(auto)'", loc);
+            return;
+        }
+        if (auto_type_utils::auto_type_flavors_in(deduced_type.get_shared()) != 0) {
+            report_error(
+                "cannot deduce type for 'decltype(auto)': unresolved placeholder",
+                loc);
+            return;
+        }
+        declared_type =
+            replace_auto_placeholder_qualtype(declared_type, deduced_type);
+        if (sym) {
+            sym->type = declared_type;
         }
         return;
     }

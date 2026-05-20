@@ -1922,7 +1922,9 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
             return true;
         }
         if (auto auto_type = dyn_cast_shared<AutoType>(raw)) {
-            return auto_type->flavor == AutoTypeFlavor::TemplateNonType;
+            return auto_type->flavor == AutoTypeFlavor::TemplateNonType ||
+                   auto_type->flavor ==
+                       AutoTypeFlavor::DecltypeAutoTemplateNonType;
         }
         if (auto typeof_type = dyn_cast_shared<TypeofExprType>(raw)) {
             if (!typeof_type->expr) {

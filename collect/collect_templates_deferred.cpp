@@ -251,7 +251,8 @@ bool variable_definition_depends_on_template_parameters(
 bool type_contains_undeduced_cxx_auto(QualType type) {
     return type &&
            (auto_type_utils::auto_type_flavors_in(type.get_shared()) &
-            auto_type_utils::kCxxAutoFlavor) != 0;
+            static_cast<uint8_t>(auto_type_utils::kCxxAutoFlavor |
+                                 auto_type_utils::kDecltypeAutoFlavor)) != 0;
 }
 
 bool expr_constexpr_value_depends_on_template_parameters_impl(

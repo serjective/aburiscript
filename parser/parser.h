@@ -617,6 +617,7 @@ private:
         SrcLoc loc);
     TemplateParameterList parse_cpp_template_parameter_list(uint32_t depth);
     std::unique_ptr<Expr> parse_cpp_constraint_expression();
+    std::unique_ptr<Expr> parse_cpp_template_constraint_expression();
     std::unique_ptr<Expr> parse_cpp_constraint_logical_or_expression();
     std::unique_ptr<Expr> parse_cpp_constraint_primary_expression();
     bool is_cpp_template_argument_boundary_here();
@@ -999,6 +1000,7 @@ struct DeclarationParser {
         int block_byref_count = 0;
         int auto_type_count = 0;
         int cxx_auto_count = 0;
+        int decltype_auto_count = 0;
     };
    // DeclarationParser(TypeTally tally): tally(tally) {};
     DeclarationParser(Parser * pars): str_class(StorageClass::NONE), result_type(nullptr)
@@ -1155,6 +1157,23 @@ struct DeclarationParser {
             error_custloc("'auto' cannot be combined with other type specifiers", begin_loc);
         if (tally.cxx_auto_count && tally.typedef_count)
             error_custloc("'auto' cannot be combined with 'typedef'", begin_loc);
+
+        // C++ decltype(auto) placeholder constraints
+        if (tally.decltype_auto_count > 1)
+            error_custloc("duplicate 'decltype(auto)' specifier", begin_loc);
+        if (tally.decltype_auto_count &&
+            (tally.auto_type_count || tally.cxx_auto_count))
+            error_custloc("'decltype(auto)' cannot be combined with 'auto' or '__auto_type'", begin_loc);
+        if (tally.decltype_auto_count &&
+            (tally.void_count || tally.char_count || tally.short_count ||
+             tally.int_count || tally.long_count || tally.float_count ||
+             tally.double_count || tally.bool_count || tally.wchar_count ||
+             tally.char16_count || tally.char32_count || tally.signed_count ||
+             tally.unsigned_count || tally.int128_count || tally.float16_count ||
+             tally.complex_count))
+            error_custloc("'decltype(auto)' cannot be combined with other type specifiers", begin_loc);
+        if (tally.decltype_auto_count && tally.typedef_count)
+            error_custloc("'decltype(auto)' cannot be combined with 'typedef'", begin_loc);
 
         if (tally.long_count > 2)
             error_custloc("Too many 'long' specifiers", begin_loc);

@@ -794,23 +794,34 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
         }
         bool deferred_template_dependent_return = false;
         auto deduce_auto_return_type = [&](const std::unique_ptr<Expr>& return_expr) -> QualType {
+            QualType return_pattern =
+                session_.func_state_.current_function_cxx_auto_return_pattern;
+            bool deducing_decltype_auto =
+                auto_type_utils::has_decltype_auto_type(
+                    return_pattern.get_shared());
             QualType implicit_void(get_builtin_void());
             QualType fallback_return = implicit_void;
             auto fallback_raw = replace_auto_type(
-                session_.func_state_.current_function_cxx_auto_return_pattern.get_shared(),
+                return_pattern.get_shared(),
                 implicit_void.get_shared());
             if (fallback_raw) {
                 fallback_return = QualType(
                     fallback_raw,
-                    session_.func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
+                    return_pattern.get_qualifiers());
             }
 
             QualType deduction_source_type = implicit_void;
             if (return_expr) {
                 if (isa<InitListExpr>(return_expr.get())) {
-                    report_error(
-                        "C++ parser unsupported syntax: auto braced-init-list deduction",
-                        loc);
+                    if (deducing_decltype_auto) {
+                        report_error(
+                            "cannot deduce return type from initializer list",
+                            loc);
+                    } else {
+                        report_error(
+                            "C++ parser unsupported syntax: auto braced-init-list deduction",
+                            loc);
+                    }
                     return fallback_return;
                 }
                 deduction_source_type = return_expr->get_type();
@@ -830,25 +841,44 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
                         deduction_source_type,
                         ast_ctx_.get())) {
                     deferred_template_dependent_return = true;
-                    return session_.func_state_.current_function_cxx_auto_return_pattern;
+                    return return_pattern;
                 }
             }
 
+            if (deducing_decltype_auto && return_expr) {
+                QualType deduced_return = resolve_decltype_expression_type(
+                    return_expr.get(),
+                    true,
+                    return_pattern,
+                    loc,
+                    DeferredTypeResolutionMode::Finalize);
+                if (!deduced_return ||
+                    auto_type_utils::auto_type_flavors_in(
+                        deduced_return.get_shared()) != 0) {
+                    report_error(
+                        "cannot deduce return type 'decltype(auto)' for function '" +
+                            session_.func_state_.current_function_name + "'",
+                        loc);
+                    return fallback_return;
+                }
+                return deduced_return;
+            }
+
             auto deduced_placeholder = auto_type_utils::extract_auto_placeholder_replacement(
-                session_.func_state_.current_function_cxx_auto_return_pattern,
+                return_pattern,
                 deduction_source_type);
             if (!deduced_placeholder.has_value() || !deduced_placeholder->get_shared()) {
                 if (return_expr) {
                     report_error(
                         "cannot deduce return type '" +
-                            session_.func_state_.current_function_cxx_auto_return_pattern.to_string() +
+                            return_pattern.to_string() +
                             "' from return expression of type '" +
                             deduction_source_type.to_string() + "'",
                         loc);
                 } else {
                     report_error(
                         "cannot deduce return type '" +
-                            session_.func_state_.current_function_cxx_auto_return_pattern.to_string() +
+                            return_pattern.to_string() +
                             "' for function '" + session_.func_state_.current_function_name +
                             "' from 'return;'",
                         loc);
@@ -877,14 +907,14 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
             }
 
             auto replaced_raw = replace_auto_type(
-                session_.func_state_.current_function_cxx_auto_return_pattern.get_shared(),
+                return_pattern.get_shared(),
                 deduced_raw);
             if (!replaced_raw) {
                 return fallback_return;
             }
             return QualType(
                 replaced_raw,
-                session_.func_state_.current_function_cxx_auto_return_pattern.get_qualifiers());
+                return_pattern.get_qualifiers());
         };
 
         if (session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction) {
@@ -905,7 +935,9 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
                 if (!deduced_return_type.equals_qualified(
                         session_.func_state_.current_function_return_type)) {
                     report_error(
-                        "inconsistent deduction for function return type 'auto': '" +
+                        "inconsistent deduction for function return type '" +
+                            session_.func_state_.current_function_cxx_auto_return_pattern.to_string() +
+                            "': '" +
                             session_.func_state_.current_function_return_type.to_string() +
                             "' and then '" +
                             deduced_return_type.to_string() + "'",
