@@ -38,6 +38,163 @@ bool template_lookup_blocks_current_record_member_lookup(
            scope_is_before_current_record_member_lookup(lookup.scope->flags);
 }
 
+struct CppBasePathAccessSummary {
+    size_t accessible_nonvirtual_paths = 0;
+    size_t inaccessible_nonvirtual_paths = 0;
+    bool accessible_virtual_path = false;
+    bool inaccessible_virtual_path = false;
+
+    bool has_any_path() const {
+        return accessible_nonvirtual_paths > 0 ||
+               inaccessible_nonvirtual_paths > 0 ||
+               accessible_virtual_path ||
+               inaccessible_virtual_path;
+    }
+
+    size_t accessible_subobject_count() const {
+        return accessible_nonvirtual_paths + (accessible_virtual_path ? 1 : 0);
+    }
+
+    bool has_inaccessible_path() const {
+        return inaccessible_nonvirtual_paths > 0 || inaccessible_virtual_path;
+    }
+};
+
+bool cpp_base_edge_accessible_from_context(
+    RecordMemberAccess access,
+    const ObjectDecl* edge_owner_decl,
+    const ObjectDecl* access_context_decl,
+    const ObjectDecl* object_record_decl,
+    QualType access_context_type,
+    const ASTContext* ast_ctx) {
+    switch (access) {
+        case RecordMemberAccess::Public:
+            return true;
+        case RecordMemberAccess::Private:
+            return can_access_private_member_in_context(
+                edge_owner_decl,
+                access_context_decl,
+                ast_ctx,
+                access_context_type);
+        case RecordMemberAccess::Protected:
+            return can_access_protected_member_in_context(
+                edge_owner_decl,
+                access_context_decl,
+                object_record_decl,
+                false,
+                ast_ctx,
+                access_context_type);
+    }
+    return false;
+}
+
+void accumulate_cpp_accessible_base_paths(
+    const ObjectDecl* current_decl,
+    const ObjectDecl* target_base_decl,
+    const ObjectDecl* most_derived_decl,
+    const ObjectDecl* access_context_decl,
+    QualType access_context_type,
+    const ASTContext* ast_ctx,
+    bool path_accessible,
+    bool saw_virtual_edge,
+    std::vector<const ObjectDecl*>& active_stack,
+    CppBasePathAccessSummary& summary) {
+    current_decl = canonical_record_decl(current_decl);
+    target_base_decl = canonical_record_decl(target_base_decl);
+    most_derived_decl = canonical_record_decl(most_derived_decl);
+    if (!current_decl || !target_base_decl) {
+        return;
+    }
+
+    const RecordSemanticState* state =
+        record_semantics_cache_lookup(current_decl, ast_ctx);
+    if (!state) {
+        return;
+    }
+
+    for (const auto& base : state->bases) {
+        const ObjectDecl* base_decl = canonical_record_decl(base.record_decl);
+        if (!base_decl) {
+            continue;
+        }
+
+        bool edge_accessible = cpp_base_edge_accessible_from_context(
+            base.declared_access,
+            current_decl,
+            access_context_decl,
+            most_derived_decl,
+            access_context_type,
+            ast_ctx);
+        bool next_path_accessible = path_accessible && edge_accessible;
+        bool next_saw_virtual_edge = saw_virtual_edge || base.is_virtual;
+
+        if (base_decl == target_base_decl) {
+            if (next_path_accessible) {
+                if (next_saw_virtual_edge) {
+                    summary.accessible_virtual_path = true;
+                } else {
+                    ++summary.accessible_nonvirtual_paths;
+                }
+            } else {
+                if (next_saw_virtual_edge) {
+                    summary.inaccessible_virtual_path = true;
+                } else {
+                    ++summary.inaccessible_nonvirtual_paths;
+                }
+            }
+            continue;
+        }
+
+        if (std::find(active_stack.begin(), active_stack.end(), base_decl) !=
+            active_stack.end()) {
+            continue;
+        }
+
+        active_stack.push_back(base_decl);
+        accumulate_cpp_accessible_base_paths(
+            base_decl,
+            target_base_decl,
+            most_derived_decl,
+            access_context_decl,
+            access_context_type,
+            ast_ctx,
+            next_path_accessible,
+            next_saw_virtual_edge,
+            active_stack,
+            summary);
+        active_stack.pop_back();
+    }
+}
+
+CppBasePathAccessSummary summarize_cpp_accessible_base_paths(
+    const ObjectDecl* derived_decl,
+    const ObjectDecl* target_base_decl,
+    const ObjectDecl* access_context_decl,
+    QualType access_context_type,
+    const ASTContext* ast_ctx) {
+    CppBasePathAccessSummary summary;
+    derived_decl = canonical_record_decl(derived_decl);
+    target_base_decl = canonical_record_decl(target_base_decl);
+    if (!derived_decl || !target_base_decl || derived_decl == target_base_decl) {
+        return summary;
+    }
+
+    std::vector<const ObjectDecl*> active_stack;
+    active_stack.push_back(derived_decl);
+    accumulate_cpp_accessible_base_paths(
+        derived_decl,
+        target_base_decl,
+        derived_decl,
+        access_context_decl,
+        access_context_type,
+        ast_ctx,
+        true,
+        false,
+        active_stack,
+        summary);
+    return summary;
+}
+
 std::optional<QualType> merge_cpp_conditional_glvalue_type(
     QualType lhs_type,
     QualType rhs_type,
@@ -4887,16 +5044,99 @@ Collect::CppStaticCastCheckResult Collect::check_cpp_static_cast(
             target_ptr->pointed_type && target_ptr->pointed_type->isVoid();
         bool source_points_to_void =
             source_ptr->pointed_type && source_ptr->pointed_type->isVoid();
+
+        if (target_ptr->pointed_type &&
+            source_ptr->pointed_type &&
+            !target_ptr->pointed_type.has_all_qualifiers_of(
+                source_ptr->pointed_type)) {
+            return set_error("static_cast cannot cast away qualifiers");
+        }
+
+        bool handled_class_pointer_conversion = false;
+        if (!target_points_to_void && !source_points_to_void) {
+            const ObjectDecl* source_record_decl =
+                object_decl_from_object_qualtype(source_ptr->pointed_type);
+            const ObjectDecl* target_record_decl =
+                object_decl_from_object_qualtype(target_ptr->pointed_type);
+            if (source_record_decl &&
+                target_record_decl &&
+                canonical_record_decl(source_record_decl) !=
+                    canonical_record_decl(target_record_decl)) {
+                const ObjectDecl* access_context_decl =
+                    current_access_context_record_decl(
+                        session_.func_state_.current_function_is_cpp_member,
+                        session_.func_state_.current_function_cpp_this_type,
+                        session_.func_state_.current_function_cpp_friend_access_type,
+                        session_.current_cpp_record_lookup_type_,
+                        ast_ctx_.get(),
+                        session_.func_state_.current_function_cpp_access_context_type);
+                QualType access_context_type =
+                    current_access_context_record_type(
+                        session_.func_state_.current_function_is_cpp_member,
+                        session_.func_state_.current_function_cpp_this_type,
+                        session_.func_state_.current_function_cpp_friend_access_type,
+                        session_.current_cpp_record_lookup_type_,
+                        ast_ctx_.get(),
+                        session_.func_state_.current_function_cpp_access_context_type);
+
+                CppBasePathAccessSummary upcast_paths =
+                    summarize_cpp_accessible_base_paths(
+                        source_record_decl,
+                        target_record_decl,
+                        access_context_decl,
+                        access_context_type,
+                        ast_ctx_.get());
+                if (upcast_paths.has_any_path()) {
+                    handled_class_pointer_conversion = true;
+                    size_t accessible_count =
+                        upcast_paths.accessible_subobject_count();
+                    if (accessible_count == 0 &&
+                        upcast_paths.has_inaccessible_path()) {
+                        return set_error(
+                            "invalid static_cast between pointer types across inaccessible base class");
+                    }
+                    if (accessible_count > 1) {
+                        return set_error(
+                            "invalid static_cast between pointer types across ambiguous base class");
+                    }
+                }
+
+                if (!handled_class_pointer_conversion) {
+                    CppBasePathAccessSummary downcast_paths =
+                        summarize_cpp_accessible_base_paths(
+                            target_record_decl,
+                            source_record_decl,
+                            access_context_decl,
+                            access_context_type,
+                            ast_ctx_.get());
+                    if (downcast_paths.has_any_path()) {
+                        handled_class_pointer_conversion = true;
+                        size_t accessible_count =
+                            downcast_paths.accessible_subobject_count();
+                        if (accessible_count == 0 &&
+                            downcast_paths.has_inaccessible_path()) {
+                            return set_error(
+                                "invalid static_cast between pointer types across inaccessible base class");
+                        }
+                        if (downcast_paths.accessible_virtual_path) {
+                            return set_error(
+                                "invalid static_cast between pointer types across virtual base class");
+                        }
+                        if (accessible_count > 1) {
+                            return set_error(
+                                "invalid static_cast between pointer types across ambiguous base class");
+                        }
+                    }
+                }
+            }
+        }
+
         if (!target_points_to_void &&
             !source_points_to_void &&
+            !handled_class_pointer_conversion &&
             !pointers_to_compatible_types(target_no_ref, source_type)) {
             return set_error(
                 "invalid static_cast between unrelated pointer types");
-        }
-
-        if (target_ptr->pointed_type.equals_unqualified(source_ptr->pointed_type) &&
-            !target_ptr->pointed_type.has_all_qualifiers_of(source_ptr->pointed_type)) {
-            return set_error("static_cast cannot cast away qualifiers");
         }
     } else if (source_member_ptr && target_member_ptr) {
         auto conversion = analyze_member_pointer_conversion(source_type, target_no_ref);

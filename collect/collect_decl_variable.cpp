@@ -856,30 +856,125 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
                                                      loc);
     }
 
-    auto init_list = make_deferred_init_list(std::move(init_args));
-
     if (has_dependent_argument) {
+        return make_deferred_init_list(std::move(init_args));
+    }
+
+    auto init_list = make_deferred_init_list(std::move(init_args));
+    auto record_type =
+        desugar_type(member_type, ast_ctx_.get()).as_shared<ObjectType>();
+    const TagDecl* tag_decl = record_type ? record_type->get_decl() : nullptr;
+    const ObjectDecl* record_decl =
+        (tag_decl && tag_decl->is_record_decl())
+            ? static_cast<const ObjectDecl*>(tag_decl)
+            : nullptr;
+    const RecordSemanticState* record_state =
+        record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
+
+    if (record_type &&
+        record_state &&
+        record_state->is_abstract &&
+        !allow_abstract_object_type_instantiation) {
+        report_error(
+            "cannot instantiate abstract class type '" +
+                member_type.to_string() + "'",
+            loc);
+        return collect_make<ErrorExpr>(
+            "cannot instantiate abstract class type", loc);
+    }
+
+    bool has_constructor_template = false;
+    if (record_state) {
+        for (const auto& method_template : record_state->method_templates) {
+            auto* function_template = method_template.decl;
+            if (function_template &&
+                isa<CppConstructorDecl>(function_template->function_decl())) {
+                has_constructor_template = true;
+                break;
+            }
+        }
+    }
+
+    bool defer_initializer_semantics =
+        should_defer_template_dependent_initializer_semantics(
+            *this,
+            member_type,
+            init_list.get());
+    bool same_type_prvalue_initializer =
+        is_same_type_object_prvalue_initializer(
+            *this,
+            member_type,
+            init_list.get(),
+            ast_ctx_.get());
+    bool aggregate_initialization_candidate =
+        record_type && is_aggregate_type(member_type.get_shared());
+    bool should_use_constructor_overload =
+        record_state &&
+        !defer_initializer_semantics &&
+        !same_type_prvalue_initializer &&
+        (!record_state->constructors.empty() || has_constructor_template) &&
+        (has_constructor_template ||
+         record_state->definition_data.has_user_declared_constructor ||
+         empty_class_initialization_needs_default_constructor_overload(
+             record_state,
+             init_list.get(),
+             aggregate_initialization_candidate) ||
+         should_use_implicit_special_member_constructor_overload(
+             member_type,
+             record_state,
+             init_list.get(),
+             ast_ctx_.get()));
+
+    if (defer_initializer_semantics) {
         return init_list;
     }
-    VariableDeclFlags ctor_flags = {
-        .is_copy_initialization = is_copy_initialization,
-        .allow_abstract_object_type_instantiation = allow_abstract_object_type_instantiation,
-    };
-    auto temp_decl = collect_variable_declaration(
-        member_type,
-        "__member_ctor_init_tmp",
-        std::move(init_list),
-        nullptr,
-        StorageClass::NONE,
-        ctor_flags,
-        loc);
-    auto* temp_var = dyn_cast<VariableDecl>(temp_decl.get());
-    if (!temp_var) {
-        report_error("internal error: failed to build member constructor initializer", loc);
-        return collect_make<ErrorExpr>("invalid member initializer", loc);
+
+    if (should_use_constructor_overload) {
+        auto owned_list = std::unique_ptr<InitListExpr>(
+            static_cast<InitListExpr*>(init_list.release()));
+        std::vector<std::unique_ptr<Expr>> ctor_args;
+        ctor_args.reserve(owned_list->elements.size());
+        for (auto& elem : owned_list->elements) {
+            if (!elem.designators.empty()) {
+                report_error(
+                    "designated initializers are not supported in constructor initialization",
+                    elem.loc);
+            }
+            if (!elem.value) {
+                report_error(
+                    "missing initializer expression in constructor argument list",
+                    elem.loc);
+                continue;
+            }
+            ctor_args.push_back(std::move(elem.value));
+        }
+
+        VariableInitializationSelection selection;
+        if (!select_constructor_for_variable_initialization(
+                record_type,
+                std::move(ctor_args),
+                is_list_init,
+                is_copy_initialization,
+                member_type,
+                loc,
+                selection)) {
+            return collect_make<ErrorExpr>("no matching constructor", loc);
+        }
+        if (selection.nonconstructor_init_expr) {
+            return std::move(selection.nonconstructor_init_expr);
+        }
+        if (!selection.constructor_symbol) {
+            return nullptr;
+        }
+        return collect_make<CppConstructExpr>(
+            selection.constructor_symbol,
+            std::move(selection.constructor_args),
+            member_type,
+            selection.constructor_is_list_init,
+            loc);
     }
 
-    return std::move(temp_var->init);
+    return process_initializer_for_type(std::move(init_list), member_type, loc);
 }
 
 

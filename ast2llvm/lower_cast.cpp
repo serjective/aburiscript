@@ -803,6 +803,86 @@ llvm::Value* ASTToLLVM::convert_explicit_cast(ExplicitCast *expr) {
         innerCType.as_shared<MemberPointerType>(),
         destCType.as_shared<MemberPointerType>());
 
+    auto source_ptr_type = innerCType.as_shared<PointerType>();
+    auto target_ptr_type = destCType.as_shared<PointerType>();
+    if (expr->cast_kind == ExplicitCastKind::CppStaticCast &&
+        source_ptr_type &&
+        target_ptr_type &&
+        canonical_type_kind(source_ptr_type->pointed_type, ast_ctx.get()) ==
+            TypeKind::Object &&
+        canonical_type_kind(target_ptr_type->pointed_type, ast_ctx.get()) ==
+            TypeKind::Object) {
+        auto source_record_type =
+            desugar_type(source_ptr_type->pointed_type, ast_ctx.get())
+                .as_shared<ObjectType>();
+        auto target_record_type =
+            desugar_type(target_ptr_type->pointed_type, ast_ctx.get())
+                .as_shared<ObjectType>();
+        auto* source_record_decl = source_record_type
+            ? canonical_cpp_record_decl(
+                  dyn_cast<ObjectDecl>(source_record_type->get_decl()))
+            : nullptr;
+        auto* target_record_decl = target_record_type
+            ? canonical_cpp_record_decl(
+                  dyn_cast<ObjectDecl>(target_record_type->get_decl()))
+            : nullptr;
+        if (source_record_decl &&
+            target_record_decl &&
+            source_record_decl != target_record_decl) {
+            bool applied_dynamic_adjustment = false;
+            const RecordSemanticState* source_state =
+                lookup_cpp_record_state(source_record_decl);
+            if (source_state &&
+                cpp_record_uses_vptr(source_state) &&
+                source_record_type) {
+                llvm::Value* adjusted_val =
+                    resolve_cpp_virtual_base_subobject_address(
+                        val,
+                        source_record_decl,
+                        target_record_decl,
+                        expr->location,
+                        "convert_explicit_cast()");
+                if (adjusted_val) {
+                    val = adjusted_val;
+                    applied_dynamic_adjustment = true;
+                }
+            }
+
+            if (!applied_dynamic_adjustment) {
+                std::optional<size_t> upcast_offset =
+                    find_cpp_base_subobject_offset(
+                        source_record_decl,
+                        target_record_decl);
+                if (upcast_offset.has_value()) {
+                    if (*upcast_offset > 0 &&
+                        *upcast_offset <=
+                            static_cast<size_t>(
+                                std::numeric_limits<int64_t>::max())) {
+                        val = adjust_cpp_pointer_by_static_offset(
+                            val,
+                            static_cast<int64_t>(*upcast_offset),
+                            "static.upcast.adjust");
+                    }
+                } else {
+                    std::optional<size_t> downcast_offset =
+                        find_cpp_base_subobject_offset(
+                            target_record_decl,
+                            source_record_decl);
+                    if (downcast_offset.has_value() &&
+                        *downcast_offset > 0 &&
+                        *downcast_offset <=
+                            static_cast<size_t>(
+                                std::numeric_limits<int64_t>::max())) {
+                        val = adjust_cpp_pointer_by_static_offset(
+                            val,
+                            -static_cast<int64_t>(*downcast_offset),
+                            "static.downcast.adjust");
+                    }
+                }
+            }
+        }
+    }
+
     llvm::Type *destType = convert_type(expr->ctype);
     llvm::Type *srcType = val->getType();
 
