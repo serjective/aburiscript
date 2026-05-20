@@ -1632,7 +1632,20 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                             FunctionRefQualifierKind::RValue;
                     }
                 }
-                pars->parse_cpp_optional_noexcept_spec(*func_type);
+                Collect::CppThisContext noexcept_cpp_this_context;
+                QualType noexcept_record_lookup_type;
+                bool has_noexcept_cpp_this_context =
+                    pars->build_cpp_member_declarator_expression_context(
+                        *this,
+                        *func_type,
+                        noexcept_cpp_this_context,
+                        noexcept_record_lookup_type);
+                pars->parse_cpp_optional_noexcept_spec(
+                    *func_type,
+                    has_noexcept_cpp_this_context
+                        ? &noexcept_cpp_this_context
+                        : nullptr,
+                    noexcept_record_lookup_type);
                 if (auto trailing_return_type = parse_cpp_trailing_return_type()) {
                     auto* leading_auto =
                         old_type ? dyn_cast<AutoType>(old_type.get()) : nullptr;

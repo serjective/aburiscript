@@ -441,6 +441,20 @@ private:
         const RecordSemanticState::Method& method,
         const std::shared_ptr<CType>& parsed_decl_type,
         uint8_t parsed_trailing_cv_qualifiers);
+    bool record_method_declarator_prefix_matches(
+        const RecordSemanticState::Method& method,
+        const std::shared_ptr<CType>& parsed_decl_type,
+        uint8_t parsed_trailing_cv_qualifiers);
+    bool build_cpp_member_declarator_expression_context(
+        const DeclarationParser& decl_parser,
+        const FunctionType& function_type,
+        Collect::CppThisContext& cpp_this_context_out,
+        QualType& record_lookup_type_out);
+    bool build_cpp_current_record_declarator_expression_context(
+        bool is_static_member,
+        uint8_t cv_qualifiers,
+        Collect::CppThisContext& cpp_this_context_out,
+        QualType& record_lookup_type_out);
     bool active_template_parameter_list_matches(
         const TemplateParameterList& parameters);
     bool record_method_template_signature_matches(
@@ -750,7 +764,10 @@ private:
     void skip_cpp_function_try_block_tail_tokens();
     void skip_cpp_function_try_block_tokens(
         bool allow_ctor_mem_initializer_after_try);
-    void parse_cpp_optional_noexcept_spec(FunctionType& function_type);
+    void parse_cpp_optional_noexcept_spec(
+        FunctionType& function_type,
+        const Collect::CppThisContext* cpp_this_context = nullptr,
+        QualType record_lookup_type = QualType());
     CppExplicitSpecifier parse_cpp_optional_explicit_specifier();
     std::shared_ptr<Scope> resolve_named_namespace_scope(
         const DeclContext* start_context,
@@ -900,6 +917,11 @@ private:
         QualType current_instantiation_type = nullptr;
     };
     std::vector<CppRecordParseFrame> cxx_record_parse_stack_;
+    struct ActiveCppQualifiedDeclaratorContext {
+        const ObjectDecl* owner_record_decl = nullptr;
+        QualType owner_type = nullptr;
+    };
+    ActiveCppQualifiedDeclaratorContext active_cpp_qualified_declarator_context_;
     // Owns temporary semantic decls created during C++ class parsing before
     // final semantic record decl emission in parse_declaration.
     std::vector<std::unique_ptr<Decl>> cpp_transient_semantic_decls_;

@@ -2253,6 +2253,208 @@ bool Parser::record_method_signature_matches(
     return parsed_cv == expected_cv;
 }
 
+// Used while parsing a qualified member declarator before the exception
+// specification and trailing return type have been parsed.
+bool Parser::record_method_declarator_prefix_matches(
+    const RecordSemanticState::Method& method,
+    const std::shared_ptr<CType>& parsed_decl_type,
+    uint8_t parsed_trailing_cv_qualifiers) {
+    auto parsed_fn_type =
+        QualType(parsed_decl_type).as_shared<FunctionType>();
+    auto method_fn_type = method.type.as_shared<FunctionType>();
+    if (!parsed_fn_type || !method_fn_type) {
+        return false;
+    }
+    if (parsed_fn_type->is_variadic != method_fn_type->is_variadic) {
+        return false;
+    }
+
+    size_t method_user_param_start = method.is_static ? 0 : 1;
+    if (method_fn_type->parameters.size() < method_user_param_start) {
+        return false;
+    }
+    size_t method_user_param_count =
+        method_fn_type->parameters.size() - method_user_param_start;
+    if (parsed_fn_type->parameters.size() != method_user_param_count) {
+        return false;
+    }
+    for (size_t idx = 0; idx < parsed_fn_type->parameters.size(); ++idx) {
+        if (!cpp_out_of_line_type_matches(
+                parsed_fn_type->parameters[idx],
+                method_fn_type->parameters[method_user_param_start + idx],
+                true)) {
+            return false;
+        }
+    }
+
+    uint8_t parsed_cv =
+        parsed_trailing_cv_qualifiers &
+        static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE);
+    if (method.is_static) {
+        return parsed_cv == QUAL_NONE;
+    }
+
+    if (method_fn_type->parameters.empty()) {
+        return false;
+    }
+    auto this_ptr_type =
+        desugar_type(method_fn_type->parameters.front()).as_shared<PointerType>();
+    if (!this_ptr_type) {
+        return false;
+    }
+    uint8_t expected_cv =
+        this_ptr_type->pointed_type.get_qualifiers() &
+        static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE);
+    return parsed_cv == expected_cv;
+}
+
+bool Parser::build_cpp_current_record_declarator_expression_context(
+    bool is_static_member,
+    uint8_t cv_qualifiers,
+    Collect::CppThisContext& cpp_this_context_out,
+    QualType& record_lookup_type_out) {
+    cpp_this_context_out = Collect::CppThisContext{};
+    record_lookup_type_out = nullptr;
+    if (!is_cxx_mode_active() || cxx_record_parse_stack_.empty()) {
+        return false;
+    }
+
+    const auto& record_frame = cxx_record_parse_stack_.back();
+    if (record_frame.name.empty()) {
+        return false;
+    }
+
+    QualType owner_type = record_frame.current_instantiation_type;
+    if (!owner_type && record_frame.semantic_owner &&
+        record_frame.semantic_owner->get_record_type()) {
+        owner_type = QualType(record_frame.semantic_owner->get_record_type());
+    }
+    if (!owner_type) {
+        auto owner_type_raw = collect_->collect_lookup_tag_type(
+            record_frame.name,
+            true);
+        if (auto owner_object_type =
+                dyn_cast_shared<ObjectType>(owner_type_raw)) {
+            owner_type = QualType(owner_object_type);
+        }
+    }
+
+    cpp_this_context_out.is_member_function = true;
+    cpp_this_context_out.is_static_member_function = is_static_member;
+    cpp_this_context_out.access_context_type = owner_type;
+    record_lookup_type_out = owner_type;
+    if (!is_static_member && owner_type) {
+        uint8_t object_qualifiers =
+            static_cast<uint8_t>(
+                cv_qualifiers &
+                static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
+        QualType qualified_owner = owner_type.with_qualifiers(
+            static_cast<uint8_t>(
+                owner_type.get_qualifiers() | object_qualifiers));
+        cpp_this_context_out.this_type =
+            QualType(std::make_shared<PointerType>(qualified_owner));
+    }
+    return true;
+}
+
+bool Parser::build_cpp_member_declarator_expression_context(
+    const DeclarationParser& decl_parser,
+    const FunctionType& function_type,
+    Collect::CppThisContext& cpp_this_context_out,
+    QualType& record_lookup_type_out) {
+    bool is_static_member = decl_parser.str_class == StorageClass::STATIC;
+    if (build_cpp_current_record_declarator_expression_context(
+            is_static_member,
+            decl_parser.trailing_function_cv_qualifiers,
+            cpp_this_context_out,
+            record_lookup_type_out)) {
+        return true;
+    }
+
+    const auto& qualified_context =
+        active_cpp_qualified_declarator_context_;
+    if (!is_cxx_mode_active() || !qualified_context.owner_record_decl) {
+        cpp_this_context_out = Collect::CppThisContext{};
+        record_lookup_type_out = nullptr;
+        return false;
+    }
+
+    bool found_static_match = false;
+    bool found_nonstatic_match = false;
+    auto parsed_function_type = std::make_shared<FunctionType>(function_type);
+    const RecordSemanticState* owner_state =
+        collect_->query_lookup_record_semantics(
+            qualified_context.owner_record_decl);
+    if (owner_state && !owner_state->is_incomplete) {
+        for (const auto& method : owner_state->methods) {
+            if (method.name != decl_parser.name) {
+                continue;
+            }
+            if (!record_method_declarator_prefix_matches(
+                    method,
+                    parsed_function_type,
+                    decl_parser.trailing_function_cv_qualifiers)) {
+                continue;
+            }
+            if (method.is_static) {
+                found_static_match = true;
+            } else {
+                found_nonstatic_match = true;
+            }
+        }
+        for (const auto& method_template : owner_state->method_templates) {
+            if (method_template.name != decl_parser.name ||
+                !method_template.decl ||
+                !method_template.decl->function_decl()) {
+                continue;
+            }
+            if (!active_template_parameter_stack_.empty() &&
+                !active_template_parameter_list_matches(
+                    method_template.decl->parameters)) {
+                continue;
+            }
+            RecordSemanticState::Method synthetic_method;
+            synthetic_method.type =
+                QualType(method_template.decl->function_decl()->type);
+            synthetic_method.is_static = method_template.is_static;
+            if (!record_method_declarator_prefix_matches(
+                    synthetic_method,
+                    parsed_function_type,
+                    decl_parser.trailing_function_cv_qualifiers)) {
+                continue;
+            }
+            if (method_template.is_static) {
+                found_static_match = true;
+            } else {
+                found_nonstatic_match = true;
+            }
+        }
+    }
+
+    if (found_static_match && !found_nonstatic_match) {
+        is_static_member = true;
+    }
+
+    cpp_this_context_out = Collect::CppThisContext{};
+    cpp_this_context_out.is_member_function = true;
+    cpp_this_context_out.is_static_member_function = is_static_member;
+    cpp_this_context_out.access_context_type = qualified_context.owner_type;
+    record_lookup_type_out = qualified_context.owner_type;
+    if (!is_static_member && qualified_context.owner_type) {
+        uint8_t object_qualifiers =
+            static_cast<uint8_t>(
+                decl_parser.trailing_function_cv_qualifiers &
+                static_cast<uint8_t>(QUAL_CONST | QUAL_VOLATILE));
+        QualType qualified_owner = qualified_context.owner_type.with_qualifiers(
+            static_cast<uint8_t>(
+                qualified_context.owner_type.get_qualifiers() |
+                object_qualifiers));
+        cpp_this_context_out.this_type =
+            QualType(std::make_shared<PointerType>(qualified_owner));
+    }
+    return true;
+}
+
 bool Parser::active_template_parameter_list_matches(
     const TemplateParameterList& parameters) {
     if (active_template_parameter_stack_.empty()) {
@@ -3936,6 +4138,26 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
             qualified_declarator_context.scope_snapshot.scope,
             qualified_declarator_context.scope_snapshot.decl_context
         };
+        auto saved_qualified_declarator_context =
+            active_cpp_qualified_declarator_context_;
+        struct ActiveQualifiedDeclaratorGuard {
+            Parser* parser = nullptr;
+            ActiveCppQualifiedDeclaratorContext saved_context;
+            ~ActiveQualifiedDeclaratorGuard() {
+                if (parser) {
+                    parser->active_cpp_qualified_declarator_context_ =
+                        saved_context;
+                }
+            }
+        } active_qualified_declarator_guard {
+            this,
+            saved_qualified_declarator_context
+        };
+        active_cpp_qualified_declarator_context_ =
+            ActiveCppQualifiedDeclaratorContext{
+                qualified_declarator.owner_record_decl,
+                qualified_declarator.owner_type
+            };
         std::shared_ptr<CType> newer_type = decl_parser.parse_declarator(new_type);
         retain_type_specifier_decl_if_needed(decl_parser);
         if (is_cxx_mode_active() && is_cpp_scope_resolution_here()) {

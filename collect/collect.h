@@ -274,6 +274,11 @@ public:
         const std::function<bool()>& action,
         QualType friend_access_type = QualType()) ;
 
+    bool with_cpp_declarator_expression_context(
+        CppThisContext cpp_this_context,
+        QualType record_lookup_type,
+        const std::function<bool()>& action) ;
+
     bool resolve_dependent_expr_after_substitution(
         std::unique_ptr<Expr>& expr,
         QualType implicit_this_type,

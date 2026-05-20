@@ -6168,7 +6168,10 @@ CppExplicitSpecifier Parser::parse_cpp_optional_explicit_specifier() {
     return specifier;
 }
 
-void Parser::parse_cpp_optional_noexcept_spec(FunctionType& function_type) {
+void Parser::parse_cpp_optional_noexcept_spec(
+    FunctionType& function_type,
+    const Collect::CppThisContext* cpp_this_context,
+    QualType record_lookup_type) {
     if (!is_cxx_mode_active() || !gentle_check(TokenType::NOEXCEPT_KW)) {
         return;
     }
@@ -6183,44 +6186,60 @@ void Parser::parse_cpp_optional_noexcept_spec(FunctionType& function_type) {
         SrcLoc lparen_loc = current_token().loc;
         advance(); // '('
 
-        if (gentle_check(TokenType::RIGHT_PAREN)) {
-            error_custloc("noexcept expression must be an integer constant expression",
-                          lparen_loc);
-        } else {
-            auto noexcept_expr = parse_conditional_expression();
-            bool is_dependent =
-                collect_ &&
-                collect_->expression_is_value_dependent_for_constant_evaluation(
-                    noexcept_expr.get(),
-                    is_in_template_pattern_context());
-            if (is_dependent) {
-                function_type.exception_spec =
-                    FunctionExceptionSpecKind::Dependent;
-                function_type.exception_spec_expr =
-                    std::shared_ptr<Expr>(noexcept_expr.release());
-                is_non_throwing = false;
+        auto parse_noexcept_operand = [&]() {
+            if (gentle_check(TokenType::RIGHT_PAREN)) {
+                error_custloc("noexcept expression must be an integer constant expression",
+                              lparen_loc);
             } else {
-                auto eval = collect_->try_evaluate_constant_expression_demand(
-                    noexcept_expr.get(),
-                    ConstEvalMode::cpp_core_constant_expression(),
-                    lparen_loc);
-                if (!eval.has_value()) {
+                auto noexcept_expr = parse_conditional_expression();
+                bool is_dependent =
+                    collect_ &&
+                    collect_->expression_is_value_dependent_for_constant_evaluation(
+                        noexcept_expr.get(),
+                        is_in_template_pattern_context());
+                if (is_dependent) {
+                    function_type.exception_spec =
+                        FunctionExceptionSpecKind::Dependent;
+                    function_type.exception_spec_expr =
+                        std::shared_ptr<Expr>(noexcept_expr.release());
+                    is_non_throwing = false;
+                } else {
+                    auto eval = collect_->try_evaluate_constant_expression_demand(
+                        noexcept_expr.get(),
+                        ConstEvalMode::cpp_core_constant_expression(),
+                        lparen_loc);
+                    if (!eval.has_value()) {
+                        SrcLoc diag_loc =
+                            noexcept_expr ? noexcept_expr->location : current_token().loc;
+                        error_custloc(
+                            "noexcept expression must be an integer constant expression",
+                            diag_loc);
+                    } else {
+                        is_non_throwing = *eval != 0;
+                    }
+                }
+                if (!is_dependent && !noexcept_expr) {
                     SrcLoc diag_loc =
-                        noexcept_expr ? noexcept_expr->location : current_token().loc;
+                        current_token().loc;
                     error_custloc(
                         "noexcept expression must be an integer constant expression",
                         diag_loc);
-                } else {
-                    is_non_throwing = *eval != 0;
                 }
             }
-            if (!is_dependent && !noexcept_expr) {
-                SrcLoc diag_loc =
-                    current_token().loc;
-                error_custloc(
-                    "noexcept expression must be an integer constant expression",
-                    diag_loc);
-            }
+        };
+
+        if (collect_ &&
+            cpp_this_context &&
+            cpp_this_context->is_member_function) {
+            collect_->with_cpp_declarator_expression_context(
+                *cpp_this_context,
+                record_lookup_type,
+                [&]() {
+                    parse_noexcept_operand();
+                    return true;
+                });
+        } else {
+            parse_noexcept_operand();
         }
         check_and_consume(TokenType::RIGHT_PAREN);
     } else {
@@ -7022,7 +7041,18 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     std::shared_ptr<Expr> ctor_exception_spec_expr = nullptr;
     if (gentle_check(TokenType::NOEXCEPT_KW)) {
         FunctionType spec_probe;
-        parse_cpp_optional_noexcept_spec(spec_probe);
+        Collect::CppThisContext noexcept_cpp_this_context;
+        QualType noexcept_record_lookup_type;
+        bool has_noexcept_cpp_this_context =
+            build_cpp_current_record_declarator_expression_context(
+                false,
+                QUAL_NONE,
+                noexcept_cpp_this_context,
+                noexcept_record_lookup_type);
+        parse_cpp_optional_noexcept_spec(
+            spec_probe,
+            has_noexcept_cpp_this_context ? &noexcept_cpp_this_context : nullptr,
+            noexcept_record_lookup_type);
         ctor_has_exception_spec = spec_probe.has_explicit_exception_spec;
         ctor_exception_spec = spec_probe.exception_spec;
         ctor_exception_spec_expr = spec_probe.exception_spec_expr;
@@ -7368,7 +7398,18 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
     std::shared_ptr<Expr> dtor_exception_spec_expr = nullptr;
     if (gentle_check(TokenType::NOEXCEPT_KW)) {
         FunctionType spec_probe;
-        parse_cpp_optional_noexcept_spec(spec_probe);
+        Collect::CppThisContext noexcept_cpp_this_context;
+        QualType noexcept_record_lookup_type;
+        bool has_noexcept_cpp_this_context =
+            build_cpp_current_record_declarator_expression_context(
+                false,
+                QUAL_NONE,
+                noexcept_cpp_this_context,
+                noexcept_record_lookup_type);
+        parse_cpp_optional_noexcept_spec(
+            spec_probe,
+            has_noexcept_cpp_this_context ? &noexcept_cpp_this_context : nullptr,
+            noexcept_record_lookup_type);
         dtor_has_exception_spec = spec_probe.has_explicit_exception_spec;
         dtor_exception_spec = spec_probe.exception_spec;
         dtor_exception_spec_expr = spec_probe.exception_spec_expr;

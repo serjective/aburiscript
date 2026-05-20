@@ -908,6 +908,48 @@ bool Collect::with_function_definition_state(
     return action();
 }
 
+bool Collect::with_cpp_declarator_expression_context(
+    CppThisContext cpp_this_context,
+    QualType record_lookup_type,
+    const std::function<bool()>& action) {
+    if (!action) {
+        return false;
+    }
+
+    auto saved_state = capture_current_function_definition_state();
+    QualType saved_record_lookup_type = session_.current_cpp_record_lookup_type_;
+    struct FunctionStateGuard {
+        Collect* collect = nullptr;
+        FunctionDefinitionState saved_state;
+        QualType saved_record_lookup_type = nullptr;
+        ~FunctionStateGuard() {
+            if (!collect) {
+                return;
+            }
+            collect->restore_current_function_definition_state(
+                std::move(saved_state));
+            collect->session_.current_cpp_record_lookup_type_ =
+                saved_record_lookup_type;
+        }
+    } state_guard{this, std::move(saved_state), saved_record_lookup_type};
+
+    FunctionDefinitionState new_state;
+    new_state.in_function = cpp_this_context.is_member_function;
+    new_state.current_function_is_cpp_member =
+        cpp_this_context.is_member_function;
+    new_state.current_function_is_static_cpp_member =
+        cpp_this_context.is_static_member_function;
+    new_state.current_function_cpp_this_type = cpp_this_context.this_type;
+    new_state.current_function_cpp_friend_access_type =
+        cpp_this_context.friend_access_type;
+    new_state.current_function_cpp_access_context_type =
+        cpp_this_context.access_context_type;
+
+    restore_current_function_definition_state(std::move(new_state));
+    session_.current_cpp_record_lookup_type_ = record_lookup_type;
+    return action();
+}
+
 Collect::FunctionDefinitionState
 Collect::capture_current_function_definition_state() const {
 
