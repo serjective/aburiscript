@@ -833,6 +833,14 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
                 if (contains_deferred_semantic_type(deduction_source_type.get_shared())) {
                     deduction_source_type = resolve_typeof_types(deduction_source_type, loc);
                 }
+                if (expression_depends_on_template_parameters(return_expr.get()) ||
+                    (deduction_source_type &&
+                     type_depends_on_template_parameters(
+                         deduction_source_type,
+                         ast_ctx_.get()))) {
+                    deferred_template_dependent_return = true;
+                    return return_pattern;
+                }
                 if (!deduction_source_type) {
                     report_error(
                         "cannot deduce return type for function '" +
@@ -840,13 +848,6 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
                             "': return expression has no type",
                         loc);
                     return fallback_return;
-                }
-                if (expression_depends_on_template_parameters(return_expr.get()) ||
-                    type_depends_on_template_parameters(
-                        deduction_source_type,
-                        ast_ctx_.get())) {
-                    deferred_template_dependent_return = true;
-                    return return_pattern;
                 }
             }
 
