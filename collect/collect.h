@@ -333,6 +333,9 @@ public:
         std::vector<std::unique_ptr<Decl>>* transient_decls_out = nullptr,
         CppRecordDeferredBodyCallback deferred_body_callback = {},
         bool allow_parent_tag_lookup_for_non_definition = false) ;
+    void collect_publish_cpp_record_provisional_bases(
+        const CppRecordDecl& record,
+        ObjectDecl* semantic_decl) ;
 
     ObjectDecl* collect_instantiate_class_template_specialization(
         const ClassTemplateDecl* class_template,

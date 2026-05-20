@@ -2966,6 +2966,7 @@ struct CppRecordDecl : Decl {
     std::vector<std::unique_ptr<Decl>> members;
     std::optional<RecordSemanticState::DefinitionData> definition_data;
     CppAccessSpecifier default_access;
+    const ObjectDecl* provisional_semantic_owner = nullptr;
     uint8_t is_definition : 1;
 
     CppRecordDecl(CppRecordKind record_kind, std::string name,

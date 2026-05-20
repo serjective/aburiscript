@@ -1673,7 +1673,11 @@ public:
 
         ObjectDecl* existing_obj_decl = nullptr;
         bool existing_decl_from_parent_scope = false;
-        if (auto* existing_tag_decl = collect_.collect_lookup_tag_decl(tag, false)) {
+        if (record_.provisional_semantic_owner &&
+            record_.provisional_semantic_owner->tag == tag) {
+            existing_obj_decl =
+                const_cast<ObjectDecl*>(record_.provisional_semantic_owner);
+        } else if (auto* existing_tag_decl = collect_.collect_lookup_tag_decl(tag, false)) {
             existing_obj_decl = dyn_cast<ObjectDecl>(existing_tag_decl);
             if (!existing_obj_decl) {
                 collect_.report_error(
@@ -1840,6 +1844,42 @@ std::unique_ptr<Decl> Collect::collect_build_cpp_record_semantic_decl(
                                  std::move(deferred_body_callback),
                                  allow_parent_tag_lookup_for_non_definition);
     return builder.build();
+}
+
+void Collect::collect_publish_cpp_record_provisional_bases(
+    const CppRecordDecl& record,
+    ObjectDecl* semantic_decl) {
+    if (!semantic_decl || !semantic_decl->get_record_type() ||
+        record.bases.empty()) {
+        return;
+    }
+
+    RecordSemanticState state;
+    if (const auto* cached = query_lookup_record_semantics(semantic_decl)) {
+        state = *cached;
+    }
+
+    CollectRecordBuildContext ctx{
+        &record,
+        record.location,
+        record.name,
+        semantic_decl->tag,
+        semantic_decl->is_union != 0,
+        semantic_decl->get_record_type(),
+        semantic_decl,
+        nullptr,
+        {}};
+    ctx.semantic_state = state;
+
+    collect_record_resolve_bases(ctx);
+    collect_record_walk_virtual_bases(ctx);
+
+    for (auto& base : ctx.bases) {
+        base.spec = nullptr;
+    }
+    state.bases = std::move(ctx.bases);
+    state.virtual_bases = std::move(ctx.virtual_bases);
+    query_publish_record_semantics(semantic_decl, std::move(state));
 }
 
 void Collect::collect_record_register_function_default_arguments(
@@ -2237,28 +2277,38 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
 
         if (const auto* nested_record = dyn_cast<CppRecordDecl>(member.get())) {
             if (!nested_record->name.empty()) {
-                auto nested_semantic = collect_build_cpp_record_semantic_decl(
-                    *nested_record,
-                    std::nullopt,
-                    ctx.transient_decls_out,
-                    ctx.deferred_body_callback);
-                if (nested_semantic) {
-                    auto* nested_object = dyn_cast<ObjectDecl>(nested_semantic.get());
-                    if (nested_object && nested_object->get_record_type()) {
-                        RecordSemanticState::NestedType nested_type;
-                        nested_type.name = nested_record->name;
-                        nested_type.type = QualType(nested_object->get_record_type());
-                        nested_type.declared_access = current_access;
-                        nested_type.decl = nested_object;
-                        ctx.nested_types.push_back(std::move(nested_type));
+                const ObjectDecl* nested_object =
+                    nested_record->provisional_semantic_owner;
+                const RecordSemanticState* nested_state =
+                    nested_object
+                        ? query_lookup_record_semantics(nested_object)
+                        : nullptr;
+                if (!nested_object || !nested_object->get_record_type() ||
+                    !nested_state || nested_state->is_incomplete) {
+                    auto nested_semantic = collect_build_cpp_record_semantic_decl(
+                        *nested_record,
+                        std::nullopt,
+                        ctx.transient_decls_out,
+                        ctx.deferred_body_callback);
+                    if (nested_semantic) {
+                        nested_object = dyn_cast<ObjectDecl>(nested_semantic.get());
+                        if (ctx.transient_decls_out) {
+                            ctx.transient_decls_out->push_back(
+                                std::move(nested_semantic));
+                        } else {
+                            report_error(
+                                "internal error: missing transient storage for nested record semantic owner",
+                                nested_record->location);
+                        }
                     }
-                    if (ctx.transient_decls_out) {
-                        ctx.transient_decls_out->push_back(std::move(nested_semantic));
-                    } else {
-                        report_error(
-                            "internal error: missing transient storage for nested record semantic owner",
-                            nested_record->location);
-                    }
+                }
+                if (nested_object && nested_object->get_record_type()) {
+                    RecordSemanticState::NestedType nested_type;
+                    nested_type.name = nested_record->name;
+                    nested_type.type = QualType(nested_object->get_record_type());
+                    nested_type.declared_access = current_access;
+                    nested_type.decl = nested_object;
+                    ctx.nested_types.push_back(std::move(nested_type));
                 }
             }
             continue;

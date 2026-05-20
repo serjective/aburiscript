@@ -7855,6 +7855,19 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         collect_->collect_set_current_cpp_record_lookup_type(
             semantic_owner_record_type);
     }
+    if (collect_ && semantic_owner && semantic_owner_record_type &&
+        !bases.empty()) {
+        CppRecordDecl provisional_record(
+            record_kind,
+            name,
+            bases,
+            true,
+            key_tok.loc);
+        provisional_record.provisional_semantic_owner = semantic_owner;
+        collect_->collect_publish_cpp_record_provisional_bases(
+            provisional_record,
+            const_cast<ObjectDecl*>(semantic_owner));
+    }
     struct CppRecordScopeGuard {
         Collect* collect = nullptr;
         bool active = false;
@@ -7923,10 +7936,34 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 if (nested_record->name.empty()) {
                     return;
                 }
-                auto* nested_owner = dyn_cast<ObjectDecl>(
-                    collect_->collect_lookup_tag_decl(
-                        nested_record->name,
-                        false));
+                auto* nested_owner = const_cast<ObjectDecl*>(
+                    nested_record->provisional_semantic_owner);
+                if (!nested_owner) {
+                    nested_owner = dyn_cast<ObjectDecl>(
+                        collect_->collect_lookup_tag_decl(
+                            nested_record->name,
+                            false));
+                }
+                const RecordSemanticState* nested_state =
+                    nested_owner
+                        ? collect_->query_lookup_record_semantics(nested_owner)
+                        : nullptr;
+                if (nested_record->is_definition &&
+                    (!nested_owner || !nested_state ||
+                     nested_state->is_incomplete)) {
+                    auto nested_semantic =
+                        build_cpp_record_semantic_decl(*nested_record);
+                    if (auto* semantic_object =
+                            dyn_cast<ObjectDecl>(nested_semantic.get())) {
+                        nested_record->provisional_semantic_owner =
+                            semantic_object;
+                        nested_owner = semantic_object;
+                    }
+                    if (nested_semantic) {
+                        cpp_transient_semantic_decls_.push_back(
+                            std::move(nested_semantic));
+                    }
+                }
                 if (!nested_owner || !nested_owner->get_record_type()) {
                     return;
                 }
@@ -8489,6 +8526,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         std::move(members),
         true,
         key_tok.loc);
+    record->provisional_semantic_owner = semantic_owner;
     ast_ctx->append_attrs(record->node_id, std::move(head_attrs));
     return record;
 }
