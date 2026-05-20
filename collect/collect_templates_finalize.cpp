@@ -423,6 +423,21 @@ bool finalize_specialized_condition_expression(
     return true;
 }
 
+bool finalize_specialized_control_condition_declaration(
+    Collect& collect,
+    ControlCondition& condition,
+    QualType expected_return_type,
+    std::string* error_out) {
+    if (!condition.declaration) {
+        return true;
+    }
+    return finalize_specialized_stmt_semantics(
+        collect,
+        condition.declaration,
+        expected_return_type,
+        error_out);
+}
+
 } // namespace
 
 QualType implicit_this_type_for_specialized_function(const FuncDecl* decl) {
@@ -674,20 +689,27 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
                     error_out)) {
                 return false;
             }
-            if (if_stmt->condition) {
+            if (!finalize_specialized_control_condition_declaration(
+                    collect,
+                    if_stmt->condition,
+                    expected_return_type,
+                    error_out)) {
+                return false;
+            }
+            if (if_stmt->condition.expression) {
                 if (!resolve_specialized_condition_after_substitution(
                         collect,
-                        if_stmt->condition,
+                        if_stmt->condition.expression,
                         "if",
                         error_out)) {
                     return false;
                 }
                 auto condition_info = collect.collect_if_condition(
-                    std::move(if_stmt->condition),
+                    std::move(if_stmt->condition.expression),
                     if_stmt->statement_kind,
                     if_stmt->location);
-                if_stmt->condition = std::move(condition_info.condition);
-                if (!if_stmt->condition) {
+                if_stmt->condition.expression = std::move(condition_info.condition);
+                if (!if_stmt->condition.expression) {
                     if (error_out && error_out->empty()) {
                         *error_out =
                             "failed to finalize if condition after template substitution";
@@ -759,9 +781,16 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::SwitchStmt: {
             auto* switch_stmt = static_cast<SwitchStmt*>(stmt.get());
-            if (!finalize_specialized_condition_expression(
+            if (!finalize_specialized_control_condition_declaration(
                     collect,
                     switch_stmt->condition,
+                    expected_return_type,
+                    error_out)) {
+                return false;
+            }
+            if (!finalize_specialized_condition_expression(
+                    collect,
+                    switch_stmt->condition.expression,
                     switch_stmt->location,
                     "switch",
                     error_out)) {
@@ -775,9 +804,16 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::WhileStmt: {
             auto* while_stmt = static_cast<WhileStmt*>(stmt.get());
-            if (!finalize_specialized_condition_expression(
+            if (!finalize_specialized_control_condition_declaration(
                     collect,
                     while_stmt->condition,
+                    expected_return_type,
+                    error_out)) {
+                return false;
+            }
+            if (!finalize_specialized_condition_expression(
+                    collect,
+                    while_stmt->condition.expression,
                     while_stmt->location,
                     "while",
                     error_out)) {
@@ -817,9 +853,16 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
                     error_out)) {
                 return false;
             }
-            if (!finalize_specialized_condition_expression(
+            if (!finalize_specialized_control_condition_declaration(
                     collect,
                     for_stmt->cond,
+                    expected_return_type,
+                    error_out)) {
+                return false;
+            }
+            if (!finalize_specialized_condition_expression(
+                    collect,
+                    for_stmt->cond.expression,
                     for_stmt->location,
                     "for",
                     error_out)) {

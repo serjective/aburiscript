@@ -798,7 +798,7 @@ public:
                                             bool defer_unmaterialized_constexpr_calls = false) const ;
 
     std::unique_ptr<Stmt> collect_if_statement(std::unique_ptr<Stmt> init_stmt,
-                                               std::unique_ptr<Expr> condition,
+                                               ControlCondition condition,
                                                std::unique_ptr<Stmt> then_stmt,
                                                std::unique_ptr<Stmt> else_stmt,
                                                IfStatementKind statement_kind,
@@ -811,12 +811,14 @@ public:
 
     std::unique_ptr<Expr> collect_switch_condition(std::unique_ptr<Expr> condition, SrcLoc loc) ;
 
-    std::unique_ptr<Stmt> collect_switch_statement(std::unique_ptr<Expr> condition,
+    std::unique_ptr<Stmt> collect_switch_statement(ControlCondition condition,
                                                    std::unique_ptr<Stmt> stmt,
+                                                   std::shared_ptr<Scope> scope,
                                                    SrcLoc loc) const ;
 
-    std::unique_ptr<Stmt> collect_while_statement(std::unique_ptr<Expr> condition,
+    std::unique_ptr<Stmt> collect_while_statement(ControlCondition condition,
                                                   std::unique_ptr<Stmt> body_stmt,
+                                                  std::shared_ptr<Scope> scope,
                                                   SrcLoc loc) const ;
 
     std::unique_ptr<Stmt> collect_do_while_statement(std::unique_ptr<Expr> condition,
@@ -824,7 +826,7 @@ public:
                                                      SrcLoc loc) const ;
 
     std::unique_ptr<Stmt> collect_for_statement(std::unique_ptr<Stmt> init,
-                                                std::unique_ptr<Expr> condition,
+                                                ControlCondition condition,
                                                 std::unique_ptr<Expr> action,
                                                 std::unique_ptr<Stmt> body_stmt,
                                                 std::shared_ptr<Scope> scope,

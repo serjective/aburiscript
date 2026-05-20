@@ -310,8 +310,13 @@ void collect_lambda_referenced_symbols_from_stmt(
             referenced_symbols,
             seen_symbols,
             referenced_this);
+        collect_lambda_referenced_symbols_from_stmt(
+            if_stmt->condition.declaration.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
         collect_lambda_referenced_symbols_from_expr(
-            if_stmt->condition.get(),
+            if_stmt->condition.expression.get(),
             referenced_symbols,
             seen_symbols,
             referenced_this);
@@ -339,8 +344,13 @@ void collect_lambda_referenced_symbols_from_stmt(
         return;
     }
     if (auto* switch_stmt = dyn_cast<const SwitchStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_stmt(
+            switch_stmt->condition.declaration.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
         collect_lambda_referenced_symbols_from_expr(
-            switch_stmt->condition.get(),
+            switch_stmt->condition.expression.get(),
             referenced_symbols,
             seen_symbols,
             referenced_this);
@@ -352,8 +362,13 @@ void collect_lambda_referenced_symbols_from_stmt(
         return;
     }
     if (auto* while_stmt = dyn_cast<const WhileStmt>(stmt)) {
+        collect_lambda_referenced_symbols_from_stmt(
+            while_stmt->condition.declaration.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
         collect_lambda_referenced_symbols_from_expr(
-            while_stmt->condition.get(),
+            while_stmt->condition.expression.get(),
             referenced_symbols,
             seen_symbols,
             referenced_this);
@@ -383,8 +398,13 @@ void collect_lambda_referenced_symbols_from_stmt(
             referenced_symbols,
             seen_symbols,
             referenced_this);
+        collect_lambda_referenced_symbols_from_stmt(
+            for_stmt->cond.declaration.get(),
+            referenced_symbols,
+            seen_symbols,
+            referenced_this);
         collect_lambda_referenced_symbols_from_expr(
-            for_stmt->cond.get(),
+            for_stmt->cond.expression.get(),
             referenced_symbols,
             seen_symbols,
             referenced_this);

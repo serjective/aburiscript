@@ -445,13 +445,20 @@ bool stmt_constexpr_value_depends_on_template_parameters_impl(
                        if_stmt->init_stmt.get(),
                        ast_ctx,
                        active_variable_symbols,
-                       active_functions,
-                       active_record_lookup_type,
-                       defer_unmaterialized_constexpr_calls) ||
-                   expr_constexpr_value_depends_on_template_parameters_impl(
-                       if_stmt->condition.get(),
-                       ast_ctx,
-                       active_variable_symbols,
+	                       active_functions,
+	                       active_record_lookup_type,
+	                       defer_unmaterialized_constexpr_calls) ||
+	                   stmt_constexpr_value_depends_on_template_parameters_impl(
+	                       if_stmt->condition.declaration.get(),
+	                       ast_ctx,
+	                       active_variable_symbols,
+	                       active_functions,
+	                       active_record_lookup_type,
+	                       defer_unmaterialized_constexpr_calls) ||
+	                   expr_constexpr_value_depends_on_template_parameters_impl(
+	                       if_stmt->condition.expression.get(),
+	                       ast_ctx,
+	                       active_variable_symbols,
                        active_functions,
                        active_record_lookup_type,
                        defer_unmaterialized_constexpr_calls) ||

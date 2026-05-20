@@ -2428,16 +2428,44 @@ struct CppTryStmt: Stmt {
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::CppTryStmt; }
 };
+struct ControlCondition {
+    std::unique_ptr<Stmt> declaration;
+    std::unique_ptr<Expr> expression;
+
+    ControlCondition() = default;
+    explicit ControlCondition(std::unique_ptr<Expr> expression)
+        : expression(std::move(expression)) {}
+    ControlCondition(std::unique_ptr<Stmt> declaration,
+                     std::unique_ptr<Expr> expression)
+        : declaration(std::move(declaration)),
+          expression(std::move(expression)) {}
+
+    bool is_declaration() const { return declaration != nullptr; }
+    explicit operator bool() const {
+        return declaration != nullptr || expression != nullptr;
+    }
+};
 struct IfStmt: Stmt {
     IfStatementKind statement_kind = IfStatementKind::Runtime;
     std::unique_ptr<Stmt> init_stmt;
-    std::unique_ptr<Expr> condition;
+    ControlCondition condition;
     std::unique_ptr<Stmt> then_stmt;
     std::unique_ptr<Stmt> else_stmt;
     std::shared_ptr<Scope> scope;
     std::optional<bool> constexpr_condition_value;
 
     IfStmt(std::unique_ptr<Expr> condition, std::unique_ptr<Stmt> then_stmt,
+        std::unique_ptr<Stmt> else_stmt = nullptr, SrcLoc loc = SrcLoc(),
+        IfStatementKind statement_kind = IfStatementKind::Runtime,
+        std::unique_ptr<Stmt> init_stmt = nullptr,
+        std::shared_ptr<Scope> scope = nullptr,
+        std::optional<bool> constexpr_condition_value = std::nullopt)
+        : Stmt(StmtKind::IfStmt, loc), statement_kind(statement_kind),
+          init_stmt(std::move(init_stmt)), condition(std::move(condition)),
+          then_stmt(std::move(then_stmt)), else_stmt(std::move(else_stmt)),
+          scope(std::move(scope)),
+          constexpr_condition_value(constexpr_condition_value) {}
+    IfStmt(ControlCondition condition, std::unique_ptr<Stmt> then_stmt,
         std::unique_ptr<Stmt> else_stmt = nullptr, SrcLoc loc = SrcLoc(),
         IfStatementKind statement_kind = IfStatementKind::Runtime,
         std::unique_ptr<Stmt> init_stmt = nullptr,
@@ -2555,20 +2583,32 @@ struct ComputedGotoStmt: Stmt {
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::ComputedGotoStmt; }
 };
 struct SwitchStmt: Stmt {
-    std::unique_ptr<Expr> condition;
+    ControlCondition condition;
     std::unique_ptr<Stmt> stmt;
+    std::shared_ptr<Scope> scope;
 
     SwitchStmt(std::unique_ptr<Expr> condition, std::unique_ptr<Stmt> stmt, SrcLoc loc = SrcLoc())
         : Stmt(StmtKind::SwitchStmt, loc), condition(std::move(condition)), stmt(std::move(stmt)) {}
+    SwitchStmt(ControlCondition condition, std::unique_ptr<Stmt> stmt,
+               std::shared_ptr<Scope> scope = nullptr,
+               SrcLoc loc = SrcLoc())
+        : Stmt(StmtKind::SwitchStmt, loc), condition(std::move(condition)),
+          stmt(std::move(stmt)), scope(std::move(scope)) {}
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::SwitchStmt; }
 };
 struct WhileStmt: Stmt {
-    std::unique_ptr<Expr> condition;
+    ControlCondition condition;
     std::unique_ptr<Stmt> body_stmt;
+    std::shared_ptr<Scope> scope;
 
     WhileStmt(std::unique_ptr<Expr> condition, std::unique_ptr<Stmt> body_stmt, SrcLoc loc = SrcLoc())
         : Stmt(StmtKind::WhileStmt, loc), condition(std::move(condition)), body_stmt(std::move(body_stmt)) {}
+    WhileStmt(ControlCondition condition, std::unique_ptr<Stmt> body_stmt,
+              std::shared_ptr<Scope> scope = nullptr,
+              SrcLoc loc = SrcLoc())
+        : Stmt(StmtKind::WhileStmt, loc), condition(std::move(condition)),
+          body_stmt(std::move(body_stmt)), scope(std::move(scope)) {}
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::WhileStmt; }
 };
@@ -2583,7 +2623,7 @@ struct DoWhileStmt: Stmt {
 };
 struct ForStmt: Stmt {
     std::unique_ptr<Stmt> init;  // 1st clause
-    std::unique_ptr<Expr> cond; // 2nd clause
+    ControlCondition cond; // 2nd clause
     std::unique_ptr<Expr> action; // 3rd clause
 
     std::unique_ptr<Stmt> body_stmt;
@@ -2591,6 +2631,14 @@ struct ForStmt: Stmt {
     std::shared_ptr<Scope> scope;
 
     ForStmt(std::unique_ptr<Stmt> init, std::unique_ptr<Expr> cond, std::unique_ptr<Expr> action,
+        std::unique_ptr<Stmt> body_stmt, std::shared_ptr<Scope> scope, SrcLoc loc = SrcLoc())
+        : Stmt(StmtKind::ForStmt, loc), init(std::move(init)),
+          cond(std::move(cond)),
+          action(std::move(action)),
+          body_stmt(std::move(body_stmt)),
+          scope(scope) {
+    }
+    ForStmt(std::unique_ptr<Stmt> init, ControlCondition cond, std::unique_ptr<Expr> action,
         std::unique_ptr<Stmt> body_stmt, std::shared_ptr<Scope> scope, SrcLoc loc = SrcLoc())
         : Stmt(StmtKind::ForStmt, loc), init(std::move(init)),
           cond(std::move(cond)),

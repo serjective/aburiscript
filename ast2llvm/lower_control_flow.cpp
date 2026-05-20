@@ -146,7 +146,8 @@ void ASTToLLVM::convert_if_statement(IfStmt *stmt) {
     if (!ifStmt) { error("unexpected subclass in convert_if_statement()", stmt->location); return; }
 
     std::shared_ptr<Scope> prev_scope = current_scope;
-    bool entered_if_scope = ifStmt->scope || ifStmt->init_stmt;
+    bool entered_if_scope =
+        ifStmt->scope || ifStmt->init_stmt || ifStmt->condition.declaration;
     if (entered_if_scope) {
         current_scope = ifStmt->scope;
         cleanup_stack.emplace_back();
@@ -169,11 +170,19 @@ void ASTToLLVM::convert_if_statement(IfStmt *stmt) {
             return;
         }
     }
+    if (ifStmt->condition.declaration) {
+        convert_statement(ifStmt->condition.declaration.get());
+        if (builder.GetInsertBlock()->getTerminator()) {
+            leave_if_scope();
+            return;
+        }
+    }
 
     if (ifStmt->statement_kind == IfStatementKind::Constexpr) {
         std::optional<bool> condition_value = ifStmt->constexpr_condition_value;
         if (!condition_value.has_value()) {
-            condition_value = try_fold_stmt_condition(ifStmt->condition.get());
+            condition_value =
+                try_fold_stmt_condition(ifStmt->condition.expression.get());
         }
         if (!condition_value.has_value()) {
             error("convert_if_statement(): constexpr if condition was not resolved",
@@ -194,7 +203,8 @@ void ASTToLLVM::convert_if_statement(IfStmt *stmt) {
         stmt_contains_jump_target(ifStmt->then_stmt.get()) ||
         stmt_contains_jump_target(ifStmt->else_stmt.get());
     if (!keep_cfg_for_jump_targets) {
-        if (auto folded_cond = try_fold_stmt_condition(ifStmt->condition.get())) {
+        if (auto folded_cond =
+                try_fold_stmt_condition(ifStmt->condition.expression.get())) {
             auto materialize_dead_branch = [&](Stmt* dead_stmt) {
                 if (!dead_stmt || !stmt_contains_jump_target(dead_stmt)) {
                     return;
@@ -218,7 +228,8 @@ void ASTToLLVM::convert_if_statement(IfStmt *stmt) {
         }
     }
 
-    llvm::Value* condVal = convert_expression(ifStmt->condition.get());
+    llvm::Value* condVal =
+        convert_expression(ifStmt->condition.expression.get());
     if (!condVal) {
         leave_if_scope();
         return;
@@ -274,31 +285,73 @@ void ASTToLLVM::convert_while_statement(WhileStmt *stmt) {
     llvm::BasicBlock* prev_end = endloop;
     size_t prev_break_depth = break_cleanup_depth;
     size_t prev_continue_depth = continue_cleanup_depth;
+    std::shared_ptr<Scope> prev_scope = current_scope;
+    bool has_condition_scope = stmt->scope || stmt->condition.declaration;
+    if (has_condition_scope) {
+        current_scope = stmt->scope;
+        cleanup_stack.emplace_back();
+    }
 
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "while.cond");
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "while.body");
+    llvm::BasicBlock* cleanupBB = has_condition_scope
+        ? llvm::BasicBlock::Create(*context, "while.cleanup")
+        : nullptr;
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "while.end");
     condloop = condBB;
     endloop = endBB;
-    break_cleanup_depth = cleanup_stack.size();
-    continue_cleanup_depth = cleanup_stack.size();
+    size_t condition_outer_depth =
+        has_condition_scope ? cleanup_stack.size() - 1 : cleanup_stack.size();
+    break_cleanup_depth = condition_outer_depth;
+    continue_cleanup_depth = condition_outer_depth;
 
     builder.CreateBr(condBB);
     function->insert(function->end(), condBB);
     builder.SetInsertPoint(condBB);
-    llvm::Value* condVal = convert_expression(stmt->condition.get());
+    if (stmt->condition.declaration) {
+        convert_statement(stmt->condition.declaration.get());
+        if (builder.GetInsertBlock()->getTerminator()) {
+            if (has_condition_scope) {
+                cleanup_stack.pop_back();
+                current_scope = prev_scope;
+            }
+            condloop = prev_cond;
+            endloop = prev_end;
+            break_cleanup_depth = prev_break_depth;
+            continue_cleanup_depth = prev_continue_depth;
+            return;
+        }
+    }
+    llvm::Value* condVal =
+        convert_expression(stmt->condition.expression.get());
     if (!condVal) {
         error("convert_while_statement(): failed to get value for condition", stmt->location);
+        if (has_condition_scope) {
+            cleanup_stack.pop_back();
+            current_scope = prev_scope;
+        }
         return;
     }
     condVal = emit_bool_conversion(condVal, "whilecond");
-    builder.CreateCondBr(condVal, bodyBB, endBB);
+    builder.CreateCondBr(condVal, bodyBB, has_condition_scope ? cleanupBB : endBB);
 
     function->insert(function->end(), bodyBB);
     builder.SetInsertPoint(bodyBB);
     convert_statement(stmt->body_stmt.get());
     if (!builder.GetInsertBlock()->getTerminator()) {
+        if (has_condition_scope) {
+            emit_cleanups_for_scope();
+        }
         builder.CreateBr(condBB);
+    }
+
+    if (has_condition_scope) {
+        function->insert(function->end(), cleanupBB);
+        builder.SetInsertPoint(cleanupBB);
+        emit_cleanups_for_scope();
+        builder.CreateBr(endBB);
+        cleanup_stack.pop_back();
+        current_scope = prev_scope;
     }
 
     function->insert(function->end(), endBB);
@@ -362,17 +415,21 @@ void ASTToLLVM::convert_for_statement(ForStmt *stmt) {
     std::shared_ptr<Scope> prev_scope = current_scope;
     current_scope = stmt->scope;
     cleanup_stack.emplace_back();
+    size_t loop_outer_cleanup_depth = cleanup_stack.size() - 1;
 
     llvm::BasicBlock* initBB = llvm::BasicBlock::Create(*context, "for.init");
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "for.cond");
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "for.body");
     llvm::BasicBlock* incrBB = llvm::BasicBlock::Create(*context, "for.incr");
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "for.end");
+    llvm::BasicBlock* conditionCleanupBB = stmt->cond.declaration
+        ? llvm::BasicBlock::Create(*context, "for.cond.cleanup")
+        : nullptr;
     llvm::BasicBlock* cleanupBB = llvm::BasicBlock::Create(*context, "for.cleanup");
 
     condloop = incrBB; // Continue jumps to increment
     endloop = endBB;   // Break jumps to end
-    break_cleanup_depth = cleanup_stack.size() - 1;
+    break_cleanup_depth = loop_outer_cleanup_depth;
     continue_cleanup_depth = cleanup_stack.size();
 
     // Initializer
@@ -392,9 +449,21 @@ void ASTToLLVM::convert_for_statement(ForStmt *stmt) {
     // Condition
     function->insert(function->end(), condBB);
     builder.SetInsertPoint(condBB);
+    bool has_condition_declaration = stmt->cond.declaration != nullptr;
+    if (has_condition_declaration) {
+        cleanup_stack.emplace_back();
+        continue_cleanup_depth = cleanup_stack.size();
+    }
+    break_cleanup_depth = loop_outer_cleanup_depth;
     llvm::Value* condVal = nullptr;
     if (stmt->cond) {
-        condVal = convert_expression(stmt->cond.get());
+        if (stmt->cond.declaration) {
+            convert_statement(stmt->cond.declaration.get());
+            if (builder.GetInsertBlock()->getTerminator()) {
+                return;
+            }
+        }
+        condVal = convert_expression(stmt->cond.expression.get());
         if (!condVal) {
             error("convert_for_statement(): failed to get value for condition", stmt->location);
             return;
@@ -404,7 +473,10 @@ void ASTToLLVM::convert_for_statement(ForStmt *stmt) {
         // If no condition, it's an infinite loop (true)
         condVal = llvm::ConstantInt::get(*context, llvm::APInt(1, 1));
     }
-    builder.CreateCondBr(condVal, bodyBB, cleanupBB);
+    builder.CreateCondBr(
+        condVal,
+        bodyBB,
+        has_condition_declaration ? conditionCleanupBB : cleanupBB);
 
     // Body
     function->insert(function->end(), bodyBB);
@@ -421,10 +493,21 @@ void ASTToLLVM::convert_for_statement(ForStmt *stmt) {
         convert_expression(stmt->action.get());
     }
     if (!builder.GetInsertBlock()->getTerminator()) {
+        if (has_condition_declaration) {
+            emit_cleanups_for_scope();
+        }
         builder.CreateBr(condBB);
     } else {
         error("convert_for_statement(): branching in a for condition", stmt->location);
         return;
+    }
+
+    if (has_condition_declaration) {
+        function->insert(function->end(), conditionCleanupBB);
+        builder.SetInsertPoint(conditionCleanupBB);
+        emit_cleanups_for_scope();
+        builder.CreateBr(cleanupBB);
+        cleanup_stack.pop_back();
     }
 
     // Cleanup for-scope variables when condition is false
@@ -576,20 +659,55 @@ void ASTToLLVM::convert_switch_statement(SwitchStmt *stmt) {
     llvm::BasicBlock* prev_switch_end = switch_end;
     llvm::BasicBlock* prev_switch_default = switch_default;
     size_t prev_break_depth = break_cleanup_depth;
+    std::shared_ptr<Scope> prev_scope = current_scope;
+    bool has_statement_scope = stmt->scope || stmt->condition.declaration;
+    if (has_statement_scope) {
+        current_scope = stmt->scope;
+        cleanup_stack.emplace_back();
+    }
 
+    llvm::BasicBlock* cleanupBB = has_statement_scope
+        ? llvm::BasicBlock::Create(*context, "switch.cleanup")
+        : nullptr;
     llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "switch.end");
     endloop = endBB; // Break jumps to end
     switch_end = endBB;
-    break_cleanup_depth = cleanup_stack.size();
+    break_cleanup_depth =
+        has_statement_scope ? cleanup_stack.size() - 1 : cleanup_stack.size();
 
-    llvm::Value* condVal = convert_expression(stmt->condition.get());
+    if (stmt->condition.declaration) {
+        convert_statement(stmt->condition.declaration.get());
+        if (builder.GetInsertBlock()->getTerminator()) {
+            if (has_statement_scope) {
+                cleanup_stack.pop_back();
+                current_scope = prev_scope;
+            }
+            endloop = prev_end;
+            switch_inst = prev_switch;
+            switch_end = prev_switch_end;
+            switch_default = prev_switch_default;
+            break_cleanup_depth = prev_break_depth;
+            return;
+        }
+    }
+
+    llvm::Value* condVal =
+        convert_expression(stmt->condition.expression.get());
     if (!condVal) {
         error("error in getting switch condition", stmt->location);
+        if (has_statement_scope) {
+            cleanup_stack.pop_back();
+            current_scope = prev_scope;
+        }
         return;
     }
 
-    switch_inst = builder.CreateSwitch(condVal, endBB, 0);
-    switch_default = endBB; // Default goes to end unless overridden
+    switch_inst = builder.CreateSwitch(
+        condVal,
+        has_statement_scope ? cleanupBB : endBB,
+        0);
+    switch_default =
+        has_statement_scope ? cleanupBB : endBB; // Default goes to end unless overridden
 
 
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "switch.body.entry", function);
@@ -599,12 +717,24 @@ void ASTToLLVM::convert_switch_statement(SwitchStmt *stmt) {
     convert_statement(stmt->stmt.get());
 
     if (!builder.GetInsertBlock()->getTerminator()) {
+        if (has_statement_scope) {
+            emit_cleanups_for_scope();
+        }
         builder.CreateBr(endBB);
     }
 
     // If we found a default case, `switch_default` would have been updated by `convert_default_statement`.
     // We need to update the SwitchInst's default destination.
     switch_inst->setDefaultDest(switch_default);
+
+    if (has_statement_scope) {
+        function->insert(function->end(), cleanupBB);
+        builder.SetInsertPoint(cleanupBB);
+        emit_cleanups_for_scope();
+        builder.CreateBr(endBB);
+        cleanup_stack.pop_back();
+        current_scope = prev_scope;
+    }
 
     function->insert(function->end(), endBB);
     builder.SetInsertPoint(endBB);

@@ -366,7 +366,7 @@ std::unique_ptr<Stmt> Collect::collect_if_statement(std::unique_ptr<Expr> condit
 
 std::unique_ptr<Stmt> Collect::collect_if_statement(
     std::unique_ptr<Stmt> init_stmt,
-    std::unique_ptr<Expr> condition,
+    ControlCondition condition,
     std::unique_ptr<Stmt> then_stmt,
     std::unique_ptr<Stmt> else_stmt,
     IfStatementKind statement_kind,
@@ -374,7 +374,7 @@ std::unique_ptr<Stmt> Collect::collect_if_statement(
     std::optional<bool> constexpr_condition_value,
     SrcLoc loc) const {
 
-    if (auto* binop = dyn_cast<BinaryOperation>(condition.get())) {
+    if (auto* binop = dyn_cast<BinaryOperation>(condition.expression.get())) {
         if (statement_kind == IfStatementKind::Runtime &&
             binop->bop == BinOpTypes::ASSIGN) {
             report_warning("using '=' in condition; did you mean '=='?", binop->location);
@@ -432,16 +432,27 @@ std::unique_ptr<Expr> Collect::collect_switch_condition(std::unique_ptr<Expr> co
 }
 
 
-std::unique_ptr<Stmt> Collect::collect_switch_statement(std::unique_ptr<Expr> condition, std::unique_ptr<Stmt> stmt, SrcLoc loc) const {
+std::unique_ptr<Stmt> Collect::collect_switch_statement(
+    ControlCondition condition,
+    std::unique_ptr<Stmt> stmt,
+    std::shared_ptr<Scope> scope,
+    SrcLoc loc) const {
 
-    return collect_make<SwitchStmt>(std::move(condition), std::move(stmt), loc);
+    return collect_make<SwitchStmt>(
+        std::move(condition), std::move(stmt), std::move(scope), loc);
 }
 
 
-std::unique_ptr<Stmt> Collect::collect_while_statement(std::unique_ptr<Expr> condition, std::unique_ptr<Stmt> body_stmt, SrcLoc loc) const {
+std::unique_ptr<Stmt> Collect::collect_while_statement(
+    ControlCondition condition,
+    std::unique_ptr<Stmt> body_stmt,
+    std::shared_ptr<Scope> scope,
+    SrcLoc loc) const {
 
-    condition = collect_condition_expression(std::move(condition), loc, "while");
-    return collect_make<WhileStmt>(std::move(condition), std::move(body_stmt), loc);
+    condition.expression =
+        collect_condition_expression(std::move(condition.expression), loc, "while");
+    return collect_make<WhileStmt>(
+        std::move(condition), std::move(body_stmt), std::move(scope), loc);
 }
 
 
@@ -452,10 +463,17 @@ std::unique_ptr<Stmt> Collect::collect_do_while_statement(std::unique_ptr<Expr> 
 }
 
 
-std::unique_ptr<Stmt> Collect::collect_for_statement(std::unique_ptr<Stmt> init, std::unique_ptr<Expr> condition, std::unique_ptr<Expr> action, std::unique_ptr<Stmt> body_stmt, std::shared_ptr<Scope> scope, SrcLoc loc) const {
+std::unique_ptr<Stmt> Collect::collect_for_statement(
+    std::unique_ptr<Stmt> init,
+    ControlCondition condition,
+    std::unique_ptr<Expr> action,
+    std::unique_ptr<Stmt> body_stmt,
+    std::shared_ptr<Scope> scope,
+    SrcLoc loc) const {
 
-    if (condition) {
-        condition = collect_condition_expression(std::move(condition), loc, "for");
+    if (condition.expression) {
+        condition.expression =
+            collect_condition_expression(std::move(condition.expression), loc, "for");
     }
     if (action) {
         action = collect_apply_standard_conversions(std::move(action), ExprUseContext::ExpressionStatement);

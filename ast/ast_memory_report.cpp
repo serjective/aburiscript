@@ -899,7 +899,8 @@ private:
                 auto* node = static_cast<const IfStmt*>(stmt);
                 record_stmt<IfStmt>(StmtKind::IfStmt);
                 visit_stmt(node->init_stmt.get());
-                visit_stmt(node->condition.get());
+                visit_stmt(node->condition.declaration.get());
+                visit_stmt(node->condition.expression.get());
                 visit_stmt(node->then_stmt.get());
                 visit_stmt(node->else_stmt.get());
                 return;
@@ -940,14 +941,16 @@ private:
             case StmtKind::SwitchStmt: {
                 auto* node = static_cast<const SwitchStmt*>(stmt);
                 record_stmt<SwitchStmt>(StmtKind::SwitchStmt);
-                visit_stmt(node->condition.get());
+                visit_stmt(node->condition.declaration.get());
+                visit_stmt(node->condition.expression.get());
                 visit_stmt(node->stmt.get());
                 return;
             }
             case StmtKind::WhileStmt: {
                 auto* node = static_cast<const WhileStmt*>(stmt);
                 record_stmt<WhileStmt>(StmtKind::WhileStmt);
-                visit_stmt(node->condition.get());
+                visit_stmt(node->condition.declaration.get());
+                visit_stmt(node->condition.expression.get());
                 visit_stmt(node->body_stmt.get());
                 return;
             }
@@ -962,7 +965,8 @@ private:
                 auto* node = static_cast<const ForStmt*>(stmt);
                 record_stmt<ForStmt>(StmtKind::ForStmt);
                 visit_stmt(node->init.get());
-                visit_stmt(node->cond.get());
+                visit_stmt(node->cond.declaration.get());
+                visit_stmt(node->cond.expression.get());
                 visit_stmt(node->action.get());
                 visit_stmt(node->body_stmt.get());
                 return;

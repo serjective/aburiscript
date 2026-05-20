@@ -3097,11 +3097,31 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
     }
 
     if (auto* if_stmt = dyn_cast<IfStmt>(stmt)) {
+        bool has_statement_scope =
+            if_stmt->scope || if_stmt->init_stmt ||
+            if_stmt->condition.declaration;
+        if (has_statement_scope) {
+            push_interpreter_scope();
+        }
         if (if_stmt->init_stmt) {
             InterpExecResult init_result =
                 eval_interpreter_stmt(if_stmt->init_stmt.get(), mode, depth + 1);
             if (init_result.kind != InterpExecResult::Kind::Continue) {
+                if (has_statement_scope) {
+                    pop_interpreter_scope();
+                }
                 return init_result;
+            }
+        }
+        if (if_stmt->condition.declaration) {
+            InterpExecResult condition_decl_result =
+                eval_interpreter_stmt(
+                    if_stmt->condition.declaration.get(), mode, depth + 1);
+            if (condition_decl_result.kind != InterpExecResult::Kind::Continue) {
+                if (has_statement_scope) {
+                    pop_interpreter_scope();
+                }
+                return condition_decl_result;
             }
         }
         bool condition_truthy = false;
@@ -3111,37 +3131,67 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
         } else {
             ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
             if (!eval_condition_truthiness(
-                    if_stmt->condition.get(),
+                    if_stmt->condition.expression.get(),
                     mode,
                     depth + 1,
                     condition_truthy,
                     condition_failure)) {
+                if (has_statement_scope) {
+                    pop_interpreter_scope();
+                }
                 return make_interp_fail_result(std::move(condition_failure));
             }
         }
 
+        InterpExecResult branch_result = make_interp_continue_result();
         if (condition_truthy) {
-            return eval_interpreter_stmt(if_stmt->then_stmt.get(), mode, depth + 1);
+            branch_result =
+                eval_interpreter_stmt(if_stmt->then_stmt.get(), mode, depth + 1);
+        } else if (if_stmt->else_stmt) {
+            branch_result =
+                eval_interpreter_stmt(if_stmt->else_stmt.get(), mode, depth + 1);
         }
-        if (if_stmt->else_stmt) {
-            return eval_interpreter_stmt(if_stmt->else_stmt.get(), mode, depth + 1);
+        if (has_statement_scope) {
+            pop_interpreter_scope();
         }
-        return make_interp_continue_result();
+        return branch_result;
     }
 
     if (auto* while_stmt = dyn_cast<WhileStmt>(stmt)) {
         while (true) {
+            bool has_condition_scope =
+                while_stmt->scope || while_stmt->condition.declaration;
+            if (has_condition_scope) {
+                push_interpreter_scope();
+            }
+            if (while_stmt->condition.declaration) {
+                InterpExecResult condition_decl_result =
+                    eval_interpreter_stmt(
+                        while_stmt->condition.declaration.get(), mode, depth + 1);
+                if (condition_decl_result.kind != InterpExecResult::Kind::Continue) {
+                    if (has_condition_scope) {
+                        pop_interpreter_scope();
+                    }
+                    return condition_decl_result;
+                }
+            }
             bool condition_truthy = false;
             ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
             if (!eval_condition_truthiness(
-                    while_stmt->condition.get(),
+                    while_stmt->condition.expression.get(),
                     mode,
                     depth + 1,
                     condition_truthy,
                     condition_failure)) {
+                if (has_condition_scope) {
+                    pop_interpreter_scope();
+                }
                 return make_interp_fail_result(std::move(condition_failure));
             }
             if (!condition_truthy) {
+                if (has_condition_scope) {
+                    pop_interpreter_scope();
+                }
                 return make_interp_continue_result();
             }
 
@@ -3149,10 +3199,19 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
                 eval_interpreter_stmt(while_stmt->body_stmt.get(), mode, depth + 1);
             if (body_result.kind == InterpExecResult::Kind::Continue ||
                 body_result.kind == InterpExecResult::Kind::LoopContinue) {
+                if (has_condition_scope) {
+                    pop_interpreter_scope();
+                }
                 continue;
             }
             if (body_result.kind == InterpExecResult::Kind::Break) {
+                if (has_condition_scope) {
+                    pop_interpreter_scope();
+                }
                 return make_interp_continue_result();
+            }
+            if (has_condition_scope) {
+                pop_interpreter_scope();
             }
             return body_result;
         }
@@ -3198,19 +3257,40 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
         }
 
         while (true) {
+            bool has_condition_scope = for_stmt->cond.declaration != nullptr;
+            if (has_condition_scope) {
+                push_interpreter_scope();
+            }
             if (for_stmt->cond) {
+                if (for_stmt->cond.declaration) {
+                    InterpExecResult condition_decl_result =
+                        eval_interpreter_stmt(
+                            for_stmt->cond.declaration.get(), mode, depth + 1);
+                    if (condition_decl_result.kind !=
+                        InterpExecResult::Kind::Continue) {
+                        pop_interpreter_scope();
+                        pop_interpreter_scope();
+                        return condition_decl_result;
+                    }
+                }
                 bool condition_truthy = false;
                 ConstEvalResult condition_failure = ConstEvalResult::not_evaluated();
                 if (!eval_condition_truthiness(
-                        for_stmt->cond.get(),
+                        for_stmt->cond.expression.get(),
                         mode,
                         depth + 1,
                         condition_truthy,
                         condition_failure)) {
+                    if (has_condition_scope) {
+                        pop_interpreter_scope();
+                    }
                     pop_interpreter_scope();
                     return make_interp_fail_result(std::move(condition_failure));
                 }
                 if (!condition_truthy) {
+                    if (has_condition_scope) {
+                        pop_interpreter_scope();
+                    }
                     pop_interpreter_scope();
                     return make_interp_continue_result();
                 }
@@ -3220,10 +3300,16 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
                 eval_interpreter_stmt(for_stmt->body_stmt.get(), mode, depth + 1);
             if (body_result.kind == InterpExecResult::Kind::Return ||
                 body_result.kind == InterpExecResult::Kind::Fail) {
+                if (has_condition_scope) {
+                    pop_interpreter_scope();
+                }
                 pop_interpreter_scope();
                 return body_result;
             }
             if (body_result.kind == InterpExecResult::Kind::Break) {
+                if (has_condition_scope) {
+                    pop_interpreter_scope();
+                }
                 pop_interpreter_scope();
                 return make_interp_continue_result();
             }
@@ -3233,9 +3319,15 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
                     eval_expr(for_stmt->action.get(), mode, depth + 1);
                 if (action_result.status != ConstEvalStatus::Constant ||
                     !action_result.value.has_value()) {
+                    if (has_condition_scope) {
+                        pop_interpreter_scope();
+                    }
                     pop_interpreter_scope();
                     return make_interp_fail_result(std::move(action_result));
                 }
+            }
+            if (has_condition_scope) {
+                pop_interpreter_scope();
             }
         }
     }
@@ -3329,20 +3421,43 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
     }
 
     if (auto* switch_stmt = dyn_cast<SwitchStmt>(stmt)) {
+        bool has_statement_scope =
+            switch_stmt->scope || switch_stmt->condition.declaration;
+        if (has_statement_scope) {
+            push_interpreter_scope();
+        }
+        if (switch_stmt->condition.declaration) {
+            InterpExecResult condition_decl_result =
+                eval_interpreter_stmt(
+                    switch_stmt->condition.declaration.get(), mode, depth + 1);
+            if (condition_decl_result.kind != InterpExecResult::Kind::Continue) {
+                if (has_statement_scope) {
+                    pop_interpreter_scope();
+                }
+                return condition_decl_result;
+            }
+        }
         ConstEvalResult cond_result =
-            eval_expr(switch_stmt->condition.get(), mode, depth + 1);
+            eval_expr(switch_stmt->condition.expression.get(), mode, depth + 1);
         if (cond_result.status != ConstEvalStatus::Constant ||
             !cond_result.value.has_value()) {
+            if (has_statement_scope) {
+                pop_interpreter_scope();
+            }
             return make_interp_fail_result(std::move(cond_result));
         }
 
-        IntShape switch_shape = infer_integer_shape(switch_stmt->condition->get_type());
+        IntShape switch_shape =
+            infer_integer_shape(switch_stmt->condition.expression->get_type());
         ConstIntValue switch_value{};
         if (!const_value_to_int(*cond_result.value, switch_shape, switch_value)) {
+            if (has_statement_scope) {
+                pop_interpreter_scope();
+            }
             return make_interp_fail_result(make_not_evaluated(
                 ConstEvalDiagCode::UnsupportedExpression,
                 "switch condition must be integer-like in constexpr interpreter",
-                switch_stmt->condition->location));
+                switch_stmt->condition.expression->location));
         }
 
         std::vector<SwitchEntry> entries;
@@ -3365,10 +3480,16 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
                     eval_expr(const_cast<Expr*>(label.const_expr), mode, depth + 1);
                 if (case_start.status != ConstEvalStatus::Constant ||
                     !case_start.value.has_value()) {
+                    if (has_statement_scope) {
+                        pop_interpreter_scope();
+                    }
                     return make_interp_fail_result(std::move(case_start));
                 }
                 ConstIntValue case_start_int{};
                 if (!const_value_to_int(*case_start.value, switch_shape, case_start_int)) {
+                    if (has_statement_scope) {
+                        pop_interpreter_scope();
+                    }
                     return make_interp_fail_result(make_not_evaluated(
                         ConstEvalDiagCode::UnsupportedExpression,
                         "switch case label must be integer-like in constexpr interpreter",
@@ -3381,10 +3502,16 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
                         eval_expr(const_cast<Expr*>(label.range_end), mode, depth + 1);
                     if (case_end.status != ConstEvalStatus::Constant ||
                         !case_end.value.has_value()) {
+                        if (has_statement_scope) {
+                            pop_interpreter_scope();
+                        }
                         return make_interp_fail_result(std::move(case_end));
                     }
                     ConstIntValue case_end_int{};
                     if (!const_value_to_int(*case_end.value, switch_shape, case_end_int)) {
+                        if (has_statement_scope) {
+                            pop_interpreter_scope();
+                        }
                         return make_interp_fail_result(make_not_evaluated(
                             ConstEvalDiagCode::UnsupportedExpression,
                             "switch case range must be integer-like in constexpr interpreter",
@@ -3423,6 +3550,9 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
 
         if (start_index == entries.size()) {
             if (default_index == entries.size()) {
+                if (has_statement_scope) {
+                    pop_interpreter_scope();
+                }
                 return make_interp_continue_result();
             }
             start_index = default_index;
@@ -3435,9 +3565,18 @@ InterpExecResult eval_interpreter_stmt(Stmt* stmt, ConstEvalMode mode, size_t de
                 continue;
             }
             if (entry_result.kind == InterpExecResult::Kind::Break) {
+                if (has_statement_scope) {
+                    pop_interpreter_scope();
+                }
                 return make_interp_continue_result();
             }
+            if (has_statement_scope) {
+                pop_interpreter_scope();
+            }
             return entry_result;
+        }
+        if (has_statement_scope) {
+            pop_interpreter_scope();
         }
         return make_interp_continue_result();
     }

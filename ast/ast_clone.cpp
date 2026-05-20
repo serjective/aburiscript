@@ -1903,14 +1903,24 @@ bool rewrite_stmt_tree_in_place_impl(std::unique_ptr<Stmt>& stmt,
                     error_out)) {
                 return false;
             }
-            if (if_stmt->condition &&
-                !rewrite_expr_tree(if_stmt->condition, ctx, error_out)) {
+            if (if_stmt->condition.declaration &&
+                !rewrite_stmt_tree_in_place_impl(
+                    if_stmt->condition.declaration,
+                    ctx,
+                    error_out)) {
+                return false;
+            }
+            if (if_stmt->condition.expression &&
+                !rewrite_expr_tree(
+                    if_stmt->condition.expression,
+                    ctx,
+                    error_out)) {
                 return false;
             }
             if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
-                if_stmt->condition) {
+                if_stmt->condition.expression) {
                 ConstEvalResult eval = evaluate_with_consteval_compat(
-                    if_stmt->condition.get(),
+                    if_stmt->condition.expression.get(),
                     ConstEvalMode::cpp_core_constant_expression());
                 if (eval.status == ConstEvalStatus::Constant &&
                     eval.int_value.has_value()) {
@@ -1977,9 +1987,14 @@ bool rewrite_stmt_tree_in_place_impl(std::unique_ptr<Stmt>& stmt,
         }
         case StmtKind::SwitchStmt: {
             auto* switch_stmt = static_cast<SwitchStmt*>(stmt.get());
-            return (!switch_stmt->condition ||
+            return (!switch_stmt->condition.declaration ||
+                    rewrite_stmt_tree_in_place_impl(
+                        switch_stmt->condition.declaration,
+                        ctx,
+                        error_out)) &&
+                   (!switch_stmt->condition.expression ||
                     rewrite_expr_tree(
-                        switch_stmt->condition,
+                        switch_stmt->condition.expression,
                         ctx,
                         error_out)) &&
                    (!switch_stmt->stmt ||
@@ -1990,8 +2005,16 @@ bool rewrite_stmt_tree_in_place_impl(std::unique_ptr<Stmt>& stmt,
         }
         case StmtKind::WhileStmt: {
             auto* while_stmt = static_cast<WhileStmt*>(stmt.get());
-            return (!while_stmt->condition ||
-                    rewrite_expr_tree(while_stmt->condition, ctx, error_out)) &&
+            return (!while_stmt->condition.declaration ||
+                    rewrite_stmt_tree_in_place_impl(
+                        while_stmt->condition.declaration,
+                        ctx,
+                        error_out)) &&
+                   (!while_stmt->condition.expression ||
+                    rewrite_expr_tree(
+                        while_stmt->condition.expression,
+                        ctx,
+                        error_out)) &&
                    (!while_stmt->body_stmt ||
                     rewrite_stmt_tree_in_place_impl(
                         while_stmt->body_stmt,
@@ -2015,8 +2038,13 @@ bool rewrite_stmt_tree_in_place_impl(std::unique_ptr<Stmt>& stmt,
                         for_stmt->init,
                         ctx,
                         error_out)) &&
-                   (!for_stmt->cond ||
-                    rewrite_expr_tree(for_stmt->cond, ctx, error_out)) &&
+                   (!for_stmt->cond.declaration ||
+                    rewrite_stmt_tree_in_place_impl(
+                        for_stmt->cond.declaration,
+                        ctx,
+                        error_out)) &&
+                   (!for_stmt->cond.expression ||
+                    rewrite_expr_tree(for_stmt->cond.expression, ctx, error_out)) &&
                    (!for_stmt->action ||
                     rewrite_expr_tree(for_stmt->action, ctx, error_out)) &&
                    (!for_stmt->body_stmt ||
@@ -2185,18 +2213,23 @@ std::unique_ptr<Stmt> clone_stmt_impl(const Stmt* stmt,
             const auto* if_stmt = static_cast<const IfStmt*>(stmt);
             auto init_stmt = clone_stmt_impl(
                 if_stmt->init_stmt.get(), ctx, error_out);
-            auto condition = clone_expr_with_substitution(
-                if_stmt->condition.get(), ctx, error_out);
+            auto condition_decl = clone_stmt_impl(
+                if_stmt->condition.declaration.get(), ctx, error_out);
+            auto condition_expr = clone_expr_with_substitution(
+                if_stmt->condition.expression.get(), ctx, error_out);
             auto then_stmt = clone_stmt_impl(if_stmt->then_stmt.get(), ctx, error_out);
             auto else_stmt = clone_stmt_impl(if_stmt->else_stmt.get(), ctx, error_out);
             if ((if_stmt->init_stmt && !init_stmt) ||
-                (if_stmt->condition && !condition) ||
+                (if_stmt->condition.declaration && !condition_decl) ||
+                (if_stmt->condition.expression && !condition_expr) ||
                 (if_stmt->then_stmt && !then_stmt) ||
                 (if_stmt->else_stmt && !else_stmt)) {
                 return nullptr;
             }
             auto result = std::make_unique<IfStmt>(
-                std::move(condition),
+                ControlCondition(
+                    std::move(condition_decl),
+                    std::move(condition_expr)),
                 std::move(then_stmt),
                 std::move(else_stmt),
                 if_stmt->location,
@@ -2284,32 +2317,44 @@ std::unique_ptr<Stmt> clone_stmt_impl(const Stmt* stmt,
         }
         case StmtKind::SwitchStmt: {
             const auto* switch_stmt = static_cast<const SwitchStmt*>(stmt);
-            auto condition = clone_expr_with_substitution(
-                switch_stmt->condition.get(), ctx, error_out);
+            auto condition_decl = clone_stmt_impl(
+                switch_stmt->condition.declaration.get(), ctx, error_out);
+            auto condition_expr = clone_expr_with_substitution(
+                switch_stmt->condition.expression.get(), ctx, error_out);
             auto nested_stmt = clone_stmt_impl(switch_stmt->stmt.get(), ctx, error_out);
-            if ((switch_stmt->condition && !condition) ||
+            if ((switch_stmt->condition.declaration && !condition_decl) ||
+                (switch_stmt->condition.expression && !condition_expr) ||
                 (switch_stmt->stmt && !nested_stmt)) {
                 return nullptr;
             }
             auto result = std::make_unique<SwitchStmt>(
-                std::move(condition),
+                ControlCondition(
+                    std::move(condition_decl),
+                    std::move(condition_expr)),
                 std::move(nested_stmt),
+                clone_scope(switch_stmt->scope, ctx),
                 switch_stmt->location);
             assign_node_id(result.get(), ctx.ast_ctx);
             return result;
         }
         case StmtKind::WhileStmt: {
             const auto* while_stmt = static_cast<const WhileStmt*>(stmt);
-            auto condition = clone_expr_with_substitution(
-                while_stmt->condition.get(), ctx, error_out);
+            auto condition_decl = clone_stmt_impl(
+                while_stmt->condition.declaration.get(), ctx, error_out);
+            auto condition_expr = clone_expr_with_substitution(
+                while_stmt->condition.expression.get(), ctx, error_out);
             auto body_stmt = clone_stmt_impl(while_stmt->body_stmt.get(), ctx, error_out);
-            if ((while_stmt->condition && !condition) ||
+            if ((while_stmt->condition.declaration && !condition_decl) ||
+                (while_stmt->condition.expression && !condition_expr) ||
                 (while_stmt->body_stmt && !body_stmt)) {
                 return nullptr;
             }
             auto result = std::make_unique<WhileStmt>(
-                std::move(condition),
+                ControlCondition(
+                    std::move(condition_decl),
+                    std::move(condition_expr)),
                 std::move(body_stmt),
+                clone_scope(while_stmt->scope, ctx),
                 while_stmt->location);
             assign_node_id(result.get(), ctx.ast_ctx);
             return result;
@@ -2333,20 +2378,25 @@ std::unique_ptr<Stmt> clone_stmt_impl(const Stmt* stmt,
         case StmtKind::ForStmt: {
             const auto* for_stmt = static_cast<const ForStmt*>(stmt);
             auto init = clone_stmt_impl(for_stmt->init.get(), ctx, error_out);
-            auto cond = clone_expr_with_substitution(
-                for_stmt->cond.get(), ctx, error_out);
+            auto cond_decl = clone_stmt_impl(
+                for_stmt->cond.declaration.get(), ctx, error_out);
+            auto cond_expr = clone_expr_with_substitution(
+                for_stmt->cond.expression.get(), ctx, error_out);
             auto action = clone_expr_with_substitution(
                 for_stmt->action.get(), ctx, error_out);
             auto body_stmt = clone_stmt_impl(for_stmt->body_stmt.get(), ctx, error_out);
             if ((for_stmt->init && !init) ||
-                (for_stmt->cond && !cond) ||
+                (for_stmt->cond.declaration && !cond_decl) ||
+                (for_stmt->cond.expression && !cond_expr) ||
                 (for_stmt->action && !action) ||
                 (for_stmt->body_stmt && !body_stmt)) {
                 return nullptr;
             }
             auto result = std::make_unique<ForStmt>(
                 std::move(init),
-                std::move(cond),
+                ControlCondition(
+                    std::move(cond_decl),
+                    std::move(cond_expr)),
                 std::move(action),
                 std::move(body_stmt),
                 clone_scope(for_stmt->scope, ctx),

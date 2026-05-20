@@ -456,6 +456,187 @@ std::optional<size_t> Parser::find_cpp_if_init_semicolon() {
     }
 }
 
+ControlCondition Parser::parse_control_condition(TokenType terminator,
+                                                 const char* statement_name) {
+    if (should_parse_control_condition_as_declaration(
+            terminator, statement_name)) {
+        return parse_control_condition_declaration(terminator, statement_name);
+    }
+    return ControlCondition(parse_expression());
+}
+
+bool Parser::should_parse_control_condition_as_declaration(
+    TokenType terminator,
+    const char* statement_name) {
+    if (!is_cxx_mode_active() || !isTokenDeclarationSpec(current_token())) {
+        return false;
+    }
+
+    {
+        RevertingTentativeParsingAction tentative(*this);
+        try {
+            auto condition =
+                parse_control_condition_declaration(terminator, statement_name);
+            (void)condition;
+            return true;
+        } catch (const ParseError&) {
+        } catch (const FatalErrorLimitReached&) {
+            throw;
+        }
+    }
+
+    {
+        RevertingTentativeParsingAction tentative(*this);
+        try {
+            auto expression = parse_expression();
+            if (expression && gentle_check(terminator)) {
+                return false;
+            }
+        } catch (const ParseError&) {
+        } catch (const FatalErrorLimitReached&) {
+            throw;
+        }
+    }
+
+    // Reparse as a declaration to preserve the more specific condition
+    // declaration diagnostic for malformed cases such as `if (int x)`.
+    return true;
+}
+
+ControlCondition Parser::parse_control_condition_declaration(
+    TokenType terminator,
+    const char* statement_name) {
+    Token start_tok = current_token();
+    DeclarationParser decl_parser(this);
+    std::vector<std::unique_ptr<Decl>> side_decls;
+    auto base_type = parse_declaration_head(start_tok, decl_parser, side_decls);
+    if (!side_decls.empty()) {
+        error_custloc(
+            std::string(statement_name) +
+                " condition declaration cannot define a class or enumeration",
+            start_tok.loc);
+    }
+    auto parsed_type = decl_parser.parse_declarator(base_type);
+    retain_type_specifier_decl_if_needed(decl_parser);
+    auto trailing_attrs = try_parse_attributes();
+
+    if (decl_parser.name.empty()) {
+        error_custloc(
+            std::string(statement_name) +
+                " condition declaration requires a variable name",
+            decl_parser.loc.isInvalid() ? start_tok.loc : decl_parser.loc);
+    }
+    if (decl_parser.str_class != StorageClass::NONE ||
+        decl_parser.is_inline ||
+        decl_parser.is_thread_local ||
+        decl_parser.is_block_byref ||
+        decl_parser.is_consteval ||
+        decl_parser.is_friend ||
+        decl_parser.is_mutable ||
+        decl_parser.explicit_specifier.is_present) {
+        error_custloc(
+            std::string(statement_name) +
+                " condition declaration only permits type specifiers and 'constexpr'",
+            start_tok.loc);
+    }
+    if (!parsed_type) {
+        error_custloc(
+            std::string(statement_name) +
+                " condition declaration has invalid type",
+            start_tok.loc);
+    }
+    if (canonical_type_kind(parsed_type, ast_ctx.get()) == TypeKind::Function) {
+        error_custloc(
+            std::string(statement_name) +
+                " condition declaration cannot declare a function",
+            decl_parser.loc.isInvalid() ? start_tok.loc : decl_parser.loc);
+    }
+    if (canonical_type_kind(parsed_type, ast_ctx.get()) == TypeKind::Array) {
+        error_custloc(
+            std::string(statement_name) +
+                " condition declaration cannot declare an array",
+            decl_parser.loc.isInvalid() ? start_tok.loc : decl_parser.loc);
+    }
+
+    std::unique_ptr<Expr> init_expr;
+    bool is_copy_initialization = false;
+    if (gentle_check_and_consume(TokenType::ASSIGN)) {
+        is_copy_initialization = true;
+        init_expr = gentle_check(TokenType::LEFT_BRACE)
+            ? parse_init_list()
+            : parse_assignment_expression();
+    } else if (gentle_check(TokenType::LEFT_BRACE)) {
+        init_expr = parse_init_list();
+    } else {
+        error_custloc(
+            std::string(statement_name) +
+                " condition declaration requires an initializer",
+            current_token().loc);
+    }
+    if (gentle_check(TokenType::COMMA)) {
+        error_custloc(
+            std::string(statement_name) +
+                " condition declaration must declare exactly one variable",
+            current_token().loc);
+    }
+    if (!gentle_check(terminator)) {
+        error_custloc(
+            std::string("expected '") + token_type_to_string(terminator) +
+                "' after " + statement_name + " condition declaration",
+            current_token().loc);
+    }
+
+    QualType declared_type(parsed_type, decl_parser.qualifiers);
+    auto declared_sym = collect_->collect_declare_variable_symbol(
+        decl_parser.name,
+        declared_type,
+        StorageClass::NONE,
+        decl_parser.is_constexpr,
+        false,
+        decl_parser.loc.isInvalid() ? start_tok.loc : decl_parser.loc,
+        current_decl_language_linkage(),
+        true);
+    if (declared_sym) {
+        declared_sym->is_constexpr = decl_parser.is_constexpr;
+        for (const auto& attr : decl_parser.leading_attrs) {
+            declared_sym->sym_attrs.attrs.push_back(attr);
+        }
+        for (const auto& attr : trailing_attrs) {
+            declared_sym->sym_attrs.attrs.push_back(attr);
+        }
+    }
+    auto var_decl = collect_->collect_variable_declaration(
+        declared_type,
+        decl_parser.name,
+        std::move(init_expr),
+        declared_sym,
+        StorageClass::NONE,
+        {decl_parser.is_constexpr,
+         false,
+         false,
+         false,
+         false,
+         false,
+         false,
+         is_copy_initialization,
+         false,
+         false},
+        decl_parser.loc.isInvalid() ? start_tok.loc : decl_parser.loc,
+        current_decl_language_linkage());
+    if (auto* variable = dyn_cast<VariableDecl>(var_decl.get())) {
+        variable->is_constexpr = decl_parser.is_constexpr;
+        ast_ctx->append_attrs(variable->node_id, std::move(decl_parser.leading_attrs));
+        ast_ctx->append_attrs(variable->node_id, std::move(trailing_attrs));
+    }
+    auto condition_expr = collect_->collect_identifier_reference(
+        decl_parser.name,
+        declared_sym,
+        decl_parser.loc.isInvalid() ? start_tok.loc : decl_parser.loc);
+    return ControlCondition(
+        collect_->collect_decl_statement(std::move(var_decl), start_tok.loc),
+        std::move(condition_expr));
+}
+
 std::unique_ptr<Stmt> Parser::parse_if_stmt() {
     Token t = current_token();
     check_and_consume(TokenType::IF);
@@ -562,13 +743,14 @@ std::unique_ptr<Stmt> Parser::parse_if_stmt() {
         init_stmt = parse_if_init_statement();
     }
 
-    auto condition = parse_expression();
+    auto condition = parse_control_condition(TokenType::RIGHT_PAREN, "if");
     check_and_consume(TokenType::RIGHT_PAREN);
     auto condition_info = collect_->collect_if_condition(
-        std::move(condition),
+        std::move(condition.expression),
         is_constexpr_if ? IfStatementKind::Constexpr : IfStatementKind::Runtime,
         t.loc,
         is_in_template_pattern_context());
+    condition.expression = std::move(condition_info.condition);
 
     auto branch_state = [&](bool then_branch) -> CppConstexprIfBranchState {
         if (!is_constexpr_if) {
@@ -630,7 +812,7 @@ std::unique_ptr<Stmt> Parser::parse_if_stmt() {
     }
     return collect_->collect_if_statement(
         std::move(init_stmt),
-        std::move(condition_info.condition),
+        std::move(condition),
         std::move(then_stmt),
         std::move(else_stmt),
         is_constexpr_if ? IfStatementKind::Constexpr : IfStatementKind::Runtime,
@@ -642,13 +824,36 @@ std::unique_ptr<Stmt> Parser::parse_switch() {
     Token t = current_token();
     check_and_consume(TokenType::SWITCH);
     check_and_consume(TokenType::LEFT_PAREN);
-    auto condition = parse_expression();
+    auto entered_scope = is_cxx_mode_active()
+        ? collect_->collect_enter_scope(ScopeFlags::BlockScope)
+        : Collect::ScopeEnterResult{};
+    struct SwitchScopeGuard {
+        Parser* parser = nullptr;
+        bool active = false;
+        ~SwitchScopeGuard() {
+            if (active && parser && parser->collect_) {
+                parser->collect_->collect_leave_scope();
+            }
+        }
+    } switch_scope_guard{this, is_cxx_mode_active()};
+
+    auto condition = parse_control_condition(TokenType::RIGHT_PAREN, "switch");
     check_and_consume(TokenType::RIGHT_PAREN);
     collect_->collect_enter_switch();
-    condition = collect_->collect_switch_condition(std::move(condition), t.loc);
+    condition.expression =
+        collect_->collect_switch_condition(std::move(condition.expression), t.loc);
     auto body_stmt = parse_stmt();
     collect_->collect_leave_switch();
-    return collect_->collect_switch_statement(std::move(condition), std::move(body_stmt), t.loc);
+    auto selection_scope = entered_scope.scope;
+    switch_scope_guard.active = false;
+    if (is_cxx_mode_active()) {
+        collect_->collect_leave_scope();
+    }
+    return collect_->collect_switch_statement(
+        std::move(condition),
+        std::move(body_stmt),
+        std::move(selection_scope),
+        t.loc);
 }
 std::unique_ptr<Stmt> Parser::parse_case_stmt() {
     struct PendingLabel {
@@ -709,13 +914,34 @@ std::unique_ptr<Stmt> Parser::parse_while_stmt() {
     Token t = current_token();
     check_and_consume(TokenType::WHILE);
     check_and_consume(TokenType::LEFT_PAREN);
-    auto condition = parse_expression();
+    auto entered_scope = is_cxx_mode_active()
+        ? collect_->collect_enter_scope(ScopeFlags::BlockScope)
+        : Collect::ScopeEnterResult{};
+    struct WhileScopeGuard {
+        Parser* parser = nullptr;
+        bool active = false;
+        ~WhileScopeGuard() {
+            if (active && parser && parser->collect_) {
+                parser->collect_->collect_leave_scope();
+            }
+        }
+    } while_scope_guard{this, is_cxx_mode_active()};
+
+    auto condition = parse_control_condition(TokenType::RIGHT_PAREN, "while");
     check_and_consume(TokenType::RIGHT_PAREN);
     collect_->collect_enter_loop();
     auto body_stmt = parse_stmt();
     collect_->collect_leave_loop();
-    return collect_->collect_while_statement(std::move(condition),
-        std::move(body_stmt), t.loc);
+    auto loop_scope = entered_scope.scope;
+    while_scope_guard.active = false;
+    if (is_cxx_mode_active()) {
+        collect_->collect_leave_scope();
+    }
+    return collect_->collect_while_statement(
+        std::move(condition),
+        std::move(body_stmt),
+        std::move(loop_scope),
+        t.loc);
 }
 
 std::unique_ptr<Stmt> Parser::parse_do_while_stmt() {
@@ -860,7 +1086,7 @@ std::unique_ptr<Stmt> Parser::parse_for_stmt() {
     check_and_consume(TokenType::LEFT_PAREN);
     const size_t for_header_begin_idx = get_token_idx();
     std::unique_ptr<Stmt> first_clause;
-    std::unique_ptr<Expr> second_clause;
+    ControlCondition second_clause;
     std::unique_ptr<Expr> third_clause;
 
     auto entered_scope = collect_->collect_enter_scope(
@@ -869,9 +1095,9 @@ std::unique_ptr<Stmt> Parser::parse_for_stmt() {
 
     auto parse_second_and_third_clause = [&]() {
         if (gentle_check(TokenType::SEMICOLON)) {
-            second_clause = nullptr;
+            second_clause = ControlCondition();
         } else {
-            second_clause = parse_expression();
+            second_clause = parse_control_condition(TokenType::SEMICOLON, "for");
         }
         check_and_consume(TokenType::SEMICOLON);
 
