@@ -193,7 +193,16 @@ std::unique_ptr<Expr> clone_substituted_fold_pattern_element(
 }
 
 const Expr* integer_pack_size_operand_from_expr(const Expr* expr) {
-    auto* stripped = Collect::strip_implicit_casts(const_cast<Expr*>(expr));
+    auto strip_implicit_casts_and_parens = [](const Expr* candidate) -> Expr* {
+        auto* stripped =
+            Collect::strip_implicit_casts(const_cast<Expr*>(candidate));
+        while (auto* paren = dyn_cast<ParenExpr>(stripped)) {
+            stripped = Collect::strip_implicit_casts(paren->subexpr.get());
+        }
+        return stripped;
+    };
+
+    auto* stripped = strip_implicit_casts_and_parens(expr);
     if (const auto* builtin = dyn_cast<BuiltinCallExpr>(stripped);
         builtin && builtin->kind == BuiltinKind::INTEGER_PACK &&
         builtin->args.size() == 1) {
@@ -201,7 +210,7 @@ const Expr* integer_pack_size_operand_from_expr(const Expr* expr) {
     }
     if (const auto* dependent_call = dyn_cast<DependentCallExpr>(stripped)) {
         const auto* callee_ref = dyn_cast<VarRef>(
-            Collect::strip_implicit_casts(dependent_call->callee.get()));
+            strip_implicit_casts_and_parens(dependent_call->callee.get()));
         if (callee_ref && callee_ref->get_name() == "__integer_pack" &&
             dependent_call->args.size() == 1) {
             return dependent_call->args.front().get();
@@ -209,7 +218,7 @@ const Expr* integer_pack_size_operand_from_expr(const Expr* expr) {
     }
     if (const auto* call = dyn_cast<FuncCall>(stripped)) {
         const auto* callee_ref = dyn_cast<VarRef>(
-            Collect::strip_implicit_casts(call->func.get()));
+            strip_implicit_casts_and_parens(call->func.get()));
         if (callee_ref && callee_ref->get_name() == "__integer_pack" &&
             call->args.size() == 1) {
             return call->args.front().get();
@@ -770,6 +779,11 @@ QualType Collect::substitute_template_type_with_bindings(
                         case StmtKind::ExplicitCast: {
                             auto* cast = static_cast<ExplicitCast*>(candidate);
                             self(self, cast->expr.get());
+                            return;
+                        }
+                        case StmtKind::ParenExpr: {
+                            auto* paren = static_cast<ParenExpr*>(candidate);
+                            self(self, paren->subexpr.get());
                             return;
                         }
                         case StmtKind::CondExpr: {

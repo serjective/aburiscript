@@ -2213,7 +2213,7 @@ std::unique_ptr<Expr> Parser::parse_primary_expression() {
         TemplateArgumentGroupGuard group_guard(*this);
         std::unique_ptr<Expr> exp = parse_expression();
         check_and_consume(TokenType::RIGHT_PAREN);
-        return std::move(exp);
+        return make_ast<ParenExpr>(*ast_ctx, std::move(exp), tok.loc);
     }
     // Handle _Generic selection expression
     // Grammar: _Generic ( assignment-expression , generic-assoc-list )

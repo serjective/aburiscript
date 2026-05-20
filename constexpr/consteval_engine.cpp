@@ -1050,6 +1050,31 @@ Expr* strip_noop_implicit_casts(Expr* expr) {
     return expr;
 }
 
+Expr* strip_noop_implicit_casts_and_parens(Expr* expr) {
+    while (expr) {
+        if (auto* paren = dyn_cast<ParenExpr>(expr)) {
+            expr = paren->subexpr.get();
+            continue;
+        }
+        auto* cast = dyn_cast<ImplicitCast>(expr);
+        if (!cast) {
+            break;
+        }
+        switch (cast->kind) {
+            case ImplicitCastTypes::LVALUE_TO_RVALUE:
+            case ImplicitCastTypes::ARRAY_TO_POINTER:
+            case ImplicitCastTypes::FUNCTION_TO_POINTER:
+            case ImplicitCastTypes::RAW_CAST:
+            case ImplicitCastTypes::ARITH_CAST:
+                expr = cast->expr.get();
+                continue;
+            default:
+                return expr;
+        }
+    }
+    return expr;
+}
+
 std::optional<ConstValue> cast_const_value_to_type(
     const ConstValue& input, QualType target_type) {
     if (!target_type) {
@@ -1396,6 +1421,10 @@ bool resolve_expr_location(Expr* expr,
         return false;
     }
 
+    if (auto* paren = dyn_cast<ParenExpr>(expr)) {
+        return resolve_expr_location(paren->subexpr.get(), mode, depth + 1, location_out);
+    }
+
     if (auto* cast = dyn_cast<ImplicitCast>(expr)) {
         auto reference_type =
             desugar_type(cast->get_type()).as_shared<ReferenceType>();
@@ -1424,7 +1453,7 @@ bool resolve_expr_location(Expr* expr,
         }
     }
 
-    Expr* core = strip_noop_implicit_casts(expr);
+    Expr* core = strip_noop_implicit_casts_and_parens(expr);
     if (!core) {
         return false;
     }
@@ -1717,7 +1746,7 @@ ConstEvalResult eval_expr_as_typed_const_value(Expr* expr,
     }
 
     target_type = desugar_type(target_type);
-    Expr* stripped = strip_noop_implicit_casts(expr);
+    Expr* stripped = strip_noop_implicit_casts_and_parens(expr);
     if ((target_type->kind == TypeKind::Object ||
          target_type->kind == TypeKind::Array) &&
         dyn_cast<InitListExpr>(stripped)) {
@@ -2058,7 +2087,7 @@ bool is_c23_address_constant_operand(Expr* expr, ConstEvalMode mode, size_t dept
         return false;
     }
 
-    Expr* core = strip_noop_implicit_casts(expr);
+    Expr* core = strip_noop_implicit_casts_and_parens(expr);
     if (!core) {
         return false;
     }
@@ -2121,7 +2150,7 @@ bool is_c23_address_constant_expr(Expr* expr, ConstEvalMode mode, size_t depth) 
         return false;
     }
 
-    Expr* core = strip_noop_implicit_casts(expr);
+    Expr* core = strip_noop_implicit_casts_and_parens(expr);
     if (!core) {
         return false;
     }
@@ -2173,7 +2202,7 @@ ConstEvalResult eval_address_of_operand(Expr* operand,
                                         ConstEvalMode mode,
                                         size_t depth,
                                         SrcLoc loc) {
-    Expr* core = strip_noop_implicit_casts(operand);
+    Expr* core = strip_noop_implicit_casts_and_parens(operand);
     if (auto* var_ref = dyn_cast<VarRef>(core)) {
         if (var_ref->symref &&
             var_ref->symref->kind == SymbolKind::FUNCTION) {
@@ -2213,7 +2242,7 @@ ConstEvalResult eval_unary_expr(UnaryOperation* unary, ConstEvalMode mode, size_
 
     if (is_cpp_non_type_template_argument_mode(mode) &&
         unary->uop == UnaryOpTypes::ADDRESS_OF) {
-        Expr* core = strip_noop_implicit_casts(unary->exp.get());
+        Expr* core = strip_noop_implicit_casts_and_parens(unary->exp.get());
         if (auto* var_ref = dyn_cast<VarRef>(core)) {
             if (!var_ref->symref) {
                 return make_not_evaluated(
@@ -3675,7 +3704,7 @@ ConstEvalResult eval_function_call_expr(FuncCall* call, ConstEvalMode mode, size
             call->location);
     }
 
-    Expr* callee_core = strip_noop_implicit_casts(call->func.get());
+    Expr* callee_core = strip_noop_implicit_casts_and_parens(call->func.get());
     auto* callee_ref = dyn_cast<VarRef>(callee_core);
     if (!callee_ref || !callee_ref->symref || callee_ref->symref->kind != SymbolKind::FUNCTION) {
         return make_not_evaluated(ConstEvalDiagCode::UnsupportedExpression,
@@ -4072,6 +4101,10 @@ ConstEvalResult eval_expr(Expr* expr, ConstEvalMode mode, size_t depth) {
     if (depth > kMaxConstEvalDepth) {
         return make_error(ConstEvalDiagCode::RecursionLimitExceeded,
             "constexpr recursion depth exceeded", expr->location);
+    }
+
+    if (auto* paren = dyn_cast<ParenExpr>(expr)) {
+        return eval_expr(paren->subexpr.get(), mode, depth + 1);
     }
 
     if (auto* immediate = dyn_cast<CppImmediateInvocationExpr>(expr)) {

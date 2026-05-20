@@ -153,6 +153,14 @@ bool builtin_call_preserves_argument_value_category(BuiltinKind kind) {
     }
 }
 
+Expr* strip_implicit_casts_and_parens(Expr* expr) {
+    Expr* current = Collect::strip_implicit_casts(expr);
+    while (auto* paren = dyn_cast<ParenExpr>(current)) {
+        current = Collect::strip_implicit_casts(paren->subexpr.get());
+    }
+    return current;
+}
+
 // TODO: we need to do the type on the root of expr node soon, because every expr has an assc type
 void store_explicit_expr_type(Expr* candidate, QualType realized_type) {
     if (!candidate || !realized_type) {
@@ -193,6 +201,11 @@ void store_explicit_expr_type(Expr* candidate, QualType realized_type) {
         case StmtKind::CppFunctionStyleCastExpr:
             static_cast<CppFunctionStyleCastExpr*>(candidate)->target_type =
                 realized_type;
+            return;
+        case StmtKind::ParenExpr:
+            store_explicit_expr_type(
+                static_cast<ParenExpr*>(candidate)->subexpr.get(),
+                realized_type);
             return;
         case StmtKind::CondExpr:
             static_cast<CondExpr*>(candidate)->type = realized_type;
@@ -1097,20 +1110,21 @@ std::unique_ptr<Expr> Collect::collect_function_call(
                 loc);
         }
     }
-    if (isa<DependentMemberPointerAccessExpr>(callee.get())) {
+    Expr* raw_callee = strip_implicit_casts_and_parens(callee.get());
+    if (isa<DependentMemberPointerAccessExpr>(raw_callee)) {
         return collect_dependent_call_expression(
             std::move(callee),
             std::move(args),
             loc);
     }
-    if (isa<UnresolvedMemberExpr>(callee.get()) ||
-        isa<UnresolvedLookupExpr>(callee.get())) {
+    if (isa<UnresolvedMemberExpr>(raw_callee) ||
+        isa<UnresolvedLookupExpr>(raw_callee)) {
         return collect_dependent_call_expression(
             std::move(callee),
             std::move(args),
             loc);
     }
-    auto* callee_var_ref = dyn_cast<VarRef>(strip_implicit_casts(callee.get()));
+    auto* callee_var_ref = dyn_cast<VarRef>(raw_callee);
     if (callee_var_ref &&
         callee_var_ref->symref &&
         callee_var_ref->symref->kind != SymbolKind::FUNCTION &&
@@ -1144,7 +1158,7 @@ std::unique_ptr<Expr> Collect::collect_function_call(
         auto callee_can_use_concrete_template_overload_resolution =
             [&](Expr* candidate) {
                 auto* callee_ref =
-                    dyn_cast<VarRef>(strip_implicit_casts(candidate));
+                    dyn_cast<VarRef>(strip_implicit_casts_and_parens(candidate));
                 if (!callee_ref) {
                     return false;
                 }
@@ -1280,7 +1294,8 @@ Collect::try_collect_typed_dependent_function_template_call(
         return nullptr;
     }
 
-    auto* callee_ref = dyn_cast<VarRef>(strip_implicit_casts(callee.get()));
+    auto* callee_ref =
+        dyn_cast<VarRef>(strip_implicit_casts_and_parens(callee.get()));
     if (!callee_ref) {
         return nullptr;
     }
@@ -2969,6 +2984,13 @@ void Collect::realize_deferred_expr_type_after_substitution(
             call->ctype = realize_type(call->ctype);
             return;
         }
+        case StmtKind::ParenExpr: {
+            auto* paren = static_cast<ParenExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                paren->subexpr.get(),
+                allow_finalize);
+            return;
+        }
         case StmtKind::UnaryOperation: {
             auto* unary = static_cast<UnaryOperation*>(expr);
             realize_deferred_expr_type_after_substitution(
@@ -3944,6 +3966,20 @@ bool Collect::resolve_dependent_expr_after_substitution(
         expr = std::move(rewritten);
         return true;
     }
+    if (auto* paren = dyn_cast<ParenExpr>(expr.get())) {
+        if (paren->subexpr &&
+            !resolve_dependent_expr_after_substitution(
+                paren->subexpr,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        strip_stale_dependent_implicit_casts(paren->subexpr);
+        realize_deferred_expr_type_after_substitution(
+            paren->subexpr.get(),
+            /*allow_finalize=*/true);
+        return true;
+    }
     if (auto* cond = dyn_cast<CondExpr>(expr.get())) {
         if (cond->condition &&
             !resolve_dependent_expr_after_substitution(
@@ -4872,7 +4908,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
         };
 
         auto* callee_ref =
-            dyn_cast<VarRef>(strip_implicit_casts(owned_call->callee.get()));
+            dyn_cast<VarRef>(
+                strip_implicit_casts_and_parens(owned_call->callee.get()));
         bool force_concrete_function_ref_call =
             callee_ref &&
             callee_ref->symref &&
@@ -5441,7 +5478,8 @@ void Collect::capture_call_target_metadata(
             }
         }
     }
-    if (auto* callee_ref = dyn_cast<VarRef>(strip_implicit_casts(call->func.get()))) {
+    if (auto* callee_ref =
+            dyn_cast<VarRef>(strip_implicit_casts_and_parens(call->func.get()))) {
         context_out.callee_symbol = callee_ref->symref;
     }
 }
@@ -5538,7 +5576,8 @@ std::unique_ptr<Expr> Collect::prepare_call_finalization(
     CallFinalizationContext& context_out) {
     context_out = CallFinalizationContext{};
 
-    Expr* raw_member_pointer_callee = strip_implicit_casts(call->func.get());
+    Expr* raw_member_pointer_callee =
+        strip_implicit_casts_and_parens(call->func.get());
     context_out.member_pointer_function_call =
         dyn_cast<MemberPointerAccessExpr>(raw_member_pointer_callee) != nullptr;
 

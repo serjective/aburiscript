@@ -16,6 +16,26 @@
 #include <optional>
 #include <unordered_set>
 
+namespace {
+
+Expr* strip_implicit_casts_and_parens(Expr* expr) {
+    Expr* current = expr;
+    while (current) {
+        if (auto* cast = dyn_cast<ImplicitCast>(current)) {
+            current = cast->expr.get();
+            continue;
+        }
+        if (auto* paren = dyn_cast<ParenExpr>(current)) {
+            current = paren->subexpr.get();
+            continue;
+        }
+        break;
+    }
+    return current;
+}
+
+} // namespace
+
 llvm::Value* ASTToLLVM::convert_member_expr(MemberExpr *expr) {
     auto lvalue_tup = get_lvalue(expr);
     llvm::Value* ptr = lvalue_tup.address;
@@ -183,10 +203,7 @@ llvm::Value* ASTToLLVM::convert_alignof_expr(AlignOfExpr *expr) {
     uint64_t alignment = 0;
 
     if (expr->expr_operand) {
-        Expr* raw = expr->expr_operand.get();
-        while (auto* cast = dyn_cast<ImplicitCast>(raw)) {
-            raw = cast->expr.get();
-        }
+        Expr* raw = strip_implicit_casts_and_parens(expr->expr_operand.get());
         if (auto* vref = dyn_cast<VarRef>(raw)) {
             if (vref->symref) {
                 if (vref->symref->kind == SymbolKind::FUNCTION) {

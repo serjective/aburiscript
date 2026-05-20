@@ -21,6 +21,14 @@
 
 namespace {
 
+const StringLiteral* unwrap_parenthesized_string_literal_expr(const Expr* expr) {
+    const Expr* current = expr;
+    while (auto* paren = dyn_cast<ParenExpr>(current)) {
+        current = paren->subexpr.get();
+    }
+    return dyn_cast<StringLiteral>(current);
+}
+
 std::shared_ptr<Expr> recover_record_field_initializer_expr(
     InitListExpr* init_list,
     size_t field_idx,
@@ -877,21 +885,22 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
                 initVal = bound_const;
             } else if (auto* initList = dyn_cast<InitListExpr>(varDecl->init.get())) {
                 val = convert_init_list(initList, varType);
-            } else if (auto *strLit = dyn_cast<StringLiteral>(varDecl->init.get())) {
+            } else if (auto* strLit = varType->isArrayTy()
+                                           ? unwrap_parenthesized_string_literal_expr(
+                                                 varDecl->init.get())
+                                           : nullptr) {
                 // For global char[] = "string", set the string data as the
                 // initializer of the GlobalVariable (not a separate anonymous string)
                 auto arr_type_s = strLit->ctype.as_shared<ArrayType>();
-                if (arr_type_s && arr_type_s->size_kind == ArraySizeKind::Constant && arr_type_s->size.has_value()) {
+                if (arr_type_s &&
+                    arr_type_s->size_kind == ArraySizeKind::Constant &&
+                    arr_type_s->size.has_value()) {
                     size_t len = arr_type_s->size.value();
                     initVal = build_string_literal_array_constant(strLit, len);
                     if (!initVal) {
                         error("deal_global_variable_declaration(): unsupported string literal initializer type",
                               varDecl->location);
                     }
-                } else {
-                    val = convert_string_literal(strLit);
-                    bind_symbol_value(sym.get(), val);
-                    return;
                 }
             } else {
                 // Try constant evaluator first (avoids crash when no basic block)
@@ -1715,9 +1724,14 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
             if (!isLocal) {
                 initVal = convert_init_list(initList, varType);
             }
-        } else if (auto *strLit = dyn_cast<StringLiteral>(varDecl->init.get())) {
+        } else if (auto* strLit = varType->isArrayTy()
+                                      ? unwrap_parenthesized_string_literal_expr(
+                                            varDecl->init.get())
+                                      : nullptr) {
             auto arr_type_s = strLit->ctype.as_shared<ArrayType>();
-            if (arr_type_s && arr_type_s->size_kind == ArraySizeKind::Constant && arr_type_s->size.has_value()) {
+            if (arr_type_s &&
+                arr_type_s->size_kind == ArraySizeKind::Constant &&
+                arr_type_s->size.has_value()) {
                 // For char arr[] = "string", create a ConstantDataArray.
                 // Local arrays: stored into the stack alloca below.
                 // Static/global arrays: used as the initializer by the global-variable path.
@@ -1726,13 +1740,6 @@ void ASTToLLVM::convert_variable_declaration(VariableDecl *varDecl) {
                 if (!initVal) {
                     error("convert_variable_declaration(): unsupported string literal initializer type",
                           varDecl->location);
-                }
-            } else {
-                // String literal used as pointer (e.g. char *p = "str")
-                initVal = convert_string_literal(strLit);
-                if (!isLocal) {
-                    bind_symbol_value(sym.get(), initVal);
-                    return;
                 }
             }
         }

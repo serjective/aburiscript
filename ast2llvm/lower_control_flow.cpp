@@ -16,8 +16,16 @@ std::optional<bool> try_fold_stmt_condition(Expr* condition) {
     }
 
     Expr* core = condition;
-    while (auto* cast = dyn_cast<ImplicitCast>(core)) {
-        core = cast->expr.get();
+    while (core) {
+        if (auto* cast = dyn_cast<ImplicitCast>(core)) {
+            core = cast->expr.get();
+            continue;
+        }
+        if (auto* paren = dyn_cast<ParenExpr>(core)) {
+            core = paren->subexpr.get();
+            continue;
+        }
+        break;
     }
     if (!core) {
         return std::nullopt;

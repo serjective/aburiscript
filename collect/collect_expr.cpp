@@ -252,6 +252,14 @@ bool expression_can_be_addressed_without_overload(const Collect& collect,
     return collect.classify_value_category(raw) == Collect::ValueCategory::LValue;
 }
 
+Expr* strip_implicit_casts_and_parens(Expr* expr) {
+    Expr* current = Collect::strip_implicit_casts(expr);
+    while (auto* paren = dyn_cast<ParenExpr>(current)) {
+        current = Collect::strip_implicit_casts(paren->subexpr.get());
+    }
+    return current;
+}
+
 QualType strip_atomic_value_qualifier(QualType type) {
     if (!type || !type.is_atomic()) {
         return type;
@@ -780,6 +788,15 @@ void collect_lambda_referenced_symbols_from_expr(
                     seen_symbols,
                     referenced_this);
             }
+            return;
+        }
+        case StmtKind::ParenExpr: {
+            const auto* paren = static_cast<const ParenExpr*>(expr);
+            collect_lambda_referenced_symbols_from_expr(
+                paren->subexpr.get(),
+                referenced_symbols,
+                seen_symbols,
+                referenced_this);
             return;
         }
         case StmtKind::CppThrowExpr: {
@@ -6302,6 +6319,9 @@ std::optional<bool> expression_is_known_noexcept_with_demand(
     Expr* expr,
     SrcLoc loc) {
     auto* stripped = Collect::strip_implicit_casts(expr);
+    while (auto* paren = dyn_cast<ParenExpr>(stripped)) {
+        stripped = Collect::strip_implicit_casts(paren->subexpr.get());
+    }
     if (!stripped) {
         return std::nullopt;
     }
@@ -6527,7 +6547,7 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
 
     switch (uop) {
         case UnaryOpTypes::ADDRESS_OF: {
-            auto* raw = strip_implicit_casts(node->exp.get());
+            auto* raw = strip_implicit_casts_and_parens(node->exp.get());
             bool is_lvalue_operand = raw && raw->isLValue();
             if (lang_opts_.is_cxx_mode() && raw) {
                 is_lvalue_operand =
@@ -8573,7 +8593,7 @@ std::unique_ptr<Expr> Collect::builtin_call_expression_special_cases(
                 return collect_make<BuiltinCallExpr>(kind, std::move(args), void_ptr, loc);
             }
 
-            Expr* raw = strip_implicit_casts(args[0].get());
+            Expr* raw = strip_implicit_casts_and_parens(args[0].get());
             QualType operand_type = raw ? raw->get_type() : args[0]->get_type();
             if (!expression_can_be_addressed_without_overload(*this, raw)) {
                 report_error("__builtin_addressof requires an lvalue operand", loc);
@@ -9138,6 +9158,10 @@ Collect::ValueCategory Collect::classify_value_category(Expr* expr) const {
             return ref->isRValueReference() ? ValueCategory::XValue : ValueCategory::LValue;
         }
         return ValueCategory::PRValue;
+    }
+
+    if (auto* paren = dyn_cast<ParenExpr>(expr)) {
+        return classify_value_category(paren->subexpr.get());
     }
 
     if (auto* dynamic_cast_expr = dyn_cast<CppDynamicCastExpr>(expr)) {

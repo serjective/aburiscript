@@ -16,6 +16,10 @@ CppExprValueCategory classify_cpp_expr_value_category(
         return CppExprValueCategory::Unknown;
     }
 
+    if (auto* paren = dyn_cast<ParenExpr>(expr)) {
+        return classify_cpp_expr_value_category(paren->subexpr.get(), ast_ctx);
+    }
+
     if (auto* cast = dyn_cast<ImplicitCast>(expr)) {
         switch (cast->kind) {
             case ImplicitCastTypes::UNKNOWN:

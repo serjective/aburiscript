@@ -190,6 +190,7 @@ const char* stmt_kind_name(StmtKind kind) {
             return "CppFunctionStyleCastExpr";
         case StmtKind::CppImmediateInvocationExpr:
             return "CppImmediateInvocationExpr";
+        case StmtKind::ParenExpr: return "ParenExpr";
         case StmtKind::CondExpr: return "CondExpr";
         case StmtKind::UnaryOperation: return "UnaryOperation";
         case StmtKind::BinaryOperation: return "BinaryOperation";
@@ -1191,6 +1192,12 @@ private:
                 record_stmt<CppImmediateInvocationExpr>(
                     StmtKind::CppImmediateInvocationExpr);
                 visit_stmt(node->invocation.get());
+                return;
+            }
+            case StmtKind::ParenExpr: {
+                auto* node = static_cast<const ParenExpr*>(stmt);
+                record_stmt<ParenExpr>(StmtKind::ParenExpr);
+                visit_stmt(node->subexpr.get());
                 return;
             }
             case StmtKind::CondExpr: {

@@ -31,19 +31,28 @@ Token make_template_split_token(const Token& source,
 }
 
 bool is_integer_pack_builtin_expr(const Expr* expr) {
-    auto* stripped = Collect::strip_implicit_casts(const_cast<Expr*>(expr));
+    auto strip_implicit_casts_and_parens = [](const Expr* candidate) -> Expr* {
+        auto* stripped =
+            Collect::strip_implicit_casts(const_cast<Expr*>(candidate));
+        while (auto* paren = dyn_cast<ParenExpr>(stripped)) {
+            stripped = Collect::strip_implicit_casts(paren->subexpr.get());
+        }
+        return stripped;
+    };
+
+    auto* stripped = strip_implicit_casts_and_parens(expr);
     const auto* builtin = dyn_cast<BuiltinCallExpr>(stripped);
     if (builtin && builtin->kind == BuiltinKind::INTEGER_PACK) {
         return true;
     }
     if (const auto* dependent_call = dyn_cast<DependentCallExpr>(stripped)) {
         const auto* callee_ref = dyn_cast<VarRef>(
-            Collect::strip_implicit_casts(dependent_call->callee.get()));
+            strip_implicit_casts_and_parens(dependent_call->callee.get()));
         return callee_ref && callee_ref->get_name() == "__integer_pack";
     }
     if (const auto* call = dyn_cast<FuncCall>(stripped)) {
         const auto* callee_ref = dyn_cast<VarRef>(
-            Collect::strip_implicit_casts(call->func.get()));
+            strip_implicit_casts_and_parens(call->func.get()));
         return callee_ref && callee_ref->get_name() == "__integer_pack";
     }
     return false;

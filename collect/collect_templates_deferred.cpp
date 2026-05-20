@@ -546,6 +546,14 @@ bool expr_constexpr_value_depends_on_template_parameters_impl(
                 active_record_lookup_type,
                 defer_unmaterialized_constexpr_calls);
         }
+        case StmtKind::ParenExpr:
+            return expr_constexpr_value_depends_on_template_parameters_impl(
+                static_cast<const ParenExpr*>(stripped)->subexpr.get(),
+                ast_ctx,
+                active_variable_symbols,
+                active_functions,
+                active_record_lookup_type,
+                defer_unmaterialized_constexpr_calls);
         case StmtKind::UnaryOperation:
             return expr_constexpr_value_depends_on_template_parameters_impl(
                 static_cast<const UnaryOperation*>(stripped)->exp.get(),
@@ -765,6 +773,11 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
             }
             return false;
         }
+        case StmtKind::ParenExpr:
+            return expr_depends_on_template_parameters_impl(
+                static_cast<const ParenExpr*>(stripped)->subexpr.get(),
+                ast_ctx,
+                active_variable_symbols);
         case StmtKind::UnaryOperation:
             return expr_depends_on_template_parameters_impl(
                 static_cast<const UnaryOperation*>(stripped)->exp.get(),
@@ -1275,6 +1288,10 @@ void materialize_expr_for_constant_evaluation(
         case StmtKind::CppNoexceptExpr:
             visit(static_cast<const CppNoexceptExpr*>(stripped)->operand,
                   false);
+            break;
+        case StmtKind::ParenExpr:
+            visit(static_cast<const ParenExpr*>(stripped)->subexpr,
+                  evaluated_context);
             break;
         case StmtKind::UnaryOperation:
             visit(static_cast<const UnaryOperation*>(stripped)->exp,

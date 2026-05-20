@@ -727,6 +727,13 @@ bool expr_structurally_matches(const Expr* lhs, const Expr* rhs) {
                        lhs_unary->exp.get(),
                        rhs_unary->exp.get());
         }
+        case StmtKind::ParenExpr: {
+            const auto* lhs_paren = static_cast<const ParenExpr*>(lhs);
+            const auto* rhs_paren = static_cast<const ParenExpr*>(rhs);
+            return expr_structurally_matches(
+                lhs_paren->subexpr.get(),
+                rhs_paren->subexpr.get());
+        }
         case StmtKind::DependentUnaryExpr: {
             const auto* lhs_unary =
                 static_cast<const DependentUnaryExpr*>(lhs);
@@ -1164,6 +1171,10 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
         case StmtKind::UnaryOperation:
             return expr_depends_on_template_parameters_for_type(
                 static_cast<const UnaryOperation*>(expr)->exp.get(),
+                ast_ctx);
+        case StmtKind::ParenExpr:
+            return expr_depends_on_template_parameters_for_type(
+                static_cast<const ParenExpr*>(expr)->subexpr.get(),
                 ast_ctx);
         case StmtKind::BinaryOperation: {
             const auto* binary = static_cast<const BinaryOperation*>(expr);

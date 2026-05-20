@@ -136,20 +136,29 @@ llvm::Value* materialize_direct_aggregate_argument(ASTToLLVM& lower,
         src_ptr, param_type, abi_type, loc, "materialize_direct_aggregate_argument()");
 }
 
-} // namespace
-
-llvm::Value* ASTToLLVM::convert_function_call(FuncCall *expr) {
-    Expr* raw_member_callee = expr->func.get();
-    // Strip front-end decay/materialization casts that do not change which
-    // callable entity is selected.
-    while (auto* cast = dyn_cast<ImplicitCast>(raw_member_callee)) {
-        if (cast->kind == ImplicitCastTypes::FUNCTION_TO_POINTER ||
-            cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
-            raw_member_callee = cast->expr.get();
+Expr* unwrap_call_target_expr(Expr* expr) {
+    Expr* current = expr;
+    while (true) {
+        if (auto* cast = dyn_cast<ImplicitCast>(current)) {
+            if (cast->kind == ImplicitCastTypes::FUNCTION_TO_POINTER ||
+                cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
+                current = cast->expr.get();
+                continue;
+            }
+        }
+        if (auto* paren = dyn_cast<ParenExpr>(current)) {
+            current = paren->subexpr.get();
             continue;
         }
         break;
     }
+    return current;
+}
+
+} // namespace
+
+llvm::Value* ASTToLLVM::convert_function_call(FuncCall *expr) {
+    Expr* raw_member_callee = unwrap_call_target_expr(expr->func.get());
 
     if (auto* member_ptr_callee = dyn_cast<MemberPointerAccessExpr>(raw_member_callee);
         member_ptr_callee) {

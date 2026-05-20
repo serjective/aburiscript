@@ -448,7 +448,9 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
     // In other words, At address "ptr" we will find a value of type "ctype"
     llvm::Value* ptr = nullptr;
     std::shared_ptr<CType> ctype = nullptr;
-    if (auto* varRef = dyn_cast<VarRef>(expr)) {
+    if (auto* paren = dyn_cast<ParenExpr>(expr)) {
+        return get_lvalue(paren->subexpr.get());
+    } else if (auto* varRef = dyn_cast<VarRef>(expr)) {
         auto sym = varRef->symref;
         if (!sym) { error("get_lvalue(): variable not in scope", expr->location); return {}; }
         if (sym->kind == SymbolKind::ENUM_CONSTANT) {

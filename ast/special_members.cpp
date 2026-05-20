@@ -33,11 +33,19 @@ bool cpp_record_is_trivially_destructible(
 
 Expr* strip_implicit_casts_for_noexcept(Expr* expr) {
     auto* current = expr;
-    while (auto* cast = dyn_cast<ImplicitCast>(current)) {
-        if (!cast->expr) {
-            break;
+    while (current) {
+        if (auto* cast = dyn_cast<ImplicitCast>(current)) {
+            if (!cast->expr) {
+                break;
+            }
+            current = cast->expr.get();
+            continue;
         }
-        current = cast->expr.get();
+        if (auto* paren = dyn_cast<ParenExpr>(current)) {
+            current = paren->subexpr.get();
+            continue;
+        }
+        break;
     }
     return current;
 }

@@ -148,6 +148,11 @@ bool refresh_constraint_expr_satisfaction(
             }
             return true;
         }
+        case StmtKind::ParenExpr:
+            return refresh_constraint_expr_satisfaction(
+                collect,
+                static_cast<ParenExpr*>(stripped)->subexpr.get(),
+                loc);
         case StmtKind::UnaryOperation:
             return refresh_constraint_expr_satisfaction(
                 collect,

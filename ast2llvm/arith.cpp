@@ -974,6 +974,10 @@ llvm::Constant* ASTToLLVM::emit_constant_initializer(Expr* expr) {
             str_global->getValueType(), str_global, indices);
     }
 
+    if (auto* paren = dyn_cast<ParenExpr>(expr)) {
+        return emit_constant_initializer(paren->subexpr.get());
+    }
+
     if (auto* member_ptr_lit = dyn_cast<MemberPointerLiteralExpr>(expr)) {
         auto mp_type =
             desugar_type(member_ptr_lit->get_type(), ast_ctx.get())
@@ -1654,6 +1658,9 @@ llvm::Value * ASTToLLVM::convert_expression(Expr *expr) {
             }
             return lowered;
         }
+        case StmtKind::ParenExpr:
+            return convert_expression(
+                static_cast<ParenExpr*>(expr)->subexpr.get());
         case StmtKind::CondExpr:
             return convert_conditional_expr(static_cast<CondExpr*>(expr));
         case StmtKind::UnaryOperation:

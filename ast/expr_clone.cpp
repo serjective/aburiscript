@@ -1192,6 +1192,19 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
             assign_node_id(result.get(), ast_ctx);
             return result;
         }
+        case StmtKind::ParenExpr: {
+            const auto* paren_expr = static_cast<const ParenExpr*>(expr);
+            auto cloned_subexpr =
+                clone_expr_impl(paren_expr->subexpr.get(), ast_ctx, error_out);
+            if (paren_expr->subexpr && !cloned_subexpr) {
+                return {};
+            }
+            auto result = std::make_unique<ParenExpr>(
+                std::move(cloned_subexpr),
+                paren_expr->location);
+            assign_node_id(result.get(), ast_ctx);
+            return result;
+        }
         case StmtKind::CondExpr: {
             const auto* cond_expr = static_cast<const CondExpr*>(expr);
             auto cloned_condition =

@@ -84,6 +84,13 @@ bool is_same_type_object_prvalue_for_initialization(
     return same_object_type &&
            collect.classify_value_category(expr) == Collect::ValueCategory::PRValue;
 }
+
+Expr* unwrap_initializer_parens(Expr* expr) {
+    while (auto* paren = dyn_cast<ParenExpr>(expr)) {
+        expr = paren->subexpr.get();
+    }
+    return expr;
+}
 }
 
 void Collect::find_field_recursive(const ObjectType* record, const std::string& name, std::vector<uint32_t>& path, size_t base_offset, FieldLookupResult& result) const {
@@ -1287,7 +1294,9 @@ std::unique_ptr<Expr> Collect::process_initializer_for_type(std::unique_ptr<Expr
         return processed;
     }
 
-    if (auto* str_lit = dyn_cast<StringLiteral>(init.get())) {
+    Expr* syntactic_init = unwrap_initializer_parens(init.get());
+
+    if (auto* str_lit = dyn_cast<StringLiteral>(syntactic_init)) {
         if (type->kind == TypeKind::Array) {
             auto arr_type = type.as_shared<ArrayType>();
             auto str_lit_type = str_lit->ctype.as_shared<ArrayType>();

@@ -1342,6 +1342,11 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
             cast_expr->target_type = rewrite_type(cast_expr->target_type, ctx);
             return true;
         }
+        case StmtKind::ParenExpr: {
+            auto* paren = static_cast<ParenExpr*>(expr.get());
+            return !paren->subexpr ||
+                   rewrite_expr_tree(paren->subexpr, ctx, error_out);
+        }
         case StmtKind::CondExpr: {
             auto* cond = static_cast<CondExpr*>(expr.get());
             if (cond->condition &&

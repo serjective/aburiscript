@@ -143,7 +143,15 @@ static std::string describe_consteval_failure(const ConstEvalResult& result) {
 }
 
 static Expr* strip_noop_implicit_casts(Expr* expr) {
-    while (auto* cast = dyn_cast<ImplicitCast>(expr)) {
+    while (expr) {
+        if (auto* paren = dyn_cast<ParenExpr>(expr)) {
+            expr = paren->subexpr.get();
+            continue;
+        }
+        auto* cast = dyn_cast<ImplicitCast>(expr);
+        if (!cast) {
+            break;
+        }
         switch (cast->kind) {
             case ImplicitCastTypes::LVALUE_TO_RVALUE:
             case ImplicitCastTypes::ARRAY_TO_POINTER:

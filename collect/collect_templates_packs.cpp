@@ -38,24 +38,32 @@ const TemplateParameterDecl* resolve_pack_parameter_reference(
     return nullptr;
 }
 
+Expr* strip_implicit_casts_and_parens(Expr* expr) {
+    auto* stripped = Collect::strip_implicit_casts(expr);
+    while (auto* paren = dyn_cast<ParenExpr>(stripped)) {
+        stripped = Collect::strip_implicit_casts(paren->subexpr.get());
+    }
+    return stripped;
+}
+
 bool is_integer_pack_template_argument(const TemplateArgument& argument) {
     if (argument.kind != TemplateArgumentKind::Value ||
         !argument.expands_parameter_pack ||
         !argument.value_expr) {
         return false;
     }
-    auto* stripped = Collect::strip_implicit_casts(argument.value_expr.get());
+    auto* stripped = strip_implicit_casts_and_parens(argument.value_expr.get());
     if (const auto* builtin = dyn_cast<BuiltinCallExpr>(stripped)) {
         return builtin->kind == BuiltinKind::INTEGER_PACK;
     }
     if (const auto* dependent_call = dyn_cast<DependentCallExpr>(stripped)) {
         const auto* callee_ref = dyn_cast<VarRef>(
-            Collect::strip_implicit_casts(dependent_call->callee.get()));
+            strip_implicit_casts_and_parens(dependent_call->callee.get()));
         return callee_ref && callee_ref->get_name() == "__integer_pack";
     }
     if (const auto* call = dyn_cast<FuncCall>(stripped)) {
         const auto* callee_ref = dyn_cast<VarRef>(
-            Collect::strip_implicit_casts(call->func.get()));
+            strip_implicit_casts_and_parens(call->func.get()));
         return callee_ref && callee_ref->get_name() == "__integer_pack";
     }
     return false;
@@ -754,6 +762,13 @@ bool collect_pack_expansion_shape_in_expr(
                        cond->type,
                        parameters,
                        shape_out);
+        }
+        case StmtKind::ParenExpr: {
+            const auto* paren = static_cast<const ParenExpr*>(expr);
+            return collect_pack_expansion_shape_in_expr(
+                paren->subexpr.get(),
+                parameters,
+                shape_out);
         }
         case StmtKind::UnaryOperation: {
             const auto* unary = static_cast<const UnaryOperation*>(expr);

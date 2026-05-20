@@ -207,6 +207,10 @@ static const StringLiteral* unwrap_string_literal_expr(const Expr* expr) {
         if (auto* str = dyn_cast<StringLiteral>(current)) {
             return str;
         }
+        if (auto* paren = dyn_cast<ParenExpr>(current)) {
+            current = paren->subexpr.get();
+            continue;
+        }
         if (auto* implicit_cast = dyn_cast<ImplicitCast>(current)) {
             current = implicit_cast->expr.get();
             continue;
@@ -225,6 +229,10 @@ static InitListExpr* unwrap_init_list_expr(Expr* expr) {
     while (current) {
         if (auto* init = dyn_cast<InitListExpr>(current)) {
             return init;
+        }
+        if (auto* paren = dyn_cast<ParenExpr>(current)) {
+            current = paren->subexpr.get();
+            continue;
         }
         if (auto* implicit_cast = dyn_cast<ImplicitCast>(current)) {
             current = implicit_cast->expr.get();

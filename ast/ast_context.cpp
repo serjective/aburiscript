@@ -378,6 +378,12 @@ void append_expr_semantic_fingerprint(std::string& out, const Expr* expr) {
             append_expr_semantic_fingerprint(out, unary->exp.get());
             return;
         }
+        case StmtKind::ParenExpr: {
+            const auto* paren = static_cast<const ParenExpr*>(expr);
+            out += "p:";
+            append_expr_semantic_fingerprint(out, paren->subexpr.get());
+            return;
+        }
         case StmtKind::DependentBinaryExpr: {
             const auto* binary =
                 static_cast<const DependentBinaryExpr*>(expr);

@@ -123,6 +123,7 @@ enum class StmtKind : uint8_t {
     CppValueInitExpr,
     CppFunctionStyleCastExpr,
     CppImmediateInvocationExpr,
+    ParenExpr,
     CondExpr,
     UnaryOperation,
     BinaryOperation,
@@ -1931,6 +1932,29 @@ struct CppDynamicCastExpr: Expr {
 
     static bool classof(const Stmt *s) {
         return s->get_kind() == StmtKind::CppDynamicCastExpr;
+    }
+};
+struct ParenExpr: Expr {
+    std::unique_ptr<Expr> subexpr;
+
+    ParenExpr(std::unique_ptr<Expr> subexpr, SrcLoc loc = SrcLoc())
+        : Expr(StmtKind::ParenExpr, loc),
+          subexpr(std::move(subexpr)) {
+        if (this->location.isInvalid() && this->subexpr) {
+            this->location = this->subexpr->location;
+        }
+    }
+
+    QualType get_type() override {
+        return subexpr ? subexpr->get_type() : QualType();
+    }
+
+    bool isLValue() override {
+        return subexpr && subexpr->isLValue();
+    }
+
+    static bool classof(const Stmt *s) {
+        return s->get_kind() == StmtKind::ParenExpr;
     }
 };
 struct CondExpr: Expr {

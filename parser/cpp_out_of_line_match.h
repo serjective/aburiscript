@@ -267,6 +267,13 @@ inline bool cpp_out_of_line_expr_matches(const Expr* lhs,
                        lhs_unary->exp.get(),
                        rhs_unary->exp.get());
         }
+        case StmtKind::ParenExpr: {
+            const auto* lhs_paren = static_cast<const ParenExpr*>(lhs);
+            const auto* rhs_paren = static_cast<const ParenExpr*>(rhs);
+            return cpp_out_of_line_expr_matches(
+                lhs_paren->subexpr.get(),
+                rhs_paren->subexpr.get());
+        }
         case StmtKind::DependentUnaryExpr: {
             const auto* lhs_unary =
                 static_cast<const DependentUnaryExpr*>(lhs);

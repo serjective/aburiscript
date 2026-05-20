@@ -1301,6 +1301,10 @@ void rewrite_stale_parameter_refs_by_name(
                 visit_unique(static_cast<ExplicitCast*>(candidate)->expr);
                 return;
             }
+            case StmtKind::ParenExpr: {
+                visit_unique(static_cast<ParenExpr*>(candidate)->subexpr);
+                return;
+            }
             case StmtKind::UnaryOperation: {
                 visit_unique(static_cast<UnaryOperation*>(candidate)->exp);
                 return;
