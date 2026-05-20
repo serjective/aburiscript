@@ -1257,6 +1257,19 @@ std::shared_ptr<ObjectType> current_record_from_this_type(QualType this_type) {
         this_type, get_active_side_table_ast_context());
 }
 
+std::shared_ptr<ObjectType> current_record_for_unqualified_member_lookup(
+    QualType current_cpp_record_lookup_type,
+    QualType current_function_cpp_this_type,
+    const ASTContext* ast_ctx) {
+    auto active_record =
+        desugar_type(current_cpp_record_lookup_type, ast_ctx)
+            .as_shared<ObjectType>();
+    if (active_record) {
+        return active_record;
+    }
+    return current_record_from_this_type(current_function_cpp_this_type, ast_ctx);
+}
+
 const ObjectDecl* record_decl_from_record_type(const ObjectType* record_type) {
     if (!record_type) {
         return nullptr;

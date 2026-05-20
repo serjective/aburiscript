@@ -1645,7 +1645,10 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
 
     if (lang_opts_.is_cxx_mode() && session_.func_state_.current_function_is_cpp_member) {
         auto current_record =
-            current_record_from_this_type(session_.func_state_.current_function_cpp_this_type, ast_ctx_.get());
+            current_record_for_unqualified_member_lookup(
+                session_.current_cpp_record_lookup_type_,
+                session_.func_state_.current_function_cpp_this_type,
+                ast_ctx_.get());
         auto member_lookup = lookup_record_member_name(current_record.get(), name);
         if (member_lookup.has_member_match() &&
             !ordinary_lookup_blocks_record_member_lookup &&
