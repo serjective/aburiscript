@@ -453,15 +453,57 @@ const RecordSemanticState::Constructor* find_constructor_for_value_category(
     return find_copy_constructor(state, owner_type, ast_ctx);
 }
 
+bool generated_subobject_constructor_is_accessible(
+    const RecordSemanticState::Constructor& ctor,
+    const ObjectDecl* constructed_record_decl,
+    const ObjectDecl* access_context_decl,
+    QualType access_context_type,
+    bool direct_base_subobject,
+    const ASTContext* ast_ctx) {
+    constructed_record_decl = canonical_cpp_record_decl(constructed_record_decl);
+    access_context_decl = canonical_cpp_record_decl(access_context_decl);
+
+    switch (ctor.declared_access) {
+        case RecordMemberAccess::Public:
+            return true;
+        case RecordMemberAccess::Private:
+            return collect_internal::can_access_private_member_in_context(
+                constructed_record_decl,
+                access_context_decl,
+                ast_ctx,
+                access_context_type);
+        case RecordMemberAccess::Protected: {
+            if (direct_base_subobject) {
+                return true;
+            }
+            const ObjectDecl* object_record_decl = constructed_record_decl;
+            return collect_internal::can_access_protected_member_in_context(
+                constructed_record_decl,
+                access_context_decl,
+                object_record_decl,
+                /*is_static_member=*/false,
+                ast_ctx,
+                access_context_type);
+        }
+    }
+    return false;
+}
+
 bool type_supports_generated_special_member_construction(
     QualType type,
     bool use_move,
+    const ObjectDecl* access_context_decl,
+    QualType access_context_type,
+    bool direct_base_subobject,
     const ASTContext* ast_ctx,
     std::unordered_set<const ObjectDecl*>& active_records);
 
 bool record_supports_generated_special_member_construction(
     const ObjectDecl* record_decl,
     bool use_move,
+    const ObjectDecl* access_context_decl,
+    QualType access_context_type,
+    bool direct_base_subobject,
     const ASTContext* ast_ctx,
     std::unordered_set<const ObjectDecl*>& active_records) {
     record_decl = canonical_cpp_record_decl(record_decl);
@@ -482,13 +524,26 @@ bool record_supports_generated_special_member_construction(
     if (const auto* ctor =
             find_constructor_for_value_category(
                 state, owner_type, use_move, ast_ctx)) {
-        return !ctor->is_deleted;
+        return !ctor->is_deleted &&
+               generated_subobject_constructor_is_accessible(
+                   *ctor,
+                   record_decl,
+                   access_context_decl,
+                   access_context_type,
+                   direct_base_subobject,
+                   ast_ctx);
     }
 
     active_records.insert(record_decl);
     for (const auto& base : state->bases) {
         if (!type_supports_generated_special_member_construction(
-                base.type, use_move, ast_ctx, active_records)) {
+                base.type,
+                use_move,
+                record_decl,
+                owner_type,
+                /*direct_base_subobject=*/true,
+                ast_ctx,
+                active_records)) {
             active_records.erase(record_decl);
             return false;
         }
@@ -498,7 +553,13 @@ bool record_supports_generated_special_member_construction(
             continue;
         }
         if (!type_supports_generated_special_member_construction(
-                field.type, use_move, ast_ctx, active_records)) {
+                field.type,
+                use_move,
+                record_decl,
+                owner_type,
+                /*direct_base_subobject=*/false,
+                ast_ctx,
+                active_records)) {
             active_records.erase(record_decl);
             return false;
         }
@@ -510,6 +571,9 @@ bool record_supports_generated_special_member_construction(
 bool type_supports_generated_special_member_construction(
     QualType type,
     bool use_move,
+    const ObjectDecl* access_context_decl,
+    QualType access_context_type,
+    bool direct_base_subobject,
     const ASTContext* ast_ctx,
     std::unordered_set<const ObjectDecl*>& active_records) {
     if (!type) {
@@ -533,6 +597,9 @@ bool type_supports_generated_special_member_construction(
         return type_supports_generated_special_member_construction(
             array_type->element_type,
             use_move,
+            access_context_decl,
+            access_context_type,
+            direct_base_subobject,
             ast_ctx,
             active_records);
     }
@@ -541,6 +608,9 @@ bool type_supports_generated_special_member_construction(
         return record_supports_generated_special_member_construction(
             dyn_cast<ObjectDecl>(object_type->get_decl()),
             use_move,
+            access_context_decl,
+            access_context_type,
+            direct_base_subobject,
             ast_ctx,
             active_records);
     }
@@ -550,18 +620,36 @@ bool type_supports_generated_special_member_construction(
 
 bool type_supports_generated_copy_construction(
     QualType type,
+    const ObjectDecl* access_context_decl,
+    QualType access_context_type,
+    bool direct_base_subobject,
     const ASTContext* ast_ctx) {
     std::unordered_set<const ObjectDecl*> active_records;
     return type_supports_generated_special_member_construction(
-        type, false, ast_ctx, active_records);
+        type,
+        false,
+        access_context_decl,
+        access_context_type,
+        direct_base_subobject,
+        ast_ctx,
+        active_records);
 }
 
 bool type_supports_generated_move_construction(
     QualType type,
+    const ObjectDecl* access_context_decl,
+    QualType access_context_type,
+    bool direct_base_subobject,
     const ASTContext* ast_ctx) {
     std::unordered_set<const ObjectDecl*> active_records;
     return type_supports_generated_special_member_construction(
-        type, true, ast_ctx, active_records);
+        type,
+        true,
+        access_context_decl,
+        access_context_type,
+        direct_base_subobject,
+        ast_ctx,
+        active_records);
 }
 
 bool type_supports_generated_assignment(
@@ -3388,7 +3476,11 @@ void Collect::collect_record_synthesize_implicit_members(
         if (!implicit_copy_ctor_deleted) {
             for (const auto& base : ctx.bases) {
                 if (!type_supports_generated_copy_construction(
-                        base.type, ast_ctx_.get())) {
+                        base.type,
+                        ctx.semantic_decl,
+                        owner_type,
+                        /*direct_base_subobject=*/true,
+                        ast_ctx_.get())) {
                     implicit_copy_ctor_deleted = true;
                     break;
                 }
@@ -3400,7 +3492,11 @@ void Collect::collect_record_synthesize_implicit_members(
                     continue;
                 }
                 if (!type_supports_generated_copy_construction(
-                        field.type, ast_ctx_.get())) {
+                        field.type,
+                        ctx.semantic_decl,
+                        owner_type,
+                        /*direct_base_subobject=*/false,
+                        ast_ctx_.get())) {
                     implicit_copy_ctor_deleted = true;
                     break;
                 }
@@ -3419,7 +3515,11 @@ void Collect::collect_record_synthesize_implicit_members(
         bool implicit_move_ctor_deleted = false;
         for (const auto& base : ctx.bases) {
             if (!type_supports_generated_move_construction(
-                    base.type, ast_ctx_.get())) {
+                    base.type,
+                    ctx.semantic_decl,
+                    owner_type,
+                    /*direct_base_subobject=*/true,
+                    ast_ctx_.get())) {
                 implicit_move_ctor_deleted = true;
                 break;
             }
@@ -3430,7 +3530,11 @@ void Collect::collect_record_synthesize_implicit_members(
                     continue;
                 }
                 if (!type_supports_generated_move_construction(
-                        field.type, ast_ctx_.get())) {
+                        field.type,
+                        ctx.semantic_decl,
+                        owner_type,
+                        /*direct_base_subobject=*/false,
+                        ast_ctx_.get())) {
                     implicit_move_ctor_deleted = true;
                     break;
                 }
@@ -3928,9 +4032,15 @@ bool Collect::collect_materialize_defaulted_constructor(
             bool supported = use_move
                 ? type_supports_generated_move_construction(
                       base.type,
+                      owner_record_decl,
+                      owner_type,
+                      /*direct_base_subobject=*/true,
                       ast_ctx_.get())
                 : type_supports_generated_copy_construction(
                       base.type,
+                      owner_record_decl,
+                      owner_type,
+                      /*direct_base_subobject=*/true,
                       ast_ctx_.get());
             if (!supported) {
                 ctor_decl->is_deleted = true;
@@ -3946,9 +4056,15 @@ bool Collect::collect_materialize_defaulted_constructor(
             bool supported = use_move
                 ? type_supports_generated_move_construction(
                       field.type,
+                      owner_record_decl,
+                      owner_type,
+                      /*direct_base_subobject=*/false,
                       ast_ctx_.get())
                 : type_supports_generated_copy_construction(
                       field.type,
+                      owner_record_decl,
+                      owner_type,
+                      /*direct_base_subobject=*/false,
                       ast_ctx_.get());
             if (!supported) {
                 ctor_decl->is_deleted = true;
