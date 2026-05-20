@@ -1357,6 +1357,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                     : clone_error,
                 pattern->body ? pattern->body->location : pattern->location);
         }
+        specialization_symbol_ptr->type = QualType(specialization_decl_ptr->type);
         specialization_symbol_ptr->is_defined =
             function_decl_defines_entity(specialization_decl_ptr);
         return true;

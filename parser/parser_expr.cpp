@@ -1721,11 +1721,10 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
 
         DeclarationParser return_parser(this);
         if (auto return_type = return_parser.parse_cpp_trailing_return_type()) {
-            if (return_parser.is_parameter_pack ||
-                auto_type_utils::has_cxx_auto_type(return_type->get_shared())) {
+            if (return_parser.is_parameter_pack) {
                 fail_cpp_future_work(
-                    "generic lambda trailing return",
-                    "generic_lambda",
+                    "lambda trailing return parameter pack",
+                    "lambda_trailing_return_pack",
                     lambda_loc);
             }
             lambda_function_type->ret_type = *return_type;
