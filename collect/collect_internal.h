@@ -1120,7 +1120,9 @@ MemberNameLookupResult lookup_record_member_name_impl(
         if (field.name == member_name) {
             ++local_result.field_matches;
         }
-        if (field.name.empty()) {
+        if (field.name.empty() &&
+            !field.is_base_subobject &&
+            !field.is_virtual_base_storage) {
             auto nested_record =
                 desugar_type(field.type).as_shared<ObjectType>();
             auto* nested_decl = nested_record
@@ -1129,11 +1131,12 @@ MemberNameLookupResult lookup_record_member_name_impl(
             if (!nested_decl || nested_record->isIncomplete()) {
                 continue;
             }
+            auto promoted_visited = visited;
             MemberNameLookupResult promoted_result =
                 lookup_record_member_name_impl(
                     nested_decl,
                     member_name,
-                    visited);
+                    promoted_visited);
             local_result.field_matches += promoted_result.field_matches;
         }
     }
