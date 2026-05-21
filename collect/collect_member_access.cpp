@@ -48,21 +48,33 @@ QualType Collect::try_synthesize_dependent_member_type(
         return QualType(nullptr);
     }
 
+    auto base_analysis = analyze_cpp_member_lookup_base(
+        base_type,
+        is_arrow,
+        session_.func_state_.current_function_is_cpp_member
+            ? session_.func_state_.current_function_cpp_this_type
+            : QualType(nullptr),
+        ast_ctx_.get(),
+        session_.current_cpp_record_lookup_type_);
+
     std::shared_ptr<ObjectType> lookup_record_type =
-        desugar_type(object_type, ast_ctx_.get()).as_shared<ObjectType>();
+        base_analysis.object_record_type
+            ? base_analysis.object_record_type
+            : desugar_type(object_type, ast_ctx_.get()).as_shared<ObjectType>();
     const ClassTemplateDecl* class_template = nullptr;
     const TemplateSpecializationType* specialization = nullptr;
 
-    if (!lookup_record_type) {
-        auto specialization_type =
-            dyn_cast_shared<TemplateSpecializationType>(
-                desugar_typedefs(object_type).get_shared());
-        if (!specialization_type) {
-            return QualType(nullptr);
-        }
+    auto specialization_type =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_typedefs(object_type).get_shared());
+    if (specialization_type) {
         class_template =
             dyn_cast<ClassTemplateDecl>(specialization_type->primary_template);
-        if (!class_template) {
+        specialization = specialization_type.get();
+    }
+
+    if (!lookup_record_type) {
+        if (!class_template || !specialization) {
             return QualType(nullptr);
         }
         const ObjectDecl* pattern_decl = class_template->pattern_semantic_decl();
@@ -70,7 +82,6 @@ QualType Collect::try_synthesize_dependent_member_type(
             return QualType(nullptr);
         }
         lookup_record_type = pattern_decl->get_record_type();
-        specialization = specialization_type.get();
     }
     if (!lookup_record_type) {
         return QualType(nullptr);
@@ -745,7 +756,8 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
                   session_.func_state_.current_function_is_cpp_member
                       ? session_.func_state_.current_function_cpp_this_type
                       : QualType(nullptr),
-                  ast_ctx_.get())
+                  ast_ctx_.get(),
+                  session_.current_cpp_record_lookup_type_)
             : CppMemberLookupBaseAnalysis{};
     bool dependent_base_expr =
         lang_opts_.is_cxx_mode() &&

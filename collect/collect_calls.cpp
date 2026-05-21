@@ -1609,7 +1609,8 @@ std::unique_ptr<Expr> Collect::build_dependent_explicit_template_call(
             session_.func_state_.current_function_is_cpp_member
                 ? session_.func_state_.current_function_cpp_this_type
                 : QualType(nullptr),
-            ast_ctx_.get());
+            ast_ctx_.get(),
+            session_.current_cpp_record_lookup_type_);
 
         auto owned_member = std::unique_ptr<MemberExpr>(
             static_cast<MemberExpr*>(callee.release()));
@@ -1779,7 +1780,8 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
                     session_.func_state_.current_function_is_cpp_member
                         ? session_.func_state_.current_function_cpp_this_type
                         : QualType(nullptr),
-                    ast_ctx_.get())
+                    ast_ctx_.get(),
+                    session_.current_cpp_record_lookup_type_)
                     .is_dependent) {
                 return build_dependent_explicit_template_call(
                     std::move(callee),
@@ -2559,7 +2561,8 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_id_impl(
             session_.func_state_.current_function_is_cpp_member
                 ? session_.func_state_.current_function_cpp_this_type
                 : QualType(nullptr),
-            ast_ctx_.get());
+            ast_ctx_.get(),
+            session_.current_cpp_record_lookup_type_);
         if (member_base_analysis.is_dependent) {
             auto owned_member = std::unique_ptr<MemberExpr>(
                 static_cast<MemberExpr*>(callee.release()));
@@ -4539,7 +4542,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
                            : QualType(nullptr),
                        unresolved_member->isArrow != 0,
                        implicit_this_type,
-                       ast_ctx_.get())
+                       ast_ctx_.get(),
+                       session_.current_cpp_record_lookup_type_)
                 .is_dependent;
         };
 

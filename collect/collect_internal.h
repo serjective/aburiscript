@@ -1454,7 +1454,8 @@ CppMemberLookupBaseAnalysis analyze_cpp_member_lookup_base(
     QualType base_type,
     bool is_arrow,
     QualType current_this_type,
-    const ASTContext* ast_ctx) {
+    const ASTContext* ast_ctx,
+    QualType current_cpp_record_lookup_type = nullptr) {
     CppMemberLookupBaseAnalysis analysis;
     if (!base_type) {
         return analysis;
@@ -1471,7 +1472,6 @@ CppMemberLookupBaseAnalysis analyze_cpp_member_lookup_base(
                       ast_ctx)
                 : QualType(nullptr);
     }
-
     analysis.object_type = object_type;
     analysis.is_dependent =
         type_depends_on_template_parameters(object_type, ast_ctx);
@@ -1491,11 +1491,39 @@ CppMemberLookupBaseAnalysis analyze_cpp_member_lookup_base(
     analysis.object_record_decl =
         record_decl_from_record_type(analysis.object_record_type.get());
 
+    QualType current_object_type = nullptr;
+    auto this_ptr =
+        desugar_type(remove_reference(current_this_type, ast_ctx), ast_ctx)
+            .as_shared<PointerType>();
+    if (this_ptr) {
+        current_object_type =
+            desugar_type(
+                remove_reference(this_ptr->pointed_type, ast_ctx),
+                ast_ctx);
+    }
+    bool object_type_is_current_instantiation =
+        object_type && current_object_type &&
+        object_type.equals_unqualified(current_object_type);
+    // Partial-specialization bodies can name the current instantiation even when
+    // the primary is only forward-declared, so record-decl identity is not enough.
+    auto current_record_type =
+        current_record_from_this_type(current_this_type, ast_ctx);
     const ObjectDecl* current_record_decl =
-        current_record_decl_from_this_type(current_this_type);
+        record_decl_from_record_type(current_record_type.get());
     analysis.is_current_instantiation =
-        current_record_decl && analysis.object_record_decl &&
-        analysis.object_record_decl == current_record_decl;
+        object_type_is_current_instantiation ||
+        (current_record_decl && analysis.object_record_decl &&
+         analysis.object_record_decl == current_record_decl);
+    if (analysis.is_current_instantiation) {
+        auto active_lookup_record =
+            desugar_type(current_cpp_record_lookup_type, ast_ctx)
+                .as_shared<ObjectType>();
+        if (active_lookup_record) {
+            analysis.object_record_type = active_lookup_record;
+            analysis.object_record_decl =
+                record_decl_from_record_type(active_lookup_record.get());
+        }
+    }
     return analysis;
 }
 
