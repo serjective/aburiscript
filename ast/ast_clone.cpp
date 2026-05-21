@@ -742,6 +742,12 @@ bool rewrite_stmt_tree_in_place_impl(std::unique_ptr<Stmt>& stmt,
 bool rewrite_decl_tree_in_place_impl(std::unique_ptr<Decl>& decl,
                                      ASTCloneContext& ctx,
                                      std::string* error_out);
+RecordSemanticState clone_record_semantic_state_for_object_decl(
+    const ObjectDecl* source,
+    const ObjectDecl* destination,
+    const ObjectType& destination_type,
+    const std::unordered_map<const FieldDecl*, const FieldDecl*>& field_remap,
+    ASTCloneContext& ctx);
 
 template <typename ExprT>
 bool rewrite_expr_tree(std::unique_ptr<ExprT>& expr,
@@ -1804,6 +1810,36 @@ bool rewrite_decl_tree_in_place_impl(std::unique_ptr<Decl>& decl,
         }
         case DeclKind::CppAccessSpecDecl:
             return true;
+        case DeclKind::ObjectDecl: {
+            auto* object_decl = static_cast<ObjectDecl*>(decl.get());
+            auto record_type = object_decl->get_record_type();
+            if (record_type) {
+                ctx.record_type_remap.emplace(object_decl, QualType(record_type));
+            }
+            if (!rewrite_decl_vector(object_decl->fields, ctx, error_out)) {
+                return false;
+            }
+            if (record_type) {
+                std::unordered_map<const FieldDecl*, const FieldDecl*> field_remap;
+                record_semantics_cache_set(
+                    ctx.ast_ctx,
+                    object_decl,
+                    clone_record_semantic_state_for_object_decl(
+                        object_decl,
+                        object_decl,
+                        *record_type,
+                        field_remap,
+                        ctx));
+            }
+            if (ctx.ast_ctx && ctx.ast_ctx->has_attrs(object_decl->node_id) &&
+                !rewrite_attribute_list_in_place(
+                    ctx.ast_ctx->get_attrs_mut(object_decl->node_id),
+                    ctx,
+                    error_out)) {
+                return false;
+            }
+            return true;
+        }
         case DeclKind::CppRecordDecl: {
             auto* record_decl = static_cast<CppRecordDecl*>(decl.get());
             for (auto& base : record_decl->bases) {
@@ -2594,6 +2630,230 @@ std::shared_ptr<Symbol> clone_symbol_shallow(const std::shared_ptr<Symbol>& sym,
     return cloned;
 }
 
+const ObjectDecl* remap_record_decl(const ObjectDecl* record_decl,
+                                    ASTCloneContext& ctx) {
+    if (!record_decl) {
+        return nullptr;
+    }
+    auto it = ctx.record_type_remap.find(record_decl);
+    if (it == ctx.record_type_remap.end() || !it->second) {
+        return record_decl;
+    }
+    auto remapped_type = it->second.as_shared<ObjectType>();
+    if (!remapped_type) {
+        return record_decl;
+    }
+    if (auto* remapped_decl = dyn_cast<ObjectDecl>(remapped_type->get_decl())) {
+        return remapped_decl;
+    }
+    return record_decl;
+}
+
+const TemplateDecl* remap_template_decl(const TemplateDecl* template_decl,
+                                        ASTCloneContext& ctx) {
+    if (!template_decl) {
+        return nullptr;
+    }
+    auto it = ctx.template_decl_remap.find(template_decl);
+    if (it == ctx.template_decl_remap.end() || !it->second) {
+        return template_decl;
+    }
+    return it->second;
+}
+
+std::shared_ptr<ObjectType> clone_object_type_for_decl(
+    const ObjectDecl* object_decl,
+    ASTCloneContext& ctx,
+    std::string* error_out) {
+    if (!object_decl) {
+        return nullptr;
+    }
+
+    auto source_type = object_decl->get_record_type();
+    auto cloned_type = std::make_shared<ObjectType>(
+        object_decl->tag,
+        object_decl->is_union != 0);
+    if (!source_type) {
+        return cloned_type;
+    }
+
+    cloned_type->is_packed = source_type->is_packed;
+    cloned_type->is_transparent_union = source_type->is_transparent_union;
+    cloned_type->requested_alignment = source_type->requested_alignment;
+    cloned_type->pack_alignment = source_type->pack_alignment;
+    if (source_type->class_template_specialization) {
+        auto cloned_info =
+            std::make_shared<ObjectType::ClassTemplateSpecializationInfo>(
+                *source_type->class_template_specialization);
+        cloned_info->primary_template =
+            dyn_cast<ClassTemplateDecl>(
+                const_cast<TemplateDecl*>(
+                    remap_template_decl(
+                        cloned_info->primary_template,
+                        ctx)));
+        auto rewritten_arguments =
+            rewrite_template_arguments(cloned_info->arguments, ctx, error_out);
+        if (rewritten_arguments.empty() &&
+            !cloned_info->arguments.empty() &&
+            error_out && !error_out->empty()) {
+            return nullptr;
+        }
+        cloned_info->arguments = std::move(rewritten_arguments);
+        cloned_type->class_template_specialization = std::move(cloned_info);
+    }
+    return cloned_type;
+}
+
+std::vector<ObjectType::Field> build_record_fields_from_decl_members(
+    const ObjectDecl* record_decl) {
+    std::vector<ObjectType::Field> fields;
+    if (!record_decl) {
+        return fields;
+    }
+    for (const auto& member : record_decl->fields) {
+        auto* field_decl = dyn_cast<FieldDecl>(member.get());
+        if (!field_decl) {
+            continue;
+        }
+        if (field_decl->is_bitfield()) {
+            fields.emplace_back(
+                field_decl->name,
+                field_decl->type,
+                0,
+                0,
+                field_decl->bitfield_width,
+                0,
+                RecordMemberAccess::Public,
+                field_decl->is_mutable,
+                field_decl);
+        } else {
+            fields.emplace_back(
+                field_decl->name,
+                field_decl->type,
+                0,
+                RecordMemberAccess::Public,
+                field_decl->is_mutable,
+                field_decl);
+        }
+    }
+    return fields;
+}
+
+RecordSemanticState clone_record_semantic_state_for_object_decl(
+    const ObjectDecl* source,
+    const ObjectDecl* destination,
+    const ObjectType& destination_type,
+    const std::unordered_map<const FieldDecl*, const FieldDecl*>& field_remap,
+    ASTCloneContext& ctx) {
+    const RecordSemanticState* source_state =
+        record_semantics_cache_lookup(source, ctx.ast_ctx);
+    RecordSemanticState state =
+        source_state ? *source_state : RecordSemanticState{};
+    if (!source_state) {
+        state.is_incomplete = destination ? destination->fields.empty() : true;
+        state.fields = build_record_fields_from_decl_members(destination);
+    }
+
+    auto remap_field_decl = [&](const FieldDecl* field_decl) -> const FieldDecl* {
+        if (!field_decl) {
+            return nullptr;
+        }
+        auto it = field_remap.find(field_decl);
+        return it != field_remap.end() ? it->second : field_decl;
+    };
+
+    for (auto& base : state.bases) {
+        base.type = rewrite_type(base.type, ctx);
+        base.record_decl = remap_record_decl(base.record_decl, ctx);
+    }
+    for (auto& field : state.fields) {
+        field.type = rewrite_type(field.type, ctx);
+        field.decl = remap_field_decl(field.decl);
+    }
+    for (auto& method : state.methods) {
+        method.type = rewrite_type(method.type, ctx);
+        method.conversion_target_type =
+            rewrite_type(method.conversion_target_type, ctx);
+        method.symbol = remap_symbol(method.symbol, ctx);
+    }
+    for (auto& method_template : state.method_templates) {
+        method_template.decl =
+            dyn_cast<FunctionTemplateDecl>(
+                const_cast<TemplateDecl*>(
+                    remap_template_decl(method_template.decl, ctx)));
+    }
+    for (auto& static_member : state.static_data_members) {
+        static_member.type = rewrite_type(static_member.type, ctx);
+        static_member.symbol = remap_symbol(static_member.symbol, ctx);
+    }
+    for (auto& nested_type : state.nested_types) {
+        nested_type.type = rewrite_type(nested_type.type, ctx);
+        nested_type.symbol = remap_symbol(nested_type.symbol, ctx);
+    }
+    for (auto& nested_template : state.nested_templates) {
+        nested_template.decl = remap_template_decl(nested_template.decl, ctx);
+    }
+    for (auto& friend_function : state.friend_functions) {
+        friend_function.type = rewrite_type(friend_function.type, ctx);
+        friend_function.symbol = remap_symbol(friend_function.symbol, ctx);
+        friend_function.function_template =
+            dyn_cast<FunctionTemplateDecl>(
+                const_cast<TemplateDecl*>(
+                    remap_template_decl(
+                        friend_function.function_template,
+                        ctx)));
+    }
+    for (auto& friend_type : state.friend_types) {
+        friend_type.type = rewrite_type(friend_type.type, ctx);
+    }
+    for (auto& constructor : state.constructors) {
+        constructor.type = rewrite_type(constructor.type, ctx);
+        constructor.symbol = remap_symbol(constructor.symbol, ctx);
+        constructor.function_template =
+            dyn_cast<FunctionTemplateDecl>(
+                const_cast<TemplateDecl*>(
+                    remap_template_decl(
+                        constructor.function_template,
+                        ctx)));
+    }
+    for (auto& destructor : state.destructors) {
+        destructor.type = rewrite_type(destructor.type, ctx);
+        destructor.symbol = remap_symbol(destructor.symbol, ctx);
+    }
+    for (auto& slot : state.virtual_slots) {
+        slot.final_symbol = remap_symbol(slot.final_symbol, ctx);
+    }
+    for (auto& virtual_base : state.virtual_bases) {
+        virtual_base.type = rewrite_type(virtual_base.type, ctx);
+        virtual_base.record_decl =
+            remap_record_decl(virtual_base.record_decl, ctx);
+    }
+    for (auto& enumerator : state.enumerator_members) {
+        enumerator.symbol = remap_symbol(enumerator.symbol, ctx);
+    }
+
+    if (state.bases.empty() && state.virtual_bases.empty()) {
+        RecordSemanticState layout = compute_record_semantics(
+            std::move(state.fields),
+            destination_type.is_union,
+            destination_type.is_packed,
+            destination_type.requested_alignment,
+            destination_type.pack_alignment,
+            state.is_incomplete,
+            ctx.ast_ctx && ctx.ast_ctx->abi_policy
+                ? ctx.ast_ctx->abi_policy.get()
+                : nullptr);
+        state.fields = std::move(layout.fields);
+        state.size_bits = layout.size_bits;
+        state.alignment = layout.alignment;
+        state.non_virtual_size_bits = layout.non_virtual_size_bits;
+        state.non_virtual_alignment = layout.non_virtual_alignment;
+        state.has_flexible_array_member = layout.has_flexible_array_member;
+    }
+
+    return state;
+}
+
 std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                                       ASTCloneContext& ctx,
                                       std::string* error_out) {
@@ -2683,6 +2943,53 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 access_spec_decl->access,
                 access_spec_decl->location);
             assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::ObjectDecl: {
+            const auto* object_decl = static_cast<const ObjectDecl*>(decl);
+            auto cloned_type =
+                clone_object_type_for_decl(object_decl, ctx, error_out);
+            if (!cloned_type) {
+                return nullptr;
+            }
+            ctx.record_type_remap[object_decl] = QualType(cloned_type);
+
+            std::vector<std::unique_ptr<Decl>> cloned_fields;
+            cloned_fields.reserve(object_decl->fields.size());
+            std::unordered_map<const FieldDecl*, const FieldDecl*> field_remap;
+            for (const auto& field : object_decl->fields) {
+                auto cloned_field = clone_decl_impl(field.get(), ctx, error_out);
+                if (field && !cloned_field) {
+                    return nullptr;
+                }
+                if (auto* source_field = dyn_cast<FieldDecl>(field.get())) {
+                    if (auto* cloned_field_decl =
+                            dyn_cast<FieldDecl>(cloned_field.get())) {
+                        field_remap[source_field] = cloned_field_decl;
+                    }
+                }
+                cloned_fields.push_back(std::move(cloned_field));
+            }
+
+            auto result = std::make_unique<ObjectDecl>(
+                object_decl->tag,
+                std::move(cloned_fields),
+                cloned_type,
+                object_decl->is_union != 0,
+                object_decl->location);
+            assign_node_id(result.get(), ctx.ast_ctx);
+            record_semantics_cache_set(
+                ctx.ast_ctx,
+                result.get(),
+                clone_record_semantic_state_for_object_decl(
+                    object_decl,
+                    result.get(),
+                    *cloned_type,
+                    field_remap,
+                    ctx));
             if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
