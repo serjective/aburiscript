@@ -864,6 +864,197 @@ std::unique_ptr<ObjectDecl> Parser::take_cpp_transient_semantic_object_decl(
     return nullptr;
 }
 
+const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
+    CppRecordDecl& record) {
+    if (!collect_) {
+        return nullptr;
+    }
+
+    bool is_union_record = record.record_kind == CppRecordKind::Union;
+    auto* semantic_decl =
+        const_cast<ObjectDecl*>(record.provisional_semantic_owner);
+    if (!semantic_decl && !record.name.empty()) {
+        semantic_decl =
+            dyn_cast<ObjectDecl>(collect_->collect_lookup_tag_decl(
+                record.name,
+                false));
+    }
+
+    std::unique_ptr<ObjectDecl> owned_semantic_decl;
+    if (!semantic_decl) {
+        auto record_type = std::make_shared<ObjectType>(
+            record.name,
+            is_union_record,
+            !record.is_definition);
+        owned_semantic_decl = collect_->collect_record_declaration(
+            record.name,
+            record_type,
+            is_union_record,
+            record.location);
+        semantic_decl = owned_semantic_decl.get();
+    }
+    if (!semantic_decl || !semantic_decl->get_record_type()) {
+        return nullptr;
+    }
+    if (semantic_decl->get_record_type()->is_union != is_union_record) {
+        error_custloc(
+            "tag '" + record.name +
+                "' was previously declared as a different kind",
+            record.location);
+    }
+
+    if (const auto* existing_state =
+            collect_->query_lookup_record_semantics(semantic_decl)) {
+        if (record.is_definition && !existing_state->is_incomplete) {
+            record.provisional_semantic_owner = semantic_decl;
+            return semantic_decl;
+        }
+    }
+
+    auto record_type = semantic_decl->get_record_type();
+    record_type->set_decl(semantic_decl);
+
+    RecordSemanticState state;
+    state.is_incomplete = !record.is_definition;
+    state.alignment = 1;
+    state.non_virtual_alignment = 1;
+    if (const auto* definition_data = record.get_definition_data()) {
+        state.definition_data = *definition_data;
+    }
+
+    RecordMemberAccess current_access =
+        encode_member_access(record.default_access);
+    for (const auto& member : record.members) {
+        if (!member) {
+            continue;
+        }
+        if (const auto* access_spec =
+                dyn_cast<CppAccessSpecDecl>(member.get())) {
+            current_access = encode_member_access(access_spec->access);
+            continue;
+        }
+        if (const auto* field_decl = dyn_cast<FieldDecl>(member.get())) {
+            if (field_decl->is_bitfield()) {
+                state.fields.emplace_back(
+                    field_decl->name,
+                    field_decl->type,
+                    0,
+                    0,
+                    field_decl->bitfield_width,
+                    0,
+                    current_access,
+                    field_decl->is_mutable,
+                    field_decl);
+            } else {
+                state.fields.emplace_back(
+                    field_decl->name,
+                    field_decl->type,
+                    0,
+                    current_access,
+                    field_decl->is_mutable,
+                    field_decl);
+            }
+            continue;
+        }
+        if (auto* nested_record = dyn_cast<CppRecordDecl>(member.get())) {
+            const ObjectDecl* nested_decl =
+                ensure_cpp_template_pattern_nested_record_semantics(
+                    *nested_record);
+            if (!nested_decl || !nested_decl->get_record_type()) {
+                continue;
+            }
+            if (nested_record->name.empty()) {
+                state.fields.emplace_back(
+                    "",
+                    QualType(nested_decl->get_record_type()),
+                    0,
+                    current_access,
+                    false,
+                    nullptr);
+            } else {
+                RecordSemanticState::NestedType nested_type;
+                nested_type.name = nested_record->name;
+                nested_type.type = QualType(nested_decl->get_record_type());
+                nested_type.declared_access = current_access;
+                nested_type.decl = nested_decl;
+                state.nested_types.push_back(std::move(nested_type));
+            }
+            continue;
+        }
+        if (const auto* typedef_decl = dyn_cast<TypedefDecl>(member.get())) {
+            RecordSemanticState::NestedType nested_type;
+            nested_type.name = typedef_decl->name;
+            nested_type.type = typedef_decl->type;
+            nested_type.declared_access = current_access;
+            nested_type.decl = typedef_decl;
+            nested_type.symbol = typedef_decl->sym;
+            state.nested_types.push_back(std::move(nested_type));
+            continue;
+        }
+        if (const auto* enum_decl = dyn_cast<EnumDecl>(member.get())) {
+            if (!enum_decl->tag.empty()) {
+                RecordSemanticState::NestedType nested_type;
+                nested_type.name = enum_decl->tag;
+                nested_type.type = QualType(enum_decl->get_enum_type());
+                nested_type.declared_access = current_access;
+                nested_type.decl = enum_decl;
+                state.nested_types.push_back(std::move(nested_type));
+            }
+            if (!enum_decl->is_scoped()) {
+                for (const auto& constant : enum_decl->constants) {
+                    if (!constant) {
+                        continue;
+                    }
+                    RecordSemanticState::EnumeratorMember enumerator;
+                    enumerator.name = constant->name;
+                    enumerator.declared_access = current_access;
+                    enumerator.enum_decl = enum_decl;
+                    enumerator.decl = constant.get();
+                    enumerator.symbol = constant->sym;
+                    state.enumerator_members.push_back(std::move(enumerator));
+                }
+            }
+            continue;
+        }
+        if (const auto* alias_template = dyn_cast<AliasTemplateDecl>(member.get())) {
+            if (const auto* alias_decl = alias_template->alias_decl()) {
+                RecordSemanticState::NestedTemplate nested_template;
+                nested_template.name = alias_decl->name;
+                nested_template.declared_access = current_access;
+                nested_template.kind =
+                    RecordSemanticState::NestedTemplateKind::Alias;
+                nested_template.decl = alias_template;
+                state.nested_templates.push_back(std::move(nested_template));
+            }
+            continue;
+        }
+        if (const auto* class_template = dyn_cast<ClassTemplateDecl>(member.get())) {
+            if (const auto* nested_record = class_template->record_decl();
+                nested_record && !nested_record->name.empty()) {
+                RecordSemanticState::NestedTemplate nested_template;
+                nested_template.name = nested_record->name;
+                nested_template.declared_access = current_access;
+                nested_template.kind =
+                    RecordSemanticState::NestedTemplateKind::Class;
+                nested_template.decl = class_template;
+                state.nested_templates.push_back(std::move(nested_template));
+            }
+            continue;
+        }
+    }
+
+    collect_->query_publish_record_semantics(semantic_decl, std::move(state));
+    record.provisional_semantic_owner = semantic_decl;
+    if (owned_semantic_decl) {
+        if (!record.name.empty()) {
+            collect_->collect_add_tag_decl(record.name, semantic_decl);
+        }
+        cpp_transient_semantic_decls_.push_back(
+            std::move(owned_semantic_decl));
+    }
+    return semantic_decl;
+}
+
 template <typename TemplateDeclT>
 void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_template) {
     auto* record = class_template.record_decl();
@@ -943,106 +1134,10 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
     friend_types.reserve(record->members.size());
     bases.reserve(record->bases.size());
 
-    std::function<const ObjectDecl*(const CppRecordDecl&)> build_pattern_nested_record;
-    build_pattern_nested_record = [&](const CppRecordDecl& nested_record)
-        -> const ObjectDecl* {
-        bool is_union_record = nested_record.record_kind == CppRecordKind::Union;
-        auto nested_record_type = std::make_shared<ObjectType>(
-            nested_record.name,
-            is_union_record,
-            !nested_record.is_definition);
-        auto nested_semantic_decl = collect_->collect_record_declaration(
-            nested_record.name,
-            nested_record_type,
-            is_union_record,
-            nested_record.location);
-        if (!nested_semantic_decl) {
-            return nullptr;
-        }
-
-        RecordSemanticState nested_state;
-        nested_state.is_incomplete = !nested_record.is_definition;
-        nested_state.alignment = 1;
-        nested_state.non_virtual_alignment = 1;
-        if (const auto* definition_data = nested_record.get_definition_data()) {
-            nested_state.definition_data = *definition_data;
-        }
-
-        std::vector<ObjectType::Field> nested_fields;
-        std::vector<RecordSemanticState::NestedType> nested_nested_types;
-        nested_fields.reserve(nested_record.members.size());
-        nested_nested_types.reserve(nested_record.members.size());
-        RecordMemberAccess nested_access =
-            encode_member_access(nested_record.default_access);
-
-        for (const auto& nested_member : nested_record.members) {
-            if (!nested_member) {
-                continue;
-            }
-            if (const auto* access_spec =
-                    dyn_cast<CppAccessSpecDecl>(nested_member.get())) {
-                nested_access = encode_member_access(access_spec->access);
-                continue;
-            }
-            if (const auto* field_decl =
-                    dyn_cast<FieldDecl>(nested_member.get())) {
-                if (field_decl->is_bitfield()) {
-                    nested_fields.emplace_back(
-                        field_decl->name,
-                        field_decl->type,
-                        0,
-                        0,
-                        field_decl->bitfield_width,
-                        0,
-                        nested_access,
-                        field_decl->is_mutable,
-                        field_decl);
-                } else {
-                    nested_fields.emplace_back(
-                        field_decl->name,
-                        field_decl->type,
-                        0,
-                        nested_access,
-                        field_decl->is_mutable,
-                        field_decl);
-                }
-                continue;
-            }
-            if (const auto* child_record =
-                    dyn_cast<CppRecordDecl>(nested_member.get())) {
-                const ObjectDecl* child_decl =
-                    build_pattern_nested_record(*child_record);
-                if (!child_decl || !child_decl->get_record_type()) {
-                    continue;
-                }
-                if (child_record->name.empty()) {
-                    nested_fields.emplace_back(
-                        "",
-                        QualType(child_decl->get_record_type()),
-                        0,
-                        nested_access,
-                        false,
-                        nullptr);
-                } else {
-                    RecordSemanticState::NestedType nested_type;
-                    nested_type.name = child_record->name;
-                    nested_type.type = QualType(child_decl->get_record_type());
-                    nested_type.declared_access = nested_access;
-                    nested_type.decl = child_decl;
-                    nested_nested_types.push_back(std::move(nested_type));
-                }
-            }
-        }
-
-        nested_state.fields = std::move(nested_fields);
-        nested_state.nested_types = std::move(nested_nested_types);
-        const ObjectDecl* nested_decl_ptr = nested_semantic_decl.get();
-        collect_->query_publish_record_semantics(
-            nested_semantic_decl.get(),
-            std::move(nested_state));
-        cpp_transient_semantic_decls_.push_back(
-            std::move(nested_semantic_decl));
-        return nested_decl_ptr;
+    auto build_pattern_nested_record =
+        [&](CppRecordDecl& nested_record) -> const ObjectDecl* {
+        return ensure_cpp_template_pattern_nested_record_semantics(
+            nested_record);
     };
 
     RecordMemberAccess current_access =
@@ -1144,7 +1239,7 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
             continue;
         }
 
-        if (const auto* nested_record = dyn_cast<CppRecordDecl>(member.get())) {
+        if (auto* nested_record = dyn_cast<CppRecordDecl>(member.get())) {
             const ObjectDecl* nested_decl =
                 build_pattern_nested_record(*nested_record);
             if (!nested_decl || !nested_decl->get_record_type()) {

@@ -8462,17 +8462,23 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                 if (nested_record->is_definition &&
                     (!nested_owner || !nested_state ||
                      nested_state->is_incomplete)) {
-                    auto nested_semantic =
-                        build_cpp_record_semantic_decl(*nested_record);
-                    if (auto* semantic_object =
-                            dyn_cast<ObjectDecl>(nested_semantic.get())) {
-                        nested_record->provisional_semantic_owner =
-                            semantic_object;
-                        nested_owner = semantic_object;
-                    }
-                    if (nested_semantic) {
-                        cpp_transient_semantic_decls_.push_back(
-                            std::move(nested_semantic));
+                    if (is_in_template_pattern_context()) {
+                        nested_owner = const_cast<ObjectDecl*>(
+                            ensure_cpp_template_pattern_nested_record_semantics(
+                                *nested_record));
+                    } else {
+                        auto nested_semantic =
+                            build_cpp_record_semantic_decl(*nested_record);
+                        if (auto* semantic_object =
+                                dyn_cast<ObjectDecl>(nested_semantic.get())) {
+                            nested_record->provisional_semantic_owner =
+                                semantic_object;
+                            nested_owner = semantic_object;
+                        }
+                        if (nested_semantic) {
+                            cpp_transient_semantic_decls_.push_back(
+                                std::move(nested_semantic));
+                        }
                     }
                 }
                 if (!nested_owner || !nested_owner->get_record_type()) {

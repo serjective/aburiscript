@@ -583,6 +583,8 @@ private:
     void prepare_cpp_template_pattern_record(
         ClassTemplatePartialSpecializationDecl& class_template);
     void ensure_cpp_class_placeholder_type(const std::string& name, SrcLoc loc);
+    const ObjectDecl* ensure_cpp_template_pattern_nested_record_semantics(
+        CppRecordDecl& record);
     std::unique_ptr<ObjectDecl> take_cpp_transient_semantic_object_decl(
         const std::string& tag_name);
     bool can_parse_namespace_scope_template_declaration() const;
