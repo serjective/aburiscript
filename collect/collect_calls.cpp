@@ -575,6 +575,43 @@ bool function_template_specialization_requires_definition_now(
              desugar_typedefs(function_type->ret_type).get_shared()));
 }
 
+QualType extract_called_function_type(QualType callable_type,
+                                      ASTContext* ast_ctx) {
+    if (!callable_type) {
+        return QualType(nullptr);
+    }
+
+    QualType semantic_type =
+        remove_reference_and_desugar(callable_type, ast_ctx);
+    if (!semantic_type) {
+        return QualType(nullptr);
+    }
+    if (semantic_type.as_shared<FunctionType>()) {
+        return semantic_type;
+    }
+
+    auto pointer_type = semantic_type.as_shared<PointerType>();
+    if (!pointer_type) {
+        return QualType(nullptr);
+    }
+    QualType pointed_type =
+        remove_reference_and_desugar(pointer_type->pointed_type, ast_ctx);
+    if (pointed_type.as_shared<FunctionType>()) {
+        return pointed_type;
+    }
+    return QualType(nullptr);
+}
+
+QualType extract_called_function_type(const Expr* callable,
+                                      ASTContext* ast_ctx) {
+    if (!callable) {
+        return QualType(nullptr);
+    }
+    return extract_called_function_type(
+        const_cast<Expr*>(callable)->get_type(),
+        ast_ctx);
+}
+
 } // namespace
 
 std::vector<const ConceptDecl*> Collect::collect_lookup_concepts(
@@ -1258,6 +1295,16 @@ std::unique_ptr<Expr> Collect::collect_dependent_call_expression(
     std::unique_ptr<Expr> callee,
     std::vector<std::unique_ptr<Expr>> args,
     SrcLoc loc) {
+    QualType known_function_type =
+        extract_called_function_type(callee.get(), ast_ctx_.get());
+    if (known_function_type) {
+        return collect_typed_dependent_call_expression(
+            std::move(callee),
+            std::move(args),
+            known_function_type,
+            loc);
+    }
+
     QualType dependent_call_type(
         std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
     return collect_make<DependentCallExpr>(
@@ -1274,10 +1321,14 @@ std::unique_ptr<Expr> Collect::collect_typed_dependent_call_expression(
     QualType known_function_type,
     SrcLoc loc) {
     QualType result_type(std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
-    if (auto function_type =
-            desugar_type(known_function_type, ast_ctx_.get())
-                .as_shared<FunctionType>()) {
+    QualType called_function_type =
+        extract_called_function_type(known_function_type, ast_ctx_.get());
+    if (auto function_type = called_function_type.as_shared<FunctionType>()) {
         result_type = function_type->ret_type;
+        if (!remove_reference_and_desugar(known_function_type, ast_ctx_.get())
+                 .as_shared<FunctionType>()) {
+            known_function_type = called_function_type;
+        }
     }
     return collect_make<DependentCallExpr>(
         std::move(callee),
