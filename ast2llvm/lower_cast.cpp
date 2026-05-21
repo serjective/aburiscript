@@ -144,14 +144,22 @@ llvm::Value* ASTToLLVM::convert_implicit_cast(ImplicitCast *expr) {
     }
     if (expr->kind == ImplicitCastTypes::ARRAY_TO_POINTER) {
         // Array to pointer decay
-        auto lvalue_tup = get_lvalue(expr->expr.get());
+        Expr* array_object_expr = unwrap_reference_binding_expr(expr->expr.get());
+        auto lvalue_tup = get_lvalue(array_object_expr);
         llvm::Value* ptr = lvalue_tup.address;
         if (!ptr) return nullptr;
 
         // We have array. We want pointer to first element.
         // GEP (0, 0)
-        auto arrType =
-            desugar_type(expr->expr->get_type(), ast_ctx.get()).as_shared<ArrayType>();
+        QualType source_array_type =
+            desugar_type(
+                remove_reference(array_object_expr->get_type(), ast_ctx.get()),
+                ast_ctx.get());
+        auto arrType = source_array_type.as_shared<ArrayType>();
+        if (!arrType && lvalue_tup.type) {
+            source_array_type = desugar_type(QualType(lvalue_tup.type), ast_ctx.get());
+            arrType = source_array_type.as_shared<ArrayType>();
+        }
         if (!arrType) {
             error("convert_implicit_cast(): internal error; didn't downcast", expr->location);
             return nullptr;
@@ -162,7 +170,7 @@ llvm::Value* ASTToLLVM::convert_implicit_cast(ImplicitCast *expr) {
             // represented as a flat pointer to their scalar elements.
             return ptr;
         }
-        llvm::Type* llvmArrType = convert_type(arrType);
+        llvm::Type* llvmArrType = convert_type(source_array_type.get_shared());
 
         llvm::Value* zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
         llvm::Value* indices[] = {zero, zero};

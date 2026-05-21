@@ -350,6 +350,80 @@ bool bind_deduced_template_argument_value(
     return existing_single && existing_single->equals(argument);
 }
 
+const Expr* strip_array_bound_deduction_expr(const Expr* expr) {
+    while (expr) {
+        if (auto* cast = dyn_cast<ImplicitCast>(expr)) {
+            expr = cast->expr.get();
+            continue;
+        }
+        if (auto* paren = dyn_cast<ParenExpr>(expr)) {
+            expr = paren->subexpr.get();
+            continue;
+        }
+        break;
+    }
+    return expr;
+}
+
+const TemplateNonTypeParmDecl* direct_non_type_template_parameter_bound(
+    const Expr* expr) {
+    expr = strip_array_bound_deduction_expr(expr);
+    auto* var_ref = dyn_cast<VarRef>(expr);
+    if (!var_ref || !var_ref->symref) {
+        return nullptr;
+    }
+    return dyn_cast<TemplateNonTypeParmDecl>(
+        const_cast<TemplateParameterDecl*>(
+            var_ref->symref->template_parameter_decl));
+}
+
+bool deduce_array_bound_template_argument(
+    const ArrayType& pattern_array,
+    const ArrayType& argument_array,
+    const TemplateParameterList& parameters,
+    TemplateArgumentBindings& deduced_arguments) {
+    if (pattern_array.size_kind == ArraySizeKind::Incomplete) {
+        return true;
+    }
+
+    if (pattern_array.size_kind == ArraySizeKind::Constant) {
+        return argument_array.size_kind == ArraySizeKind::Constant &&
+               pattern_array.size == argument_array.size;
+    }
+
+    if (pattern_array.size_kind != ArraySizeKind::Variable ||
+        !pattern_array.size_expr) {
+        return argument_array.size_kind == pattern_array.size_kind;
+    }
+
+    const auto* bound_parameter =
+        direct_non_type_template_parameter_bound(pattern_array.size_expr.get());
+    if (!bound_parameter) {
+        return argument_array.size_kind == pattern_array.size_kind;
+    }
+    if (argument_array.size_kind != ArraySizeKind::Constant ||
+        !argument_array.size.has_value()) {
+        return false;
+    }
+
+    TemplateArgument bound_argument = TemplateArgument::value_argument(
+        bound_parameter->type,
+        ConstValue::integer(
+            ConstIntValue::from_unsigned(*argument_array.size, 64)),
+        std::to_string(*argument_array.size));
+    if (!template_sema_internal::normalize_concrete_template_value_argument(
+            bound_argument,
+            bound_parameter->type,
+            nullptr)) {
+        return false;
+    }
+    return bind_deduced_template_argument_value(
+        bound_parameter,
+        bound_argument,
+        parameters,
+        deduced_arguments);
+}
+
 TemplateArgument materialize_template_argument_pack_element(
     const TemplateArgument& argument) {
     TemplateArgument element_argument = argument;
@@ -1204,8 +1278,11 @@ bool deduce_template_argument_types_impl(
         if (!argument_array) {
             return false;
         }
-        if (pattern_array->size_kind != argument_array->size_kind ||
-            pattern_array->size != argument_array->size) {
+        if (!deduce_array_bound_template_argument(
+                *pattern_array,
+                *argument_array,
+                parameters,
+                deduced_arguments)) {
             return false;
         }
         return deduce_template_argument_types_impl(

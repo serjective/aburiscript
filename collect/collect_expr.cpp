@@ -9667,6 +9667,10 @@ Collect::build_cpp_overload_reference_conversion_sequence(
     seq.from = source_type;
     QualType canonical_source_type = desugar_type(source_type, ast_ctx_.get());
     QualType canonical_target_type = desugar_type(target_type, ast_ctx_.get());
+    QualType array_normalized_source_type =
+        normalize_array_qualifiers_for_conversion(source_type, ast_ctx_.get());
+    QualType array_normalized_target_type =
+        normalize_array_qualifiers_for_conversion(target_type, ast_ctx_.get());
     auto arg_category = classify_value_category(strip_implicit_casts(arg));
 
     auto fail_binding = [&](const std::string& reason) {
@@ -9686,6 +9690,8 @@ Collect::build_cpp_overload_reference_conversion_sequence(
             (canonical_source_type &&
              canonical_target_type &&
              canonical_source_type.equals_qualified(canonical_target_type)) ||
+            array_normalized_source_type.equals_qualified(
+                array_normalized_target_type) ||
             types_equivalent_after_template_argument_canonicalization(
                 source_type,
                 target_type,
@@ -9703,13 +9709,17 @@ Collect::build_cpp_overload_reference_conversion_sequence(
             (canonical_source_type &&
              canonical_target_type &&
              canonical_source_type.equals_unqualified(canonical_target_type)) ||
+            array_normalized_source_type.equals_unqualified(
+                array_normalized_target_type) ||
             types_equivalent_after_template_argument_canonicalization(
                 source_type,
                 target_type,
                 ast_ctx_.get(),
                 /*ignore_top_level_qualifiers=*/true);
         if (same_unqualified_type &&
-            target_type.has_all_qualifiers_of(source_type)) {
+            (target_type.has_all_qualifiers_of(source_type) ||
+             array_normalized_target_type.has_all_qualifiers_of(
+                 array_normalized_source_type))) {
             seq.kind = ConversionSequenceKind::Qualification;
             seq.rank = ConversionSequenceRank::ExactMatch;
             seq.detail_kind = ConversionSequenceDetailKind::ReferenceDirectBinding;

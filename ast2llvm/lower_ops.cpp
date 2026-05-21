@@ -757,6 +757,7 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
         // directly for references to arrays.
         llvm::Value* arrVal = nullptr;
         llvm::Value* idxVal = convert_expression(subscript->index.get());
+        Expr* array_lvalue_expr = subscript->array.get();
 
         // Get element type
         QualType array_expr_type =
@@ -770,12 +771,14 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
                 desugar_type(remove_reference(array_expr_type, ast_ctx.get()),
                              ast_ctx.get());
             if (auto array_type = referred_array_type.as_shared<ArrayType>()) {
-                Expr* array_lvalue_expr = subscript->array.get();
-                if (auto* cast = dyn_cast<ImplicitCast>(array_lvalue_expr)) {
+                while (auto* cast = dyn_cast<ImplicitCast>(array_lvalue_expr)) {
                     if (cast->kind == ImplicitCastTypes::LVALUE_TO_RVALUE ||
-                        cast->kind == ImplicitCastTypes::ARRAY_TO_POINTER) {
+                        cast->kind == ImplicitCastTypes::ARRAY_TO_POINTER ||
+                        (cast->expr && cast->expr->isLValue())) {
                         array_lvalue_expr = cast->expr.get();
+                        continue;
                     }
+                    break;
                 }
                 auto array_lvalue = get_lvalue(array_lvalue_expr);
                 arrVal = array_lvalue.address;

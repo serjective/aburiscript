@@ -1010,6 +1010,11 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
     switch (expr->get_kind()) {
         case StmtKind::QualifiedVarRef: {
             const auto* var_ref = static_cast<const QualifiedVarRef*>(expr);
+            if (var_ref->symref &&
+                isa<TemplateNonTypeParmDecl>(
+                    var_ref->symref->template_parameter_decl)) {
+                return true;
+            }
             const auto* qualified_info = var_ref->get_cpp_qualified_info();
             bool has_non_dependent_qualifier = false;
             if (qualified_info) {
@@ -1031,6 +1036,11 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
         }
         case StmtKind::VarRef: {
             const auto* var_ref = static_cast<const VarRef*>(expr);
+            if (var_ref->symref &&
+                isa<TemplateNonTypeParmDecl>(
+                    var_ref->symref->template_parameter_decl)) {
+                return true;
+            }
             if (var_ref->symref &&
                 type_depends_on_template_parameters(
                     get_symbol_owner_record_type(var_ref->symref.get()),
@@ -2065,6 +2075,13 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
             continue;
         }
         if (auto arr = dyn_cast_shared<ArrayType>(raw)) {
+            if (arr->size_kind == ArraySizeKind::Variable &&
+                arr->size_expr &&
+                expr_depends_on_template_parameters_for_type(
+                    arr->size_expr.get(),
+                    ast_ctx)) {
+                return true;
+            }
             type = arr->element_type;
             continue;
         }

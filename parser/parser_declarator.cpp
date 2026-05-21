@@ -1006,6 +1006,8 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
         std::shared_ptr<CType> old_type = base;
         std::shared_ptr<CType> new_type = nullptr;
         std::shared_ptr<CType> over_arch = nullptr;
+        uint8_t direct_base_qualifiers = qualifiers;
+        bool applied_base_qualifiers_to_array_element = false;
         auto try_parse_qualified_cpp_declarator_name =
             [&]() -> bool {
                 if (!pars->is_cxx_mode_active()) {
@@ -1368,14 +1370,28 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                 // - Bracket qualifiers (array_param_quals) stay on the outer level
                 //   so that `int a[const]` decays to `int *const`
                 uint8_t elem_extra_quals = QUAL_NONE;
-                if (in_function_parameter && !consumed_outer_param_array_suffix) {
-                    elem_extra_quals = qualifiers; // declaration-specifier qualifiers -> element type
-                    qualifiers = array_param_quals; // only bracket qualifiers stay outer
-                    consumed_outer_param_array_suffix = true;
+                bool outer_parameter_array_suffix =
+                    in_function_parameter &&
+                    !consumed_outer_param_array_suffix &&
+                    (!over_arch || isa<PlaceholderType>(over_arch.get()));
+                if (outer_parameter_array_suffix) {
+                    elem_extra_quals = static_cast<uint8_t>(
+                        qualifiers | direct_base_qualifiers);
+                    if (direct_base_qualifiers != QUAL_NONE) {
+                        applied_base_qualifiers_to_array_element = true;
+                    }
                 }
                 // the pointer bec
                 std::shared_ptr<CType> insert;
                 auto placeholder_type = std::make_shared<PlaceholderType>();
+                bool parenthesized_array_suffix =
+                    over_arch != nullptr &&
+                    !applied_base_qualifiers_to_array_element;
+                if (parenthesized_array_suffix) {
+                    elem_extra_quals = static_cast<uint8_t>(
+                        elem_extra_quals | direct_base_qualifiers);
+                    applied_base_qualifiers_to_array_element = true;
+                }
                 if (arrays_are_pointers) {
                     insert = std::make_shared<PointerType>(QualType(placeholder_type));
                 } else {
@@ -1393,6 +1409,10 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                 if (over_arch != nullptr) {
                     new_type = replace_placeholder(over_arch, new_type);
                     over_arch = nullptr;
+                }
+                if (outer_parameter_array_suffix) {
+                    qualifiers = array_param_quals;
+                    consumed_outer_param_array_suffix = true;
                 }
             } else if (mgnt->gentle_check(TokenType::LEFT_PAREN)) {
                 if (parse_new_type_id_context && pars->is_cxx_mode_active()) {

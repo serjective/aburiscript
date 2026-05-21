@@ -81,10 +81,38 @@ std::string describe_consteval_failure(const ConstEvalResult& result) {
     return "expression is not constant";
 }
 
+QualType normalize_array_qualifiers_for_conversion(QualType type,
+                                                   const ASTContext* ast_ctx) {
+    type = desugar_type(type, ast_ctx);
+    auto arr = type.as_shared<ArrayType>();
+    if (!arr) {
+        return type;
+    }
+
+    QualType element =
+        arr->element_type.with_qualifiers(type.get_qualifiers());
+    element = normalize_array_qualifiers_for_conversion(element, ast_ctx);
+
+    std::shared_ptr<ArrayType> rebuilt;
+    if (arr->size_kind == ArraySizeKind::Variable) {
+        rebuilt = std::make_shared<ArrayType>(element, arr->size_expr);
+    } else {
+        rebuilt = std::make_shared<ArrayType>(element, arr->size);
+        rebuilt->size_kind = arr->size_kind;
+    }
+    return QualType(rebuilt, QUAL_NONE);
+}
+
 bool has_qualification_preserving_match(QualType from, QualType to) {
     if (!from || !to) {
         return false;
     }
+    from = normalize_array_qualifiers_for_conversion(
+        from,
+        get_active_side_table_ast_context());
+    to = normalize_array_qualifiers_for_conversion(
+        to,
+        get_active_side_table_ast_context());
     if (!from.equals_unqualified(to)) {
         return false;
     }
