@@ -1645,6 +1645,20 @@ bool Collect::decltype_expression_requires_deferred_resolution(
         }
         case StmtKind::RequiresExpr:
             return expression_depends_on_template_parameters(stripped);
+        case StmtKind::CppDeleteExpr: {
+            const auto* delete_expr =
+                static_cast<const CppDeleteExpr*>(stripped);
+            return (delete_expr->operand &&
+                    expression_depends_on_template_parameters(
+                        delete_expr->operand.get())) ||
+                   type_depends_on_template_parameters(
+                       delete_expr->destroyed_type,
+                       ast_ctx_.get()) ||
+                   contains_deferred_semantic_type(
+                       delete_expr->destroyed_type.get_shared()) ||
+                   type_contains_undeduced_cxx_auto(
+                       delete_expr->destroyed_type);
+        }
         case StmtKind::CppPseudoDestructorExpr: {
             const auto* pseudo_dtor =
                 static_cast<const CppPseudoDestructorExpr*>(stripped);

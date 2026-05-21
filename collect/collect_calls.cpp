@@ -4401,6 +4401,55 @@ bool Collect::resolve_dependent_expr_after_substitution(
         expr = std::move(rewritten);
         return true;
     }
+    if (auto* delete_expr = dyn_cast<CppDeleteExpr>(expr.get())) {
+        auto type_still_dependent_or_deferred =
+            [&](QualType type) {
+                return type &&
+                       (type_depends_on_template_parameters(
+                            type,
+                            ast_ctx_.get()) ||
+                        contains_deferred_semantic_type(type.get_shared()) ||
+                        auto_type_utils::auto_type_flavors_in(
+                            type.get_shared()) != 0);
+            };
+        strip_stale_dependent_implicit_casts(delete_expr->operand);
+        if (delete_expr->operand &&
+            !resolve_dependent_expr_after_substitution(
+                delete_expr->operand,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        strip_stale_dependent_implicit_casts(delete_expr->operand);
+        realize_deferred_expr_type_after_substitution(
+            delete_expr->operand.get(),
+            /*allow_finalize=*/true);
+        if (!delete_expr->operand ||
+            expression_depends_on_template_parameters(
+                delete_expr->operand.get()) ||
+            type_still_dependent_or_deferred(
+                delete_expr->operand->get_type()) ||
+            type_still_dependent_or_deferred(
+                delete_expr->destroyed_type)) {
+            return true;
+        }
+        auto owned_delete = std::unique_ptr<CppDeleteExpr>(
+            static_cast<CppDeleteExpr*>(expr.release()));
+        auto rewritten = collect_cpp_delete_expression(
+            std::move(owned_delete->operand),
+            owned_delete->is_array_form != 0,
+            owned_delete->is_global_delete != 0,
+            owned_delete->location);
+        if (!rewritten) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to resolve dependent delete expression after substitution";
+            }
+            return false;
+        }
+        expr = std::move(rewritten);
+        return true;
+    }
     if (auto* pseudo_dtor = dyn_cast<CppPseudoDestructorExpr>(expr.get())) {
         while (auto* cast = dyn_cast<ImplicitCast>(pseudo_dtor->base.get())) {
             if (!cast->expr) {

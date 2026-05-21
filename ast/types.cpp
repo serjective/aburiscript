@@ -1277,6 +1277,18 @@ bool expr_depends_on_template_parameters_for_type(const Expr* expr,
             return expr_depends_on_template_parameters_for_type(
                 static_cast<const CppNoexceptExpr*>(expr)->operand.get(),
                 ast_ctx);
+        case StmtKind::CppDeleteExpr: {
+            const auto* delete_expr =
+                static_cast<const CppDeleteExpr*>(expr);
+            return expr_depends_on_template_parameters_for_type(
+                       delete_expr->operand.get(),
+                       ast_ctx) ||
+                   type_depends_on_template_parameters(
+                       delete_expr->destroyed_type,
+                       ast_ctx) ||
+                   auto_type_utils::auto_type_flavors_in(
+                       delete_expr->destroyed_type.get_shared()) != 0;
+        }
         case StmtKind::CppPseudoDestructorExpr: {
             const auto* pseudo_dtor =
                 static_cast<const CppPseudoDestructorExpr*>(expr);

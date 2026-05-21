@@ -5931,16 +5931,46 @@ std::unique_ptr<Expr> Collect::collect_cpp_delete_expression(
         std::move(operand),
         ExprUseContext::RValue);
 
+    auto type_is_dependent_or_deferred =
+        [&](QualType type) {
+            return type &&
+                   (type_depends_on_template_parameters(type, ast_ctx_.get()) ||
+                    contains_deferred_semantic_type(type.get_shared()) ||
+                    auto_type_utils::auto_type_flavors_in(type.get_shared()) != 0);
+        };
+    auto build_dependent_delete =
+        [&](std::unique_ptr<Expr> delete_operand,
+            QualType dependent_destroyed_type) -> std::unique_ptr<Expr> {
+            return collect_make<CppDeleteExpr>(
+                std::move(delete_operand),
+                QualType(get_builtin_void()),
+                dependent_destroyed_type,
+                nullptr,
+                nullptr,
+                CppDeleteExpr::DestructionKind::None,
+                is_array_form,
+                is_global_delete,
+                loc);
+        };
+
+    QualType operand_expr_type = operand ? operand->get_type() : QualType();
+    if ((operand &&
+         expression_depends_on_template_parameters(operand.get())) ||
+        type_is_dependent_or_deferred(operand_expr_type)) {
+        return build_dependent_delete(std::move(operand), QualType(nullptr));
+    }
+
     QualType destroyed_type = nullptr;
-    auto operand_type = operand ? desugar_type(remove_reference(operand->get_type()))
+    auto operand_type = operand ? desugar_type(remove_reference(operand_expr_type))
                                 : QualType();
     auto pointer_type = operand_type.as_shared<PointerType>();
     if (!pointer_type) {
         if (operand && is_null_pointer_constant_expr(operand.get())) {
             QualType void_ptr(std::make_shared<PointerType>(QualType(get_builtin_void())));
             operand = cast_if_needed(std::move(operand), void_ptr);
+            operand_expr_type = operand ? operand->get_type() : QualType();
             pointer_type = desugar_type(remove_reference(
-                operand ? operand->get_type() : QualType())).as_shared<PointerType>();
+                operand_expr_type)).as_shared<PointerType>();
         }
     }
     if (!pointer_type) {
@@ -5948,6 +5978,9 @@ std::unique_ptr<Expr> Collect::collect_cpp_delete_expression(
         return collect_error_expression("delete-expression requires a pointer operand", loc);
     }
     destroyed_type = remove_reference(pointer_type->pointed_type);
+    if (type_is_dependent_or_deferred(destroyed_type)) {
+        return build_dependent_delete(std::move(operand), destroyed_type);
+    }
     QualType canonical_destroyed = desugar_type(destroyed_type);
     auto destroyed_kind = canonical_type_kind(canonical_destroyed);
 
