@@ -4827,8 +4827,34 @@ std::unique_ptr<Expr> Collect::cpp_dynamic_named_cast(
     QualType target_type,
     QualType target_no_ref,
     SrcLoc loc) const {
-    auto source_type = desugar_type(expr->get_type());
+    auto make_dependent_dynamic_cast =
+        [&]() -> std::unique_ptr<Expr> {
+        return collect_make<CppDynamicCastExpr>(
+            std::move(expr),
+            target_type,
+            loc);
+    };
+    auto type_needs_deferred_check =
+        [&](QualType type) {
+        return type &&
+               (type_depends_on_template_parameters(type, ast_ctx_.get()) ||
+                contains_deferred_semantic_type(type.get_shared()) ||
+                auto_type_utils::auto_type_flavors_in(type.get_shared()) != 0);
+    };
+
+    QualType raw_source_type = expr->get_type();
+    auto source_type = desugar_type(raw_source_type, ast_ctx_.get());
+    bool target_dependent =
+        type_needs_deferred_check(target_type) ||
+        type_needs_deferred_check(target_no_ref);
+    bool source_dependent =
+        expression_depends_on_template_parameters(expr.get()) ||
+        type_needs_deferred_check(raw_source_type) ||
+        type_needs_deferred_check(source_type);
     if (!source_type) {
+        if (target_dependent || source_dependent) {
+            return make_dependent_dynamic_cast();
+        }
         return named_cast_error("dynamic_cast operand has unknown type", loc);
     }
 
@@ -4836,6 +4862,20 @@ std::unique_ptr<Expr> Collect::cpp_dynamic_named_cast(
     bool source_is_pointer = canonical_type_kind(source_type) == TypeKind::Pointer;
     bool target_is_reference = canonical_type_kind(target_type) == TypeKind::Reference;
     bool source_is_reference = canonical_type_kind(source_type) == TypeKind::Reference;
+    if (!(target_is_pointer || target_is_reference)) {
+        if (target_dependent) {
+            return make_dependent_dynamic_cast();
+        }
+        return named_cast_error(
+            "dynamic_cast requires pointer or reference operand types", loc);
+    }
+    if (!(source_is_pointer || source_is_reference)) {
+        if (source_dependent) {
+            return make_dependent_dynamic_cast();
+        }
+        return named_cast_error(
+            "dynamic_cast requires pointer or reference operand types", loc);
+    }
     if (!((target_is_pointer && source_is_pointer) ||
           (target_is_reference && source_is_reference))) {
         return named_cast_error(
@@ -4874,6 +4914,10 @@ std::unique_ptr<Expr> Collect::cpp_dynamic_named_cast(
                 .as_shared<PointerType>();
         auto target_ptr = target_no_ref.as_shared<PointerType>();
         if (!source_ptr || !target_ptr) {
+            if ((source_dependent && !source_ptr) ||
+                (target_dependent && !target_ptr)) {
+                return make_dependent_dynamic_cast();
+            }
             return named_cast_error("dynamic_cast requires pointer operand types", loc);
         }
 
@@ -4882,6 +4926,10 @@ std::unique_ptr<Expr> Collect::cpp_dynamic_named_cast(
                 source_ptr->pointed_type,
                 ast_ctx_.get());
         if (!source_object.as_shared<ObjectType>()) {
+            if (source_dependent ||
+                type_needs_deferred_check(source_ptr->pointed_type)) {
+                return make_dependent_dynamic_cast();
+            }
             return named_cast_error("dynamic_cast requires pointers to class types", loc);
         }
 
@@ -4897,6 +4945,10 @@ std::unique_ptr<Expr> Collect::cpp_dynamic_named_cast(
                 target_ptr->pointed_type,
                 ast_ctx_.get());
         if (!target_object.as_shared<ObjectType>()) {
+            if (target_dependent ||
+                type_needs_deferred_check(target_ptr->pointed_type)) {
+                return make_dependent_dynamic_cast();
+            }
             return named_cast_error("dynamic_cast requires pointers to class types", loc);
         }
 
@@ -4917,6 +4969,10 @@ std::unique_ptr<Expr> Collect::cpp_dynamic_named_cast(
     auto source_ref = desugar_type(source_type).as_shared<ReferenceType>();
     auto target_ref = desugar_type(target_type).as_shared<ReferenceType>();
     if (!source_ref || !target_ref) {
+        if ((source_dependent && !source_ref) ||
+            (target_dependent && !target_ref)) {
+            return make_dependent_dynamic_cast();
+        }
         return named_cast_error(
             "dynamic_cast requires pointer or reference operand types", loc);
     }
@@ -4931,6 +4987,12 @@ std::unique_ptr<Expr> Collect::cpp_dynamic_named_cast(
             ast_ctx_.get());
     if (!source_object.as_shared<ObjectType>() ||
         !target_object.as_shared<ObjectType>()) {
+        if ((source_dependent ||
+             type_needs_deferred_check(source_ref->referred_type)) ||
+            (target_dependent ||
+             type_needs_deferred_check(target_ref->referred_type))) {
+            return make_dependent_dynamic_cast();
+        }
         return named_cast_error("dynamic_cast requires references to class types", loc);
     }
 

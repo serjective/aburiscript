@@ -3042,6 +3042,14 @@ void Collect::realize_deferred_expr_type_after_substitution(
             call->ctype = realize_type(call->ctype);
             return;
         }
+        case StmtKind::CppDynamicCastExpr: {
+            auto* cast = static_cast<CppDynamicCastExpr*>(expr);
+            realize_deferred_expr_type_after_substitution(
+                cast->expr.get(),
+                allow_finalize);
+            cast->target_type = realize_type(cast->target_type);
+            return;
+        }
         case StmtKind::ParenExpr: {
             auto* paren = static_cast<ParenExpr*>(expr);
             realize_deferred_expr_type_after_substitution(
@@ -4398,6 +4406,55 @@ bool Collect::resolve_dependent_expr_after_substitution(
             if (error_out && error_out->empty()) {
                 *error_out =
                     "failed to resolve dependent noexcept expression after substitution";
+            }
+            return false;
+        }
+        expr = std::move(rewritten);
+        return true;
+    }
+    if (auto* dynamic_cast_expr = dyn_cast<CppDynamicCastExpr>(expr.get())) {
+        auto type_still_dependent_or_deferred =
+            [&](QualType type) {
+            return type &&
+                   (type_depends_on_template_parameters(
+                        type,
+                        ast_ctx_.get()) ||
+                    contains_deferred_semantic_type(type.get_shared()) ||
+                    auto_type_utils::auto_type_flavors_in(
+                        type.get_shared()) != 0);
+        };
+        if (dynamic_cast_expr->expr &&
+            !resolve_dependent_expr_after_substitution(
+                dynamic_cast_expr->expr,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+        strip_stale_dependent_implicit_casts(dynamic_cast_expr->expr);
+        realize_deferred_expr_type_after_substitution(
+            dynamic_cast_expr,
+            /*allow_finalize=*/true);
+        if (!dynamic_cast_expr->expr ||
+            expression_depends_on_template_parameters(
+                dynamic_cast_expr->expr.get()) ||
+            type_still_dependent_or_deferred(
+                dynamic_cast_expr->expr->get_type()) ||
+            type_still_dependent_or_deferred(
+                dynamic_cast_expr->target_type)) {
+            return true;
+        }
+
+        auto owned_dynamic_cast = std::unique_ptr<CppDynamicCastExpr>(
+            static_cast<CppDynamicCastExpr*>(expr.release()));
+        auto rewritten = collect_cpp_named_cast(
+            CppNamedCastKind::Dynamic,
+            std::move(owned_dynamic_cast->expr),
+            owned_dynamic_cast->target_type,
+            owned_dynamic_cast->location);
+        if (!rewritten) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to resolve dependent dynamic_cast expression after substitution";
             }
             return false;
         }
