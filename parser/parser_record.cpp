@@ -1298,6 +1298,8 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 RecordSemanticState::FriendType friend_type;
                 friend_type.type = friend_decl->friend_type;
                 friend_type.decl = friend_decl;
+                friend_type.class_template =
+                    friend_decl->friend_class_template;
                 friend_types.push_back(std::move(friend_type));
             }
             continue;

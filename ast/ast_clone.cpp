@@ -2805,6 +2805,12 @@ RecordSemanticState clone_record_semantic_state_for_object_decl(
     }
     for (auto& friend_type : state.friend_types) {
         friend_type.type = rewrite_type(friend_type.type, ctx);
+        friend_type.class_template =
+            dyn_cast<ClassTemplateDecl>(
+                const_cast<TemplateDecl*>(
+                    remap_template_decl(
+                        friend_type.class_template,
+                        ctx)));
     }
     for (auto& constructor : state.constructors) {
         constructor.type = rewrite_type(constructor.type, ctx);

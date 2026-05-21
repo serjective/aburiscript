@@ -953,6 +953,7 @@ inline bool function_decl_defines_entity(const FuncDecl* decl) {
 struct FriendDecl : Decl {
     std::unique_ptr<Decl> target_decl;
     QualType friend_type;
+    const ClassTemplateDecl* friend_class_template;
     QualType granting_record_type;
     std::shared_ptr<Symbol> function_symbol;
     uint8_t friend_kind : 3;
@@ -967,6 +968,7 @@ struct FriendDecl : Decl {
         : Decl(DeclKind::FriendDecl, loc),
           target_decl(std::move(target_decl)),
           friend_type(nullptr),
+          friend_class_template(nullptr),
           granting_record_type(std::move(granting_record_type)),
           friend_kind(static_cast<uint8_t>(friend_kind)),
           has_deferred_inline_body_tokens(false),
@@ -979,6 +981,7 @@ struct FriendDecl : Decl {
         : Decl(DeclKind::FriendDecl, loc),
           target_decl(nullptr),
           friend_type(std::move(friend_type)),
+          friend_class_template(nullptr),
           granting_record_type(std::move(granting_record_type)),
           friend_kind(static_cast<uint8_t>(CppFriendKind::Type)),
           has_deferred_inline_body_tokens(false),

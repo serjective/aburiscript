@@ -657,6 +657,10 @@ bool complete_template_argument_bindings_with_defaults(
     TemplateArgumentBindings& bindings_out,
     std::string* error_out = nullptr);
 
+bool template_template_parameter_lists_are_compatible(
+    const TemplateParameterList& formal_parameters,
+    const TemplateParameterList& actual_parameters);
+
 std::vector<TemplateArgument> flatten_template_argument_bindings(
     const TemplateArgumentBindings& bindings);
 
@@ -1646,6 +1650,7 @@ struct RecordSemanticState {
     struct FriendType {
         QualType type;
         const FriendDecl* decl = nullptr;
+        const ClassTemplateDecl* class_template = nullptr;
     };
 
     struct Constructor {

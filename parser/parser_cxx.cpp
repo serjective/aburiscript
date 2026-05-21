@@ -75,6 +75,40 @@ TemplateDeclT* canonical_primary_template_for_partial_registration(
     return canonical_primary ? canonical_primary : primary_template;
 }
 
+const ClassTemplateDecl* canonical_class_template_decl(
+    const ClassTemplateDecl* class_template) {
+    if (!class_template) {
+        return nullptr;
+    }
+    const TemplateDecl* canonical_template =
+        get_template_decl_canonical_decl(class_template);
+    auto* canonical_class_template = dyn_cast<ClassTemplateDecl>(
+        const_cast<TemplateDecl*>(canonical_template));
+    return canonical_class_template ? canonical_class_template : class_template;
+}
+
+const ClassTemplateDecl* class_template_decl_from_friend_type(
+    QualType friend_type,
+    const ASTContext* ast_ctx) {
+    if (!friend_type) {
+        return nullptr;
+    }
+    QualType desugared_friend_type = desugar_type(friend_type, ast_ctx);
+    if (auto specialization_type =
+            dyn_cast_shared<TemplateSpecializationType>(
+                desugared_friend_type.get_shared())) {
+        return canonical_class_template_decl(
+            dyn_cast<ClassTemplateDecl>(
+                const_cast<Decl*>(specialization_type->primary_template)));
+    }
+    if (auto object_type =
+            dyn_cast_shared<ObjectType>(desugared_friend_type.get_shared())) {
+        return canonical_class_template_decl(
+            object_type->get_primary_class_template());
+    }
+    return nullptr;
+}
+
 } // namespace
 
 bool Parser::is_cxx_mode_active() const {
@@ -5075,6 +5109,30 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
 
     if (auto* friend_decl =
             dyn_cast<FriendDecl>(templated_decls.front().get())) {
+        if (friend_decl->get_friend_kind() == CppFriendKind::Type) {
+            const ClassTemplateDecl* friend_class_template =
+                canonical_class_template_decl(friend_decl->friend_class_template);
+            if (!friend_class_template) {
+                friend_class_template = class_template_decl_from_friend_type(
+                    friend_decl->friend_type,
+                    ast_ctx.get());
+            }
+            if (!friend_class_template) {
+                fail_cpp_unsupported(
+                    "friend class template declaration without a class template target",
+                    friend_decl->location);
+            }
+            if (!template_template_parameter_lists_are_compatible(
+                    friend_class_template->parameters,
+                    parameters)) {
+                error_custloc(
+                    "friend class template parameter list is not compatible with the target template",
+                    friend_decl->location);
+            }
+            friend_decl->friend_class_template = friend_class_template;
+            wrapped_decls.push_back(std::move(templated_decls.front()));
+            return wrapped_decls;
+        }
         auto* function_decl = friend_decl->function_decl();
         if (!function_decl) {
             fail_cpp_unsupported(

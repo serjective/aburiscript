@@ -3580,10 +3580,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 rewritten_friend_type,
                 owner_type,
                 friend_decl->location);
+            cloned_friend->friend_class_template =
+                friend_decl->friend_class_template;
 
             RecordSemanticState::FriendType semantic_friend;
             semantic_friend.type = rewritten_friend_type;
             semantic_friend.decl = cloned_friend.get();
+            semantic_friend.class_template =
+                cloned_friend->friend_class_template;
             friend_types.push_back(std::move(semantic_friend));
             semantic_state.friend_types = friend_types;
             entry->member_decls.push_back(std::move(cloned_friend));

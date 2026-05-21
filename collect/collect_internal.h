@@ -1582,6 +1582,86 @@ bool is_same_record_or_any_access_derived(const ObjectDecl* derived_or_same,
     return has_any_access_unambiguous_base_path(derived_or_same, base_decl);
 }
 
+const ClassTemplateDecl* canonical_class_template_friend_decl(
+    const ClassTemplateDecl* class_template) {
+    if (!class_template) {
+        return nullptr;
+    }
+    const TemplateDecl* canonical_template =
+        get_template_decl_canonical_decl(class_template);
+    auto* canonical_class_template = dyn_cast<ClassTemplateDecl>(
+        const_cast<TemplateDecl*>(canonical_template));
+    return canonical_class_template ? canonical_class_template : class_template;
+}
+
+bool class_template_friend_targets_same_template(
+    const ClassTemplateDecl* lhs,
+    const ClassTemplateDecl* rhs) {
+    lhs = canonical_class_template_friend_decl(lhs);
+    rhs = canonical_class_template_friend_decl(rhs);
+    if (!lhs || !rhs) {
+        return false;
+    }
+    return lhs == rhs || template_decls_share_lookup_identity(lhs, rhs);
+}
+
+const ClassTemplateDecl* primary_class_template_from_context_type(
+    QualType access_context_type,
+    const ASTContext* ast_ctx) {
+    if (!access_context_type) {
+        return nullptr;
+    }
+    QualType desugared_context_type =
+        desugar_type(access_context_type, ast_ctx);
+    if (auto specialization_type =
+            dyn_cast_shared<TemplateSpecializationType>(
+                desugared_context_type.get_shared())) {
+        return canonical_class_template_friend_decl(
+            dyn_cast<ClassTemplateDecl>(
+                const_cast<Decl*>(specialization_type->primary_template)));
+    }
+    if (auto object_type =
+            dyn_cast_shared<ObjectType>(desugared_context_type.get_shared())) {
+        return canonical_class_template_friend_decl(
+            object_type->get_primary_class_template());
+    }
+    return nullptr;
+}
+
+bool class_template_friend_matches_access_context(
+    const ClassTemplateDecl* friend_class_template,
+    const ObjectDecl* access_context_decl,
+    const ASTContext* ast_ctx,
+    QualType access_context_type = nullptr) {
+    friend_class_template =
+        canonical_class_template_friend_decl(friend_class_template);
+    access_context_decl = canonical_record_decl(access_context_decl);
+    if (!friend_class_template ||
+        (!access_context_decl && !access_context_type)) {
+        return false;
+    }
+
+    if (!access_context_type &&
+        access_context_decl &&
+        access_context_decl->get_record_type()) {
+        access_context_type =
+            QualType(access_context_decl->get_record_type());
+    }
+    if (class_template_friend_targets_same_template(
+            friend_class_template,
+            primary_class_template_from_context_type(
+                access_context_type,
+                ast_ctx))) {
+        return true;
+    }
+
+    const ObjectDecl* pattern_decl = canonical_record_decl(
+        friend_class_template->pattern_semantic_decl());
+    return pattern_decl &&
+           access_context_decl &&
+           same_record_identity_or_tag(pattern_decl, access_context_decl);
+}
+
 bool type_friend_matches_access_context(QualType friend_type,
                                         const ObjectDecl* access_context_decl,
                                         const ASTContext* ast_ctx,
@@ -1661,6 +1741,13 @@ bool record_grants_type_friend_access(const ObjectDecl* member_owner_decl,
         return false;
     }
     for (const auto& friend_type : owner_state->friend_types) {
+        if (class_template_friend_matches_access_context(
+                friend_type.class_template,
+                access_context_decl,
+                ast_ctx,
+                access_context_type)) {
+            return true;
+        }
         if (type_friend_matches_access_context(
                 friend_type.type,
                 access_context_decl,

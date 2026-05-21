@@ -2409,6 +2409,8 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 RecordSemanticState::FriendType friend_type;
                 friend_type.type = friend_decl->friend_type;
                 friend_type.decl = friend_decl;
+                friend_type.class_template =
+                    friend_decl->friend_class_template;
                 ctx.friend_types.push_back(std::move(friend_type));
             }
             continue;

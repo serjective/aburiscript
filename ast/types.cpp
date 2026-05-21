@@ -1807,7 +1807,7 @@ bool template_template_parameters_are_compatible(
     const TemplateParameterDecl* formal_parameter,
     const TemplateParameterDecl* actual_parameter);
 
-bool template_template_parameter_lists_are_compatible(
+bool template_template_parameter_lists_are_compatible_impl(
     const TemplateParameterList& formal_parameters,
     const TemplateParameterList& actual_parameters) {
     const size_t matched_count =
@@ -1869,7 +1869,7 @@ bool template_template_parameters_are_compatible(
         auto* actual_template = dyn_cast<TemplateTemplateParmDecl>(
             const_cast<TemplateParameterDecl*>(actual_parameter));
         return actual_template &&
-               template_template_parameter_lists_are_compatible(
+               template_template_parameter_lists_are_compatible_impl(
                    formal_template->parameters,
                    actual_template->parameters);
     }
@@ -1915,7 +1915,7 @@ bool template_parameter_accepts_argument(const TemplateParameterDecl* parameter,
             return true;
         }
         if (actual_parameters &&
-            template_template_parameter_lists_are_compatible(
+            template_template_parameter_lists_are_compatible_impl(
                 template_parameter->parameters,
                 *actual_parameters)) {
             return true;
@@ -2087,6 +2087,14 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
     return false;
 }
 } // namespace
+
+bool template_template_parameter_lists_are_compatible(
+    const TemplateParameterList& formal_parameters,
+    const TemplateParameterList& actual_parameters) {
+    return template_template_parameter_lists_are_compatible_impl(
+        formal_parameters,
+        actual_parameters);
+}
 
 bool template_parameter_references_have_same_lookup_shape(
     const TemplateParameterDecl* lhs,
