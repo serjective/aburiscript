@@ -3698,6 +3698,45 @@ bool Collect::resolve_dependent_expr_after_substitution(
             }
             expr = std::move(rebuilt);
             return true;
+        } else if (explicit_cast->cast_kind == ExplicitCastKind::CppReinterpretCast) {
+            auto owned_cast = std::unique_ptr<ExplicitCast>(
+                static_cast<ExplicitCast*>(expr.release()));
+            owned_cast->expr = collect_apply_standard_conversions(
+                std::move(owned_cast->expr),
+                ExprUseContext::RValue);
+            if (!owned_cast->expr) {
+                if (error_out) {
+                    *error_out = "reinterpret_cast operand became invalid after substitution";
+                }
+                expr = std::move(owned_cast);
+                return false;
+            }
+
+            QualType source_type =
+                remove_reference_and_desugar(
+                    owned_cast->expr->get_type(),
+                    ast_ctx_.get());
+            QualType target_no_ref =
+                remove_reference_and_desugar(
+                    owned_cast->ctype,
+                    ast_ctx_.get());
+            auto rebuilt =
+                cpp_reinterpret_named_cast(
+                    std::move(owned_cast->expr),
+                    source_type,
+                    owned_cast->ctype,
+                    target_no_ref,
+                    owned_cast->location);
+            if (!rebuilt || isa<ErrorExpr>(rebuilt.get())) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "invalid reinterpret_cast after template substitution";
+                }
+                expr = std::move(rebuilt);
+                return false;
+            }
+            expr = std::move(rebuilt);
+            return true;
         } else if (explicit_cast->expr &&
                    explicit_cast->ctype &&
                    !contains_deferred_semantic_type(

@@ -4955,6 +4955,48 @@ std::unique_ptr<Expr> Collect::cpp_reinterpret_named_cast(
     QualType target_type,
     QualType target_no_ref,
     SrcLoc loc) const {
+    auto type_needs_deferred_check = [&](QualType type) {
+        return type &&
+               (type_depends_on_template_parameters(type, ast_ctx_.get()) ||
+                contains_deferred_semantic_type(type.get_shared()));
+    };
+
+    bool target_dependent =
+        type_needs_deferred_check(target_type) ||
+        type_needs_deferred_check(target_no_ref);
+    bool expr_dependent =
+        expr && expression_depends_on_template_parameters(expr.get());
+    bool source_dependent =
+        expr_dependent ||
+        type_needs_deferred_check(source_type);
+    if (!source_type) {
+        if (source_dependent || target_dependent) {
+            return collect_make<ExplicitCast>(
+                std::move(expr),
+                target_type,
+                loc,
+                ExplicitCastKind::CppReinterpretCast);
+        }
+        return named_cast_error("named cast operand has unknown type", loc);
+    }
+    if (!target_no_ref) {
+        if (target_dependent) {
+            return collect_make<ExplicitCast>(
+                std::move(expr),
+                target_type,
+                loc,
+                ExplicitCastKind::CppReinterpretCast);
+        }
+        return named_cast_error("named cast requires a valid target type", loc);
+    }
+    if (source_dependent || target_dependent) {
+        return collect_make<ExplicitCast>(
+            std::move(expr),
+            target_type,
+            loc,
+            ExplicitCastKind::CppReinterpretCast);
+    }
+
     bool source_pointer_like = is_pointer_like_type(source_type, ast_ctx_.get());
     bool target_pointer_like = is_pointer_like_type(target_no_ref, ast_ctx_.get());
     bool source_integer_like =
@@ -4979,7 +5021,11 @@ std::unique_ptr<Expr> Collect::cpp_reinterpret_named_cast(
         }
     }
 
-    return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
+    return collect_make<ExplicitCast>(
+        std::move(expr),
+        target_type,
+        loc,
+        ExplicitCastKind::CppReinterpretCast);
 }
 
 Collect::CppStaticCastCheckResult Collect::check_cpp_static_cast(
@@ -5287,17 +5333,15 @@ std::unique_ptr<Expr> Collect::collect_cpp_named_cast(CppNamedCastKind cast_kind
         return named_cast_error("named cast requires a valid expression operand", loc);
     }
 
-    auto source_type =
-        remove_reference_and_desugar(expr->get_type(), ast_ctx_.get());
-    if (!source_type) {
-        return named_cast_error("named cast operand has unknown type", loc);
-    }
-
     if (cast_kind == CppNamedCastKind::Reinterpret) {
+        auto source_type =
+            remove_reference_and_desugar(expr->get_type(), ast_ctx_.get());
         return cpp_reinterpret_named_cast(
             std::move(expr), source_type, target_type, target_no_ref, loc);
     }
     if (cast_kind == CppNamedCastKind::Static) {
+        auto source_type =
+            remove_reference_and_desugar(expr->get_type(), ast_ctx_.get());
         return cpp_static_named_cast(
             std::move(expr), source_type, target_type, target_no_ref, loc);
     }

@@ -2257,7 +2257,8 @@ struct ImplicitCast: Expr {
 enum class ExplicitCastKind : uint8_t {
     General,
     CppConstCast,
-    CppStaticCast
+    CppStaticCast,
+    CppReinterpretCast
 };
 
 struct ExplicitCast: Expr {

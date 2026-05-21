@@ -263,6 +263,25 @@ std::unique_ptr<Expr> Collect::collect_array_subscript(std::unique_ptr<Expr> arr
     auto array_type = array ? array->get_type() : QualType();
     auto index_type = index ? index->get_type() : QualType();
 
+    auto is_subscript_base = [&](QualType t) -> bool {
+        auto kind = canonical_type_kind(t, ast_ctx_.get());
+        return kind == TypeKind::Pointer || kind == TypeKind::Array || kind == TypeKind::Vector;
+    };
+    auto subscript_result_type = [&](QualType t) -> QualType {
+        auto semantic_type = desugar_type(t, ast_ctx_.get());
+        if (auto ptr_type = semantic_type.as_shared<PointerType>()) {
+            return ptr_type->pointed_type;
+        }
+        if (auto vec_type = semantic_type.as_shared<VectorType>()) {
+            return vec_type->element_type;
+        }
+        if (auto arr_type = semantic_type.as_shared<ArrayType>()) {
+            return arr_type->element_type;
+        }
+        return QualType(nullptr);
+    };
+    QualType result_type = subscript_result_type(array_type);
+
     bool array_is_dependent =
         (array && expression_depends_on_template_parameters(array.get())) ||
         type_depends_on_template_parameters(array_type, ast_ctx_.get());
@@ -273,14 +292,9 @@ std::unique_ptr<Expr> Collect::collect_array_subscript(std::unique_ptr<Expr> arr
         return collect_make<DependentArraySubscriptExpr>(
             std::move(array),
             std::move(index),
-            QualType(nullptr),
+            result_type,
             loc);
     }
-
-    auto is_subscript_base = [&](QualType t) -> bool {
-        auto kind = canonical_type_kind(t, ast_ctx_.get());
-        return kind == TypeKind::Pointer || kind == TypeKind::Array || kind == TypeKind::Vector;
-    };
 
     // C defines a[b] as *(a + b), so 1[p] is valid and equivalent to p[1].
     if (!is_subscript_base(array_type) && is_subscript_base(index_type) &&
@@ -293,6 +307,7 @@ std::unique_ptr<Expr> Collect::collect_array_subscript(std::unique_ptr<Expr> arr
         index = collect_apply_standard_conversions(std::move(index), ExprUseContext::ArraySubscriptIndex);
         array_type = array ? array->get_type() : QualType();
         index_type = index ? index->get_type() : QualType();
+        result_type = subscript_result_type(array_type);
     }
 
     if (!array_type || !is_subscript_base(array_type)) {
@@ -302,15 +317,6 @@ std::unique_ptr<Expr> Collect::collect_array_subscript(std::unique_ptr<Expr> arr
         report_error("array subscript is not an integer", loc);
     }
 
-    QualType result_type = nullptr;
-    auto semantic_array_type = desugar_type(array_type, ast_ctx_.get());
-    if (auto ptr_type = semantic_array_type.as_shared<PointerType>()) {
-        result_type = ptr_type->pointed_type;
-    } else if (auto vec_type = semantic_array_type.as_shared<VectorType>()) {
-        result_type = vec_type->element_type;
-    } else if (auto arr_type = semantic_array_type.as_shared<ArrayType>()) {
-        result_type = arr_type->element_type;
-    }
     return collect_make<ArraySubscriptExpr>(std::move(array), std::move(index), result_type, loc);
 }
 
