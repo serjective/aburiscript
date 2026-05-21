@@ -504,6 +504,11 @@ private:
         CppMethodDecl* method_decl,
         const ClassTemplateDecl* owner_class_template,
         SrcLoc declarator_loc);
+    void remap_out_of_line_constructor_with_parameter_rebinds(
+        CppConstructorDecl* ctor_decl,
+        const std::unordered_map<const TemplateParameterDecl*,
+                                 const TemplateParameterDecl*>& parameter_rebinds,
+        SrcLoc declarator_loc);
     void remap_out_of_line_primary_template_static_member(
         QualType& declared_type,
         std::unique_ptr<Expr>& init_expr,

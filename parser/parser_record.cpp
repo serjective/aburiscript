@@ -4432,6 +4432,54 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_declaration() {
                 qualified_declarator.owner_record_decl,
                 qualified_declarator.owner_type
             };
+        QualType previous_record_lookup_type =
+            collect_ ? collect_->collect_current_cpp_record_lookup_type()
+                     : QualType();
+        struct QualifiedDeclaratorRecordLookupGuard {
+            Collect* collect = nullptr;
+            QualType previous_type = nullptr;
+            ~QualifiedDeclaratorRecordLookupGuard() {
+                if (collect) {
+                    collect->collect_set_current_cpp_record_lookup_type(
+                        previous_type);
+                }
+            }
+        } record_lookup_guard{collect_.get(), previous_record_lookup_type};
+        QualType qualified_record_lookup_type = qualified_declarator.owner_type;
+        if (!qualified_record_lookup_type &&
+            qualified_declarator.owner_record_decl &&
+            qualified_declarator.owner_record_decl->get_record_type()) {
+            qualified_record_lookup_type =
+                QualType(qualified_declarator.owner_record_decl->get_record_type());
+        }
+        if (collect_ && qualified_record_lookup_type) {
+            collect_->collect_set_current_cpp_record_lookup_type(
+                qualified_record_lookup_type);
+        }
+        if (qualified_declarator.owner_record_decl) {
+            cxx_record_parse_stack_.push_back(CppRecordParseFrame{
+                qualified_declarator.owner_record_decl->is_union
+                    ? CppRecordKind::Union
+                    : CppRecordKind::Class,
+                qualified_declarator.owner_record_decl->tag,
+                qualified_declarator.owner_record_decl,
+                qualified_declarator.owner_class_template,
+                qualified_declarator.targets_template_pattern
+                    ? qualified_declarator.owner_type
+                    : QualType()});
+        }
+        struct QualifiedDeclaratorRecordParseGuard {
+            std::vector<CppRecordParseFrame>* stack = nullptr;
+            bool active = false;
+            ~QualifiedDeclaratorRecordParseGuard() {
+                if (active && stack && !stack->empty()) {
+                    stack->pop_back();
+                }
+            }
+        } record_parse_guard{
+            &cxx_record_parse_stack_,
+            qualified_declarator.owner_record_decl != nullptr
+        };
         std::shared_ptr<CType> newer_type = decl_parser.parse_declarator(new_type);
         retain_type_specifier_decl_if_needed(decl_parser);
         if (is_cxx_mode_active() && is_cpp_scope_resolution_here()) {

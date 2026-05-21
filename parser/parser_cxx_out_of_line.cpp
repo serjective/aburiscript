@@ -123,6 +123,56 @@ void merge_out_of_line_constructor_definition(
     }
 }
 
+void merge_out_of_line_constructor_template_definition(
+    CppConstructorDecl* matched_ctor_decl,
+    CppConstructorDecl* parsed_ctor,
+    const std::shared_ptr<ASTContext>& ast_ctx) {
+    if (!matched_ctor_decl || !parsed_ctor) {
+        return;
+    }
+
+    matched_ctor_decl->parameters = std::move(parsed_ctor->parameters);
+    matched_ctor_decl->type = parsed_ctor->type;
+    matched_ctor_decl->body = std::move(parsed_ctor->body);
+    matched_ctor_decl->scope = parsed_ctor->scope;
+    matched_ctor_decl->stmt_labels = std::move(parsed_ctor->stmt_labels);
+    matched_ctor_decl->ctor_initializers =
+        std::move(parsed_ctor->ctor_initializers);
+    matched_ctor_decl->is_explicit = parsed_ctor->is_explicit;
+    matched_ctor_decl->explicit_specifier = parsed_ctor->explicit_specifier;
+    matched_ctor_decl->is_deleted = parsed_ctor->is_deleted;
+    matched_ctor_decl->is_defaulted = parsed_ctor->is_defaulted;
+    matched_ctor_decl->is_defaulted_on_first_declaration = false;
+    matched_ctor_decl->is_constexpr = parsed_ctor->is_constexpr;
+    matched_ctor_decl->is_consteval = parsed_ctor->is_consteval;
+    if (matched_ctor_decl->is_consteval) {
+        matched_ctor_decl->is_constexpr = true;
+        matched_ctor_decl->is_inline = true;
+    }
+    matched_ctor_decl->set_language_linkage(parsed_ctor->get_language_linkage());
+    if (parsed_ctor->asm_label) {
+        matched_ctor_decl->set_asm_label(*parsed_ctor->asm_label);
+    } else {
+        matched_ctor_decl->clear_asm_label();
+    }
+    matched_ctor_decl->clear_deferred_inline_body_token_range();
+
+    adopt_out_of_line_member_qualifier_prefix(matched_ctor_decl, parsed_ctor);
+
+    if (ast_ctx) {
+        const auto& parsed_attrs =
+            ast_ctx->get_attrs(parsed_ctor->node_id).attrs;
+        if (!parsed_attrs.empty()) {
+            auto& dst_attrs =
+                ast_ctx->get_attrs_mut(matched_ctor_decl->node_id).attrs;
+            dst_attrs.insert(
+                dst_attrs.end(),
+                parsed_attrs.begin(),
+                parsed_attrs.end());
+        }
+    }
+}
+
 struct ScopeRestoreGuard {
     Collect* collect = nullptr;
     std::shared_ptr<Scope> scope;
@@ -148,6 +198,119 @@ struct RecordParseScopeGuard {
     }
 };
 } // namespace
+
+void Parser::remap_out_of_line_constructor_with_parameter_rebinds(
+    CppConstructorDecl* ctor_decl,
+    const std::unordered_map<const TemplateParameterDecl*,
+                             const TemplateParameterDecl*>& parameter_rebinds,
+    SrcLoc declarator_loc) {
+    if (!ctor_decl || parameter_rebinds.empty()) {
+        return;
+    }
+
+    ASTCloneContext clone_ctx;
+    clone_ctx.ast_ctx = ast_ctx.get();
+    for (const auto& [active_parameter, canonical_parameter] : parameter_rebinds) {
+        auto* active_non_type =
+            dyn_cast<TemplateNonTypeParmDecl>(
+                const_cast<TemplateParameterDecl*>(active_parameter));
+        auto* canonical_non_type =
+            dyn_cast<TemplateNonTypeParmDecl>(
+                const_cast<TemplateParameterDecl*>(canonical_parameter));
+        if (active_non_type && canonical_non_type &&
+            active_non_type->sym && canonical_non_type->sym) {
+            clone_ctx.symbol_remap.emplace(
+                active_non_type->sym.get(),
+                canonical_non_type->sym);
+        }
+    }
+
+    clone_ctx.rewrite_type = [&](QualType type) -> QualType {
+        return template_sema_internal::remap_template_parameter_types_in_type(
+            type,
+            parameter_rebinds);
+    };
+    clone_ctx.rewrite_symbol =
+        [&](const std::shared_ptr<Symbol>& sym) -> std::shared_ptr<Symbol> {
+        if (!sym) {
+            return nullptr;
+        }
+        if (auto it = clone_ctx.symbol_remap.find(sym.get());
+            it != clone_ctx.symbol_remap.end()) {
+            return it->second;
+        }
+        return sym;
+    };
+
+    ctor_decl->type =
+        clone_ctx.rewrite_type(QualType(ctor_decl->type)).get_shared();
+
+    std::vector<std::unique_ptr<Decl>> remapped_parameters;
+    remapped_parameters.reserve(ctor_decl->parameters.size());
+    for (const auto& parameter : ctor_decl->parameters) {
+        std::string clone_error;
+        auto remapped_parameter =
+            clone_decl_tree(parameter.get(), clone_ctx, &clone_error);
+        if (!remapped_parameter) {
+            error_custloc(
+                clone_error.empty()
+                    ? "failed to remap out-of-line constructor parameter"
+                    : clone_error,
+                parameter ? parameter->location : declarator_loc);
+        }
+        remapped_parameters.push_back(std::move(remapped_parameter));
+    }
+    ctor_decl->parameters = std::move(remapped_parameters);
+
+    for (auto& initializer : ctor_decl->ctor_initializers) {
+        if (initializer.member_expr) {
+            std::string clone_error;
+            auto remapped_member =
+                clone_expr_with_substitution(
+                    initializer.member_expr.get(),
+                    clone_ctx,
+                    &clone_error);
+            if (!remapped_member) {
+                error_custloc(
+                    clone_error.empty()
+                        ? "failed to remap out-of-line constructor member initializer"
+                        : clone_error,
+                    initializer.location);
+            }
+            initializer.member_expr = std::move(remapped_member);
+        }
+        if (initializer.init_expr) {
+            std::string clone_error;
+            auto remapped_init =
+                clone_expr_with_substitution(
+                    initializer.init_expr.get(),
+                    clone_ctx,
+                    &clone_error);
+            if (!remapped_init) {
+                error_custloc(
+                    clone_error.empty()
+                        ? "failed to remap out-of-line constructor initializer expression"
+                        : clone_error,
+                    initializer.location);
+            }
+            initializer.init_expr = std::move(remapped_init);
+        }
+    }
+
+    if (ctor_decl->body) {
+        std::string clone_error;
+        auto remapped_body =
+            clone_stmt_tree(ctor_decl->body.get(), clone_ctx, &clone_error);
+        if (!remapped_body) {
+            error_custloc(
+                clone_error.empty()
+                    ? "failed to remap out-of-line constructor body"
+                    : clone_error,
+                ctor_decl->body->location);
+        }
+        ctor_decl->body = std::move(remapped_body);
+    }
+}
 
 bool Parser::is_cpp_out_of_line_constructor_declaration_start() {
     if (!is_cxx_mode_active()) {
@@ -446,6 +609,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
 
     const ObjectDecl* owner_record_decl = nullptr;
     const ClassTemplateDecl* owner_class_template = nullptr;
+    QualType owner_current_instantiation_type = nullptr;
     bool allow_owner_enclosing_lookup =
         !has_global_qualifier && namespace_qualifiers.empty();
     if (owner_component.has_template_argument_list) {
@@ -477,6 +641,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
         }
         owner_class_template = class_template;
         owner_record_decl = class_template->pattern_semantic_decl();
+        owner_current_instantiation_type =
+            build_cpp_current_instantiation_type(
+                owner_class_template,
+                owner_name,
+                owner_component.template_arguments);
     } else {
         auto* owner_tag_decl = LookupEngine::lookup_tag_decl(
             owner_name,
@@ -522,11 +691,34 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
     }
 
     set_token_idx(constructor_token_idx);
+    QualType previous_record_lookup_type =
+        collect_ ? collect_->collect_current_cpp_record_lookup_type()
+                 : QualType();
+    struct OutOfLineRecordLookupGuard {
+        Collect* collect = nullptr;
+        QualType previous_type = nullptr;
+        ~OutOfLineRecordLookupGuard() {
+            if (collect) {
+                collect->collect_set_current_cpp_record_lookup_type(previous_type);
+            }
+        }
+    } record_lookup_guard{collect_.get(), previous_record_lookup_type};
+    QualType owner_record_lookup_type = owner_current_instantiation_type;
+    if (!owner_record_lookup_type && owner_record_decl->get_record_type()) {
+        owner_record_lookup_type =
+            QualType(owner_record_decl->get_record_type());
+    }
+    if (collect_ && owner_record_lookup_type) {
+        collect_->collect_set_current_cpp_record_lookup_type(
+            owner_record_lookup_type);
+    }
     cxx_record_parse_stack_.push_back(
         CppRecordParseFrame{
             owner_record_decl->is_union ? CppRecordKind::Union : CppRecordKind::Class,
             owner_name,
-            owner_record_decl});
+            owner_record_decl,
+            owner_class_template,
+            owner_current_instantiation_type});
     RecordParseScopeGuard<decltype(cxx_record_parse_stack_)>
         record_parse_scope_guard{&cxx_record_parse_stack_};
 
@@ -552,12 +744,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
     if (owner_class_template && !active_template_parameter_stack_.empty()) {
         const auto& active_parameters = active_template_parameter_stack_.back();
         if (active_parameters.size() == owner_class_template->parameters.size()) {
-            ASTCloneContext clone_ctx;
-            clone_ctx.ast_ctx = ast_ctx.get();
             std::unordered_map<const TemplateParameterDecl*,
                                const TemplateParameterDecl*> parameter_rebinds;
             parameter_rebinds.reserve(active_parameters.size());
-
             for (size_t idx = 0; idx < active_parameters.size(); ++idx) {
                 const auto* active_parameter = active_parameters[idx];
                 const auto* canonical_parameter =
@@ -569,105 +758,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                         decl_loc);
                 }
                 parameter_rebinds.emplace(active_parameter, canonical_parameter);
-                auto* active_non_type =
-                    dyn_cast<TemplateNonTypeParmDecl>(
-                        const_cast<TemplateParameterDecl*>(active_parameter));
-                auto* canonical_non_type =
-                    dyn_cast<TemplateNonTypeParmDecl>(
-                        const_cast<TemplateParameterDecl*>(canonical_parameter));
-                if (active_non_type && canonical_non_type &&
-                    active_non_type->sym && canonical_non_type->sym) {
-                    clone_ctx.symbol_remap.emplace(
-                        active_non_type->sym.get(),
-                        canonical_non_type->sym);
-                }
             }
-
-            clone_ctx.rewrite_type =
-                [&](QualType type) -> QualType {
-                return template_sema_internal::remap_template_parameter_types_in_type(
-                    type,
-                    parameter_rebinds);
-            };
-            clone_ctx.rewrite_symbol =
-                [&](const std::shared_ptr<Symbol>& sym) -> std::shared_ptr<Symbol> {
-                if (!sym) {
-                    return nullptr;
-                }
-                if (auto it = clone_ctx.symbol_remap.find(sym.get());
-                    it != clone_ctx.symbol_remap.end()) {
-                    return it->second;
-                }
-                return sym;
-            };
-
-            parsed_ctor->type = clone_ctx.rewrite_type(QualType(parsed_ctor->type)).get_shared();
-
-            std::vector<std::unique_ptr<Decl>> remapped_parameters;
-            remapped_parameters.reserve(parsed_ctor->parameters.size());
-            for (const auto& parameter : parsed_ctor->parameters) {
-                std::string clone_error;
-                auto remapped_parameter =
-                    clone_decl_tree(parameter.get(), clone_ctx, &clone_error);
-                if (!remapped_parameter) {
-                    error_custloc(
-                        clone_error.empty()
-                            ? "failed to remap out-of-line constructor parameter"
-                            : clone_error,
-                        parameter ? parameter->location : decl_loc);
-                }
-                remapped_parameters.push_back(std::move(remapped_parameter));
-            }
-            parsed_ctor->parameters = std::move(remapped_parameters);
-
-            for (auto& initializer : parsed_ctor->ctor_initializers) {
-                if (initializer.member_expr) {
-                    std::string clone_error;
-                    auto remapped_member =
-                        clone_expr_with_substitution(
-                            initializer.member_expr.get(),
-                            clone_ctx,
-                            &clone_error);
-                    if (!remapped_member) {
-                        error_custloc(
-                            clone_error.empty()
-                                ? "failed to remap out-of-line constructor member initializer"
-                                : clone_error,
-                            initializer.location);
-                    }
-                    initializer.member_expr = std::move(remapped_member);
-                }
-                if (initializer.init_expr) {
-                    std::string clone_error;
-                    auto remapped_init =
-                        clone_expr_with_substitution(
-                            initializer.init_expr.get(),
-                            clone_ctx,
-                            &clone_error);
-                    if (!remapped_init) {
-                        error_custloc(
-                            clone_error.empty()
-                                ? "failed to remap out-of-line constructor initializer expression"
-                                : clone_error,
-                            initializer.location);
-                    }
-                    initializer.init_expr = std::move(remapped_init);
-                }
-            }
-
-            if (parsed_ctor->body) {
-                std::string clone_error;
-                auto remapped_body =
-                    clone_stmt_tree(parsed_ctor->body.get(), clone_ctx, &clone_error);
-                if (!remapped_body) {
-                    error_custloc(
-                        clone_error.empty()
-                            ? "failed to remap out-of-line constructor body"
-                            : clone_error,
-                        parsed_ctor->body->location);
-                }
-                parsed_ctor->body = std::move(remapped_body);
-            }
+            remap_out_of_line_constructor_with_parameter_rebinds(
+                parsed_ctor,
+                parameter_rebinds,
+                decl_loc);
         }
     }
 
@@ -684,6 +779,93 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
             decl_loc);
     }
 
+    auto parameter_shape_matches =
+        [](const TemplateParameterDecl* active_parameter,
+           const TemplateParameterDecl* canonical_parameter) -> bool {
+        return active_parameter &&
+               canonical_parameter &&
+               active_parameter->get_kind() == canonical_parameter->get_kind() &&
+               active_parameter->is_parameter_pack ==
+                   canonical_parameter->is_parameter_pack &&
+               active_parameter->depth == canonical_parameter->depth &&
+               active_parameter->index == canonical_parameter->index;
+    };
+    auto find_active_parameter_list_matching =
+        [&](const TemplateParameterList& canonical_parameters)
+        -> const std::vector<const TemplateParameterDecl*>* {
+        for (auto stack_it = active_template_parameter_stack_.rbegin();
+             stack_it != active_template_parameter_stack_.rend();
+             ++stack_it) {
+            if (stack_it->size() != canonical_parameters.size()) {
+                continue;
+            }
+            bool matches = true;
+            for (size_t idx = 0; idx < canonical_parameters.size(); ++idx) {
+                if (!parameter_shape_matches(
+                        (*stack_it)[idx],
+                        canonical_parameters[idx].get())) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                return &*stack_it;
+            }
+        }
+        return nullptr;
+    };
+    auto add_parameter_rebinds =
+        [&](const std::vector<const TemplateParameterDecl*>& active_parameters,
+            const TemplateParameterList& canonical_parameters,
+            std::unordered_map<const TemplateParameterDecl*,
+                               const TemplateParameterDecl*>& rebinds) -> bool {
+        if (active_parameters.size() != canonical_parameters.size()) {
+            return false;
+        }
+        for (size_t idx = 0; idx < canonical_parameters.size(); ++idx) {
+            const auto* active_parameter = active_parameters[idx];
+            const auto* canonical_parameter = canonical_parameters[idx].get();
+            if (!parameter_shape_matches(active_parameter, canonical_parameter)) {
+                return false;
+            }
+            rebinds.emplace(active_parameter, canonical_parameter);
+        }
+        return true;
+    };
+    auto non_type_parameter_types_match_after_rebind =
+        [&](const std::vector<const TemplateParameterDecl*>& active_parameters,
+            const TemplateParameterList& canonical_parameters,
+            const std::unordered_map<const TemplateParameterDecl*,
+                                     const TemplateParameterDecl*>& rebinds)
+        -> bool {
+        for (size_t idx = 0; idx < canonical_parameters.size(); ++idx) {
+            auto* active_non_type =
+                dyn_cast<TemplateNonTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(active_parameters[idx]));
+            if (!active_non_type) {
+                continue;
+            }
+            auto* canonical_non_type =
+                dyn_cast<TemplateNonTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(
+                        canonical_parameters[idx].get()));
+            if (!canonical_non_type) {
+                return false;
+            }
+            QualType remapped_active_type =
+                template_sema_internal::remap_template_parameter_types_in_type(
+                    active_non_type->type,
+                    rebinds);
+            if (!cpp_out_of_line_type_matches(
+                    remapped_active_type,
+                    canonical_non_type->type,
+                    false)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     const RecordSemanticState::Constructor* matched_ctor_state = nullptr;
     // Out-of-line definition must match a previously declared constructor
     // signature in the class; compare canonicalized parameter signatures.
@@ -699,7 +881,71 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
         matched_ctor_state = &ctor;
         break;
     }
-    if (!matched_ctor_state || !matched_ctor_state->decl) {
+    CppConstructorDecl* matched_ctor_template_decl = nullptr;
+    std::unordered_map<const TemplateParameterDecl*, const TemplateParameterDecl*>
+        matched_ctor_template_rebinds;
+    if (!matched_ctor_state) {
+        for (const auto& method_template : owner_state->method_templates) {
+            if (method_template.name != constructor_name ||
+                !method_template.decl ||
+                !method_template.decl->function_decl()) {
+                continue;
+            }
+            auto* templated_ctor =
+                dyn_cast<CppConstructorDecl>(
+                    method_template.decl->function_decl());
+            if (!templated_ctor || !templated_ctor->type) {
+                continue;
+            }
+
+            std::unordered_map<const TemplateParameterDecl*,
+                               const TemplateParameterDecl*> rebinds;
+            if (owner_class_template) {
+                const auto* active_owner_parameters =
+                    find_active_parameter_list_matching(
+                        owner_class_template->parameters);
+                if (!active_owner_parameters ||
+                    !add_parameter_rebinds(
+                        *active_owner_parameters,
+                        owner_class_template->parameters,
+                        rebinds)) {
+                    continue;
+                }
+            }
+            const auto* active_member_parameters =
+                find_active_parameter_list_matching(
+                    method_template.decl->parameters);
+            if (!active_member_parameters ||
+                !add_parameter_rebinds(
+                    *active_member_parameters,
+                    method_template.decl->parameters,
+                    rebinds) ||
+                !non_type_parameter_types_match_after_rebind(
+                    *active_member_parameters,
+                    method_template.decl->parameters,
+                    rebinds)) {
+                continue;
+            }
+
+            QualType remapped_parsed_type =
+                template_sema_internal::remap_template_parameter_types_in_type(
+                    QualType(parsed_ctor->type),
+                    rebinds);
+            if (!cpp_out_of_line_type_matches(
+                    desugar_type(QualType(templated_ctor->type)),
+                    desugar_type(remapped_parsed_type),
+                    true)) {
+                continue;
+            }
+
+            matched_ctor_template_decl =
+                const_cast<CppConstructorDecl*>(templated_ctor);
+            matched_ctor_template_rebinds = std::move(rebinds);
+            break;
+        }
+    }
+    if ((!matched_ctor_state || !matched_ctor_state->decl) &&
+        !matched_ctor_template_decl) {
         error_custloc(
             "out-of-line declaration of '" +
                 qualified_constructor_name +
@@ -707,23 +953,47 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
             decl_loc);
     }
 
-    auto* matched_ctor_decl =
-        const_cast<CppConstructorDecl*>(matched_ctor_state->decl);
-    if (!matched_ctor_decl ||
-        matched_ctor_decl->body != nullptr ||
-        matched_ctor_decl->has_deferred_inline_body() ||
-        (matched_ctor_state->symbol && matched_ctor_state->symbol->is_defined)) {
-        error_custloc(
-            "redefinition of '" +
-                qualified_constructor_name +
-                "'",
+    if (matched_ctor_template_decl) {
+        remap_out_of_line_constructor_with_parameter_rebinds(
+            parsed_ctor,
+            matched_ctor_template_rebinds,
             decl_loc);
+        if (matched_ctor_template_decl->body != nullptr ||
+            matched_ctor_template_decl->has_deferred_inline_body()) {
+            error_custloc(
+                "redefinition of '" +
+                    qualified_constructor_name +
+                    "'",
+                decl_loc);
+        }
+        if (matched_ctor_template_decl->is_consteval != parsed_ctor->is_consteval) {
+            error_custloc(
+                "conflicting consteval specifier for '" +
+                    qualified_constructor_name + "'",
+                decl_loc);
+        }
     }
-    if (matched_ctor_decl->is_consteval != parsed_ctor->is_consteval) {
-        error_custloc(
-            "conflicting consteval specifier for '" +
-                qualified_constructor_name + "'",
-            decl_loc);
+
+    CppConstructorDecl* matched_ctor_decl = nullptr;
+    if (!matched_ctor_template_decl) {
+        matched_ctor_decl =
+            const_cast<CppConstructorDecl*>(matched_ctor_state->decl);
+        if (!matched_ctor_decl ||
+            matched_ctor_decl->body != nullptr ||
+            matched_ctor_decl->has_deferred_inline_body() ||
+            (matched_ctor_state->symbol && matched_ctor_state->symbol->is_defined)) {
+            error_custloc(
+                "redefinition of '" +
+                    qualified_constructor_name +
+                    "'",
+                decl_loc);
+        }
+        if (matched_ctor_decl->is_consteval != parsed_ctor->is_consteval) {
+            error_custloc(
+                "conflicting consteval specifier for '" +
+                    qualified_constructor_name + "'",
+                decl_loc);
+        }
     }
 
     register_function_default_arguments(
@@ -758,13 +1028,14 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
             Collect::CppThisContext cpp_this_context;
             cpp_this_context.is_member_function = true;
             cpp_this_context.is_static_member_function = false;
-            auto ctor_fn_type = dyn_cast_shared<FunctionType>(ctor_decl->type);
-            if (ctor_fn_type && !ctor_fn_type->parameters.empty()) {
-                cpp_this_context.this_type = ctor_fn_type->parameters.front();
+            QualType constructor_owner_type = owner_record_lookup_type;
+            if (!constructor_owner_type && owner_record_type) {
+                constructor_owner_type = QualType(owner_record_type);
             }
-            if (!cpp_this_context.this_type && owner_record_type) {
+            cpp_this_context.access_context_type = constructor_owner_type;
+            if (constructor_owner_type) {
                 cpp_this_context.this_type = QualType(
-                    std::make_shared<PointerType>(QualType(owner_record_type)));
+                    std::make_shared<PointerType>(constructor_owner_type));
             }
 
             func_type = ctor_decl->type;
@@ -1028,13 +1299,20 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
         };
 
     parse_deferred_constructor_body_now(parsed_ctor);
-    merge_out_of_line_constructor_definition(
-        matched_ctor_decl,
-        parsed_ctor,
-        matched_ctor_state,
-        matched_ctor_state->symbol,
-        ast_ctx,
-        owner_record_decl);
+    if (matched_ctor_template_decl) {
+        merge_out_of_line_constructor_template_definition(
+            matched_ctor_template_decl,
+            parsed_ctor,
+            ast_ctx);
+    } else {
+        merge_out_of_line_constructor_definition(
+            matched_ctor_decl,
+            parsed_ctor,
+            matched_ctor_state,
+            matched_ctor_state->symbol,
+            ast_ctx,
+            owner_record_decl);
+    }
 
     parsed_decls.push_back(collect_->collect_nop_declaration(decl_loc));
     return parsed_decls;
@@ -1174,6 +1452,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
     };
 
     const ObjectDecl* owner_record_decl = nullptr;
+    const ClassTemplateDecl* owner_class_template = nullptr;
+    QualType owner_current_instantiation_type = nullptr;
     bool allow_owner_enclosing_lookup =
         !has_global_qualifier && namespace_qualifiers.empty();
     if (owner_component.has_template_argument_list) {
@@ -1203,7 +1483,13 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
                     "' does not match any declaration in the target class",
                 decl_loc);
         }
+        owner_class_template = class_template;
         owner_record_decl = class_template->pattern_semantic_decl();
+        owner_current_instantiation_type =
+            build_cpp_current_instantiation_type(
+                owner_class_template,
+                owner_name,
+                owner_component.template_arguments);
     } else {
         auto* owner_tag_decl = LookupEngine::lookup_tag_decl(
             owner_name,
@@ -1249,11 +1535,34 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
     }
 
     set_token_idx(destructor_token_idx);
+    QualType previous_record_lookup_type =
+        collect_ ? collect_->collect_current_cpp_record_lookup_type()
+                 : QualType();
+    struct OutOfLineRecordLookupGuard {
+        Collect* collect = nullptr;
+        QualType previous_type = nullptr;
+        ~OutOfLineRecordLookupGuard() {
+            if (collect) {
+                collect->collect_set_current_cpp_record_lookup_type(previous_type);
+            }
+        }
+    } record_lookup_guard{collect_.get(), previous_record_lookup_type};
+    QualType owner_record_lookup_type = owner_current_instantiation_type;
+    if (!owner_record_lookup_type && owner_record_decl->get_record_type()) {
+        owner_record_lookup_type =
+            QualType(owner_record_decl->get_record_type());
+    }
+    if (collect_ && owner_record_lookup_type) {
+        collect_->collect_set_current_cpp_record_lookup_type(
+            owner_record_lookup_type);
+    }
     cxx_record_parse_stack_.push_back(
         CppRecordParseFrame{
             owner_record_decl->is_union ? CppRecordKind::Union : CppRecordKind::Class,
             owner_name,
-            owner_record_decl});
+            owner_record_decl,
+            owner_class_template,
+            owner_current_instantiation_type});
     RecordParseScopeGuard<decltype(cxx_record_parse_stack_)>
         record_parse_scope_guard{&cxx_record_parse_stack_};
 
