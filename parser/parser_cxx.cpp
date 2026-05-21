@@ -1787,9 +1787,7 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                                     ast_ctx.get()) ||
                                 template_arguments_are_dependent(
                                     component.template_arguments);
-                            if (nested_template->kind ==
-                                    RecordSemanticState::NestedTemplateKind::Class &&
-                                is_dependent) {
+                            if (is_dependent) {
                                 resolved_type = QualType(
                                     std::make_shared<TemplateSpecializationType>(
                                         component.name,

@@ -412,9 +412,7 @@ Parser::CppTypeComponentResolution Parser::resolve_cpp_unqualified_type_componen
             }
         }
 
-        if (nested_template->kind ==
-                RecordSemanticState::NestedTemplateKind::Class &&
-            is_dependent) {
+        if (is_dependent) {
             result.type = QualType(
                 std::make_shared<TemplateSpecializationType>(
                     component_name,
@@ -938,9 +936,7 @@ Parser::resolve_cpp_qualified_owner_chain(
                             ast_ctx.get()) ||
                         template_arguments_are_dependent(
                             component.template_arguments);
-                    if (nested_template->kind ==
-                            RecordSemanticState::NestedTemplateKind::Class &&
-                        is_dependent) {
+                    if (is_dependent) {
                         resolution.owner_type = QualType(
                             std::make_shared<TemplateSpecializationType>(
                                 component.name,
