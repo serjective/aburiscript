@@ -3980,7 +3980,8 @@ bool Parser::cpp_template_parameter_lists_match_for_redeclaration(
 
 bool Parser::cpp_template_decls_match_for_redeclaration(
     const TemplateDecl* existing,
-    const TemplateDecl* current) const {
+    const TemplateDecl* current,
+    const std::string* current_template_name) const {
     if (!existing || !current ||
         existing->get_kind() != current->get_kind() ||
         !cpp_template_parameter_lists_match_for_redeclaration(
@@ -4015,11 +4016,19 @@ bool Parser::cpp_template_decls_match_for_redeclaration(
             dyn_cast<ClassTemplateDecl>(const_cast<TemplateDecl*>(existing))) {
         auto* current_class =
             dyn_cast<ClassTemplateDecl>(const_cast<TemplateDecl*>(current));
+        auto* existing_record = dyn_cast<CppRecordDecl>(
+            const_cast<Decl*>(existing_class->get_templated_decl()));
+        auto* current_record = current_class
+            ? dyn_cast<CppRecordDecl>(
+                  const_cast<Decl*>(current_class->get_templated_decl()))
+            : nullptr;
+        const std::string* current_name =
+            current_record ? &current_record->name : current_template_name;
         return current_class &&
-               existing_class->record_decl() &&
-               current_class->record_decl() &&
-               existing_class->record_decl()->name ==
-                   current_class->record_decl()->name;
+               existing_record &&
+               current_name &&
+               !existing_record->name.empty() &&
+               existing_record->name == *current_name;
     }
     if (auto* existing_alias =
             dyn_cast<AliasTemplateDecl>(const_cast<TemplateDecl*>(existing))) {
@@ -4103,9 +4112,13 @@ const TemplateDecl* Parser::resolve_matching_primary_template_redeclaration(
         if (!candidate_template) {
             continue;
         }
+        if (candidate_template == current_template) {
+            continue;
+        }
         if (!cpp_template_decls_match_for_redeclaration(
                 candidate_template,
-                current_template)) {
+                current_template,
+                &template_name)) {
             continue;
         }
         const TemplateDecl* canonical =
@@ -8318,6 +8331,12 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         semantic_owner ? QualType(semantic_owner->get_record_type()) : QualType();
     QualType current_instantiation_type;
     if (primary_class_template && !name.empty()) {
+        if (primary_class_template == current_primary_class_template) {
+            set_primary_template_canonical_identity(
+                const_cast<ClassTemplateDecl*>(primary_class_template),
+                name,
+                LookupNamespace::Tag);
+        }
         bool has_record_specialization_argument_list =
             has_specialization_argument_list_out &&
             *has_specialization_argument_list_out &&

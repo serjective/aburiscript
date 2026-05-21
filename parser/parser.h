@@ -613,7 +613,8 @@ private:
         const TemplateParameterList& rhs) const;
     bool cpp_template_decls_match_for_redeclaration(
         const TemplateDecl* existing,
-        const TemplateDecl* current) const;
+        const TemplateDecl* current,
+        const std::string* current_template_name = nullptr) const;
     const TemplateDecl* resolve_matching_primary_template_redeclaration(
         const std::string& template_name,
         LookupNamespace lookup_namespace,
