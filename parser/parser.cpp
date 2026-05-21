@@ -663,9 +663,12 @@ std::vector<ParsedAttribute> Parser::try_parse_attributes() {
             have_alignment_arg = true;
         } else {
             auto align_expr = parse_conditional_expression();
+            auto align_eval_mode = is_cxx_mode_active()
+                ? ConstEvalMode::cpp_core_constant_expression()
+                : ConstEvalMode::c_ice();
             auto value = try_evaluate_with_consteval_compat(
                 align_expr.get(),
-                ConstEvalMode::c_ice());
+                align_eval_mode);
             if (value.has_value()) {
                 alignment_arg = AttributeArg::make_int(*value, alignas_tok.loc);
                 have_alignment_arg = true;
@@ -965,8 +968,11 @@ ParsedAttribute Parser::parse_single_attribute() {
         error("expected attribute name, got \"" + name_tok.value + "\"");
         return attr;
     }
-    const bool parse_args_as_constexpr =
-        (attr.canonical_name() == "vector_size" || attr.canonical_name() == "aligned");
+    const std::string canonical_attr_name = attr.canonical_name();
+    const bool parse_vector_size_as_constexpr =
+        canonical_attr_name == "vector_size";
+    const bool parse_aligned_as_constexpr =
+        canonical_attr_name == "aligned";
 
     // Check for arguments in parentheses
     if (gentle_check_and_consume(TokenType::LEFT_PAREN)) {
@@ -1007,7 +1013,8 @@ ParsedAttribute Parser::parse_single_attribute() {
                     advance();
                 }
                 attr.args.push_back(AttributeArg::make_key_value(key, val, val_loc));
-            } else if (parse_args_as_constexpr) {
+            } else if (parse_vector_size_as_constexpr ||
+                       parse_aligned_as_constexpr) {
                 size_t arg_start_idx = get_token_idx();
                 auto expr = parse_conditional_expression();
                 if (get_token_idx() == arg_start_idx) {
@@ -1016,14 +1023,35 @@ ParsedAttribute Parser::parse_single_attribute() {
                 }
                 int64_t val = 0;
                 if (!expr) {
-                    error("vector_size requires an integer constant expression");
+                    error(
+                        parse_vector_size_as_constexpr
+                            ? "vector_size requires an integer constant expression"
+                            : "aligned attribute requires an integer constant expression");
                 } else {
+                    auto attr_eval_mode =
+                        parse_aligned_as_constexpr && is_cxx_mode_active()
+                        ? ConstEvalMode::cpp_core_constant_expression()
+                        : ConstEvalMode::c_ice();
                     auto eval = try_evaluate_with_consteval_compat(
-                        expr.get(), ConstEvalMode::c_ice());
-                    if (!eval.has_value()) {
-                        error("vector_size requires an integer constant expression");
-                    } else {
+                        expr.get(), attr_eval_mode);
+                    if (eval.has_value()) {
                         val = eval.value();
+                    } else if (parse_aligned_as_constexpr &&
+                               is_cxx_mode_active() &&
+                               expr_depends_on_active_template_parameter(
+                                   expr.get())) {
+                        attr.args.push_back(AttributeArg::make_expr(
+                            std::shared_ptr<Expr>(expr.release()),
+                            arg_tok.loc));
+                        if (!gentle_check(TokenType::RIGHT_PAREN)) {
+                            gentle_check_and_consume(TokenType::COMMA);
+                        }
+                        continue;
+                    } else {
+                        error(
+                            parse_vector_size_as_constexpr
+                                ? "vector_size requires an integer constant expression"
+                                : "aligned attribute requires an integer constant expression");
                     }
                 }
                 attr.args.push_back(AttributeArg::make_int(val, arg_tok.loc));

@@ -310,6 +310,8 @@ public:
 
     std::shared_ptr<Scope> collect_leave_scope() ;
 
+    const LangOptions& collect_lang_options() const { return lang_opts_; }
+
     // === Symbol lookup ===
 
     std::shared_ptr<Symbol> collect_lookup_typedef_symbol(const std::string& name,
@@ -337,7 +339,8 @@ public:
         std::optional<std::string> semantic_tag_name = std::nullopt,
         std::vector<std::unique_ptr<Decl>>* transient_decls_out = nullptr,
         CppRecordDeferredBodyCallback deferred_body_callback = {},
-        bool allow_parent_tag_lookup_for_non_definition = false) ;
+        bool allow_parent_tag_lookup_for_non_definition = false,
+        bool allow_anonymous_record = false) ;
     void collect_publish_cpp_record_provisional_bases(
         const CppRecordDecl& record,
         ObjectDecl* semantic_decl) ;

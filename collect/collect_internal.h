@@ -1092,9 +1092,49 @@ MemberNameLookupResult lookup_record_member_name_impl(
         return local_result;
     }
 
+    auto merge_lookup_result = [](MemberNameLookupResult& dst,
+                                  const MemberNameLookupResult& src) {
+        dst.field_matches += src.field_matches;
+        dst.static_method_matches += src.static_method_matches;
+        dst.static_method_template_matches += src.static_method_template_matches;
+        dst.static_data_matches += src.static_data_matches;
+        dst.enumerator_matches += src.enumerator_matches;
+        dst.nonstatic_method_matches += src.nonstatic_method_matches;
+        dst.nonstatic_method_template_matches +=
+            src.nonstatic_method_template_matches;
+        if (!dst.single_static_method && src.single_static_method &&
+            src.static_method_matches == 1) {
+            dst.single_static_method = src.single_static_method;
+        }
+        if (!dst.single_static_data_member && src.single_static_data_member &&
+            src.static_data_matches == 1) {
+            dst.single_static_data_member = src.single_static_data_member;
+        }
+        if (!dst.single_enumerator_member && src.single_enumerator_member &&
+            src.enumerator_matches == 1) {
+            dst.single_enumerator_member = src.single_enumerator_member;
+        }
+    };
+
     for (const auto& field : state->fields) {
         if (field.name == member_name) {
             ++local_result.field_matches;
+        }
+        if (field.name.empty()) {
+            auto nested_record =
+                desugar_type(field.type).as_shared<ObjectType>();
+            auto* nested_decl = nested_record
+                ? dyn_cast<ObjectDecl>(nested_record->get_decl())
+                : nullptr;
+            if (!nested_decl || nested_record->isIncomplete()) {
+                continue;
+            }
+            MemberNameLookupResult promoted_result =
+                lookup_record_member_name_impl(
+                    nested_decl,
+                    member_name,
+                    visited);
+            local_result.field_matches += promoted_result.field_matches;
         }
     }
     for (const auto& method : state->methods) {
@@ -1149,33 +1189,7 @@ MemberNameLookupResult lookup_record_member_name_impl(
         }
         MemberNameLookupResult base_result =
             lookup_record_member_name_impl(base.record_decl, member_name, visited);
-        inherited_result.field_matches += base_result.field_matches;
-        inherited_result.static_method_matches += base_result.static_method_matches;
-        inherited_result.static_method_template_matches +=
-            base_result.static_method_template_matches;
-        inherited_result.static_data_matches += base_result.static_data_matches;
-        inherited_result.enumerator_matches += base_result.enumerator_matches;
-        inherited_result.nonstatic_method_matches += base_result.nonstatic_method_matches;
-        inherited_result.nonstatic_method_template_matches +=
-            base_result.nonstatic_method_template_matches;
-        if (!inherited_result.single_static_method &&
-            base_result.single_static_method &&
-            base_result.static_method_matches == 1) {
-            inherited_result.single_static_method =
-                base_result.single_static_method;
-        }
-        if (!inherited_result.single_static_data_member &&
-            base_result.single_static_data_member &&
-            base_result.static_data_matches == 1) {
-            inherited_result.single_static_data_member =
-                base_result.single_static_data_member;
-        }
-        if (!inherited_result.single_enumerator_member &&
-            base_result.single_enumerator_member &&
-            base_result.enumerator_matches == 1) {
-            inherited_result.single_enumerator_member =
-                base_result.single_enumerator_member;
-        }
+        merge_lookup_result(inherited_result, base_result);
     }
     if (inherited_result.static_method_matches != 1) {
         inherited_result.single_static_method = nullptr;

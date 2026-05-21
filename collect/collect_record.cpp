@@ -45,6 +45,7 @@ const ObjectDecl* cpp_base_record_decl_from_type(QualType base_type) {
 
 std::optional<size_t> collect_aligned_attribute_value(Collect& collect,
                                                       const AttributeArg& arg,
+                                                      ConstEvalMode eval_mode,
                                                       std::string* error_out) {
     int64_t raw_alignment = 0;
     if (arg.kind == AttributeArg::Kind::INTEGER) {
@@ -55,7 +56,7 @@ std::optional<size_t> collect_aligned_attribute_value(Collect& collect,
         }
         auto evaluated = try_evaluate_with_consteval_compat(
             arg.expr_value.get(),
-            ConstEvalMode::c_ice());
+            eval_mode);
         if (!evaluated.has_value()) {
             if (error_out && error_out->empty()) {
                 *error_out = "_Alignas requires a constant expression";
@@ -89,6 +90,7 @@ size_t collect_requested_alignment_from_attrs(Collect& collect,
                                               ASTContext* ast_ctx,
                                               uint32_t node_id,
                                               SrcLoc loc,
+                                              ConstEvalMode eval_mode,
                                               std::string* error_out = nullptr,
                                               SrcLoc* error_loc_out = nullptr) {
     if (!ast_ctx || !ast_ctx->has_attrs(node_id)) {
@@ -104,6 +106,7 @@ size_t collect_requested_alignment_from_attrs(Collect& collect,
         auto requested = collect_aligned_attribute_value(
             collect,
             attr.args.front(),
+            eval_mode,
             &local_error);
         SrcLoc attr_loc = attr.loc.isInvalid() ? loc : attr.loc;
         if (!local_error.empty()) {
@@ -1636,17 +1639,19 @@ public:
         std::optional<std::string> semantic_tag_name,
         std::vector<std::unique_ptr<Decl>>* transient_decls_out,
         Collect::CppRecordDeferredBodyCallback deferred_body_callback,
-        bool allow_parent_tag_lookup_for_non_definition)
+        bool allow_parent_tag_lookup_for_non_definition,
+        bool allow_anonymous_record = false)
         : collect_(collect),
           record_(record),
           semantic_tag_name_(std::move(semantic_tag_name)),
           transient_decls_out_(transient_decls_out),
           deferred_body_callback_(std::move(deferred_body_callback)),
           allow_parent_tag_lookup_for_non_definition_(
-              allow_parent_tag_lookup_for_non_definition) {}
+              allow_parent_tag_lookup_for_non_definition),
+          allow_anonymous_record_(allow_anonymous_record) {}
 
     std::unique_ptr<Decl> build() {
-        if (record_.name.empty()) {
+        if (record_.name.empty() && !allow_anonymous_record_) {
             return nullptr;
         }
 
@@ -1663,23 +1668,28 @@ public:
             record_.provisional_semantic_owner->tag == tag) {
             existing_obj_decl =
                 const_cast<ObjectDecl*>(record_.provisional_semantic_owner);
-        } else if (auto* existing_tag_decl = collect_.collect_lookup_tag_decl(tag, false)) {
-            existing_obj_decl = dyn_cast<ObjectDecl>(existing_tag_decl);
-            if (!existing_obj_decl) {
-                collect_.report_error(
-                    "tag '" + tag + "' was previously declared with a different kind",
-                    record_.location);
-            }
-        } else if (!record_.is_definition &&
-                   allow_parent_tag_lookup_for_non_definition_) {
-            if (auto* inherited_tag_decl =
-                    collect_.collect_lookup_tag_decl(tag, true)) {
-                existing_obj_decl = dyn_cast<ObjectDecl>(inherited_tag_decl);
-                existing_decl_from_parent_scope = existing_obj_decl != nullptr;
+        } else if (!tag.empty()) {
+            if (auto* existing_tag_decl =
+                    collect_.collect_lookup_tag_decl(tag, false)) {
+                existing_obj_decl = dyn_cast<ObjectDecl>(existing_tag_decl);
                 if (!existing_obj_decl) {
                     collect_.report_error(
-                        "tag '" + tag + "' was previously declared with a different kind",
+                        "tag '" + tag +
+                            "' was previously declared with a different kind",
                         record_.location);
+                }
+            } else if (!record_.is_definition &&
+                       allow_parent_tag_lookup_for_non_definition_) {
+                if (auto* inherited_tag_decl =
+                        collect_.collect_lookup_tag_decl(tag, true)) {
+                    existing_obj_decl = dyn_cast<ObjectDecl>(inherited_tag_decl);
+                    existing_decl_from_parent_scope = existing_obj_decl != nullptr;
+                    if (!existing_obj_decl) {
+                        collect_.report_error(
+                            "tag '" + tag +
+                                "' was previously declared with a different kind",
+                            record_.location);
+                    }
                 }
             }
         }
@@ -1744,6 +1754,9 @@ public:
                     collect_.ast_ctx_.get(),
                     record_.node_id,
                     record_.location,
+                    collect_.collect_lang_options().is_cxx_mode()
+                        ? ConstEvalMode::cpp_core_constant_expression()
+                        : ConstEvalMode::c_ice(),
                     &alignment_error,
                     &alignment_error_loc);
                 if (!alignment_error.empty()) {
@@ -1802,7 +1815,7 @@ public:
 
         collect_.query_publish_record_semantics(semantic_decl.get(),
                                                 std::move(semantic_state));
-        if (!existing_decl_from_parent_scope) {
+        if (!existing_decl_from_parent_scope && !tag.empty()) {
             collect_.collect_add_tag_decl(tag, semantic_decl.get());
         }
         return semantic_decl;
@@ -1815,6 +1828,7 @@ private:
     std::vector<std::unique_ptr<Decl>>* transient_decls_out_ = nullptr;
     Collect::CppRecordDeferredBodyCallback deferred_body_callback_;
     bool allow_parent_tag_lookup_for_non_definition_ = false;
+    bool allow_anonymous_record_ = false;
 };
 
 std::unique_ptr<Decl> Collect::collect_build_cpp_record_semantic_decl(
@@ -1822,13 +1836,15 @@ std::unique_ptr<Decl> Collect::collect_build_cpp_record_semantic_decl(
     std::optional<std::string> semantic_tag_name,
     std::vector<std::unique_ptr<Decl>>* transient_decls_out,
     CppRecordDeferredBodyCallback deferred_body_callback,
-    bool allow_parent_tag_lookup_for_non_definition) {
+    bool allow_parent_tag_lookup_for_non_definition,
+    bool allow_anonymous_record) {
     CollectRecordBuilder builder(*this,
                                  record,
                                  std::move(semantic_tag_name),
                                  transient_decls_out,
                                  std::move(deferred_body_callback),
-                                 allow_parent_tag_lookup_for_non_definition);
+                                 allow_parent_tag_lookup_for_non_definition,
+                                 allow_anonymous_record);
     return builder.build();
 }
 
@@ -2262,39 +2278,49 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
         }
 
         if (const auto* nested_record = dyn_cast<CppRecordDecl>(member.get())) {
-            if (!nested_record->name.empty()) {
-                const ObjectDecl* nested_object =
-                    nested_record->provisional_semantic_owner;
-                const RecordSemanticState* nested_state =
-                    nested_object
-                        ? query_lookup_record_semantics(nested_object)
-                        : nullptr;
-                if (!nested_object || !nested_object->get_record_type() ||
-                    !nested_state || nested_state->is_incomplete) {
-                    auto nested_semantic = collect_build_cpp_record_semantic_decl(
-                        *nested_record,
-                        std::nullopt,
-                        ctx.transient_decls_out,
-                        ctx.deferred_body_callback);
-                    if (nested_semantic) {
-                        nested_object = dyn_cast<ObjectDecl>(nested_semantic.get());
-                        if (ctx.transient_decls_out) {
-                            ctx.transient_decls_out->push_back(
-                                std::move(nested_semantic));
-                        } else {
-                            report_error(
-                                "internal error: missing transient storage for nested record semantic owner",
-                                nested_record->location);
-                        }
+            const ObjectDecl* nested_object =
+                nested_record->provisional_semantic_owner;
+            const RecordSemanticState* nested_state =
+                nested_object
+                    ? query_lookup_record_semantics(nested_object)
+                    : nullptr;
+            if (!nested_object || !nested_object->get_record_type() ||
+                !nested_state || nested_state->is_incomplete) {
+                auto nested_semantic = collect_build_cpp_record_semantic_decl(
+                    *nested_record,
+                    std::nullopt,
+                    ctx.transient_decls_out,
+                    ctx.deferred_body_callback,
+                    false,
+                    nested_record->name.empty());
+                if (nested_semantic) {
+                    nested_object = dyn_cast<ObjectDecl>(nested_semantic.get());
+                    if (ctx.transient_decls_out) {
+                        ctx.transient_decls_out->push_back(
+                            std::move(nested_semantic));
+                    } else {
+                        report_error(
+                            "internal error: missing transient storage for nested record semantic owner",
+                            nested_record->location);
                     }
                 }
-                if (nested_object && nested_object->get_record_type()) {
+            }
+            if (nested_object && nested_object->get_record_type()) {
+                if (!nested_record->name.empty()) {
                     RecordSemanticState::NestedType nested_type;
                     nested_type.name = nested_record->name;
                     nested_type.type = QualType(nested_object->get_record_type());
                     nested_type.declared_access = current_access;
                     nested_type.decl = nested_object;
                     ctx.nested_types.push_back(std::move(nested_type));
+                } else {
+                    ctx.fields.emplace_back(
+                        "",
+                        QualType(nested_object->get_record_type()),
+                        0,
+                        current_access,
+                        false,
+                        nullptr);
                 }
             }
             continue;
@@ -2523,6 +2549,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 ast_ctx_.get(),
                 field_decl->node_id,
                 field_decl->location,
+                lang_opts_.is_cxx_mode()
+                    ? ConstEvalMode::cpp_core_constant_expression()
+                    : ConstEvalMode::c_ice(),
                 &alignment_error,
                 &alignment_error_loc);
             if (!alignment_error.empty()) {

@@ -385,8 +385,11 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                     } else {
                         // _Alignas(constant-expression)
                         auto align_expr = pars->parse_conditional_expression();
+                        auto align_eval_mode = pars->is_cxx_mode_active()
+                            ? ConstEvalMode::cpp_core_constant_expression()
+                            : ConstEvalMode::c_ice();
                         auto val = try_evaluate_with_consteval_compat(
-                            align_expr.get(), ConstEvalMode::c_ice());
+                            align_expr.get(), align_eval_mode);
                         if (val.has_value()) {
                             alignment_arg = AttributeArg::make_int(*val, t.loc);
                             have_alignment_arg = true;

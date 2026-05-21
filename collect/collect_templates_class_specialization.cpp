@@ -152,7 +152,7 @@ std::optional<size_t> aligned_attribute_value_after_substitution(
         }
         auto evaluated = try_evaluate_with_consteval_compat(
             arg.expr_value.get(),
-            ConstEvalMode::c_ice());
+            ConstEvalMode::cpp_core_constant_expression());
         if (!evaluated.has_value()) {
             if (error_out && error_out->empty()) {
                 *error_out = "_Alignas requires a constant expression";
@@ -1997,10 +1997,10 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     bool handle_nested_record_member(
         const CppRecordDecl* nested_record,
         RecordMemberAccess declared_access) {
-        if (!nested_record || nested_record->name.empty()) {
+        if (!nested_record) {
             return fail_instantiation(
-                "anonymous nested records in class template specializations are not supported yet",
-                nested_record ? nested_record->location : loc);
+                "missing class template nested record",
+                loc);
         }
 
         std::string clone_error;
@@ -2108,12 +2108,22 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             ast_ctx()->append_attrs(semantic_decl->node_id, std::move(copied_attrs));
         }
 
-        RecordSemanticState::NestedType nested_type;
-        nested_type.name = cloned_record->name;
-        nested_type.type = QualType(record_type);
-        nested_type.declared_access = declared_access;
-        nested_type.decl = semantic_decl.get();
-        nested_types.push_back(std::move(nested_type));
+        if (cloned_record->name.empty()) {
+            user_fields.emplace_back(
+                "",
+                QualType(record_type),
+                0,
+                declared_access,
+                false,
+                nullptr);
+        } else {
+            RecordSemanticState::NestedType nested_type;
+            nested_type.name = cloned_record->name;
+            nested_type.type = QualType(record_type);
+            nested_type.declared_access = declared_access;
+            nested_type.decl = semantic_decl.get();
+            nested_types.push_back(std::move(nested_type));
+        }
         publish_provisional_nested_members();
 
         entry->member_decls.push_back(std::move(semantic_decl));
