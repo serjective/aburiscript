@@ -8475,6 +8475,21 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         semantic_owner =
             dyn_cast<ObjectDecl>(collect_->collect_lookup_tag_decl(name, false));
     }
+    if (semantic_owner &&
+        primary_class_template &&
+        primary_class_template == current_primary_class_template &&
+        !primary_class_template->pattern_semantic_decl()) {
+        auto owned_semantic_owner =
+            take_cpp_transient_semantic_object_decl(name);
+        if (owned_semantic_owner &&
+            owned_semantic_owner.get() == semantic_owner) {
+            const_cast<ClassTemplateDecl*>(primary_class_template)
+                ->set_pattern_semantic_decl(std::move(owned_semantic_owner));
+        } else if (owned_semantic_owner) {
+            cpp_transient_semantic_decls_.push_back(
+                std::move(owned_semantic_owner));
+        }
+    }
     QualType semantic_owner_record_type =
         semantic_owner ? QualType(semantic_owner->get_record_type()) : QualType();
     QualType current_instantiation_type;
