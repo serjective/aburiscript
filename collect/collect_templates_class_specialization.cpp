@@ -1,6 +1,7 @@
 #include "collect.h"
 #include "collect_templates_internal.h"
 
+#include <functional>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -2971,15 +2972,21 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         auto alias_template_clone_pass =
             alias_template_builder.build_substitution_pass();
 
-        for (const auto& parameter : alias_template_decl->parameters) {
+        std::function<std::unique_ptr<TemplateParameterDecl>(
+            const TemplateParameterDecl*,
+            std::unordered_map<const TemplateParameterDecl*,
+                               const TemplateParameterDecl*>&)>
+            clone_alias_template_parameter =
+                [&](const TemplateParameterDecl* parameter,
+                    std::unordered_map<const TemplateParameterDecl*,
+                                       const TemplateParameterDecl*>& active_rebinds)
+                    -> std::unique_ptr<TemplateParameterDecl> {
             if (!parameter) {
-                return fail_instantiation(
-                    "internal error: missing class template nested alias template parameter",
-                    alias_template_decl->location);
+                return nullptr;
             }
 
             if (auto* type_parameter =
-                    dyn_cast<TemplateTypeParmDecl>(parameter.get())) {
+                    dyn_cast<TemplateTypeParmDecl>(parameter)) {
                 auto cloned_parameter_type =
                     std::make_shared<TemplateTypeParmType>(
                         type_parameter->name,
@@ -2995,19 +3002,17 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                         type_parameter->is_parameter_pack,
                         type_parameter->location);
                 cloned_parameter_type->parameter_decl = cloned_parameter.get();
-                parameter_rebinds.emplace(type_parameter, cloned_parameter.get());
-                cloned_template_decl->parameters.push_back(
-                    std::move(cloned_parameter));
-                continue;
+                active_rebinds.emplace(type_parameter, cloned_parameter.get());
+                return cloned_parameter;
             }
 
             if (auto* non_type_parameter =
-                    dyn_cast<TemplateNonTypeParmDecl>(parameter.get())) {
+                    dyn_cast<TemplateNonTypeParmDecl>(parameter)) {
                 auto rewritten_parameter_type =
                     remap_template_parameter_types_in_type(
                         alias_template_clone_pass.rewrite_type(
                             non_type_parameter->type),
-                        parameter_rebinds);
+                        active_rebinds);
                 std::shared_ptr<Symbol> cloned_parameter_symbol = nullptr;
                 if (non_type_parameter->sym) {
                     cloned_parameter_symbol =
@@ -3016,7 +3021,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                             remap_template_parameter_types_in_type(
                                 alias_template_clone_pass.rewrite_type(
                                     non_type_parameter->sym->type),
-                                parameter_rebinds));
+                                active_rebinds));
                     alias_template_clone_pass.context().symbol_remap.emplace(
                         non_type_parameter->sym.get(),
                         cloned_parameter_symbol);
@@ -3031,15 +3036,63 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                         cloned_parameter_symbol,
                         non_type_parameter->is_parameter_pack,
                         non_type_parameter->location);
-                parameter_rebinds.emplace(non_type_parameter, cloned_parameter.get());
-                cloned_template_decl->parameters.push_back(
-                    std::move(cloned_parameter));
-                continue;
+                active_rebinds.emplace(non_type_parameter, cloned_parameter.get());
+                return cloned_parameter;
             }
 
-            return fail_instantiation(
-                "class template nested alias template instantiation for this template parameter kind is not supported yet",
-                parameter->location);
+            if (auto* template_parameter =
+                    dyn_cast<TemplateTemplateParmDecl>(parameter)) {
+                auto inner_rebinds = active_rebinds;
+                TemplateParameterList cloned_inner_parameters;
+                cloned_inner_parameters.reserve(
+                    template_parameter->parameters.size());
+                for (const auto& inner_parameter :
+                     template_parameter->parameters) {
+                    auto cloned_inner_parameter =
+                        clone_alias_template_parameter(
+                            inner_parameter.get(),
+                            inner_rebinds);
+                    if (!cloned_inner_parameter) {
+                        return nullptr;
+                    }
+                    cloned_inner_parameters.push_back(
+                        std::move(cloned_inner_parameter));
+                }
+
+                auto cloned_parameter =
+                    collect.collect_make<TemplateTemplateParmDecl>(
+                        std::move(cloned_inner_parameters),
+                        template_parameter->name,
+                        template_parameter->depth,
+                        template_parameter->index,
+                        template_parameter->uses_typename_keyword,
+                        template_parameter->is_parameter_pack,
+                        template_parameter->location);
+                active_rebinds.emplace(template_parameter, cloned_parameter.get());
+                return cloned_parameter;
+            }
+
+            return nullptr;
+        };
+
+        for (const auto& parameter : alias_template_decl->parameters) {
+            if (!parameter) {
+                return fail_instantiation(
+                    "internal error: missing class template nested alias template parameter",
+                    alias_template_decl->location);
+            }
+
+            auto cloned_parameter =
+                clone_alias_template_parameter(
+                    parameter.get(),
+                    parameter_rebinds);
+            if (!cloned_parameter) {
+                return fail_instantiation(
+                    "class template nested alias template instantiation for this template parameter kind is not supported yet",
+                    parameter->location);
+            }
+            cloned_template_decl->parameters.push_back(
+                std::move(cloned_parameter));
         }
 
         auto rewritten_alias_type = remap_template_parameter_types_in_type(

@@ -751,9 +751,20 @@ QualType remap_template_parameter_types_in_type(
     }
 
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
+        const Decl* remapped_primary = specialization->primary_template;
+        bool primary_changed = false;
+        if (auto* template_parameter = dyn_cast<TemplateTemplateParmDecl>(
+                const_cast<Decl*>(specialization->primary_template))) {
+            auto it = parameter_rebinds.find(template_parameter);
+            if (it != parameter_rebinds.end() && it->second) {
+                remapped_primary = it->second;
+                primary_changed = true;
+            }
+        }
+
         std::vector<TemplateArgument> remapped_arguments;
         remapped_arguments.reserve(specialization->arguments.size());
-        bool changed = false;
+        bool changed = primary_changed;
         for (const auto& argument : specialization->arguments) {
             auto remapped_argument = remap_template_argument(argument);
             changed |= !remapped_argument.equals(argument);
@@ -765,7 +776,7 @@ QualType remap_template_parameter_types_in_type(
         return QualType(
             std::make_shared<TemplateSpecializationType>(
                 specialization->template_name,
-                specialization->primary_template,
+                remapped_primary,
                 std::move(remapped_arguments),
                 specialization->is_dependent),
             quals);

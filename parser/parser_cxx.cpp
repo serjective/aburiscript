@@ -1660,7 +1660,8 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
             return std::nullopt;
         }
 
-        auto parse_component = [&]() -> CppQualifiedNameComponent {
+        auto parse_component =
+            [&](bool preceded_by_template_keyword = false) -> CppQualifiedNameComponent {
             if (!gentle_check(TokenType::IDENTIFIER)) {
                 error_custloc("expected identifier after '::' in qualified type name",
                               current_token().loc);
@@ -1668,10 +1669,18 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
             CppQualifiedNameComponent component;
             component.name = current_token().value;
             component.loc = current_token().loc;
+            component.preceded_by_template_keyword =
+                preceded_by_template_keyword;
             advance();
             if (gentle_check(TokenType::LESS_THAN)) {
                 component.has_template_argument_list = true;
                 component.template_arguments = parse_cpp_template_argument_list();
+            }
+            if (component.preceded_by_template_keyword &&
+                !component.has_template_argument_list) {
+                error_custloc(
+                    "expected template-id after 'template' keyword",
+                    component.loc);
             }
             return component;
         };
@@ -1680,11 +1689,25 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
         components.push_back(parse_component());
         while (is_cpp_scope_resolution_here()) {
             consume_cpp_scope_resolution();
-            if (gentle_check(TokenType::TEMPLATE) && allow_implicit_typename) {
+            bool preceded_by_template_keyword =
+                gentle_check_and_consume(TokenType::TEMPLATE);
+            if (preceded_by_template_keyword &&
+                start_tok.type != TokenType::TYPENAME &&
+                !allow_implicit_typename &&
+                !is_type_requirement) {
                 restore();
                 return std::nullopt;
             }
-            components.push_back(parse_component());
+            components.push_back(
+                parse_component(preceded_by_template_keyword));
+        }
+        const bool qualified_type_name =
+            has_global_qualifier || components.size() > 1;
+        if (start_tok.type == TokenType::TYPENAME &&
+            !qualified_type_name &&
+            !is_type_requirement) {
+            restore();
+            return std::nullopt;
         }
 
         auto tu_context = collect_->get_translation_unit_decl_context();
@@ -1955,7 +1978,40 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                     }
                 }
             } else {
-                if (component.has_template_argument_list) {
+                const bool owner_is_dependent =
+                    type_depends_on_template_parameters(
+                        resolved_type,
+                        ast_ctx.get());
+                if (owner_is_dependent) {
+                    if (component.has_template_argument_list &&
+                        !component.preceded_by_template_keyword &&
+                        start_tok.type == TokenType::TYPENAME) {
+                        std::string qualifier_spelling =
+                            qualified_name_utils::format_cpp_qualified_name(
+                                has_global_qualifier,
+                                resolved_prefix,
+                                "");
+                        if (qualifier_spelling.ends_with("::")) {
+                            qualifier_spelling.resize(
+                                qualifier_spelling.size() - 2);
+                        }
+                        diagnose_missing_cpp_template_keyword(
+                            qualifier_spelling,
+                            component.name,
+                            component.loc);
+                    }
+                    const bool terminal_is_known_type =
+                        start_tok.type == TokenType::TYPENAME ||
+                        allow_implicit_typename ||
+                        is_type_requirement;
+                    resolved_type = QualType(std::make_shared<DependentNameType>(
+                        resolved_type,
+                        component.name,
+                        component.template_arguments,
+                        /*is_current_instantiation=*/false,
+                        is_last_component && terminal_is_known_type,
+                        component.has_template_argument_list));
+                } else if (component.has_template_argument_list) {
                     bool matched_nested_template = false;
                     resolved_type =
                         collect_->collect_lookup_record_nested_template_type(
@@ -1977,17 +2033,22 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
             }
 
             if (!is_last_component) {
-                resolved_type =
-                    prepare_cpp_qualified_type_owner(resolved_type);
-                if (!resolved_type) {
-                    restore();
-                    return std::nullopt;
-                }
                 if (type_depends_on_template_parameters(
                         resolved_type,
                         ast_ctx.get())) {
-                    restore();
-                    return std::nullopt;
+                    if (start_tok.type != TokenType::TYPENAME &&
+                        !allow_implicit_typename &&
+                        !is_type_requirement) {
+                        restore();
+                        return std::nullopt;
+                    }
+                } else {
+                    resolved_type =
+                        prepare_cpp_qualified_type_owner(resolved_type);
+                    if (!resolved_type) {
+                        restore();
+                        return std::nullopt;
+                    }
                 }
                 resolved_prefix.push_back(component.spelling());
             }
@@ -2176,9 +2237,14 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                 try_parse_decltype_qualified_type(true)) {
             return decltype_qualified;
         }
+        size_t after_typename_idx = get_token_idx();
+        auto after_typename_split_state = tok_mgnt.get_split_token_state();
+        if (auto concrete = try_parse_concrete_named_type()) {
+            return concrete;
+        }
+        set_token_idx(after_typename_idx);
+        tok_mgnt.set_split_token_state(after_typename_split_state);
         if (is_type_requirement) {
-            size_t after_typename_idx = get_token_idx();
-            auto after_typename_split_state = tok_mgnt.get_split_token_state();
             if (auto concrete = try_parse_concrete_named_type()) {
                 return concrete;
             }
@@ -2328,14 +2394,6 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
             saw_typename_keyword || allow_implicit_typename ||
             is_type_requirement;
         if (!member_has_template_argument_list && is_terminal_component) {
-            if (saw_typename_keyword &&
-                !is_type_requirement &&
-                !state.is_dependent &&
-                !state.is_current_instantiation) {
-                error_custloc(
-                    "'typename' is only allowed before qualified dependent type names",
-                    start_tok.loc);
-            }
             if (!terminal_is_known_type &&
                 state.requires_typename_keyword() &&
                 gentle_check(TokenType::LEFT_PAREN)) {
@@ -2391,12 +2449,6 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                     nested_template_type,
                     ast_ctx.get());
                 state.is_current_instantiation = false;
-                if (is_terminal_component && saw_typename_keyword &&
-                    !state.is_dependent) {
-                    error_custloc(
-                        "'typename' is only allowed before qualified dependent type names",
-                        start_tok.loc);
-                }
             }
         } else {
             if (state.is_dependent_context()) {
