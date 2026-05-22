@@ -240,6 +240,26 @@ std::optional<QualType> merge_cpp_conditional_glvalue_type(
     return make_reference_type(merged_referred, lhs_ref->reference_kind);
 }
 
+QualType known_dependent_unary_result_type(UnaryOpTypes uop,
+                                           QualType operand_type,
+                                           const ASTContext* ast_ctx) {
+    switch (uop) {
+        case UnaryOpTypes::DEREFERENCE: {
+            auto ptr_type =
+                desugar_type(operand_type, ast_ctx).as_shared<PointerType>();
+            if (!ptr_type) {
+                return nullptr;
+            }
+            if (auto spelled_ptr = operand_type.as_shared<PointerType>()) {
+                return spelled_ptr->pointed_type;
+            }
+            return ptr_type->pointed_type;
+        }
+        default:
+            return nullptr;
+    }
+}
+
 bool expression_can_be_addressed_without_overload(const Collect& collect,
                                                   Expr* raw) {
     if (!raw) {
@@ -6680,8 +6700,13 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
     if (lang_opts_.is_cxx_mode() &&
         (type_depends_on_template_parameters(exp_type, ast_ctx_.get()) ||
          expression_depends_on_template_parameters(node->exp.get()))) {
-        QualType dependent_result_type(
-            std::make_shared<AutoType>(AutoTypeFlavor::TemplateNonType));
+        QualType dependent_result_type =
+            known_dependent_unary_result_type(uop, exp_type, ast_ctx_.get());
+        if (!dependent_result_type) {
+            dependent_result_type =
+                QualType(std::make_shared<AutoType>(
+                    AutoTypeFlavor::TemplateNonType));
+        }
         return collect_make<DependentUnaryExpr>(
             uop,
             std::move(node->exp),

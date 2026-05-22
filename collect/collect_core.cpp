@@ -6,6 +6,48 @@
 #include <iostream>
 
 namespace {
+struct RecordNestedLookupOwner {
+    std::shared_ptr<ObjectType> record_type = nullptr;
+    const ClassTemplateDecl* class_template = nullptr;
+    std::shared_ptr<TemplateSpecializationType> specialization = nullptr;
+};
+
+RecordNestedLookupOwner resolve_record_nested_lookup_owner(
+    QualType owner_type,
+    const ASTContext* ast_ctx) {
+    RecordNestedLookupOwner owner;
+    if (!owner_type) {
+        return owner;
+    }
+
+    owner.record_type =
+        desugar_type(owner_type, ast_ctx).as_shared<ObjectType>();
+    if (owner.record_type) {
+        return owner;
+    }
+
+    owner.specialization =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_typedefs(owner_type).get_shared());
+    if (!owner.specialization) {
+        return owner;
+    }
+
+    owner.class_template =
+        dyn_cast<ClassTemplateDecl>(owner.specialization->primary_template);
+    const ObjectDecl* pattern_decl = owner.class_template
+        ? owner.class_template->pattern_semantic_decl()
+        : nullptr;
+    if (!pattern_decl) {
+        owner.class_template = nullptr;
+        owner.specialization = nullptr;
+        return owner;
+    }
+
+    owner.record_type = pattern_decl->get_record_type();
+    return owner;
+}
+
 struct CollectTentativeMetrics {
     uint64_t tentative_begins = 0;
     uint64_t tentative_commits = 0;
@@ -1370,8 +1412,9 @@ QualType Collect::collect_lookup_record_nested_type(QualType owner_type,
         return QualType();
     }
 
-    auto record_type =
-        desugar_type(owner_type, ast_ctx_.get()).as_shared<ObjectType>();
+    auto lookup_owner =
+        resolve_record_nested_lookup_owner(owner_type, ast_ctx_.get());
+    auto record_type = lookup_owner.record_type;
     if (!record_type) {
         return QualType();
     }
@@ -1389,6 +1432,13 @@ QualType Collect::collect_lookup_record_nested_type(QualType owner_type,
 
     for (auto it = state->nested_types.rbegin(); it != state->nested_types.rend(); ++it) {
         if (it->name == name) {
+            if (lookup_owner.class_template && lookup_owner.specialization) {
+                return const_cast<Collect*>(this)->partially_substitute_template_type(
+                    it->type,
+                    lookup_owner.class_template->parameters,
+                    lookup_owner.specialization->arguments,
+                    SrcLoc());
+            }
             return it->type;
         }
     }
@@ -1413,7 +1463,15 @@ QualType Collect::collect_lookup_record_nested_type(QualType owner_type,
         visit_base(virtual_base.record_decl);
     }
     if (base_matches.size() == 1) {
-        return base_matches.front().type;
+        QualType nested_type = base_matches.front().type;
+        if (lookup_owner.class_template && lookup_owner.specialization) {
+            nested_type = const_cast<Collect*>(this)->partially_substitute_template_type(
+                nested_type,
+                lookup_owner.class_template->parameters,
+                lookup_owner.specialization->arguments,
+                SrcLoc());
+        }
+        return nested_type;
     }
     return QualType();
 }
@@ -1426,7 +1484,8 @@ std::shared_ptr<Symbol> Collect::collect_lookup_record_enumerator(
     }
 
     auto record_type =
-        desugar_type(owner_type, ast_ctx_.get()).as_shared<ObjectType>();
+        resolve_record_nested_lookup_owner(owner_type, ast_ctx_.get())
+            .record_type;
     if (!record_type) {
         return nullptr;
     }
@@ -1491,7 +1550,8 @@ Collect::collect_lookup_record_nested_template(QualType owner_type,
     }
 
     auto record_type =
-        desugar_type(owner_type, ast_ctx_.get()).as_shared<ObjectType>();
+        resolve_record_nested_lookup_owner(owner_type, ast_ctx_.get())
+            .record_type;
     if (!record_type) {
         return nullptr;
     }

@@ -328,6 +328,49 @@ QualType Parser::try_build_cpp_injected_current_instantiation_type(
         loc);
 }
 
+std::optional<std::vector<TemplateArgument>>
+Parser::complete_cpp_template_id_arguments(
+    const TemplateDecl* template_decl,
+    const std::vector<TemplateArgument>& arguments,
+    SrcLoc loc) {
+    if (!template_decl || !collect_) {
+        return arguments;
+    }
+
+    TemplateArgumentBindings bindings;
+    std::vector<TemplateArgument> normalized_arguments;
+    std::string error;
+    if (!collect_->collect_bind_and_normalize_template_arguments_for_specialization(
+            template_decl,
+            arguments,
+            bindings,
+            normalized_arguments,
+            loc,
+            &error)) {
+        return std::nullopt;
+    }
+    return normalized_arguments;
+}
+
+const TemplateDecl*
+Parser::cpp_template_decl_for_default_arguments(const Decl* decl) const {
+    if (!decl) {
+        return nullptr;
+    }
+    switch (decl->get_kind()) {
+        case DeclKind::ClassTemplateDecl:
+            return static_cast<const ClassTemplateDecl*>(decl);
+        case DeclKind::AliasTemplateDecl:
+            return static_cast<const AliasTemplateDecl*>(decl);
+        case DeclKind::ClassTemplatePartialSpecializationDecl:
+            return static_cast<const ClassTemplatePartialSpecializationDecl*>(decl);
+        case DeclKind::ConceptDecl:
+            return static_cast<const ConceptDecl*>(decl);
+        default:
+            return nullptr;
+    }
+}
+
 Parser::CppTypeComponentResolution Parser::resolve_cpp_unqualified_type_component(
     const std::string& component_name,
     const std::vector<TemplateArgument>& component_arguments,
@@ -399,11 +442,19 @@ Parser::CppTypeComponentResolution Parser::resolve_cpp_unqualified_type_componen
             return result;
         }
 
+        auto normalized_arguments = complete_cpp_template_id_arguments(
+            nested_template->decl,
+            component_arguments,
+            component_loc);
+        if (!normalized_arguments) {
+            return result;
+        }
+
         bool is_dependent =
             type_depends_on_template_parameters(
                 owner_lookup_type,
                 ast_ctx.get());
-        for (const auto& argument : component_arguments) {
+        for (const auto& argument : *normalized_arguments) {
             if (template_argument_depends_on_template_parameters(
                     argument,
                     ast_ctx.get())) {
@@ -417,7 +468,7 @@ Parser::CppTypeComponentResolution Parser::resolve_cpp_unqualified_type_componen
                 std::make_shared<TemplateSpecializationType>(
                     component_name,
                     nested_template->decl,
-                    component_arguments,
+                    *normalized_arguments,
                     true));
             return result;
         }
@@ -425,13 +476,21 @@ Parser::CppTypeComponentResolution Parser::resolve_cpp_unqualified_type_componen
         result.type = collect_->collect_lookup_record_nested_template_type(
             owner_lookup_type,
             component_name,
-            component_arguments,
+            *normalized_arguments,
             component_loc);
         return result;
     }
 
+    auto normalized_arguments = complete_cpp_template_id_arguments(
+        cpp_template_decl_for_default_arguments(primary_template),
+        component_arguments,
+        component_loc);
+    if (!normalized_arguments) {
+        return result;
+    }
+
     bool is_dependent = isa<TemplateTemplateParmDecl>(primary_template);
-    for (const auto& argument : component_arguments) {
+    for (const auto& argument : *normalized_arguments) {
         if (template_argument_depends_on_template_parameters(
                 argument,
                 ast_ctx.get())) {
@@ -444,7 +503,7 @@ Parser::CppTypeComponentResolution Parser::resolve_cpp_unqualified_type_componen
         QualType(std::make_shared<TemplateSpecializationType>(
             component_name,
             primary_template,
-            component_arguments,
+            *normalized_arguments,
             is_dependent));
     if (is_dependent) {
         result.type = specialization_type;
@@ -930,25 +989,34 @@ Parser::resolve_cpp_qualified_owner_chain(
                         component.name,
                         &owner_lookup_type);
                 if (nested_template && nested_template->decl) {
+                    auto normalized_arguments =
+                        complete_cpp_template_id_arguments(
+                            nested_template->decl,
+                            component.template_arguments,
+                            component.loc);
+                    if (!normalized_arguments) {
+                        fail_lookup(component);
+                        return resolution;
+                    }
                     bool is_dependent =
                         type_depends_on_template_parameters(
                             owner_lookup_type,
                             ast_ctx.get()) ||
                         template_arguments_are_dependent(
-                            component.template_arguments);
+                            *normalized_arguments);
                     if (is_dependent) {
                         resolution.owner_type = QualType(
                             std::make_shared<TemplateSpecializationType>(
                                 component.name,
                                 nested_template->decl,
-                                component.template_arguments,
+                                *normalized_arguments,
                                 true));
                     } else {
                         resolution.owner_type =
                             collect_->collect_lookup_record_nested_template_type(
                                 owner_lookup_type,
                                 component.name,
-                                component.template_arguments,
+                                *normalized_arguments,
                                 component.loc);
                     }
                     if (resolution.owner_type) {
@@ -971,6 +1039,16 @@ Parser::resolve_cpp_qualified_owner_chain(
             bool is_dependent =
                 isa<TemplateTemplateParmDecl>(primary_template) ||
                 template_arguments_are_dependent(component.template_arguments);
+            auto normalized_arguments = complete_cpp_template_id_arguments(
+                cpp_template_decl_for_default_arguments(primary_template),
+                component.template_arguments,
+                component.loc);
+            if (!normalized_arguments) {
+                fail_lookup(component);
+                return resolution;
+            }
+            is_dependent = is_dependent ||
+                template_arguments_are_dependent(*normalized_arguments);
             QualType specialization_type(
                 std::make_shared<TemplateSpecializationType>(
                     qualified_name_utils::format_cpp_qualified_name(
@@ -978,7 +1056,7 @@ Parser::resolve_cpp_qualified_owner_chain(
                         resolution.qualifier_spellings,
                         component.name),
                     primary_template,
-                    component.template_arguments,
+                    *normalized_arguments,
                     is_dependent));
             if (!is_dependent) {
                 auto concrete_specialization =

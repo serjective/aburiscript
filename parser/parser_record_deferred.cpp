@@ -479,7 +479,10 @@ void Parser::build_cpp_record_parse_deferred_bodies(
 
         QualType previous_record_lookup_type =
             collect_->collect_current_cpp_record_lookup_type();
-        QualType active_record_lookup_type = QualType(ctx.record_type);
+        QualType active_record_lookup_type =
+            ctx.semantic_owner && ctx.semantic_owner->get_record_type()
+                ? QualType(ctx.semantic_owner->get_record_type())
+                : QualType(ctx.record_type);
         if (active_record_lookup_type) {
             collect_->collect_set_current_cpp_record_lookup_type(
                 active_record_lookup_type);

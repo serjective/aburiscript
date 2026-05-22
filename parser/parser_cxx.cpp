@@ -1854,18 +1854,27 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                                 component.name,
                                 &owner_lookup_type);
                         if (nested_template && nested_template->decl) {
+                            auto normalized_arguments =
+                                complete_cpp_template_id_arguments(
+                                    nested_template->decl,
+                                    component.template_arguments,
+                                    component.loc);
+                            if (!normalized_arguments) {
+                                restore();
+                                return std::nullopt;
+                            }
                             bool is_dependent =
                                 type_depends_on_template_parameters(
                                     owner_lookup_type,
                                     ast_ctx.get()) ||
                                 template_arguments_are_dependent(
-                                    component.template_arguments);
+                                    *normalized_arguments);
                             if (is_dependent) {
                                 resolved_type = QualType(
                                     std::make_shared<TemplateSpecializationType>(
                                         component.name,
                                         nested_template->decl,
-                                        component.template_arguments,
+                                        *normalized_arguments,
                                         true));
                             } else {
                                 bool matched_nested_template = false;
@@ -1873,7 +1882,7 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                                     collect_->collect_lookup_record_nested_template_type(
                                         owner_lookup_type,
                                         component.name,
-                                        component.template_arguments,
+                                        *normalized_arguments,
                                         component.loc,
                                         &matched_nested_template);
                             }
@@ -1885,10 +1894,20 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                     }
 
                     if (primary_template) {
+                        auto normalized_arguments =
+                            complete_cpp_template_id_arguments(
+                                cpp_template_decl_for_default_arguments(
+                                    primary_template),
+                                component.template_arguments,
+                                component.loc);
+                        if (!normalized_arguments) {
+                            restore();
+                            return std::nullopt;
+                        }
                         bool is_dependent =
                             isa<TemplateTemplateParmDecl>(primary_template) ||
                             template_arguments_are_dependent(
-                                component.template_arguments);
+                                *normalized_arguments);
                         QualType specialization_type =
                             QualType(std::make_shared<TemplateSpecializationType>(
                                 qualified_name_utils::format_cpp_qualified_name(
@@ -1896,7 +1915,7 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                                     resolved_prefix,
                                     component.name),
                                 primary_template,
-                                component.template_arguments,
+                                *normalized_arguments,
                                 is_dependent));
                         if (is_last_component || is_dependent) {
                             resolved_type = specialization_type;

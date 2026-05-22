@@ -700,6 +700,13 @@ private:
     QualType try_build_cpp_injected_current_instantiation_type(
         std::string_view type_name,
         SrcLoc loc);
+    std::optional<std::vector<TemplateArgument>>
+    complete_cpp_template_id_arguments(
+        const TemplateDecl* template_decl,
+        const std::vector<TemplateArgument>& arguments,
+        SrcLoc loc);
+    const TemplateDecl* cpp_template_decl_for_default_arguments(
+        const Decl* decl) const;
     QualType lookup_cpp_current_record_nested_type(
         const std::string& component_name) const;
     const RecordSemanticState::NestedTemplate*

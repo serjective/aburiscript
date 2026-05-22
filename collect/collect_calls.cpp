@@ -1224,8 +1224,37 @@ std::unique_ptr<Expr> Collect::collect_function_call(
                               current_decl_context);
                 return !template_candidates.empty();
             };
+        bool callee_has_function_template_candidates =
+            callee_can_use_concrete_template_overload_resolution(callee.get());
+        auto build_dependent_template_lookup_call =
+            [&]() -> std::unique_ptr<Expr> {
+            auto* callee_ref =
+                dyn_cast<VarRef>(strip_implicit_casts_and_parens(callee.get()));
+            if (!callee_ref) {
+                return nullptr;
+            }
+            QualType dependent_call_type(
+                std::make_shared<AutoType>(AutoTypeFlavor::Cxx));
+            auto unresolved_lookup = collect_make<UnresolvedLookupExpr>(
+                callee_ref->get_name(),
+                build_dependent_lookup_qualifier(
+                    callee_ref->get_cpp_qualified_info()),
+                std::nullopt,
+                /*requires_template_keyword=*/false,
+                /*is_dependent=*/true,
+                dependent_call_type,
+                callee_ref->location,
+                session_.current_scope_,
+                session_.current_decl_context_);
+            return collect_make<DependentCallExpr>(
+                std::move(unresolved_lookup),
+                std::move(args),
+                dependent_call_type,
+                /*known_function_type=*/QualType(nullptr),
+                loc);
+        };
         if (callee_is_dependent && !any_arg_is_dependent &&
-            callee_can_use_concrete_template_overload_resolution(callee.get())) {
+            callee_has_function_template_candidates) {
             callee_is_dependent = false;
         }
         if (callee_is_dependent || any_arg_is_dependent) {
@@ -1237,6 +1266,12 @@ std::unique_ptr<Expr> Collect::collect_function_call(
                         args,
                         loc)) {
                 return typed_dependent_call;
+            }
+            if (callee_has_function_template_candidates) {
+                if (auto unresolved_template_call =
+                        build_dependent_template_lookup_call()) {
+                    return unresolved_template_call;
+                }
             }
             return collect_dependent_call_expression(
                 std::move(callee),
@@ -4647,6 +4682,22 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 ast_ctx_.get());
         };
 
+    auto call_arguments_still_dependent =
+        [&](const std::vector<std::unique_ptr<Expr>>& args) -> bool {
+            for (const auto& arg : args) {
+                if (!arg) {
+                    continue;
+                }
+                if (expression_depends_on_template_parameters(arg.get()) ||
+                    type_depends_on_template_parameters(
+                        arg->get_type(),
+                        ast_ctx_.get())) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
     auto materialize_unresolved_member =
         [&](std::unique_ptr<UnresolvedMemberExpr> owned_member,
             bool allow_overloaded_method_set)
@@ -5245,6 +5296,23 @@ bool Collect::resolve_dependent_expr_after_substitution(
     auto owned_call = std::unique_ptr<DependentCallExpr>(
         static_cast<DependentCallExpr*>(expr.release()));
     std::vector<TemplateArgument> explicit_template_args;
+    if (auto* owned_member =
+            dyn_cast<UnresolvedMemberExpr>(owned_call->callee.get())) {
+        if (owned_member->base &&
+            !resolve_dependent_expr_after_substitution(
+                owned_member->base,
+                implicit_this_type,
+                error_out)) {
+            return false;
+        }
+    }
+    if (!resolve_call_arguments_after_substitution(owned_call->args)) {
+        return false;
+    }
+    if (call_arguments_still_dependent(owned_call->args)) {
+        expr = std::move(owned_call);
+        return true;
+    }
 
     if (unresolved_member) {
         auto owned_member = std::unique_ptr<UnresolvedMemberExpr>(
@@ -5264,9 +5332,6 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 *error_out =
                     "failed to materialize dependent member callee after substitution";
             }
-            return false;
-        }
-        if (!resolve_call_arguments_after_substitution(owned_call->args)) {
             return false;
         }
         auto rewritten = has_explicit_template_args
@@ -5330,9 +5395,6 @@ bool Collect::resolve_dependent_expr_after_substitution(
             *error_out =
                 "failed to materialize dependent qualified callee after substitution";
         }
-        return false;
-    }
-    if (!resolve_call_arguments_after_substitution(owned_call->args)) {
         return false;
     }
     auto rewritten = has_explicit_template_args

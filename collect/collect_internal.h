@@ -1312,6 +1312,12 @@ std::shared_ptr<ObjectType> current_record_for_unqualified_member_lookup(
     if (active_record) {
         return active_record;
     }
+    active_record = class_template_pattern_record_type_from_specialization(
+        current_cpp_record_lookup_type,
+        ast_ctx);
+    if (active_record) {
+        return active_record;
+    }
     return current_record_from_this_type(current_function_cpp_this_type, ast_ctx);
 }
 

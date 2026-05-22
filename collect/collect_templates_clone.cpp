@@ -456,6 +456,33 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
         if (!replacement) {
             return nullptr;
         }
+        if (replacement->kind == TemplateArgumentKind::Value &&
+            replacement->is_dependent) {
+            if (replacement->value_expr) {
+                std::string clone_error;
+                ASTCloneContext value_expr_clone_ctx;
+                value_expr_clone_ctx.ast_ctx = clone_ast_ctx;
+                auto cloned = clone_expr_with_substitution(
+                    replacement->value_expr.get(),
+                    value_expr_clone_ctx,
+                    &clone_error);
+                if (!cloned && error_out && error_out->empty()) {
+                    *error_out = clone_error.empty()
+                        ? value_error_message
+                        : clone_error;
+                }
+                return cloned;
+            }
+            auto* referenced_non_type =
+                dyn_cast<TemplateNonTypeParmDecl>(
+                    const_cast<TemplateParameterDecl*>(
+                        replacement->referenced_parameter));
+            if (referenced_non_type && referenced_non_type->sym) {
+                return std::make_unique<VarRef>(
+                    referenced_non_type->sym,
+                    var_ref ? var_ref->location : fallback_loc);
+            }
+        }
         auto literal = make_constant_expr_for_template_argument(
             *replacement,
             clone_ast_ctx,
