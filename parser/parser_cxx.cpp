@@ -1325,10 +1325,49 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_typed_braced_template_argument_expr(
         tentative.commit();
         QualType target_type(parsed_type, type_parser.qualifiers);
         SrcLoc literal_loc = current_token().loc;
-        auto initializer = parse_init_list();
-        return collect_->collect_compound_literal_expression(
+        auto initializer_expr = parse_init_list();
+        auto* initializer = dyn_cast<InitListExpr>(initializer_expr.get());
+        if (!initializer) {
+            return nullptr;
+        }
+        auto owned_initializer = std::unique_ptr<InitListExpr>(
+            static_cast<InitListExpr*>(initializer_expr.release()));
+        if (type_depends_on_template_parameters(target_type, ast_ctx.get())) {
+            if (!owned_initializer->actions.empty() ||
+                !owned_initializer->mappings.empty()) {
+                error_custloc(
+                    "dependent braced template argument does not support lowered initializer actions",
+                    literal_loc);
+                return collect_->collect_error_expression(
+                    "unsupported dependent braced template argument",
+                    literal_loc);
+            }
+            std::vector<std::unique_ptr<Expr>> args;
+            args.reserve(owned_initializer->elements.size());
+            for (auto& element : owned_initializer->elements) {
+                if (!element.designators.empty()) {
+                    error_custloc(
+                        "dependent braced template argument does not support designators",
+                        element.loc);
+                    return collect_->collect_error_expression(
+                        "unsupported dependent braced template argument",
+                        element.loc);
+                }
+                args.push_back(std::move(element.value));
+            }
+            auto deferred =
+                collect_->collect_cpp_function_style_cast(
+                    target_type,
+                    std::move(args),
+                    literal_loc);
+            if (auto* cast = dyn_cast<CppFunctionStyleCastExpr>(deferred.get())) {
+                cast->is_list_init = true;
+            }
+            return deferred;
+        }
+        return collect_->collect_cpp_type_list_initialization_expression(
             target_type,
-            std::move(initializer),
+            std::move(owned_initializer),
             literal_loc);
     } catch (const ParseError&) {
     } catch (const FatalErrorLimitReached&) {

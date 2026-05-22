@@ -577,10 +577,55 @@ QualType Collect::substitute_template_type_with_bindings(
                             }
                         }
                         if (!still_dependent) {
-                            candidate = collect_cpp_function_style_cast(
+                            if (function_style_cast->is_list_init) {
+                                auto init_list = collect_make<InitListExpr>(
+                                    function_style_cast->location);
+                                init_list->elements.reserve(
+                                    function_style_cast->args.size());
+                                for (auto& arg : function_style_cast->args) {
+                                    InitElement element;
+                                    element.value = std::move(arg);
+                                    element.loc = element.value
+                                        ? element.value->location
+                                        : function_style_cast->location;
+                                    init_list->elements.push_back(
+                                        std::move(element));
+                                }
+                                candidate =
+                                    collect_cpp_type_list_initialization_expression(
+                                        function_style_cast->target_type,
+                                        std::move(init_list),
+                                        function_style_cast->location);
+                            } else {
+                                candidate = collect_cpp_function_style_cast(
+                                    function_style_cast->target_type,
+                                    std::move(function_style_cast->args),
+                                    function_style_cast->location);
+                            }
+                            return true;
+                        }
+                        if (function_style_cast->is_list_init &&
+                            !type_depends_on_template_parameters(
                                 function_style_cast->target_type,
-                                std::move(function_style_cast->args),
+                                ast_ctx_.get())) {
+                            auto init_list = collect_make<InitListExpr>(
                                 function_style_cast->location);
+                            init_list->elements.reserve(
+                                function_style_cast->args.size());
+                            for (auto& arg : function_style_cast->args) {
+                                InitElement element;
+                                element.value = std::move(arg);
+                                element.loc = element.value
+                                    ? element.value->location
+                                    : function_style_cast->location;
+                                init_list->elements.push_back(
+                                    std::move(element));
+                            }
+                            candidate =
+                                collect_cpp_type_list_initialization_expression(
+                                    function_style_cast->target_type,
+                                    std::move(init_list),
+                                    function_style_cast->location);
                             return true;
                         }
                     }

@@ -3859,15 +3859,34 @@ bool Collect::resolve_dependent_expr_after_substitution(
                  type_depends_on_template_parameters(
                      arg->get_type(),
                      ast_ctx_.get()))) {
-                return true;
+                if (!function_style_cast->is_list_init) {
+                    return true;
+                }
             }
         }
         auto owned_cast = std::unique_ptr<CppFunctionStyleCastExpr>(
             static_cast<CppFunctionStyleCastExpr*>(expr.release()));
-        auto rewritten = collect_cpp_function_style_cast(
-            owned_cast->target_type,
-            std::move(owned_cast->args),
-            owned_cast->location);
+        std::unique_ptr<Expr> rewritten;
+        if (owned_cast->is_list_init) {
+            auto init_list = collect_make<InitListExpr>(owned_cast->location);
+            init_list->elements.reserve(owned_cast->args.size());
+            for (auto& arg : owned_cast->args) {
+                InitElement element;
+                element.value = std::move(arg);
+                element.loc = element.value ? element.value->location
+                                            : owned_cast->location;
+                init_list->elements.push_back(std::move(element));
+            }
+            rewritten = collect_cpp_type_list_initialization_expression(
+                owned_cast->target_type,
+                std::move(init_list),
+                owned_cast->location);
+        } else {
+            rewritten = collect_cpp_function_style_cast(
+                owned_cast->target_type,
+                std::move(owned_cast->args),
+                owned_cast->location);
+        }
         if (!rewritten) {
             if (error_out && error_out->empty()) {
                 *error_out =

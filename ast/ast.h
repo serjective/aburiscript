@@ -1565,13 +1565,16 @@ struct CppValueInitExpr: Expr {
 struct CppFunctionStyleCastExpr: Expr {
     QualType target_type;
     std::vector<std::unique_ptr<Expr>> args;
+    bool is_list_init = false;
 
     CppFunctionStyleCastExpr(QualType target_type,
                              std::vector<std::unique_ptr<Expr>> args,
-                             SrcLoc loc = SrcLoc())
+                             SrcLoc loc = SrcLoc(),
+                             bool is_list_init = false)
         : Expr(StmtKind::CppFunctionStyleCastExpr, loc),
           target_type(std::move(target_type)),
-          args(std::move(args)) {}
+          args(std::move(args)),
+          is_list_init(is_list_init) {}
 
     QualType get_type() override {
         return target_type;

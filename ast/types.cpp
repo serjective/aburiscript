@@ -670,6 +670,7 @@ bool expr_structurally_matches(const Expr* lhs, const Expr* rhs) {
                 static_cast<const CppFunctionStyleCastExpr*>(rhs);
             return lhs_cast->target_type.equals_qualified(
                        rhs_cast->target_type) &&
+                   lhs_cast->is_list_init == rhs_cast->is_list_init &&
                    expr_vector_structurally_matches(
                        lhs_cast->args,
                        rhs_cast->args);

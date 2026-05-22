@@ -768,7 +768,8 @@ std::unique_ptr<Expr> clone_expr_impl(const Expr* expr,
             auto result = std::make_unique<CppFunctionStyleCastExpr>(
                 cast->target_type,
                 std::move(cloned_args),
-                cast->location);
+                cast->location,
+                cast->is_list_init);
             assign_node_id(result.get(), ast_ctx);
             return result;
         }
