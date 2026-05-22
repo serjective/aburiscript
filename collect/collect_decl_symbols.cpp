@@ -115,6 +115,17 @@ std::vector<std::shared_ptr<Symbol>> collect_owner_matched_function_candidates(
     return candidates;
 }
 
+bool function_binds_into_ordinary_scope(
+    bool is_cpp_member_function,
+    const std::shared_ptr<Scope>& decl_scope) {
+
+    if (!is_cpp_member_function) {
+        return true;
+    }
+    return decl_scope &&
+           scope_flags_contains(decl_scope->flags, ScopeFlags::RecordScope);
+}
+
 } // namespace
 
 std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, SrcLoc loc, LanguageLinkage language_linkage, bool skip_template_parameter_scopes) {
@@ -498,6 +509,10 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         }
     }
     auto decl_context = resolve_scope_decl_context(decl_scope);
+    const bool binds_into_ordinary_scope =
+        function_binds_into_ordinary_scope(
+            is_cpp_member_function,
+            decl_scope);
     auto owner_matched_function_candidates =
         collect_owner_matched_function_candidates(
             decl_context.get(),
@@ -621,7 +636,9 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
             }
             if (!same_type) {
                 report_error("conflicting types for '" + name + "'", loc);
-                if (decl_scope != scope && !is_definition) {
+                if (binds_into_ordinary_scope &&
+                    decl_scope != scope &&
+                    !is_definition) {
                     bind_symbol_in_scope(scope, name, existing);
                 }
                 return existing;
@@ -686,7 +703,9 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
             } else {
                 existing->linkage = VariableLinkage::EXTERNAL;
             }
-            if (decl_scope != scope && !is_definition) {
+            if (binds_into_ordinary_scope &&
+                decl_scope != scope &&
+                !is_definition) {
                 bind_symbol_in_scope(scope, name, existing);
             }
             merge_language_linkage(existing);
@@ -726,9 +745,11 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
         record_global_scope_mutation(global_scope);
         global_scope->add_to_global_scope(sym);
     }
-    bind_symbol_in_scope(decl_scope, name, sym);
-    if (decl_scope != scope && !is_definition) {
-        bind_symbol_in_scope(scope, name, sym);
+    if (binds_into_ordinary_scope) {
+        bind_symbol_in_scope(decl_scope, name, sym);
+        if (decl_scope != scope && !is_definition) {
+            bind_symbol_in_scope(scope, name, sym);
+        }
     }
     return sym;
 }

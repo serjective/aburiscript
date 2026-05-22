@@ -225,14 +225,16 @@ Parser::build_cpp_current_instantiation_arguments(
         if (auto* non_type_parameter =
                 dyn_cast<TemplateNonTypeParmDecl>(
                     const_cast<TemplateParameterDecl*>(active_parameter))) {
-            if (!non_type_parameter->sym &&
-                non_type_parameter->name.empty() &&
-                get_template_parameter_default_argument(non_type_parameter)) {
+            if (!non_type_parameter->sym) {
                 arguments.push_back(
-                    *get_template_parameter_default_argument(non_type_parameter));
+                    TemplateArgument::dependent_value_argument(
+                        non_type_parameter->type,
+                        nullptr,
+                        non_type_parameter->name,
+                        non_type_parameter));
                 return true;
             }
-            if (!collect_ || !non_type_parameter->sym) {
+            if (!collect_) {
                 return false;
             }
             auto expr = collect_->collect_identifier_reference(
