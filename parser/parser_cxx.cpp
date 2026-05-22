@@ -3559,6 +3559,13 @@ TemplateParameterList
 Parser::parse_cpp_template_parameter_list(uint32_t depth) {
     TemplateParameterList parameters;
     check_and_consume(TokenType::LESS_THAN);
+
+    ++template_pattern_depth_;
+    struct TemplateParameterListPatternGuard {
+        uint32_t& depth;
+        ~TemplateParameterListPatternGuard() { --depth; }
+    } template_parameter_list_pattern_guard{template_pattern_depth_};
+
     if (gentle_check(TokenType::GREATER_THAN)) {
         advance();
         return parameters;
@@ -3566,11 +3573,6 @@ Parser::parse_cpp_template_parameter_list(uint32_t depth) {
 
     auto parse_template_parameter_default_argument =
         [&]() -> TemplateArgument {
-        ++template_pattern_depth_;
-        struct TemplateParameterDefaultPatternGuard {
-            uint32_t& depth;
-            ~TemplateParameterDefaultPatternGuard() { --depth; }
-        } template_parameter_default_pattern_guard{template_pattern_depth_};
         return parse_cpp_template_argument();
     };
 
