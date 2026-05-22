@@ -97,6 +97,12 @@ QualType lookup_ctor_initializer_target_type(const CppConstructorDecl* ctor_decl
         return QualType();
     }
 
+    if ((initializer.is_delegating_initializer ||
+         initializer.is_base_initializer) &&
+        initializer.resolved_target_type) {
+        return initializer.resolved_target_type;
+    }
+
     if (initializer.is_delegating_initializer) {
         return specialized_ctor_owner_type(ctor_decl);
     }

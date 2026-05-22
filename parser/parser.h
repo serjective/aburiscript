@@ -559,6 +559,10 @@ private:
         bool* has_specialization_argument_list_out = nullptr,
         bool suppress_placeholder_type = false,
         const ClassTemplateDecl* current_primary_class_template = nullptr);
+    CppCtorInitializer parse_cpp_ctor_mem_initializer(
+        const std::string& record_name);
+    std::vector<CppCtorInitializer> parse_cpp_ctor_mem_initializer_list(
+        const std::string& record_name);
     std::unique_ptr<Decl> parse_cpp_constructor_member();
     std::unique_ptr<Decl> parse_cpp_destructor_member();
     std::unique_ptr<Decl> build_cpp_record_semantic_decl(
@@ -757,8 +761,7 @@ private:
     CppCtorBaseInitializerTarget resolve_cpp_ctor_base_initializer_target(
         const RecordSemanticState& semantic_state,
         QualType owner_type,
-        const std::string& initializer_name,
-        SrcLoc loc);
+        const CppCtorInitializer& initializer);
 
     std::vector<std::unique_ptr<Decl>> parse_struct_declaration(bool leading_virtual_specifier = false);
 

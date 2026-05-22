@@ -5404,73 +5404,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 }
                 std::vector<CppCtorInitializer> parsed_ctor_initializers;
                 if (gentle_check(TokenType::COLON)) {
-                    advance(); // ':'
-                    std::unordered_set<std::string> seen_mem_inits;
-                    bool saw_delegating_initializer = false;
-                    bool saw_non_delegating_initializer = false;
-                    while (true) {
-                        if (!gentle_check(TokenType::IDENTIFIER)) {
-                            error("expected member name in constructor mem-initializer-list");
-                        }
-                        Token member_tok = current_token();
-                        std::string member_name = member_tok.value;
-                        advance();
-
-                        bool is_delegating_initializer = member_name == record_name;
-                        if (is_delegating_initializer) {
-                            if (saw_non_delegating_initializer) {
-                                error_custloc(
-                                    "delegating constructor initializer must appear alone",
-                                    member_tok.loc);
-                            }
-                            saw_delegating_initializer = true;
-                        } else {
-                            if (saw_delegating_initializer) {
-                                error_custloc(
-                                    "delegating constructor initializer must appear alone",
-                                    member_tok.loc);
-                            }
-                            saw_non_delegating_initializer = true;
-                        }
-
-                        if (!seen_mem_inits.insert(member_name).second) {
-                            error_custloc(
-                                "constructor mem-initializer-list has duplicate member '" +
-                                    member_name + "'",
-                                member_tok.loc);
-                        }
-
-                        CppCtorInitializer mem_init;
-                        mem_init.member_name = member_name;
-                        mem_init.is_delegating_initializer = is_delegating_initializer;
-                        mem_init.location = member_tok.loc;
-
-                        if (gentle_check(TokenType::LEFT_PAREN)) {
-                            mem_init.is_list_init = false;
-                            mem_init.deferred_init_begin_token_idx = get_token_idx();
-                            skip_balanced_token_sequence_tokens(
-                                TokenType::LEFT_PAREN,
-                                TokenType::RIGHT_PAREN,
-                                "expected ')' to close constructor member initializer");
-                            mem_init.deferred_init_end_token_idx = get_token_idx();
-                        } else if (gentle_check(TokenType::LEFT_BRACE)) {
-                            mem_init.is_list_init = true;
-                            mem_init.deferred_init_begin_token_idx = get_token_idx();
-                            skip_balanced_token_sequence_tokens(
-                                TokenType::LEFT_BRACE,
-                                TokenType::RIGHT_BRACE,
-                                "expected '}' to close constructor member initializer");
-                            mem_init.deferred_init_end_token_idx = get_token_idx();
-                        } else {
-                            error("expected '(' or '{' after constructor mem-initializer '" +
-                                  member_name + "'");
-                        }
-
-                        parsed_ctor_initializers.push_back(std::move(mem_init));
-                        if (!gentle_check_and_consume(TokenType::COMMA)) {
-                            break;
-                        }
-                    }
+                    parsed_ctor_initializers =
+                        parse_cpp_ctor_mem_initializer_list(record_name);
                 }
                 bool ctor_is_deleted = false;
                 bool ctor_is_defaulted = false;

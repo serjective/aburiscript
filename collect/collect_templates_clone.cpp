@@ -1880,10 +1880,20 @@ bool clone_ctor_initializers_for_specialization(
     for (const auto& initializer : pattern->ctor_initializers) {
         CppCtorInitializer cloned_initializer;
         cloned_initializer.member_name = initializer.member_name;
+        cloned_initializer.target_spelling = initializer.target_spelling;
+        cloned_initializer.target_type =
+            substitution_pass.rewrite_type(initializer.target_type);
+        cloned_initializer.resolved_target_type =
+            substitution_pass.rewrite_type(initializer.resolved_target_type);
         cloned_initializer.is_base_initializer = initializer.is_base_initializer;
         cloned_initializer.is_delegating_initializer =
             initializer.is_delegating_initializer;
         cloned_initializer.is_list_init = initializer.is_list_init;
+        cloned_initializer.is_pack_expansion = initializer.is_pack_expansion;
+        cloned_initializer.deferred_init_begin_token_idx =
+            initializer.deferred_init_begin_token_idx;
+        cloned_initializer.deferred_init_end_token_idx =
+            initializer.deferred_init_end_token_idx;
         cloned_initializer.location = initializer.location;
 
         if (initializer.member_expr) {

@@ -6997,10 +6997,59 @@ void Parser::skip_cpp_constructor_mem_initializer_list_tokens() {
 
     advance(); // ':'
     while (true) {
-        if (!gentle_check(TokenType::IDENTIFIER)) {
+        bool saw_target_token = false;
+        int angle_depth = 0;
+        while (!gentle_check(TokenType::Eof)) {
+            TokenType tt = current_token().type;
+            if (angle_depth == 0 &&
+                (tt == TokenType::LEFT_PAREN || tt == TokenType::LEFT_BRACE)) {
+                break;
+            }
+            if (angle_depth == 0 &&
+                (tt == TokenType::COMMA || tt == TokenType::SEMICOLON ||
+                 tt == TokenType::RIGHT_BRACE)) {
+                break;
+            }
+            if (tt == TokenType::DECLTYPE_KW &&
+                peek_token().type == TokenType::LEFT_PAREN) {
+                saw_target_token = true;
+                advance(); // decltype
+                skip_balanced_token_sequence_tokens(
+                    TokenType::LEFT_PAREN,
+                    TokenType::RIGHT_PAREN,
+                    "expected ')' to close decltype in constructor mem-initializer");
+                continue;
+            }
+            if (tt == TokenType::LESS_THAN) {
+                ++angle_depth;
+                saw_target_token = true;
+                advance();
+                continue;
+            }
+            if (tt == TokenType::GREATER_THAN && angle_depth > 0) {
+                --angle_depth;
+                saw_target_token = true;
+                advance();
+                continue;
+            }
+            if (tt == TokenType::RIGHT_SHIFT && angle_depth > 0) {
+                angle_depth = angle_depth > 1 ? angle_depth - 2 : 0;
+                saw_target_token = true;
+                advance();
+                continue;
+            }
+            if (tt == TokenType::ASSIGN_RSHIFT && angle_depth > 0) {
+                angle_depth = 0;
+                saw_target_token = true;
+                advance();
+                continue;
+            }
+            saw_target_token = true;
+            advance();
+        }
+        if (!saw_target_token) {
             error("expected member name in constructor mem-initializer-list");
         }
-        advance(); // member/base name
 
         if (gentle_check(TokenType::LEFT_PAREN)) {
             skip_balanced_token_sequence_tokens(
@@ -7015,6 +7064,8 @@ void Parser::skip_cpp_constructor_mem_initializer_list_tokens() {
         } else {
             error("expected '(' or '{' after constructor mem-initializer");
         }
+
+        gentle_check_and_consume(TokenType::ELLIPSIS);
 
         if (!gentle_check_and_consume(TokenType::COMMA)) {
             break;
@@ -7317,6 +7368,91 @@ CppAccessSpecifier to_cpp_access_specifier(TokenType tok) {
 }
 } // namespace
 
+CppCtorInitializer Parser::parse_cpp_ctor_mem_initializer(
+    const std::string& record_name) {
+    CppCtorInitializer mem_init;
+    Token target_tok = current_token();
+    mem_init.location = target_tok.loc;
+
+    size_t saved_idx = get_token_idx();
+    auto saved_split_state = tok_mgnt.get_split_token_state();
+    auto restore_target_parse = [&]() {
+        set_token_idx(saved_idx);
+        tok_mgnt.set_split_token_state(saved_split_state);
+    };
+
+    if (auto parsed_target =
+            try_parse_cpp_named_type_specifier(
+                CppTypeNameParseContext::BaseSpecifier)) {
+        if (gentle_check(TokenType::LEFT_PAREN) ||
+            gentle_check(TokenType::LEFT_BRACE)) {
+            mem_init.member_name = parsed_target->spelling;
+            mem_init.target_spelling = parsed_target->spelling;
+            mem_init.target_type = parsed_target->type;
+        } else {
+            restore_target_parse();
+        }
+    }
+
+    if (mem_init.target_spelling.empty()) {
+        if (!gentle_check(TokenType::IDENTIFIER)) {
+            error("expected member name in constructor mem-initializer-list");
+        }
+        target_tok = current_token();
+        mem_init.location = target_tok.loc;
+        mem_init.member_name = target_tok.value;
+        mem_init.target_spelling = target_tok.value;
+        advance();
+    }
+
+    mem_init.is_delegating_initializer = mem_init.target_spelling == record_name;
+    const std::string& target_name =
+        mem_init.target_spelling.empty()
+            ? mem_init.member_name
+            : mem_init.target_spelling;
+
+    if (gentle_check(TokenType::LEFT_PAREN)) {
+        mem_init.is_list_init = false;
+        mem_init.deferred_init_begin_token_idx = get_token_idx();
+        skip_balanced_token_sequence_tokens(
+            TokenType::LEFT_PAREN,
+            TokenType::RIGHT_PAREN,
+            "expected ')' to close constructor member initializer");
+        mem_init.deferred_init_end_token_idx = get_token_idx();
+    } else if (gentle_check(TokenType::LEFT_BRACE)) {
+        mem_init.is_list_init = true;
+        mem_init.deferred_init_begin_token_idx = get_token_idx();
+        skip_balanced_token_sequence_tokens(
+            TokenType::LEFT_BRACE,
+            TokenType::RIGHT_BRACE,
+            "expected '}' to close constructor member initializer");
+        mem_init.deferred_init_end_token_idx = get_token_idx();
+    } else {
+        error("expected '(' or '{' after constructor mem-initializer '" +
+              target_name + "'");
+    }
+
+    if (gentle_check_and_consume(TokenType::ELLIPSIS)) {
+        mem_init.is_pack_expansion = true;
+    }
+
+    return mem_init;
+}
+
+std::vector<CppCtorInitializer>
+Parser::parse_cpp_ctor_mem_initializer_list(const std::string& record_name) {
+    check_and_consume(TokenType::COLON);
+    std::vector<CppCtorInitializer> parsed_ctor_initializers;
+    while (true) {
+        parsed_ctor_initializers.push_back(
+            parse_cpp_ctor_mem_initializer(record_name));
+        if (!gentle_check_and_consume(TokenType::COMMA)) {
+            break;
+        }
+    }
+    return parsed_ctor_initializers;
+}
+
 std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
     if (!is_cxx_mode_active() || cxx_record_parse_stack_.empty()) {
         error("internal error: constructor parser invoked outside C++ class scope");
@@ -7577,74 +7713,8 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
 
     std::vector<CppCtorInitializer> parsed_ctor_initializers;
     if (gentle_check(TokenType::COLON)) {
-        advance(); // ':'
-        std::unordered_set<std::string> seen_mem_inits;
-        bool saw_delegating_initializer = false;
-        bool saw_non_delegating_initializer = false;
-        while (true) {
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error("expected member name in constructor mem-initializer-list");
-            }
-            Token member_tok = current_token();
-            std::string member_name = member_tok.value;
-            advance();
-
-            bool is_delegating_initializer = member_name == record_name;
-            if (is_delegating_initializer) {
-                if (saw_non_delegating_initializer) {
-                    error_custloc(
-                        "delegating constructor initializer must appear alone",
-                        member_tok.loc);
-                }
-                saw_delegating_initializer = true;
-            } else {
-                if (saw_delegating_initializer) {
-                    error_custloc(
-                        "delegating constructor initializer must appear alone",
-                        member_tok.loc);
-                }
-                saw_non_delegating_initializer = true;
-            }
-
-            if (!seen_mem_inits.insert(member_name).second) {
-                error_custloc(
-                    "constructor mem-initializer-list has duplicate member '" +
-                        member_name + "'",
-                    member_tok.loc);
-            }
-
-            CppCtorInitializer mem_init;
-            mem_init.member_name = member_name;
-            mem_init.is_delegating_initializer = is_delegating_initializer;
-            mem_init.location = member_tok.loc;
-
-            if (gentle_check(TokenType::LEFT_PAREN)) {
-                mem_init.is_list_init = false;
-                mem_init.deferred_init_begin_token_idx = get_token_idx();
-                skip_balanced_token_sequence_tokens(
-                    TokenType::LEFT_PAREN,
-                    TokenType::RIGHT_PAREN,
-                    "expected ')' to close constructor member initializer");
-                mem_init.deferred_init_end_token_idx = get_token_idx();
-            } else if (gentle_check(TokenType::LEFT_BRACE)) {
-                mem_init.is_list_init = true;
-                mem_init.deferred_init_begin_token_idx = get_token_idx();
-                skip_balanced_token_sequence_tokens(
-                    TokenType::LEFT_BRACE,
-                    TokenType::RIGHT_BRACE,
-                    "expected '}' to close constructor member initializer");
-                mem_init.deferred_init_end_token_idx = get_token_idx();
-            } else {
-                error("expected '(' or '{' after constructor mem-initializer '" +
-                      member_name + "'");
-            }
-
-            parsed_ctor_initializers.push_back(std::move(mem_init));
-
-            if (!gentle_check_and_consume(TokenType::COMMA)) {
-                break;
-            }
-        }
+        parsed_ctor_initializers =
+            parse_cpp_ctor_mem_initializer_list(record_name);
     }
 
     bool is_deleted = false;

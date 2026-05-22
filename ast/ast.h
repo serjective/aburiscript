@@ -814,9 +814,13 @@ struct CppMethodDecl : FuncDecl {
 
 struct CppCtorInitializer {
     std::string member_name;
+    std::string target_spelling;
+    QualType target_type = nullptr;
+    QualType resolved_target_type = nullptr;
     bool is_base_initializer = false;
     bool is_delegating_initializer = false;
     bool is_list_init = false;
+    bool is_pack_expansion = false;
     size_t deferred_init_begin_token_idx = 0;
     size_t deferred_init_end_token_idx = 0;
     std::unique_ptr<Expr> member_expr = nullptr;

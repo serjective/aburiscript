@@ -9,9 +9,13 @@ Parser::CppCtorBaseInitializerTarget
 Parser::resolve_cpp_ctor_base_initializer_target(
     const RecordSemanticState& semantic_state,
     QualType owner_type,
-    const std::string& initializer_name,
-    SrcLoc loc) {
+    const CppCtorInitializer& initializer) {
     CppCtorBaseInitializerTarget result;
+    const std::string initializer_name =
+        !initializer.target_spelling.empty()
+            ? initializer.target_spelling
+            : initializer.member_name;
+    SrcLoc loc = initializer.location;
     if (initializer_name.empty()) {
         return result;
     }
@@ -27,13 +31,19 @@ Parser::resolve_cpp_ctor_base_initializer_target(
         return target;
     };
 
+    auto target_spelling_matches = [&](const std::string& base_name) {
+        return base_name == initializer_name ||
+               (!initializer.member_name.empty() &&
+                base_name == initializer.member_name);
+    };
+
     for (const auto& base : semantic_state.bases) {
-        if (base.name == initializer_name) {
+        if (target_spelling_matches(base.name)) {
             return make_target(base.name, base.type, base.is_virtual);
         }
     }
     for (const auto& virtual_base : semantic_state.virtual_bases) {
-        if (virtual_base.name == initializer_name) {
+        if (target_spelling_matches(virtual_base.name)) {
             return make_target(virtual_base.name, virtual_base.type, true);
         }
     }
@@ -126,8 +136,50 @@ Parser::resolve_cpp_ctor_base_initializer_target(
             return type;
         }
 
+        if (auto transform =
+                desugared.as_shared<BuiltinTypeTransformType>()) {
+            QualType operand_type = self(self, transform->operand_type);
+            if (!operand_type) {
+                return type;
+            }
+            switch (transform->transform_kind) {
+                case BuiltinTypeTransformKind::RemoveConst:
+                case BuiltinTypeTransformKind::RemoveVolatile:
+                case BuiltinTypeTransformKind::RemoveCV:
+                case BuiltinTypeTransformKind::RemoveCVRef:
+                case BuiltinTypeTransformKind::RemoveReference: {
+                    QualType transformed = apply_builtin_type_transform(
+                        transform->transform_kind,
+                        operand_type,
+                        ast_ctx.get());
+                    return transformed ? transformed : operand_type;
+                }
+                default:
+                    return type;
+            }
+        }
+
         if (auto specialization =
                 desugared.as_shared<TemplateSpecializationType>()) {
+            if (const auto* alias_template =
+                    dyn_cast<AliasTemplateDecl>(
+                        const_cast<Decl*>(specialization->primary_template))) {
+                QualType instantiated =
+                    collect_->collect_try_instantiate_alias_template_specialization(
+                        alias_template,
+                        specialization->arguments,
+                        loc);
+                instantiated = normalize_type(instantiated);
+                if (instantiated &&
+                    !instantiated.equals_qualified(type)) {
+                    QualType resolved = self(self, instantiated);
+                    if (resolved) {
+                        return resolved;
+                    }
+                    return instantiated;
+                }
+            }
+
             std::vector<TemplateArgument> rewritten_arguments =
                 specialization->arguments;
             bool changed = false;
@@ -158,13 +210,27 @@ Parser::resolve_cpp_ctor_base_initializer_target(
         return type;
     };
 
-    QualType named_type =
-        collect_->collect_lookup_record_nested_type(owner_type, initializer_name);
+    QualType named_type = initializer.target_type;
+    if (!named_type) {
+        named_type =
+            collect_->collect_lookup_record_nested_type(owner_type, initializer_name);
+    }
     if (!named_type) {
         named_type = collect_->collect_lookup_type_name(
             initializer_name,
             true,
             true);
+    }
+    if (!named_type && initializer.member_name != initializer_name) {
+        named_type =
+            collect_->collect_lookup_record_nested_type(owner_type,
+                                                        initializer.member_name);
+        if (!named_type) {
+            named_type = collect_->collect_lookup_type_name(
+                initializer.member_name,
+                true,
+                true);
+        }
     }
     if (!named_type) {
         return result;
@@ -272,7 +338,9 @@ Parser::resolve_cpp_ctor_base_initializer_target(
 
     bool has_field_with_name = false;
     for (const auto& field : semantic_state.fields) {
-        if (field.name == initializer_name) {
+        if (field.name == initializer_name ||
+            (!initializer.member_name.empty() &&
+             field.name == initializer.member_name)) {
             has_field_with_name = true;
             break;
         }
@@ -327,19 +395,48 @@ void Parser::build_cpp_record_parse_deferred_bodies(
         size_t saved_idx = get_token_idx();
         bool saw_base_initializer = false;
         bool saw_delegating_initializer = false;
+        std::unordered_set<std::string> seen_resolved_initializers;
+        auto initializer_display_name =
+            [](const CppCtorInitializer& initializer) -> std::string {
+            if (!initializer.target_spelling.empty()) {
+                return initializer.target_spelling;
+            }
+            return initializer.member_name;
+        };
+        auto note_resolved_initializer =
+            [&](const std::string& key,
+                const CppCtorInitializer& initializer) {
+            if (initializer.is_pack_expansion) {
+                return;
+            }
+            if (!seen_resolved_initializers.insert(key).second) {
+                diag_engine->report_error(
+                    "constructor mem-initializer-list has duplicate initializer '" +
+                        initializer_display_name(initializer) + "'",
+                    initializer.location);
+            }
+        };
         for (auto& mem_init : ctor->ctor_initializers) {
             mem_init.member_expr.reset();
             mem_init.init_expr.reset();
             mem_init.is_base_initializer = false;
+            mem_init.resolved_target_type = nullptr;
 
             if (mem_init.is_delegating_initializer) {
                 saw_delegating_initializer = true;
+                note_resolved_initializer("delegating", mem_init);
+                if (ctor->ctor_initializers.size() != 1) {
+                    diag_engine->report_error(
+                        "delegating constructor initializer must appear alone",
+                        mem_init.location);
+                }
                 if (!ctx.record_type) {
                     diag_engine->report_error(
                         "delegating constructor target type is unavailable",
                         mem_init.location);
                     continue;
                 }
+                mem_init.resolved_target_type = QualType(ctx.record_type);
                 if (mem_init.deferred_init_end_token_idx <=
                     mem_init.deferred_init_begin_token_idx) {
                     continue;
@@ -385,12 +482,15 @@ void Parser::build_cpp_record_parse_deferred_bodies(
                 resolve_cpp_ctor_base_initializer_target(
                     ctx.semantic_state,
                     QualType(ctx.record_type),
-                    mem_init.member_name,
-                    mem_init.location);
+                    mem_init);
             if (base_init_target) {
                 saw_base_initializer = true;
                 mem_init.is_base_initializer = true;
                 mem_init.member_name = base_init_target.base_name;
+                mem_init.resolved_target_type = base_init_target.type;
+                note_resolved_initializer(
+                    "base:" + base_init_target.type.to_string(),
+                    mem_init);
             } else if (base_init_target.found_non_base_type) {
                 continue;
             }
@@ -407,6 +507,9 @@ void Parser::build_cpp_record_parse_deferred_bodies(
                 if (!member_expr || !member_expr->member_type) {
                     continue;
                 }
+                note_resolved_initializer(
+                    "member:" + mem_init.member_name,
+                    mem_init);
             }
             if (mem_init.deferred_init_end_token_idx <=
                 mem_init.deferred_init_begin_token_idx) {
@@ -493,6 +596,9 @@ void Parser::build_cpp_record_parse_deferred_bodies(
                 canonical_type_kind(direct_base.type) == TypeKind::Object) {
                 CppCtorInitializer implicit_base_init;
                 implicit_base_init.member_name = direct_base.name;
+                implicit_base_init.target_spelling = direct_base.name;
+                implicit_base_init.target_type = direct_base.type;
+                implicit_base_init.resolved_target_type = direct_base.type;
                 implicit_base_init.is_base_initializer = true;
                 implicit_base_init.location = ctor->location;
                 std::vector<std::unique_ptr<Expr>> args;

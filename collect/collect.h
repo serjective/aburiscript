@@ -350,6 +350,16 @@ public:
         const std::vector<TemplateArgument>& arguments,
         SrcLoc loc) ;
 
+    QualType collect_try_instantiate_alias_template_specialization(
+        const AliasTemplateDecl* alias_template,
+        const std::vector<TemplateArgument>& arguments,
+        SrcLoc loc) {
+        return try_instantiate_alias_template_specialization(
+            alias_template,
+            arguments,
+            loc);
+    }
+
     // === Type operations ===
 
     QualType collect_try_realize_deferred_semantic_type(

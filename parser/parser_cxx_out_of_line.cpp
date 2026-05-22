@@ -1069,19 +1069,49 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                 size_t saved_idx = get_token_idx();
                 bool saw_base_initializer = false;
                 bool saw_delegating_initializer = false;
+                std::unordered_set<std::string> seen_resolved_initializers;
+                auto initializer_display_name =
+                    [](const CppCtorInitializer& initializer) -> std::string {
+                    if (!initializer.target_spelling.empty()) {
+                        return initializer.target_spelling;
+                    }
+                    return initializer.member_name;
+                };
+                auto note_resolved_initializer =
+                    [&](const std::string& key,
+                        const CppCtorInitializer& initializer) {
+                    if (initializer.is_pack_expansion) {
+                        return;
+                    }
+                    if (!seen_resolved_initializers.insert(key).second) {
+                        diag_engine->report_error(
+                            "constructor mem-initializer-list has duplicate initializer '" +
+                                initializer_display_name(initializer) + "'",
+                            initializer.location);
+                    }
+                };
                 for (auto& mem_init : ctor->ctor_initializers) {
                     mem_init.member_expr.reset();
                     mem_init.init_expr.reset();
                     mem_init.is_base_initializer = false;
+                    mem_init.resolved_target_type = nullptr;
 
                     if (mem_init.is_delegating_initializer) {
                         saw_delegating_initializer = true;
+                        note_resolved_initializer("delegating", mem_init);
+                        if (ctor->ctor_initializers.size() != 1) {
+                            diag_engine->report_error(
+                                "delegating constructor initializer must appear alone",
+                                mem_init.location);
+                        }
                         if (!owner_record_type) {
                             diag_engine->report_error(
                                 "delegating constructor target type is unavailable",
                                 mem_init.location);
                             continue;
                         }
+                        mem_init.resolved_target_type =
+                            QualType(owner_record_type);
                         if (mem_init.deferred_init_end_token_idx <=
                             mem_init.deferred_init_begin_token_idx) {
                             continue;
@@ -1127,12 +1157,15 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                         resolve_cpp_ctor_base_initializer_target(
                             *owner_state,
                             QualType(owner_record_type),
-                            mem_init.member_name,
-                            mem_init.location);
+                            mem_init);
                     if (base_init_target) {
                         saw_base_initializer = true;
                         mem_init.is_base_initializer = true;
                         mem_init.member_name = base_init_target.base_name;
+                        mem_init.resolved_target_type = base_init_target.type;
+                        note_resolved_initializer(
+                            "base:" + base_init_target.type.to_string(),
+                            mem_init);
                     } else if (base_init_target.found_non_base_type) {
                         continue;
                     }
@@ -1149,6 +1182,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                         if (!member_expr || !member_expr->member_type) {
                             continue;
                         }
+                        note_resolved_initializer(
+                            "member:" + mem_init.member_name,
+                            mem_init);
                     }
                     if (mem_init.deferred_init_end_token_idx <=
                         mem_init.deferred_init_begin_token_idx) {
@@ -1235,6 +1271,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                         canonical_type_kind(direct_base.type) == TypeKind::Object) {
                         CppCtorInitializer implicit_base_init;
                         implicit_base_init.member_name = direct_base.name;
+                        implicit_base_init.target_spelling = direct_base.name;
+                        implicit_base_init.target_type = direct_base.type;
+                        implicit_base_init.resolved_target_type = direct_base.type;
                         implicit_base_init.is_base_initializer = true;
                         implicit_base_init.location = ctor->location;
                         std::vector<std::unique_ptr<Expr>> args;

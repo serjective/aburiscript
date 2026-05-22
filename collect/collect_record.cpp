@@ -4275,6 +4275,8 @@ bool Collect::collect_materialize_defaulted_constructor(
 
                     CppCtorInitializer field_init;
                     field_init.member_name = field.name;
+                    field_init.target_spelling = field.name;
+                    field_init.resolved_target_type = field.type;
                     field_init.location = ctor_decl->location;
                     field_init.member_expr = collect_member_expression(
                         make_this_expr(),
@@ -4368,6 +4370,9 @@ bool Collect::collect_materialize_defaulted_constructor(
                 }
                 CppCtorInitializer base_init;
                 base_init.member_name = base.name;
+                base_init.target_spelling = base.name;
+                base_init.target_type = base.type;
+                base_init.resolved_target_type = base.type;
                 base_init.is_base_initializer = true;
                 base_init.location = ctor_decl->location;
                 base_init.init_expr = std::move(init_expr);
@@ -4409,6 +4414,8 @@ bool Collect::collect_materialize_defaulted_constructor(
                 }
                 CppCtorInitializer field_init;
                 field_init.member_name = field.name;
+                field_init.target_spelling = field.name;
+                field_init.resolved_target_type = field.type;
                 field_init.location = ctor_decl->location;
                 field_init.member_expr = collect_member_expression(
                     make_this_expr(),
