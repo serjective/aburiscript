@@ -102,6 +102,143 @@ bool cpp_in_class_definition_is_inline(bool explicitly_inline, bool is_definitio
     return explicitly_inline || is_definition;
 }
 
+const ClassTemplateDecl* class_template_from_specialization_type(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    auto specialization =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_type(type, ast_ctx).get_shared());
+    if (!specialization || !specialization->primary_template) {
+        return nullptr;
+    }
+    auto* class_template =
+        dyn_cast<ClassTemplateDecl>(
+            const_cast<Decl*>(specialization->primary_template));
+    if (!class_template) {
+        return nullptr;
+    }
+    return class_template;
+}
+
+bool object_type_is_primary_template_pattern_decl(
+    const TagDecl* tag_decl,
+    const ClassTemplateDecl* primary_template) {
+    return tag_decl &&
+           primary_template &&
+           primary_template->pattern_semantic_decl() &&
+           tag_decl == primary_template->pattern_semantic_decl();
+}
+
+bool object_type_is_primary_template_pattern(
+    QualType type,
+    const ClassTemplateDecl* primary_template,
+    const ASTContext* ast_ctx) {
+    if (!primary_template) {
+        return false;
+    }
+    auto object_type =
+        dyn_cast_shared<ObjectType>(
+            desugar_type(type, ast_ctx).get_shared());
+    if (!object_type) {
+        return false;
+    }
+    const TagDecl* tag_decl = object_type->get_decl();
+    if (!tag_decl) {
+        return false;
+    }
+    if (object_type_is_primary_template_pattern_decl(
+            tag_decl,
+            primary_template)) {
+        return true;
+    }
+
+    if (const auto* canonical =
+            get_template_decl_canonical_decl(primary_template)) {
+        if (auto* canonical_class_template =
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<TemplateDecl*>(canonical))) {
+            if (object_type_is_primary_template_pattern_decl(
+                    tag_decl,
+                    canonical_class_template)) {
+                return true;
+            }
+        }
+    }
+    if (const auto* definition =
+            get_template_decl_definition_decl(primary_template)) {
+        if (auto* definition_class_template =
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<TemplateDecl*>(definition))) {
+            if (object_type_is_primary_template_pattern_decl(
+                    tag_decl,
+                    definition_class_template)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool template_specialization_names_current_class_owner(
+    QualType candidate_type,
+    QualType owner_type,
+    const ASTContext* ast_ctx) {
+    auto candidate =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_type(candidate_type, ast_ctx).get_shared());
+    auto owner =
+        dyn_cast_shared<TemplateSpecializationType>(
+            desugar_type(owner_type, ast_ctx).get_shared());
+    if (!candidate || !owner ||
+        !candidate->primary_template ||
+        !owner->primary_template ||
+        candidate->template_name != owner->template_name ||
+        !template_decls_share_lookup_identity(
+            candidate->primary_template,
+            owner->primary_template)) {
+        return false;
+    }
+    return candidate->arguments.empty() || owner->arguments.empty();
+}
+
+bool type_matches_current_class_owner(
+    QualType candidate_type,
+    QualType owner_type,
+    const ASTContext* ast_ctx) {
+    if (!candidate_type || !owner_type || !ast_ctx) {
+        return false;
+    }
+    if (candidate_type.equals_unqualified(owner_type)) {
+        return true;
+    }
+    if (template_specialization_names_current_class_owner(
+            candidate_type,
+            owner_type,
+            ast_ctx)) {
+        return true;
+    }
+
+    if (auto* owner_template =
+            class_template_from_specialization_type(owner_type, ast_ctx)) {
+        if (object_type_is_primary_template_pattern(
+                candidate_type,
+                owner_template,
+                ast_ctx)) {
+            return true;
+        }
+    }
+    if (auto* candidate_template =
+            class_template_from_specialization_type(candidate_type, ast_ctx)) {
+        if (object_type_is_primary_template_pattern(
+                owner_type,
+                candidate_template,
+                ast_ctx)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool is_defaultable_special_member_method(
     const CppMethodDecl* method_decl,
     QualType owner_type,
@@ -135,7 +272,10 @@ bool is_defaultable_special_member_method(
     }
     QualType canonical_parameter =
         remove_reference(parameter_type, ast_ctx).without_qualifiers();
-    return canonical_parameter.equals_unqualified(canonical_owner);
+    return type_matches_current_class_owner(
+        canonical_parameter,
+        canonical_owner,
+        ast_ctx);
 }
 
 bool is_defaulted_comparison_operator_name(const std::string& name) {
@@ -167,7 +307,10 @@ bool defaulted_comparison_parameter_matches_owner(
         remove_reference(parameter_type, ast_ctx).without_qualifiers();
     QualType canonical_owner =
         remove_reference(owner_type, ast_ctx).without_qualifiers();
-    return canonical_parameter.equals_unqualified(canonical_owner);
+    return type_matches_current_class_owner(
+        canonical_parameter,
+        canonical_owner,
+        ast_ctx);
 }
 
 bool defaulted_comparison_return_type_is_valid(
@@ -5674,10 +5817,13 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             QualType defaulted_method_owner_type;
             if (!cxx_record_parse_stack_.empty()) {
                 const auto& record_frame = cxx_record_parse_stack_.back();
-                defaulted_method_owner_type =
-                    record_frame.semantic_owner
-                        ? QualType(record_frame.semantic_owner->get_record_type())
-                        : QualType();
+                defaulted_method_owner_type = record_frame.current_instantiation_type;
+                if (!defaulted_method_owner_type) {
+                    defaulted_method_owner_type =
+                        record_frame.semantic_owner
+                            ? QualType(record_frame.semantic_owner->get_record_type())
+                            : QualType();
+                }
                 if (!defaulted_method_owner_type && !record_frame.name.empty()) {
                     auto owner_type_raw = collect_->collect_lookup_tag_type(
                         record_frame.name,
