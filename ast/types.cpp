@@ -1833,35 +1833,68 @@ bool template_template_parameters_are_compatible(
 bool template_template_parameter_lists_are_compatible_impl(
     const TemplateParameterList& formal_parameters,
     const TemplateParameterList& actual_parameters) {
-    const size_t matched_count =
-        std::min(formal_parameters.size(), actual_parameters.size());
-    for (size_t idx = 0; idx < matched_count; ++idx) {
-        if (!template_template_parameters_are_compatible(
-                formal_parameters[idx].get(),
-                actual_parameters[idx].get())) {
-            return false;
-        }
-    }
+    auto actual_parameter_can_be_omitted =
+        [](const TemplateParameterDecl* actual_parameter) {
+            return actual_parameter &&
+                   (actual_parameter->is_parameter_pack ||
+                    get_template_parameter_default_argument(actual_parameter) !=
+                        nullptr);
+        };
 
-    for (size_t idx = matched_count; idx < formal_parameters.size(); ++idx) {
-        const auto* formal_parameter = formal_parameters[idx].get();
-        if (!formal_parameter || !formal_parameter->is_parameter_pack) {
-            return false;
-        }
-    }
+    std::function<bool(size_t, size_t)> match_from =
+        [&](size_t formal_idx, size_t actual_idx) -> bool {
+            if (formal_idx == formal_parameters.size()) {
+                for (size_t idx = actual_idx;
+                     idx < actual_parameters.size();
+                     ++idx) {
+                    if (!actual_parameter_can_be_omitted(
+                            actual_parameters[idx].get())) {
+                        return false;
+                    }
+                }
+                return true;
+            }
 
-    for (size_t idx = matched_count; idx < actual_parameters.size(); ++idx) {
-        const auto* actual_parameter = actual_parameters[idx].get();
-        if (!actual_parameter) {
-            return false;
-        }
-        if (!actual_parameter->is_parameter_pack &&
-            get_template_parameter_default_argument(actual_parameter) == nullptr) {
-            return false;
-        }
-    }
+            const auto* formal_parameter =
+                formal_parameters[formal_idx].get();
+            if (!formal_parameter) {
+                return false;
+            }
 
-    return true;
+            if (formal_parameter->is_parameter_pack) {
+                if (match_from(formal_idx + 1, actual_idx)) {
+                    return true;
+                }
+                for (size_t idx = actual_idx;
+                     idx < actual_parameters.size();
+                     ++idx) {
+                    const auto* actual_parameter =
+                        actual_parameters[idx].get();
+                    if (!actual_parameter ||
+                        !template_template_parameters_are_compatible(
+                            formal_parameter,
+                            actual_parameter)) {
+                        return false;
+                    }
+                    if (match_from(formal_idx + 1, idx + 1)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            if (actual_idx >= actual_parameters.size()) {
+                return false;
+            }
+            if (!template_template_parameters_are_compatible(
+                    formal_parameter,
+                    actual_parameters[actual_idx].get())) {
+                return false;
+            }
+            return match_from(formal_idx + 1, actual_idx + 1);
+        };
+
+    return match_from(0, 0);
 }
 
 bool template_template_parameters_are_compatible(
