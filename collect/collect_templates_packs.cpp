@@ -123,6 +123,21 @@ bool collect_pack_expansion_shape_in_optional_template_arguments(
         shape_out);
 }
 
+void merge_pack_expansion_shape(TemplatePackExpansionShape& destination,
+                                const TemplatePackExpansionShape& source) {
+    for (const auto* parameter : source.referenced_parameters) {
+        if (std::find(
+                destination.referenced_parameters.begin(),
+                destination.referenced_parameters.end(),
+                parameter) == destination.referenced_parameters.end()) {
+            destination.referenced_parameters.push_back(parameter);
+        }
+    }
+    destination.has_unsupported_dependency =
+        destination.has_unsupported_dependency ||
+        source.has_unsupported_dependency;
+}
+
 } // namespace
 
 std::optional<size_t> find_template_parameter_index_by_identity(
@@ -296,12 +311,18 @@ bool collect_pack_expansion_shape_in_template_argument(
         return true;
     }
 
+    TemplatePackExpansionShape argument_shape;
+    auto finish = [&]() {
+        merge_pack_expansion_shape(shape_out, argument_shape);
+        return !argument_shape.has_unsupported_dependency;
+    };
+
     if (argument.expands_parameter_pack) {
         if (!argument.pack_expansion_parameters.empty()) {
             for (const auto* parameter : argument.pack_expansion_parameters) {
-                if (!add_pack_reference(parameter, parameters, shape_out)) {
-                    shape_out.has_unsupported_dependency = true;
-                    return false;
+                if (!add_pack_reference(parameter, parameters, argument_shape)) {
+                    argument_shape.has_unsupported_dependency = true;
+                    return finish();
                 }
             }
         } else if (argument.referenced_parameter &&
@@ -309,49 +330,63 @@ bool collect_pack_expansion_shape_in_template_argument(
             if (!add_pack_reference(
                     argument.referenced_parameter,
                     parameters,
-                    shape_out)) {
-                shape_out.has_unsupported_dependency = true;
-                return false;
+                    argument_shape)) {
+                argument_shape.has_unsupported_dependency = true;
+                return finish();
             }
         }
     }
 
+    auto finish_dependent_value_or_template_argument = [&]() {
+        if (argument.referenced_parameter &&
+            argument.referenced_parameter->is_parameter_pack) {
+            if (!add_pack_reference(
+                    argument.referenced_parameter,
+                    parameters,
+                    argument_shape)) {
+                argument_shape.has_unsupported_dependency = true;
+                return finish();
+            }
+        }
+        if (argument.expands_parameter_pack &&
+            !argument_shape.referenced_parameters.empty()) {
+            return finish();
+        }
+        if (template_argument_depends_on_template_parameters(argument)) {
+            argument_shape.has_unsupported_dependency = true;
+            return finish();
+        }
+        return finish();
+    };
+
     switch (argument.kind) {
         case TemplateArgumentKind::Type:
-            return collect_pack_expansion_shape_in_type(
+            if (!collect_pack_expansion_shape_in_type(
                 argument.type,
                 parameters,
-                shape_out);
+                argument_shape)) {
+                return finish();
+            }
+            return finish();
         case TemplateArgumentKind::Value:
             if (!collect_pack_expansion_shape_in_type(
                     argument.value_type,
                     parameters,
-                    shape_out)) {
-                return false;
+                    argument_shape)) {
+                return finish();
             }
             if (argument.value_expr &&
                 !collect_pack_expansion_shape_in_expr(
                     argument.value_expr.get(),
                     parameters,
-                    shape_out)) {
-                return false;
+                    argument_shape)) {
+                return finish();
             }
             [[fallthrough]];
         case TemplateArgumentKind::Template:
-            if (argument.referenced_parameter &&
-                argument.referenced_parameter->is_parameter_pack) {
-                return add_pack_reference(
-                    argument.referenced_parameter,
-                    parameters,
-                    shape_out);
-            }
-            if (template_argument_depends_on_template_parameters(argument)) {
-                shape_out.has_unsupported_dependency = true;
-                return false;
-            }
-            return true;
+            return finish_dependent_value_or_template_argument();
     }
-    return true;
+    return finish();
 }
 
 bool collect_pack_expansion_shape_in_expr(
