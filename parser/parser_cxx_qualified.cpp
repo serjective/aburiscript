@@ -350,7 +350,10 @@ Parser::complete_cpp_template_id_arguments(
             bindings,
             normalized_arguments,
             loc,
-            &error)) {
+            &error,
+            // Member template defaults can legally mention enclosing class
+            // template parameters while the class pattern is still dependent.
+            is_in_template_pattern_context())) {
         if (error_out) {
             *error_out = std::move(error);
         }

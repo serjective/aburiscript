@@ -193,15 +193,57 @@ Parser::resolve_cpp_ctor_base_initializer_target(
             true);
     };
 
+    auto dependent_class_template_identity = [&](QualType type)
+        -> const Decl* {
+        type = resolve_dependent_aliases(resolve_dependent_aliases, type);
+        if (!type || !type_depends_on_template_parameters(type, ast_ctx.get())) {
+            return nullptr;
+        }
+
+        QualType spelled = desugar_typedefs(type);
+        if (auto specialization =
+                spelled.as_shared<TemplateSpecializationType>()) {
+            return specialization->primary_template;
+        }
+
+        QualType canonical = desugar_type(type, ast_ctx.get());
+        if (auto object_type = canonical.as_shared<ObjectType>()) {
+            if (object_type->is_class_template_specialization()) {
+                return object_type->get_primary_class_template();
+            }
+        }
+        return nullptr;
+    };
+
+    auto same_dependent_class_template =
+        [&](QualType initializer_type, QualType base_type) {
+        const Decl* initializer_template =
+            dependent_class_template_identity(initializer_type);
+        const Decl* base_template =
+            dependent_class_template_identity(base_type);
+        return initializer_template &&
+               base_template &&
+               template_decls_share_lookup_identity(
+                   initializer_template,
+                   base_template);
+    };
+
     std::vector<CppCtorBaseInitializerTarget> matches;
+    std::vector<CppCtorBaseInitializerTarget> dependent_matches;
     for (const auto& base : semantic_state.bases) {
         if (same_initializer_type(named_type, base.type)) {
             matches.push_back(make_target(base.name, base.type, base.is_virtual));
+        } else if (same_dependent_class_template(named_type, base.type)) {
+            dependent_matches.push_back(
+                make_target(base.name, base.type, base.is_virtual));
         }
     }
     for (const auto& virtual_base : semantic_state.virtual_bases) {
         if (same_initializer_type(named_type, virtual_base.type)) {
             matches.push_back(make_target(virtual_base.name, virtual_base.type, true));
+        } else if (same_dependent_class_template(named_type, virtual_base.type)) {
+            dependent_matches.push_back(
+                make_target(virtual_base.name, virtual_base.type, true));
         }
     }
 
@@ -213,6 +255,17 @@ Parser::resolve_cpp_ctor_base_initializer_target(
         diag_engine->report_error(
             "constructor initializer '" + initializer_name +
                 "' is ambiguous between base classes",
+            loc);
+        return result;
+    }
+    if (dependent_matches.size() == 1) {
+        return dependent_matches.front();
+    }
+    if (dependent_matches.size() > 1) {
+        result.found_non_base_type = true;
+        diag_engine->report_error(
+            "constructor initializer '" + initializer_name +
+                "' is ambiguous between dependent base classes",
             loc);
         return result;
     }

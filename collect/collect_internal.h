@@ -1724,6 +1724,121 @@ bool class_template_friend_matches_access_context(
            same_record_identity_or_tag(pattern_decl, access_context_decl);
 }
 
+struct ClassTemplateSpecializationAccessView {
+    const ClassTemplateDecl* primary_template = nullptr;
+    std::vector<TemplateArgument> arguments;
+};
+
+ClassTemplateSpecializationAccessView
+class_template_specialization_access_view(QualType type,
+                                          const ASTContext* ast_ctx) {
+    ClassTemplateSpecializationAccessView result;
+    if (!type) {
+        return result;
+    }
+
+    QualType spelled = desugar_typedefs(type);
+    if (auto specialization =
+            dyn_cast_shared<TemplateSpecializationType>(spelled.get_shared())) {
+        result.primary_template =
+            canonical_class_template_friend_decl(
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<Decl*>(specialization->primary_template)));
+        result.arguments = specialization->arguments;
+        return result;
+    }
+
+    QualType canonical = desugar_type(type, ast_ctx);
+    if (auto object_type = canonical.as_shared<ObjectType>()) {
+        result.primary_template =
+            canonical_class_template_friend_decl(
+                object_type->get_primary_class_template());
+        if (object_type->is_class_template_specialization()) {
+            result.arguments =
+                object_type->get_template_specialization_arguments();
+        }
+    }
+    return result;
+}
+
+bool friend_specialization_arguments_match(const TemplateArgument& lhs,
+                                           const TemplateArgument& rhs,
+                                           const ASTContext* ast_ctx) {
+    if (lhs.equals(rhs) || template_argument_has_same_lookup_shape(lhs, rhs)) {
+        return true;
+    }
+    if (lhs.kind != rhs.kind) {
+        return false;
+    }
+
+    if (lhs.kind == TemplateArgumentKind::Type) {
+        return types_equivalent_after_template_argument_canonicalization(
+            lhs.type,
+            rhs.type,
+            ast_ctx,
+            true);
+    }
+    return false;
+}
+
+bool class_template_specialization_friend_matches_access_context(
+    QualType friend_type,
+    QualType access_context_type,
+    const ASTContext* ast_ctx) {
+    ClassTemplateSpecializationAccessView friend_view =
+        class_template_specialization_access_view(friend_type, ast_ctx);
+    ClassTemplateSpecializationAccessView context_view =
+        class_template_specialization_access_view(access_context_type, ast_ctx);
+    if (!class_template_friend_targets_same_template(
+            friend_view.primary_template,
+            context_view.primary_template)) {
+        return false;
+    }
+
+    const auto& parameters = friend_view.primary_template->parameters;
+    const size_t max_argument_count =
+        std::max(friend_view.arguments.size(), context_view.arguments.size());
+    if (max_argument_count > parameters.size()) {
+        return false;
+    }
+
+    for (size_t idx = 0; idx < max_argument_count; ++idx) {
+        const TemplateArgument* friend_argument =
+            idx < friend_view.arguments.size() ? &friend_view.arguments[idx]
+                                               : nullptr;
+        const TemplateArgument* context_argument =
+            idx < context_view.arguments.size() ? &context_view.arguments[idx]
+                                                : nullptr;
+        if (friend_argument && context_argument) {
+            if (!friend_specialization_arguments_match(
+                    *friend_argument,
+                    *context_argument,
+                    ast_ctx)) {
+                return false;
+            }
+            continue;
+        }
+
+        const TemplateParameterDecl* parameter = parameters[idx].get();
+        const TemplateArgument* default_argument =
+            get_template_parameter_default_argument(parameter);
+        if (!default_argument) {
+            return false;
+        }
+        const TemplateArgument* explicit_argument =
+            friend_argument ? friend_argument : context_argument;
+        if (!explicit_argument ||
+            !friend_specialization_arguments_match(
+                *explicit_argument,
+                *default_argument,
+                ast_ctx)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool type_friend_matches_access_context(QualType friend_type,
                                         const ObjectDecl* access_context_decl,
                                         const ASTContext* ast_ctx,
@@ -1744,6 +1859,12 @@ bool type_friend_matches_access_context(QualType friend_type,
             access_context_type,
             ast_ctx,
             true)) {
+        return true;
+    }
+    if (class_template_specialization_friend_matches_access_context(
+            friend_type,
+            access_context_type,
+            ast_ctx)) {
         return true;
     }
     if ((type_depends_on_template_parameters(friend_type, ast_ctx) ||

@@ -1231,14 +1231,16 @@ public:
         TemplateArgumentBindings& bindings_out,
         std::vector<TemplateArgument>& normalized_arguments_out,
         SrcLoc loc,
-        std::string* error_out = nullptr) {
+        std::string* error_out = nullptr,
+        bool allow_unsubstituted_default_parameters = false) {
         return bind_and_normalize_template_arguments_for_specialization(
             template_decl,
             arguments,
             bindings_out,
             normalized_arguments_out,
             loc,
-            error_out);
+            error_out,
+            allow_unsubstituted_default_parameters);
     }
 
     QualType collect_substitute_template_type(
@@ -1944,14 +1946,16 @@ private:
         const TemplateDecl* template_decl,
         TemplateArgumentBindings& bindings_out,
         SrcLoc loc,
-        std::string* error_out = nullptr) ;
+        std::string* error_out = nullptr,
+        bool allow_unsubstituted_default_parameters = false) ;
 
     bool bind_template_arguments_for_specialization(
         const TemplateDecl* template_decl,
         const std::vector<TemplateArgument>& arguments,
         TemplateArgumentBindings& bindings_out,
         SrcLoc loc,
-        std::string* error_out = nullptr) ;
+        std::string* error_out = nullptr,
+        bool allow_unsubstituted_default_parameters = false) ;
 
     bool bind_and_normalize_template_arguments_for_specialization(
         const TemplateDecl* template_decl,
@@ -1959,7 +1963,8 @@ private:
         TemplateArgumentBindings& bindings_out,
         std::vector<TemplateArgument>& normalized_arguments_out,
         SrcLoc loc,
-        std::string* error_out = nullptr) ;
+        std::string* error_out = nullptr,
+        bool allow_unsubstituted_default_parameters = false) ;
 
     bool template_value_argument_requires_dependent_normalization(
         const TemplateArgument& argument,

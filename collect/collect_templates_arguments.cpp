@@ -1479,7 +1479,8 @@ bool Collect::complete_template_argument_bindings_with_substituted_defaults(
     const TemplateDecl* template_decl,
     TemplateArgumentBindings& bindings_out,
     SrcLoc loc,
-    std::string* error_out) {
+    std::string* error_out,
+    bool allow_unsubstituted_default_parameters) {
     if (!template_decl) {
         set_template_default_completion_error(
             error_out,
@@ -1526,7 +1527,8 @@ bool Collect::complete_template_argument_bindings_with_substituted_defaults(
                 {*default_argument},
                 template_decl->parameters,
                 bindings_out,
-                loc);
+                loc,
+                allow_unsubstituted_default_parameters);
         if (rewritten_defaults.size() != 1) {
             set_template_default_completion_error(
                 error_out,
@@ -1597,7 +1599,8 @@ bool Collect::bind_template_arguments_for_specialization(
     const std::vector<TemplateArgument>& arguments,
     TemplateArgumentBindings& bindings_out,
     SrcLoc loc,
-    std::string* error_out) {
+    std::string* error_out,
+    bool allow_unsubstituted_default_parameters) {
     if (!template_decl) {
         set_template_default_completion_error(
             error_out,
@@ -1627,7 +1630,8 @@ bool Collect::bind_template_arguments_for_specialization(
         template_decl,
         bindings_out,
         loc,
-        error_out);
+        error_out,
+        allow_unsubstituted_default_parameters);
 }
 
 bool Collect::bind_and_normalize_template_arguments_for_specialization(
@@ -1636,14 +1640,16 @@ bool Collect::bind_and_normalize_template_arguments_for_specialization(
     TemplateArgumentBindings& bindings_out,
     std::vector<TemplateArgument>& normalized_arguments_out,
     SrcLoc loc,
-    std::string* error_out) {
+    std::string* error_out,
+    bool allow_unsubstituted_default_parameters) {
     normalized_arguments_out.clear();
     if (!bind_template_arguments_for_specialization(
             template_decl,
             arguments,
             bindings_out,
             loc,
-            error_out)) {
+            error_out,
+            allow_unsubstituted_default_parameters)) {
         return false;
     }
 
