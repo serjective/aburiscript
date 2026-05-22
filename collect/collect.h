@@ -1961,6 +1961,10 @@ private:
         SrcLoc loc,
         std::string* error_out = nullptr) ;
 
+    bool template_value_argument_requires_dependent_normalization(
+        const TemplateArgument& argument,
+        QualType expected_type) const ;
+
     struct ClassTemplateSpecializationInstantiator;
     struct FunctionTemplateSpecializationInstantiator;
     struct VariableTemplateSpecializationInstantiator;

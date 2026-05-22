@@ -1432,7 +1432,48 @@ void set_template_default_completion_error(std::string* error_out,
     }
 }
 
+bool mark_template_value_argument_dependent(TemplateArgument& argument,
+                                            QualType value_type,
+                                            std::string* error_out) {
+    if (argument.kind != TemplateArgumentKind::Value) {
+        set_template_default_completion_error(
+            error_out,
+            "template value argument expected");
+        return false;
+    }
+    argument.value_type = value_type;
+    argument.is_dependent = true;
+    return true;
+}
+
 } // namespace
+
+bool Collect::template_value_argument_requires_dependent_normalization(
+    const TemplateArgument& argument,
+    QualType expected_type) const {
+    if (argument.kind != TemplateArgumentKind::Value) {
+        return false;
+    }
+
+    auto type_is_dependent = [this](QualType type) {
+        if (!type) {
+            return false;
+        }
+        auto raw = type.get_shared();
+        if (auto_type_utils::has_cxx_auto_type(raw) ||
+            auto_type_utils::has_gnu_auto_type(raw)) {
+            return false;
+        }
+        return type_depends_on_template_parameters(type, ast_ctx_.get()) ||
+               contains_deferred_semantic_type(raw);
+    };
+
+    return argument.is_dependent ||
+           type_is_dependent(expected_type) ||
+           type_is_dependent(argument.value_type) ||
+           (argument.value_expr &&
+            expression_depends_on_template_parameters(argument.value_expr.get()));
+}
 
 bool Collect::complete_template_argument_bindings_with_substituted_defaults(
     const TemplateDecl* template_decl,
@@ -1514,8 +1555,15 @@ bool Collect::complete_template_argument_bindings_with_substituted_defaults(
                             loc);
                     expected_type =
                         finalize_deferred_semantic_type(expected_type, loc);
-                    if (rewritten_default.is_dependent) {
-                        rewritten_default.value_type = expected_type;
+                    if (template_value_argument_requires_dependent_normalization(
+                            rewritten_default,
+                            expected_type)) {
+                        if (!mark_template_value_argument_dependent(
+                                rewritten_default,
+                                expected_type,
+                                error_out)) {
+                            return false;
+                        }
                     } else {
                         std::string normalize_error;
                         if (!template_sema_internal::
@@ -1628,6 +1676,17 @@ bool Collect::bind_and_normalize_template_arguments_for_specialization(
             loc);
         expected_type = finalize_deferred_semantic_type(expected_type, loc);
         for (auto& bound_argument : bindings_out[idx].arguments) {
+            if (template_value_argument_requires_dependent_normalization(
+                    bound_argument,
+                    expected_type)) {
+                if (!mark_template_value_argument_dependent(
+                        bound_argument,
+                        expected_type,
+                        error_out)) {
+                    return false;
+                }
+                continue;
+            }
             std::string normalize_error;
             if (!template_sema_internal::normalize_concrete_template_value_argument(
                     bound_argument,
