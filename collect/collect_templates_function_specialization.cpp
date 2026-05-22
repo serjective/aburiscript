@@ -764,7 +764,19 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
         }
 
         if (specialization_decl) {
-            specialization_decl->friend_access_type = pattern->friend_access_type;
+            QualType friend_access_type = pattern->friend_access_type;
+            if (friend_access_type) {
+                friend_access_type = collect.substitute_template_type(
+                    friend_access_type,
+                    function_template->parameters,
+                    normalized_arguments,
+                    loc);
+                friend_access_type =
+                    collect.finalize_deferred_semantic_type(
+                        friend_access_type,
+                        loc);
+            }
+            specialization_decl->friend_access_type = friend_access_type;
         }
         apply_specialization_decl_metadata(specialization_decl.get());
         return specialization_decl;

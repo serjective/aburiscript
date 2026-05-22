@@ -601,7 +601,14 @@ private:
     bool is_parsing_cpp_record_body() const;
     std::string current_cpp_record_qualifier_prefix() const;
     std::shared_ptr<Scope> nearest_cpp_friend_namespace_scope() const;
+    void apply_cpp_friend_namespace_prefix(FuncDecl* function_decl) const;
     void register_cpp_friend_function_template_decl(FriendDecl* friend_decl);
+    bool active_template_parameters_match_for_redeclaration(
+        const TemplateParameterList& parameters) const;
+    QualType lookup_friend_access_type_for_current_function_template_redeclaration(
+        const FuncDecl* function_decl) const;
+    void propagate_function_template_friend_access(
+        FunctionTemplateDecl* function_template);
 
     // === Template and qualified-name parsing ===
     // These helpers are parser-owned classification/resolution seams used by
@@ -620,6 +627,9 @@ private:
     bool cpp_template_parameter_lists_match_for_redeclaration(
         const TemplateParameterList& lhs,
         const TemplateParameterList& rhs) const;
+    bool cpp_function_template_decls_match_for_redeclaration(
+        const FunctionTemplateDecl* existing,
+        const FunctionTemplateDecl* current) const;
     bool cpp_template_decls_match_for_redeclaration(
         const TemplateDecl* existing,
         const TemplateDecl* current,

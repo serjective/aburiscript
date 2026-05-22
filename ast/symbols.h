@@ -99,6 +99,7 @@ struct Symbol {
     std::string deprecated_message;
     AttributeList sym_attrs;  // Merged attributes across declarations
     std::optional<std::string> asm_label;
+    QualType friend_access_type = nullptr;
     const FuncDecl* function_definition = nullptr;
     const Expr* function_trailing_requires_clause = nullptr;
     const VariableDecl* variable_definition = nullptr;

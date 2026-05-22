@@ -719,6 +719,12 @@ QualType remap_template_parameter_types_in_type(
                 }
                 break;
         }
+        for (auto*& parameter : remapped.pack_expansion_parameters) {
+            auto it = parameter_rebinds.find(parameter);
+            if (it != parameter_rebinds.end()) {
+                parameter = it->second;
+            }
+        }
         remapped.is_dependent = template_argument_depends_on_template_parameters(
             remapped,
             clone_ctx ? clone_ctx->ast_ctx : nullptr);
@@ -1019,6 +1025,12 @@ std::vector<TemplateArgument> remap_template_parameter_types_in_arguments(
                         nullptr);
                 }
                 break;
+        }
+        for (auto*& parameter : rewritten.pack_expansion_parameters) {
+            auto it = parameter_rebinds.find(parameter);
+            if (it != parameter_rebinds.end()) {
+                parameter = it->second;
+            }
         }
         rewritten.is_dependent = template_argument_depends_on_template_parameters(
             rewritten,

@@ -1839,6 +1839,38 @@ bool class_template_specialization_friend_matches_access_context(
     return true;
 }
 
+bool dependent_class_template_friend_pattern_matches_owner(
+    QualType friend_type,
+    const ObjectDecl* member_owner_decl,
+    const ASTContext* ast_ctx) {
+    if (!friend_type || !member_owner_decl ||
+        !type_depends_on_template_parameters(friend_type, ast_ctx)) {
+        return false;
+    }
+    QualType owner_type = member_owner_decl->get_record_type()
+        ? QualType(member_owner_decl->get_record_type())
+        : QualType();
+    if (!owner_type) {
+        return false;
+    }
+    ClassTemplateSpecializationAccessView friend_view =
+        class_template_specialization_access_view(friend_type, ast_ctx);
+    ClassTemplateSpecializationAccessView owner_view =
+        class_template_specialization_access_view(owner_type, ast_ctx);
+    if (class_template_friend_targets_same_template(
+            friend_view.primary_template,
+            owner_view.primary_template)) {
+        return true;
+    }
+    const ObjectDecl* pattern_decl = friend_view.primary_template
+        ? canonical_record_decl(friend_view.primary_template->pattern_semantic_decl())
+        : nullptr;
+    const ObjectDecl* owner_decl = canonical_record_decl(member_owner_decl);
+    return pattern_decl &&
+           owner_decl &&
+           same_record_identity_or_tag(pattern_decl, owner_decl);
+}
+
 bool type_friend_matches_access_context(QualType friend_type,
                                         const ObjectDecl* access_context_decl,
                                         const ASTContext* ast_ctx,
@@ -1956,6 +1988,12 @@ bool can_access_protected_member_in_context(
             access_context_type)) {
         return true;
     }
+    if (dependent_class_template_friend_pattern_matches_owner(
+            access_context_type,
+            member_owner_decl,
+            ast_ctx)) {
+        return true;
+    }
     if (!is_same_record_or_any_access_derived(access_context_decl, member_owner_decl)) {
         return false;
     }
@@ -1979,6 +2017,12 @@ bool can_access_private_member_in_context(const ObjectDecl* member_owner_decl,
             context_decl,
             ast_ctx,
             access_context_type)) {
+        return true;
+    }
+    if (dependent_class_template_friend_pattern_matches_owner(
+            access_context_type,
+            member_owner_decl ? member_owner_decl : owner_decl,
+            ast_ctx)) {
         return true;
     }
     return owner_decl &&

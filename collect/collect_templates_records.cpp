@@ -288,6 +288,7 @@ std::shared_ptr<Symbol> clone_symbol_shallow_for_specialization(
     cloned->sym_attrs = sym->sym_attrs;
     cloned->enum_val = sym->enum_val;
     cloned->asm_label = sym->asm_label;
+    cloned->friend_access_type = sym->friend_access_type;
     cloned->function_trailing_requires_clause =
         sym->function_trailing_requires_clause;
     cloned->set_language_linkage(sym->get_language_linkage());

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <unordered_map>
 
 namespace {
 Token make_template_split_token(const Token& source,
@@ -446,6 +447,22 @@ std::shared_ptr<Scope> Parser::nearest_cpp_friend_namespace_scope() const {
         scope = scope->parent;
     }
     return scope ? scope : collect_->collect_current_scope();
+}
+
+void Parser::apply_cpp_friend_namespace_prefix(FuncDecl* function_decl) const {
+    if (!function_decl || !is_cxx_mode_active()) {
+        return;
+    }
+    auto friend_scope = nearest_cpp_friend_namespace_scope();
+    auto namespace_prefix =
+        qualified_name_utils::namespace_prefix_from_scope(friend_scope);
+    if (namespace_prefix.has_value()) {
+        set_func_decl_cxx_qualifier_prefix(
+            function_decl,
+            std::move(*namespace_prefix));
+    } else {
+        set_func_decl_cxx_qualifier_prefix(function_decl, std::nullopt);
+    }
 }
 
 const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
@@ -4110,15 +4127,215 @@ bool Parser::cpp_template_parameter_lists_match_for_redeclaration(
     return true;
 }
 
+bool Parser::active_template_parameters_match_for_redeclaration(
+    const TemplateParameterList& parameters) const {
+    if (active_template_parameter_stack_.empty()) {
+        return false;
+    }
+    const auto& active_parameters = active_template_parameter_stack_.back();
+    if (active_parameters.size() != parameters.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < parameters.size(); ++idx) {
+        const auto* lhs_param = parameters[idx].get();
+        const auto* rhs_param = active_parameters[idx];
+        if (!lhs_param || !rhs_param ||
+            lhs_param->get_kind() != rhs_param->get_kind() ||
+            lhs_param->is_parameter_pack != rhs_param->is_parameter_pack) {
+            return false;
+        }
+        if (auto* lhs_non_type = dyn_cast<TemplateNonTypeParmDecl>(
+                const_cast<TemplateParameterDecl*>(lhs_param))) {
+            auto* rhs_non_type = dyn_cast<TemplateNonTypeParmDecl>(
+                const_cast<TemplateParameterDecl*>(rhs_param));
+            if (!rhs_non_type ||
+                !cpp_out_of_line_type_matches(
+                    lhs_non_type->type,
+                    rhs_non_type->type,
+                    false)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool Parser::cpp_function_template_decls_match_for_redeclaration(
+    const FunctionTemplateDecl* existing,
+    const FunctionTemplateDecl* current) const {
+    if (!existing || !current ||
+        existing->associated_constraint ||
+        current->associated_constraint ||
+        existing->parameters.size() != current->parameters.size()) {
+        return false;
+    }
+
+    std::unordered_map<const TemplateParameterDecl*, const TemplateParameterDecl*>
+        parameter_rebinds;
+    auto has_lookup_constraint = [](const TemplateParameterDecl* parameter) {
+        auto* type_parameter = dyn_cast<TemplateTypeParmDecl>(
+            const_cast<TemplateParameterDecl*>(parameter));
+        return type_parameter && type_parameter->type_constraint != nullptr;
+    };
+    parameter_rebinds.reserve(current->parameters.size());
+    for (size_t idx = 0; idx < existing->parameters.size(); ++idx) {
+        const auto* existing_param = existing->parameters[idx].get();
+        const auto* current_param = current->parameters[idx].get();
+        if (!existing_param || !current_param ||
+            existing_param->get_kind() != current_param->get_kind() ||
+            existing_param->index != current_param->index ||
+            existing_param->is_parameter_pack != current_param->is_parameter_pack ||
+            has_lookup_constraint(existing_param) ||
+            has_lookup_constraint(current_param)) {
+            return false;
+        }
+
+        parameter_rebinds.emplace(current_param, existing_param);
+        if (auto* existing_non_type = dyn_cast<TemplateNonTypeParmDecl>(
+                const_cast<TemplateParameterDecl*>(existing_param))) {
+            auto* current_non_type = dyn_cast<TemplateNonTypeParmDecl>(
+                const_cast<TemplateParameterDecl*>(current_param));
+            if (!current_non_type) {
+                return false;
+            }
+            QualType remapped_current_type =
+                template_sema_internal::remap_template_parameter_types_in_type(
+                    current_non_type->type,
+                    parameter_rebinds);
+            if (!cpp_out_of_line_type_matches(
+                    existing_non_type->type,
+                    remapped_current_type,
+                    false)) {
+                return false;
+            }
+        }
+    }
+
+    auto* existing_function = existing->function_decl();
+    auto* current_function = current->function_decl();
+    if (!existing_function || !current_function ||
+        existing_function->name != current_function->name ||
+        existing_function->trailing_requires_clause ||
+        current_function->trailing_requires_clause) {
+        return false;
+    }
+    QualType existing_owner = get_func_decl_owner_record_type(existing_function);
+    QualType current_owner = get_func_decl_owner_record_type(current_function);
+    if (existing_owner || current_owner) {
+        if (!existing_owner.equals_unqualified(current_owner)) {
+            return false;
+        }
+    } else {
+        const std::string* existing_prefix =
+            get_func_decl_cxx_qualifier_prefix(existing_function);
+        const std::string* current_prefix =
+            get_func_decl_cxx_qualifier_prefix(current_function);
+        if (existing_prefix || current_prefix) {
+            if (!existing_prefix || !current_prefix ||
+                *existing_prefix != *current_prefix) {
+                return false;
+            }
+        }
+    }
+    QualType remapped_current_type =
+        template_sema_internal::remap_template_parameter_types_in_type(
+            QualType(current_function->type),
+            parameter_rebinds);
+    bool type_matches = cpp_out_of_line_type_matches(
+        QualType(existing_function->type),
+        remapped_current_type,
+        true);
+    return type_matches;
+}
+
+QualType Parser::lookup_friend_access_type_for_current_function_template_redeclaration(
+    const FuncDecl* function_decl) const {
+    if (!is_cxx_mode_active() || !collect_ || !function_decl ||
+        function_decl->name.empty() || active_template_parameter_stack_.empty()) {
+        return QualType();
+    }
+
+    auto lookup_scope = collect_->collect_current_scope();
+    while (lookup_scope &&
+           (scope_flags_contains(lookup_scope->flags, ScopeFlags::FunctionScope) ||
+            scope_flags_contains(lookup_scope->flags, ScopeFlags::PrototypeScope) ||
+            scope_flags_contains(lookup_scope->flags, ScopeFlags::BlockScope) ||
+            scope_flags_contains(lookup_scope->flags, ScopeFlags::TemplateParameterScope))) {
+        lookup_scope = lookup_scope->parent;
+    }
+    if (!lookup_scope) {
+        return QualType();
+    }
+
+    const DeclBinding* binding =
+        LookupEngine::lookup_unqualified_template_binding(
+            function_decl->name,
+            lookup_scope,
+            false,
+            LookupNamespace::Ordinary);
+    if (!binding) {
+        return QualType();
+    }
+
+    std::vector<const Decl*> candidates;
+    auto append_candidate = [&](const Decl* candidate) {
+        if (!candidate) {
+            return;
+        }
+        for (const auto* existing : candidates) {
+            if (existing == candidate) {
+                return;
+            }
+        }
+        candidates.push_back(candidate);
+    };
+    append_candidate(binding->template_decl);
+    for (const auto* candidate : binding->template_overload_candidates) {
+        append_candidate(candidate);
+    }
+
+    for (const auto* candidate : candidates) {
+        auto* function_template =
+            dyn_cast<FunctionTemplateDecl>(const_cast<Decl*>(candidate));
+        if (!function_template ||
+            !active_template_parameters_match_for_redeclaration(
+                function_template->parameters)) {
+            continue;
+        }
+
+        auto* candidate_function = function_template->function_decl();
+        if (!candidate_function ||
+            !cpp_out_of_line_type_matches(
+                QualType(candidate_function->type),
+                QualType(function_decl->type),
+                true)) {
+            continue;
+        }
+        if (candidate_function->friend_access_type) {
+            return candidate_function->friend_access_type;
+        }
+
+        const TemplateDecl* canonical =
+            get_template_decl_canonical_decl(function_template);
+        auto* canonical_function_template =
+            dyn_cast<FunctionTemplateDecl>(
+                const_cast<TemplateDecl*>(canonical));
+        auto* canonical_function = canonical_function_template
+            ? canonical_function_template->function_decl()
+            : nullptr;
+        if (canonical_function && canonical_function->friend_access_type) {
+            return canonical_function->friend_access_type;
+        }
+    }
+    return QualType();
+}
+
 bool Parser::cpp_template_decls_match_for_redeclaration(
     const TemplateDecl* existing,
     const TemplateDecl* current,
     const std::string* current_template_name) const {
     if (!existing || !current ||
-        existing->get_kind() != current->get_kind() ||
-        !cpp_template_parameter_lists_match_for_redeclaration(
-            existing->parameters,
-            current->parameters)) {
+        existing->get_kind() != current->get_kind()) {
         return false;
     }
 
@@ -4127,10 +4344,17 @@ bool Parser::cpp_template_decls_match_for_redeclaration(
         auto* current_function =
             dyn_cast<FunctionTemplateDecl>(const_cast<TemplateDecl*>(current));
         return current_function &&
-               cpp_out_of_line_type_matches(
-                   QualType(existing_function->function_decl()->type),
-                   QualType(current_function->function_decl()->type),
-                   true);
+               (template_decls_share_lookup_identity(
+                   existing_function,
+                   current_function) ||
+                cpp_function_template_decls_match_for_redeclaration(
+                    existing_function,
+                    current_function));
+    }
+    if (!cpp_template_parameter_lists_match_for_redeclaration(
+            existing->parameters,
+            current->parameters)) {
+        return false;
     }
     if (auto* existing_variable =
             dyn_cast<VariableTemplateDecl>(const_cast<TemplateDecl*>(existing))) {
@@ -4278,6 +4502,38 @@ void Parser::set_primary_template_canonical_identity(
     set_template_decl_canonical_decl(template_decl, canonical_template);
 }
 
+void Parser::propagate_function_template_friend_access(
+    FunctionTemplateDecl* function_template) {
+    if (!function_template) {
+        return;
+    }
+    auto* function_decl = function_template->function_decl();
+    if (!function_decl) {
+        return;
+    }
+    const TemplateDecl* canonical_template =
+        get_template_decl_canonical_decl(function_template);
+    auto* canonical_function_template =
+        dyn_cast<FunctionTemplateDecl>(
+            const_cast<TemplateDecl*>(canonical_template));
+    auto* canonical_function = canonical_function_template
+        ? canonical_function_template->function_decl()
+        : nullptr;
+    if (!canonical_function || canonical_function == function_decl) {
+        return;
+    }
+    if (!function_decl->friend_access_type &&
+        canonical_function->friend_access_type) {
+        function_decl->friend_access_type =
+            canonical_function->friend_access_type;
+    }
+    if (!canonical_function->friend_access_type &&
+        function_decl->friend_access_type) {
+        canonical_function->friend_access_type =
+            function_decl->friend_access_type;
+    }
+}
+
 void Parser::validate_template_default_argument_rules(
     const TemplateDecl* template_decl) {
     if (!template_decl) {
@@ -4355,6 +4611,10 @@ void Parser::finalize_primary_template_decl(
         template_decl,
         template_name,
         lookup_namespace);
+    if (auto* function_template =
+            dyn_cast<FunctionTemplateDecl>(template_decl)) {
+        propagate_function_template_friend_access(function_template);
+    }
     if (primary_template_decl_is_definition(template_decl)) {
         const TemplateDecl* canonical_template =
             get_template_decl_canonical_decl(template_decl);
@@ -4435,13 +4695,7 @@ void Parser::register_cpp_friend_function_template_decl(FriendDecl* friend_decl)
         set_template_decl_canonical_decl(
             function_template,
             visible_canonical_template);
-    }
-    if (has_visible_matching_namespace_decl && friend_scope) {
-        collect_->collect_bind_template_decl_in_scope(
-            friend_scope,
-            function_decl->name,
-            function_template,
-            LookupNamespace::Ordinary);
+        propagate_function_template_friend_access(function_template);
     }
 }
 
@@ -5294,6 +5548,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                 "unnamed friend function template",
                 function_decl->location);
         }
+        apply_cpp_friend_namespace_prefix(function_decl);
 
         std::string template_name = function_decl->name;
         auto function_pattern = std::move(friend_decl->target_decl);

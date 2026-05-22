@@ -453,20 +453,9 @@ inline bool cpp_out_of_line_type_matches(QualType lhs,
             return false;
         }
         for (size_t idx = 0; idx < lhs_specialization->arguments.size(); ++idx) {
-            const auto& lhs_argument = lhs_specialization->arguments[idx];
-            const auto& rhs_argument = rhs_specialization->arguments[idx];
-            if (lhs_argument.kind != rhs_argument.kind) {
-                return false;
-            }
-            if (lhs_argument.kind == TemplateArgumentKind::Type &&
-                !cpp_out_of_line_type_matches(
-                    lhs_argument.type,
-                    rhs_argument.type,
-                    false)) {
-                return false;
-            }
-            if (lhs_argument.kind == TemplateArgumentKind::Value &&
-                !lhs_argument.equals(rhs_argument)) {
+            if (!cpp_out_of_line_template_argument_matches(
+                    lhs_specialization->arguments[idx],
+                    rhs_specialization->arguments[idx])) {
                 return false;
             }
         }
@@ -487,20 +476,9 @@ inline bool cpp_out_of_line_type_matches(QualType lhs,
             return false;
         }
         for (size_t idx = 0; idx < lhs_dependent->template_arguments.size(); ++idx) {
-            const auto& lhs_argument = lhs_dependent->template_arguments[idx];
-            const auto& rhs_argument = rhs_dependent->template_arguments[idx];
-            if (lhs_argument.kind != rhs_argument.kind) {
-                return false;
-            }
-            if (lhs_argument.kind == TemplateArgumentKind::Type &&
-                !cpp_out_of_line_type_matches(
-                    lhs_argument.type,
-                    rhs_argument.type,
-                    false)) {
-                return false;
-            }
-            if (lhs_argument.kind == TemplateArgumentKind::Value &&
-                !lhs_argument.equals(rhs_argument)) {
+            if (!cpp_out_of_line_template_argument_matches(
+                    lhs_dependent->template_arguments[idx],
+                    rhs_dependent->template_arguments[idx])) {
                 return false;
             }
         }

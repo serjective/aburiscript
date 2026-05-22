@@ -4030,10 +4030,20 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
         }
         if (final_sym) {
             final_sym->is_hidden_friend = false;
+            if (!final_sym->friend_access_type && func_decl_check &&
+                func_decl_check->friend_access_type) {
+                final_sym->friend_access_type =
+                    func_decl_check->friend_access_type;
+            }
         }
         if (is_definition && func_decl_check) {
             if (predecl_sym) {
                 predecl_sym->is_hidden_friend = false;
+                if (!predecl_sym->friend_access_type &&
+                    func_decl_check->friend_access_type) {
+                    predecl_sym->friend_access_type =
+                        func_decl_check->friend_access_type;
+                }
                 predecl_sym->function_definition = func_decl_check;
                 predecl_sym->function_trailing_requires_clause =
                     func_decl_check->trailing_requires_clause.get();
@@ -4832,6 +4842,15 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
         }
         return QualType(nullptr);
     };
+    auto current_friend_access_record_type = [&]() -> QualType {
+        if (!cxx_record_parse_stack_.empty()) {
+            const auto& record_frame = cxx_record_parse_stack_.back();
+            if (record_frame.current_instantiation_type) {
+                return record_frame.current_instantiation_type;
+            }
+        }
+        return current_granting_record_type();
+    };
 
     auto resolve_or_declare_elaborated_friend_type =
         [&](const std::string& tag_name,
@@ -5256,6 +5275,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                             friend_function->is_defaulted);
 
                 QualType granting_record_type = current_granting_record_type();
+                QualType friend_access_type = current_friend_access_record_type();
 
                 auto friend_decl = make_ast<FriendDecl>(
                     *ast_ctx,
@@ -5266,7 +5286,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 auto* friend_function_ptr = friend_decl->function_decl();
                 if (friend_function_ptr) {
                     friend_function_ptr->friend_access_type =
-                        granting_record_type;
+                        friend_access_type;
+                    apply_cpp_friend_namespace_prefix(friend_function_ptr);
                 }
                 if (friend_function_ptr &&
                     friend_function_ptr->is_defaulted &&
@@ -5342,6 +5363,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                         std::nullopt,
                         friend_function_ptr->trailing_requires_clause.get());
                     if (friend_sym) {
+                        if (!friend_sym->friend_access_type) {
+                            friend_sym->friend_access_type =
+                                friend_access_type;
+                        }
                         if (is_definition) {
                             friend_sym->function_definition =
                                 friend_function_ptr;

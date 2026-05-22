@@ -403,6 +403,16 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
         decl_parser->explicit_specialization_arguments;
     fin_funcdecl->has_explicit_specialization_argument_list =
         decl_parser->has_explicit_specialization_argument_list;
+    if (predecl_sym && predecl_sym->kind == SymbolKind::FUNCTION &&
+        predecl_sym->friend_access_type) {
+        fin_funcdecl->friend_access_type = predecl_sym->friend_access_type;
+    }
+    if (!fin_funcdecl->friend_access_type &&
+        is_in_template_pattern_context()) {
+        fin_funcdecl->friend_access_type =
+            lookup_friend_access_type_for_current_function_template_redeclaration(
+                fin_funcdecl.get());
+    }
 
     auto entered_scope = collect_->collect_enter_scope(ScopeFlags::FunctionScope);
     auto new_scope = entered_scope.scope;
@@ -575,6 +585,11 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
             }
         }
         cpp_this_context.access_context_type = active_record_lookup_type;
+    }
+    if (!cpp_this_context.friend_access_type &&
+        fin_funcdecl->friend_access_type) {
+        cpp_this_context.friend_access_type =
+            fin_funcdecl->friend_access_type;
     }
     QualType previous_record_lookup_type =
         collect_->collect_current_cpp_record_lookup_type();
