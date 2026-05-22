@@ -381,7 +381,10 @@ void Parser::build_cpp_record_parse_deferred_bodies(
                             false,
                             mem_init.location,
                             true);
-                } else if (canonical_type_kind(member_expr->member_type) ==
+                } else if (type_depends_on_template_parameters(
+                               member_expr->member_type,
+                               ast_ctx.get()) ||
+                           canonical_type_kind(member_expr->member_type) ==
                                TypeKind::Object ||
                            args.empty()) {
                     mem_init.init_expr =

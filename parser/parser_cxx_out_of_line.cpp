@@ -1176,7 +1176,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                                     false,
                                     mem_init.location,
                                     true);
-                        } else if (canonical_type_kind(member_expr->member_type) ==
+                        } else if (type_depends_on_template_parameters(
+                                       member_expr->member_type,
+                                       ast_ctx.get()) ||
+                                   canonical_type_kind(member_expr->member_type) ==
                                        TypeKind::Object ||
                                    args.empty()) {
                             mem_init.init_expr =
