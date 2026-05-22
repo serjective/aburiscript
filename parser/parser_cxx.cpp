@@ -1757,6 +1757,26 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                     allow_enclosing_lookup);
             };
 
+        auto complete_template_id_arguments_for_named_type =
+            [&](const TemplateDecl* template_decl,
+                const std::vector<TemplateArgument>& arguments,
+                SrcLoc loc)
+                -> std::optional<std::vector<TemplateArgument>> {
+            std::string template_argument_error;
+            auto normalized_arguments = complete_cpp_template_id_arguments(
+                template_decl,
+                arguments,
+                loc,
+                &template_argument_error);
+            if (!normalized_arguments &&
+                !template_argument_error.empty() &&
+                !is_in_tentative_context()) {
+                restore();
+                error_custloc(template_argument_error, loc);
+            }
+            return normalized_arguments;
+        };
+
         std::shared_ptr<Scope> lookup_scope =
             has_global_qualifier ? global_scope : current_scope;
         const DeclContext* lookup_context =
@@ -1855,7 +1875,7 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                                 &owner_lookup_type);
                         if (nested_template && nested_template->decl) {
                             auto normalized_arguments =
-                                complete_cpp_template_id_arguments(
+                                complete_template_id_arguments_for_named_type(
                                     nested_template->decl,
                                     component.template_arguments,
                                     component.loc);
@@ -1895,7 +1915,7 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
 
                     if (primary_template) {
                         auto normalized_arguments =
-                            complete_cpp_template_id_arguments(
+                            complete_template_id_arguments_for_named_type(
                                 cpp_template_decl_for_default_arguments(
                                     primary_template),
                                 component.template_arguments,

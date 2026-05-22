@@ -704,7 +704,8 @@ private:
     complete_cpp_template_id_arguments(
         const TemplateDecl* template_decl,
         const std::vector<TemplateArgument>& arguments,
-        SrcLoc loc);
+        SrcLoc loc,
+        std::string* error_out = nullptr);
     const TemplateDecl* cpp_template_decl_for_default_arguments(
         const Decl* decl) const;
     QualType lookup_cpp_current_record_nested_type(

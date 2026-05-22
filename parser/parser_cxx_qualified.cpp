@@ -332,7 +332,11 @@ std::optional<std::vector<TemplateArgument>>
 Parser::complete_cpp_template_id_arguments(
     const TemplateDecl* template_decl,
     const std::vector<TemplateArgument>& arguments,
-    SrcLoc loc) {
+    SrcLoc loc,
+    std::string* error_out) {
+    if (error_out) {
+        error_out->clear();
+    }
     if (!template_decl || !collect_) {
         return arguments;
     }
@@ -347,6 +351,9 @@ Parser::complete_cpp_template_id_arguments(
             normalized_arguments,
             loc,
             &error)) {
+        if (error_out) {
+            *error_out = std::move(error);
+        }
         return std::nullopt;
     }
     return normalized_arguments;
