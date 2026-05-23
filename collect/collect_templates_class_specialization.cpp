@@ -972,86 +972,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         seen_direct_bases.reserve(pattern_state->bases.size());
 
         for (const auto& pattern_base : pattern_state->bases) {
-            const CppBaseSpecifier* base_spec = pattern_base.spec;
-            SrcLoc base_loc = base_spec ? base_spec->location : loc;
-            if (base_spec && base_spec->is_pack_expansion) {
-                return fail_instantiation(
-                    "class template base-specifier pack expansions are not supported yet",
-                    base_loc);
+            if (!instantiate_base_specifier(pattern_base, seen_direct_bases)) {
+                return false;
             }
-
-            RecordSemanticState::Base specialized_base;
-            specialized_base.name = !pattern_base.name.empty()
-                ? pattern_base.name
-                : (base_spec ? base_spec->type_name : std::string());
-            specialized_base.declared_access = pattern_base.declared_access;
-            specialized_base.is_virtual = pattern_base.is_virtual;
-            specialized_base.spec = base_spec;
-
-            QualType base_type = pattern_base.type;
-            if (!base_type && base_spec) {
-                base_type = base_spec->type;
-            }
-            if (base_type) {
-                base_type =
-                    rewrite_class_template_type(base_type, specialization_bindings);
-            } else if (base_spec && !base_spec->type_name.empty()) {
-                base_type = collect.collect_lookup_type_name(
-                    base_spec->type_name,
-                    true,
-                    true);
-            }
-            base_type = collect.finalize_deferred_semantic_type(base_type, base_loc);
-
-            auto base_object = desugar_type(base_type).as_shared<ObjectType>();
-            auto* base_record_decl =
-                base_object ? dyn_cast<ObjectDecl>(base_object->get_decl()) : nullptr;
-            if (!base_record_decl) {
-                if (base_type &&
-                    type_depends_on_template_parameters(base_type, ast_ctx())) {
-                    return fail_instantiation(
-                        "class template base type remains dependent after substitution",
-                        base_loc);
-                }
-                return fail_instantiation(
-                    "base type '" + specialized_base.name +
-                        "' does not name a class or struct",
-                    base_loc);
-            }
-
-            const ObjectDecl* canonical_base_decl = canonical_record_decl(base_record_decl);
-            if (!canonical_base_decl) {
-                return fail_instantiation(
-                    "internal error: failed to canonicalize template base class",
-                    base_loc);
-            }
-            if (canonical_base_decl == entry->specialization_decl.get()) {
-                return fail_instantiation(
-                    "class '" + specialization_name + "' cannot derive from itself",
-                    base_loc);
-            }
-            if (!seen_direct_bases.insert(canonical_base_decl).second) {
-                return fail_instantiation(
-                    "duplicate direct base class '" + specialized_base.name + "'",
-                    base_loc);
-            }
-            if (canonical_base_decl->is_union) {
-                return fail_instantiation(
-                    "base type '" + specialized_base.name +
-                        "' is a union; only class/struct bases are supported",
-                    base_loc);
-            }
-            const RecordSemanticState* base_state =
-                collect.query_lookup_record_semantics(canonical_base_decl);
-            if (!base_state || base_state->is_incomplete) {
-                return fail_instantiation(
-                    "base class '" + specialized_base.name + "' is incomplete",
-                    base_loc);
-            }
-
-            specialized_base.record_decl = canonical_base_decl;
-            specialized_base.type = QualType(canonical_base_decl->get_record_type());
-            direct_bases.push_back(std::move(specialized_base));
         }
 
         std::unordered_set<const ObjectDecl*> seen_virtual_base_decls;
@@ -1100,6 +1023,191 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
             walk_base_graph(direct_base.record_decl);
         }
+        return true;
+    }
+
+    std::string base_name_for_pattern(
+        const RecordSemanticState::Base& pattern_base) const {
+        if (!pattern_base.name.empty()) {
+            return pattern_base.name;
+        }
+        return pattern_base.spec ? pattern_base.spec->type_name : std::string();
+    }
+
+    QualType base_type_for_pattern(
+        const RecordSemanticState::Base& pattern_base) const {
+        if (pattern_base.type) {
+            return pattern_base.type;
+        }
+        return pattern_base.spec ? pattern_base.spec->type : QualType();
+    }
+
+    bool instantiate_base_specifier(
+        const RecordSemanticState::Base& pattern_base,
+        std::unordered_set<const ObjectDecl*>& seen_direct_bases) {
+        const CppBaseSpecifier* base_spec = pattern_base.spec;
+        if (base_spec && base_spec->is_pack_expansion) {
+            return instantiate_base_pack_expansion(
+                pattern_base,
+                seen_direct_bases);
+        }
+
+        QualType base_type = base_type_for_pattern(pattern_base);
+        if (base_type) {
+            base_type = rewrite_class_template_type(
+                base_type,
+                specialization_bindings);
+        } else if (base_spec && !base_spec->type_name.empty()) {
+            base_type = collect.collect_lookup_type_name(
+                base_spec->type_name,
+                true,
+                true);
+        }
+        return append_specialized_base(
+            pattern_base,
+            base_type,
+            seen_direct_bases);
+    }
+
+    bool instantiate_base_pack_expansion(
+        const RecordSemanticState::Base& pattern_base,
+        std::unordered_set<const ObjectDecl*>& seen_direct_bases) {
+        const CppBaseSpecifier* base_spec = pattern_base.spec;
+        SrcLoc base_loc = base_spec ? base_spec->location : loc;
+        QualType pattern_base_type = base_type_for_pattern(pattern_base);
+        if (!pattern_base_type) {
+            return fail_instantiation(
+                "base pack expansion requires a dependent base type",
+                base_loc);
+        }
+
+        TemplatePackExpansionShape shape;
+        if (!collect_pack_expansion_shape_in_type(
+                pattern_base_type,
+                *selected_parameters,
+                shape)) {
+            return fail_instantiation(
+                shape.has_unsupported_dependency
+                    ? "class template base pack expansion depends on unsupported template parameters"
+                    : "failed to collect class template base pack expansion shape",
+                base_loc);
+        }
+        if (shape.has_unsupported_dependency) {
+            return fail_instantiation(
+                "class template base pack expansion depends on unsupported template parameters",
+                base_loc);
+        }
+
+        std::string arity_error;
+        auto expansion_arity = find_pack_expansion_arity_for_bindings(
+            shape,
+            *selected_parameters,
+            specialization_bindings,
+            &arity_error);
+        if (!expansion_arity.has_value()) {
+            return fail_instantiation(
+                arity_error.empty()
+                    ? "failed to determine class template base pack expansion arity"
+                    : arity_error,
+                base_loc);
+        }
+
+        direct_bases.reserve(direct_bases.size() + *expansion_arity);
+        for (size_t element_index = 0;
+             element_index < *expansion_arity;
+             ++element_index) {
+            TemplateArgumentBindings element_bindings;
+            std::string binding_error;
+            if (!build_pack_element_argument_bindings_for_shape(
+                    *selected_parameters,
+                    specialization_bindings,
+                    shape,
+                    element_index,
+                    element_bindings,
+                    &binding_error)) {
+                return fail_instantiation(
+                    binding_error.empty()
+                        ? "failed to materialize class template base pack expansion bindings"
+                        : binding_error,
+                    base_loc);
+            }
+
+            QualType base_type = rewrite_class_template_type(
+                pattern_base_type,
+                element_bindings);
+            if (!append_specialized_base(
+                    pattern_base,
+                    base_type,
+                    seen_direct_bases)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool append_specialized_base(
+        const RecordSemanticState::Base& pattern_base,
+        QualType base_type,
+        std::unordered_set<const ObjectDecl*>& seen_direct_bases) {
+        const CppBaseSpecifier* base_spec = pattern_base.spec;
+        SrcLoc base_loc = base_spec ? base_spec->location : loc;
+
+        RecordSemanticState::Base specialized_base;
+        specialized_base.name = base_name_for_pattern(pattern_base);
+        specialized_base.declared_access = pattern_base.declared_access;
+        specialized_base.is_virtual = pattern_base.is_virtual;
+        specialized_base.spec = base_spec;
+
+        base_type = collect.finalize_deferred_semantic_type(base_type, base_loc);
+        auto base_object = desugar_type(base_type).as_shared<ObjectType>();
+        auto* base_record_decl =
+            base_object ? dyn_cast<ObjectDecl>(base_object->get_decl()) : nullptr;
+        if (!base_record_decl) {
+            if (base_type &&
+                type_depends_on_template_parameters(base_type, ast_ctx())) {
+                return fail_instantiation(
+                    "class template base type remains dependent after substitution",
+                    base_loc);
+            }
+            return fail_instantiation(
+                "base type '" + specialized_base.name +
+                    "' does not name a class or struct",
+                base_loc);
+        }
+
+        const ObjectDecl* canonical_base_decl = canonical_record_decl(base_record_decl);
+        if (!canonical_base_decl) {
+            return fail_instantiation(
+                "internal error: failed to canonicalize template base class",
+                base_loc);
+        }
+        if (canonical_base_decl == entry->specialization_decl.get()) {
+            return fail_instantiation(
+                "class '" + specialization_name + "' cannot derive from itself",
+                base_loc);
+        }
+        if (!seen_direct_bases.insert(canonical_base_decl).second) {
+            return fail_instantiation(
+                "duplicate direct base class '" + specialized_base.name + "'",
+                base_loc);
+        }
+        if (canonical_base_decl->is_union) {
+            return fail_instantiation(
+                "base type '" + specialized_base.name +
+                    "' is a union; only class/struct bases are supported",
+                base_loc);
+        }
+        const RecordSemanticState* base_state =
+            collect.query_lookup_record_semantics(canonical_base_decl);
+        if (!base_state || base_state->is_incomplete) {
+            return fail_instantiation(
+                "base class '" + specialized_base.name + "' is incomplete",
+                base_loc);
+        }
+
+        specialized_base.record_decl = canonical_base_decl;
+        specialized_base.type = QualType(canonical_base_decl->get_record_type());
+        direct_bases.push_back(std::move(specialized_base));
         return true;
     }
 

@@ -211,15 +211,10 @@ bool collect_pack_expansion_shape_in_type(
                 return false;
             }
         }
-        for (const auto& argument : specialization->arguments) {
-            if (!collect_pack_expansion_shape_in_template_argument(
-                    argument,
-                    parameters,
-                    shape_out)) {
-                return false;
-            }
-        }
-        return true;
+        return collect_pack_expansion_shape_in_template_arguments(
+            specialization->arguments,
+            parameters,
+            shape_out);
     }
     if (auto dependent_name = dyn_cast_shared<DependentNameType>(raw)) {
         if (!collect_pack_expansion_shape_in_type(
@@ -228,15 +223,10 @@ bool collect_pack_expansion_shape_in_type(
                 shape_out)) {
             return false;
         }
-        for (const auto& argument : dependent_name->template_arguments) {
-            if (!collect_pack_expansion_shape_in_template_argument(
-                    argument,
-                    parameters,
-                    shape_out)) {
-                return false;
-            }
-        }
-        return true;
+        return collect_pack_expansion_shape_in_template_arguments(
+            dependent_name->template_arguments,
+            parameters,
+            shape_out);
     }
     if (auto ptr = dyn_cast_shared<PointerType>(raw)) {
         return collect_pack_expansion_shape_in_type(
@@ -254,15 +244,10 @@ bool collect_pack_expansion_shape_in_type(
     }
     if (auto pack_element =
             dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
-        for (const auto& argument : pack_element->arguments) {
-            if (!collect_pack_expansion_shape_in_template_argument(
-                    argument,
-                    parameters,
-                    shape_out)) {
-                return false;
-            }
-        }
-        return true;
+        return collect_pack_expansion_shape_in_template_arguments(
+            pack_element->arguments,
+            parameters,
+            shape_out);
     }
     if (auto mem_ptr = dyn_cast_shared<MemberPointerType>(raw)) {
         return collect_pack_expansion_shape_in_type(
@@ -348,8 +333,7 @@ bool collect_pack_expansion_shape_in_template_argument(
                 return finish();
             }
         }
-        if (argument.expands_parameter_pack &&
-            !argument_shape.referenced_parameters.empty()) {
+        if (!argument_shape.referenced_parameters.empty()) {
             return finish();
         }
         if (template_argument_depends_on_template_parameters(argument)) {
@@ -1034,14 +1018,41 @@ bool collect_pack_expansion_shape_in_template_arguments(
     const std::vector<TemplateArgument>& arguments,
     const TemplateParameterList& parameters,
     TemplatePackExpansionShape& shape_out) {
+    TemplatePackExpansionShape accumulated_shape;
+    bool has_dependent_non_shape_argument = false;
+
+    // A pack expansion pattern may contain dependent arguments that do not
+    // determine arity themselves, such as default template arguments depending
+    // on earlier arguments. Defer those until we know whether the surrounding
+    // argument list supplied an actual pack reference.
     for (const auto& argument : arguments) {
+        TemplatePackExpansionShape argument_shape;
         if (!collect_pack_expansion_shape_in_template_argument(
                 argument,
                 parameters,
-                shape_out)) {
+                argument_shape)) {
+            if (argument_shape.has_unsupported_dependency &&
+                argument_shape.referenced_parameters.empty() &&
+                template_argument_depends_on_template_parameters(argument)) {
+                has_dependent_non_shape_argument = true;
+                continue;
+            }
+            merge_pack_expansion_shape(accumulated_shape, argument_shape);
+            merge_pack_expansion_shape(shape_out, accumulated_shape);
             return false;
         }
+        merge_pack_expansion_shape(accumulated_shape, argument_shape);
     }
+
+    if (has_dependent_non_shape_argument &&
+        accumulated_shape.referenced_parameters.empty() &&
+        shape_out.referenced_parameters.empty()) {
+        accumulated_shape.has_unsupported_dependency = true;
+        merge_pack_expansion_shape(shape_out, accumulated_shape);
+        return false;
+    }
+
+    merge_pack_expansion_shape(shape_out, accumulated_shape);
     return true;
 }
 
