@@ -226,6 +226,11 @@ bool template_argument_has_same_lookup_shape_impl(const TemplateArgument& lhs,
                         lhs.referenced_parameter,
                         rhs.referenced_parameter);
                 }
+                if (lhs.value_expr && rhs.value_expr) {
+                    return expr_structurally_matches(
+                        lhs.value_expr.get(),
+                        rhs.value_expr.get());
+                }
                 return lhs.value_spelling == rhs.value_spelling;
             }
             return lhs.equals(rhs);
