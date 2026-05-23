@@ -1163,6 +1163,45 @@ bool build_pack_element_argument_bindings(
     return true;
 }
 
+bool build_pack_element_argument_bindings_for_shape(
+    const TemplateParameterList& parameters,
+    const TemplateArgumentBindings& bindings,
+    const TemplatePackExpansionShape& shape,
+    size_t element_index,
+    TemplateArgumentBindings& element_bindings,
+    std::string* error_out) {
+    element_bindings = bindings;
+    for (const auto* parameter : shape.referenced_parameters) {
+        auto parameter_index =
+            find_template_parameter_index_by_decl(parameter, parameters);
+        if (!parameter_index || *parameter_index >= bindings.size()) {
+            if (error_out) {
+                *error_out =
+                    "internal error: missing template argument binding for pack expansion parameter";
+            }
+            return false;
+        }
+        const auto& binding = bindings[*parameter_index];
+        if (!binding.is_pack()) {
+            if (error_out) {
+                *error_out =
+                    "internal error: template parameter pack was not bound as a pack";
+            }
+            return false;
+        }
+        if (element_index >= binding.arguments.size()) {
+            if (error_out) {
+                *error_out =
+                    "internal error: template pack expansion index is out of range";
+            }
+            return false;
+        }
+        element_bindings[*parameter_index] =
+            TemplateArgumentBinding::single(binding.arguments[element_index]);
+    }
+    return true;
+}
+
 std::string make_parameter_pack_element_name(const std::string& base_name,
                                              size_t element_index) {
     if (base_name.empty()) {

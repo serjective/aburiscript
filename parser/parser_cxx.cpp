@@ -4160,6 +4160,107 @@ bool Parser::active_template_parameters_match_for_redeclaration(
     return true;
 }
 
+bool Parser::cpp_type_matches_for_template_redeclaration(
+    QualType lhs,
+    QualType rhs,
+    bool ignore_top_level_qualifiers,
+    SrcLoc loc,
+    unsigned depth) const {
+    if (cpp_out_of_line_type_matches(lhs, rhs, ignore_top_level_qualifiers)) {
+        return true;
+    }
+    if (!collect_ || depth > 8) {
+        return false;
+    }
+
+    auto instantiate_alias_specialization = [&](QualType type) -> QualType {
+        QualType spelled = desugar_typedefs(type);
+        if (ignore_top_level_qualifiers) {
+            spelled = QualType(spelled.get_shared());
+        }
+        // Function-template identity includes the return type, so compare
+        // alias-template spellings through their instantiated result type.
+        auto specialization =
+            spelled.as_shared<TemplateSpecializationType>();
+        auto* alias_template = specialization
+            ? dyn_cast<AliasTemplateDecl>(
+                  const_cast<Decl*>(specialization->primary_template))
+            : nullptr;
+        if (!alias_template) {
+            return QualType();
+        }
+        return collect_->collect_try_instantiate_alias_template_specialization(
+            alias_template,
+            specialization->arguments,
+            loc);
+    };
+
+    QualType lhs_alias = instantiate_alias_specialization(lhs);
+    QualType rhs_alias = instantiate_alias_specialization(rhs);
+    if (!lhs_alias && !rhs_alias) {
+        return false;
+    }
+
+    return cpp_type_matches_for_template_redeclaration(
+        lhs_alias ? lhs_alias : lhs,
+        rhs_alias ? rhs_alias : rhs,
+        ignore_top_level_qualifiers,
+        loc,
+        depth + 1);
+}
+
+bool Parser::cpp_function_type_matches_for_template_redeclaration(
+    QualType existing_type,
+    QualType current_type,
+    SrcLoc loc) const {
+    if (cpp_type_matches_for_template_redeclaration(
+            existing_type,
+            current_type,
+            true,
+            loc)) {
+        return true;
+    }
+
+    auto existing_function =
+        desugar_typedefs(existing_type).as_shared<FunctionType>();
+    auto current_function =
+        desugar_typedefs(current_type).as_shared<FunctionType>();
+    if (!existing_function ||
+        !current_function ||
+        existing_function->member_ref_qualifier !=
+            current_function->member_ref_qualifier ||
+        existing_function->has_prototype != current_function->has_prototype ||
+        existing_function->is_variadic != current_function->is_variadic ||
+        !function_exception_specs_equal(*existing_function, *current_function) ||
+        existing_function->parameters.size() !=
+            current_function->parameters.size()) {
+        return false;
+    }
+
+    if (!cpp_type_matches_for_template_redeclaration(
+            existing_function->ret_type,
+            current_function->ret_type,
+            true,
+            loc)) {
+        return false;
+    }
+
+    for (size_t idx = 0; idx < existing_function->parameters.size(); ++idx) {
+        if (existing_function->parameter_is_pack(idx) !=
+            current_function->parameter_is_pack(idx)) {
+            return false;
+        }
+        if (!cpp_type_matches_for_template_redeclaration(
+                existing_function->parameters[idx],
+                current_function->parameters[idx],
+                true,
+                loc)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool Parser::cpp_function_template_decls_match_for_redeclaration(
     const FunctionTemplateDecl* existing,
     const FunctionTemplateDecl* current) const {
@@ -4241,10 +4342,10 @@ bool Parser::cpp_function_template_decls_match_for_redeclaration(
         template_sema_internal::remap_template_parameter_types_in_type(
             QualType(current_function->type),
             parameter_rebinds);
-    bool type_matches = cpp_out_of_line_type_matches(
+    bool type_matches = cpp_function_type_matches_for_template_redeclaration(
         QualType(existing_function->type),
         remapped_current_type,
-        true);
+        current_function->location);
     return type_matches;
 }
 

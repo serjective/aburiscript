@@ -5,6 +5,7 @@
 #include <optional>
 
 using template_sema_internal::build_pack_element_argument_bindings;
+using template_sema_internal::build_pack_element_argument_bindings_for_shape;
 using template_sema_internal::collect_pack_expansion_shape_in_template_argument;
 using template_sema_internal::find_template_parameter_index_by_identity;
 using template_sema_internal::find_template_parameter_index_by_decl;
@@ -1789,9 +1790,10 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                  ++element_index) {
                 TemplateArgumentBindings element_bindings;
                 std::string element_binding_error;
-                if (!build_pack_element_argument_bindings(
+                if (!build_pack_element_argument_bindings_for_shape(
                         parameters,
                         active_bindings,
+                        shape,
                         element_index,
                         element_bindings,
                         &element_binding_error)) {

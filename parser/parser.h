@@ -627,6 +627,16 @@ private:
     bool cpp_template_parameter_lists_match_for_redeclaration(
         const TemplateParameterList& lhs,
         const TemplateParameterList& rhs) const;
+    bool cpp_type_matches_for_template_redeclaration(
+        QualType lhs,
+        QualType rhs,
+        bool ignore_top_level_qualifiers,
+        SrcLoc loc,
+        unsigned depth = 0) const;
+    bool cpp_function_type_matches_for_template_redeclaration(
+        QualType existing_type,
+        QualType current_type,
+        SrcLoc loc) const;
     bool cpp_function_template_decls_match_for_redeclaration(
         const FunctionTemplateDecl* existing,
         const FunctionTemplateDecl* current) const;

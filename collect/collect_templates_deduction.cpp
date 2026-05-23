@@ -161,24 +161,12 @@ std::optional<TemplateSpecializationMatchInfo> extract_template_specialization_m
 }
 
 TemplatePatternLayout analyze_template_argument_pattern_layout(
-    const std::vector<TemplateArgument>& arguments,
-    const TemplateParameterList* parameters = nullptr) {
+    const std::vector<TemplateArgument>& arguments) {
     TemplatePatternLayout layout;
     layout.element_count = arguments.size();
     size_t pack_count = 0;
     for (size_t idx = 0; idx < arguments.size(); ++idx) {
-        bool expands_pack = arguments[idx].expands_parameter_pack;
-        if (!expands_pack && parameters) {
-            template_sema_internal::TemplatePackExpansionShape shape;
-            if (template_sema_internal::collect_pack_expansion_shape_in_template_argument(
-                    arguments[idx],
-                    *parameters,
-                    shape) &&
-                !shape.empty()) {
-                expands_pack = true;
-            }
-        }
-        if (!expands_pack) {
+        if (!arguments[idx].expands_parameter_pack) {
             continue;
         }
         ++pack_count;
@@ -1032,8 +1020,7 @@ bool deduce_class_template_specialization_match_into_bindings(
 
     TemplatePatternLayout pattern_layout =
         analyze_template_argument_pattern_layout(
-            pattern_specialization.arguments,
-            &parameters);
+            pattern_specialization.arguments);
     if (!deduce_class_template_specialization_argument_list_into_existing_bindings(
             pattern_specialization.arguments,
             pattern_layout,
@@ -1409,12 +1396,10 @@ bool class_template_partial_specialization_is_at_least_as_specialized_as(
     }
     TemplatePatternLayout parameter_layout =
         analyze_template_argument_pattern_layout(
-            parameter_arguments,
-            &parameter_partial->parameters);
+            parameter_arguments);
     TemplatePatternLayout argument_layout =
         analyze_template_argument_pattern_layout(
-            argument_arguments,
-            &argument_partial->parameters);
+            argument_arguments);
     if (!parameter_layout.valid || !argument_layout.valid) {
         return false;
     }
@@ -1471,8 +1456,7 @@ bool deduce_class_template_partial_specialization_bindings(
     }
     TemplatePatternLayout pattern_layout =
         analyze_template_argument_pattern_layout(
-            pattern_arguments,
-            &partial_specialization->parameters);
+            pattern_arguments);
     auto normalized_actual_arguments =
         normalize_actual_arguments_for_partial_matching(
             collect,
@@ -1543,12 +1527,10 @@ bool is_class_template_partial_specialization_more_specialized(
     }
     TemplatePatternLayout lhs_layout =
         analyze_template_argument_pattern_layout(
-            lhs_arguments,
-            &lhs_partial->parameters);
+            lhs_arguments);
     TemplatePatternLayout rhs_layout =
         analyze_template_argument_pattern_layout(
-            rhs_arguments,
-            &rhs_partial->parameters);
+            rhs_arguments);
     return compare_pack_layout_specificity(lhs_layout, rhs_layout) > 0;
 }
 
@@ -1572,8 +1554,7 @@ bool deduce_variable_template_partial_specialization_bindings(
     }
     TemplatePatternLayout pattern_layout =
         analyze_template_argument_pattern_layout(
-            pattern_arguments,
-            &partial_specialization->parameters);
+            pattern_arguments);
     auto normalized_actual_arguments =
         normalize_actual_arguments_for_partial_matching(
             collect,
@@ -1635,12 +1616,10 @@ bool is_variable_template_partial_specialization_more_specialized(
             }
             TemplatePatternLayout parameter_layout =
                 analyze_template_argument_pattern_layout(
-                    parameter_arguments,
-                    &parameter_partial->parameters);
+                    parameter_arguments);
             TemplatePatternLayout argument_layout =
                 analyze_template_argument_pattern_layout(
-                    argument_arguments,
-                    &argument_partial->parameters);
+                    argument_arguments);
             if (!parameter_layout.valid || !argument_layout.valid) {
                 return false;
             }
@@ -1703,12 +1682,10 @@ bool is_variable_template_partial_specialization_more_specialized(
     }
     TemplatePatternLayout lhs_layout =
         analyze_template_argument_pattern_layout(
-            lhs_arguments,
-            &lhs_partial->parameters);
+            lhs_arguments);
     TemplatePatternLayout rhs_layout =
         analyze_template_argument_pattern_layout(
-            rhs_arguments,
-            &rhs_partial->parameters);
+            rhs_arguments);
     return compare_pack_layout_specificity(lhs_layout, rhs_layout) > 0;
 }
 

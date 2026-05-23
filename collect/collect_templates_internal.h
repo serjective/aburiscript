@@ -150,6 +150,14 @@ bool build_pack_element_argument_bindings(
     TemplateArgumentBindings& element_bindings,
     std::string* error_out);
 
+bool build_pack_element_argument_bindings_for_shape(
+    const TemplateParameterList& parameters,
+    const TemplateArgumentBindings& bindings,
+    const TemplatePackExpansionShape& shape,
+    size_t element_index,
+    TemplateArgumentBindings& element_bindings,
+    std::string* error_out);
+
 bool materialize_specialized_fold_expression(
     Collect& collect,
     std::unique_ptr<Expr>& expr,

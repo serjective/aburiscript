@@ -324,6 +324,14 @@ inline bool cpp_out_of_line_type_matches(QualType lhs,
         return lhs.get_shared() == rhs.get_shared();
     }
 
+    if (types_equivalent_after_template_argument_canonicalization(
+            lhs,
+            rhs,
+            nullptr,
+            ignore_top_level_qualifiers)) {
+        return true;
+    }
+
     lhs = desugar_typedefs(lhs);
     rhs = desugar_typedefs(rhs);
     if (ignore_top_level_qualifiers) {
