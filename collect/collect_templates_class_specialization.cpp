@@ -2662,7 +2662,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                         {*default_argument},
                         *selected_parameters,
                         specialization_bindings,
-                        loc);
+                        loc,
+                        /*allow_unsubstituted_parameters=*/true);
                 if (rewritten_defaults.size() != 1) {
                     return fail_instantiation(
                         "internal error: failed to rewrite " +
