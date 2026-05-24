@@ -75,6 +75,12 @@ ASTContext* record_semantics_ast_context(const ObjectDecl* record_decl,
     return nullptr;
 }
 
+bool template_specialization_primary_is_dependent_template_parameter(
+    const Decl* primary_template) {
+    return primary_template &&
+           isa<TemplateTemplateParmDecl>(const_cast<Decl*>(primary_template));
+}
+
 const ASTContext* enum_semantics_ast_context(const EnumDecl* enum_decl,
                                              const ASTContext* ast_ctx) {
     if (ast_ctx) {
@@ -2056,17 +2062,7 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
             return false;
         }
         if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
-            if (specialization->is_dependent) {
-                return true;
-            }
-            for (const auto& argument : specialization->arguments) {
-                if (template_argument_depends_on_template_parameters(
-                        argument,
-                        ast_ctx)) {
-                    return true;
-                }
-            }
-            return false;
+            return specialization->depends_on_template_parameters(ast_ctx);
         }
         if (auto object_type = dyn_cast_shared<ObjectType>(raw)) {
             if (!object_type->is_class_template_specialization()) {
@@ -2155,6 +2151,35 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
     return false;
 }
 } // namespace
+
+bool template_specialization_components_are_dependent(
+    const Decl* primary_template,
+    const std::vector<TemplateArgument>& arguments,
+    bool explicitly_dependent,
+    const ASTContext* ast_ctx) {
+    if (explicitly_dependent ||
+        template_specialization_primary_is_dependent_template_parameter(
+            primary_template)) {
+        return true;
+    }
+    for (const auto& argument : arguments) {
+        if (template_argument_depends_on_template_parameters(
+                argument,
+                ast_ctx)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TemplateSpecializationType::depends_on_template_parameters(
+    const ASTContext* ast_ctx) const {
+    return template_specialization_components_are_dependent(
+        primary_template,
+        arguments,
+        is_dependent,
+        ast_ctx);
+}
 
 bool template_template_parameter_lists_are_compatible(
     const TemplateParameterList& formal_parameters,

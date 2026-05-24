@@ -408,6 +408,12 @@ struct BuiltinTypePackElementType : CType {
     }
 };
 
+bool template_specialization_components_are_dependent(
+    const Decl* primary_template,
+    const std::vector<TemplateArgument>& arguments,
+    bool explicitly_dependent,
+    const ASTContext* ast_ctx = nullptr);
+
 enum class TemplateArgumentBindingKind : uint8_t {
     Unbound,
     Single,
@@ -1258,7 +1264,15 @@ struct TemplateSpecializationType : CType {
           primary_template(primary_template),
           arguments(std::move(arguments)),
           is_dependent(is_dependent),
-          is_class_template_placeholder(is_class_template_placeholder) {}
+          is_class_template_placeholder(is_class_template_placeholder) {
+        this->is_dependent = template_specialization_components_are_dependent(
+            this->primary_template,
+            this->arguments,
+            this->is_dependent);
+    }
+
+    bool depends_on_template_parameters(
+        const ASTContext* ast_ctx = nullptr) const;
 
     bool isIncomplete() const override {
         auto resolved =

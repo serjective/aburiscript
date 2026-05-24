@@ -1173,15 +1173,11 @@ QualType Collect::substitute_template_type_with_bindings(
             loc,
             allow_unsubstituted_parameters,
             clone_context);
-        bool dependent = isa<TemplateTemplateParmDecl>(rewritten_primary);
-        for (const auto& argument : substituted_arguments) {
-            if (template_argument_depends_on_template_parameters(
-                    argument,
-                ast_ctx_.get())) {
-                dependent = true;
-                break;
-            }
-        }
+        bool dependent = template_specialization_components_are_dependent(
+            rewritten_primary,
+            substituted_arguments,
+            /*explicitly_dependent=*/false,
+            ast_ctx_.get());
         auto rewritten = std::make_shared<TemplateSpecializationType>(
             rewritten_name,
             rewritten_primary,
