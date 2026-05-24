@@ -4570,6 +4570,112 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return true;
     }
 
+    bool clone_deferred_member_template_ctor_initializers(
+        const CppConstructorDecl* pattern_ctor,
+        CppConstructorDecl* specialized_ctor,
+        TemplateSubstitutionPass& substitution_pass,
+        std::string* error_out) {
+        if (!pattern_ctor || !specialized_ctor) {
+            return true;
+        }
+        specialized_ctor->ctor_initializers.clear();
+        specialized_ctor->ctor_initializers.reserve(
+            pattern_ctor->ctor_initializers.size());
+        for (const auto& initializer : pattern_ctor->ctor_initializers) {
+            CppCtorInitializer cloned_initializer;
+            cloned_initializer.member_name = initializer.member_name;
+            cloned_initializer.target_spelling = initializer.target_spelling;
+            cloned_initializer.target_type =
+                substitution_pass.rewrite_type(initializer.target_type);
+            cloned_initializer.resolved_target_type =
+                substitution_pass.rewrite_type(initializer.resolved_target_type);
+            cloned_initializer.is_base_initializer = initializer.is_base_initializer;
+            cloned_initializer.is_delegating_initializer =
+                initializer.is_delegating_initializer;
+            cloned_initializer.is_list_init = initializer.is_list_init;
+            cloned_initializer.is_pack_expansion = initializer.is_pack_expansion;
+            cloned_initializer.deferred_init_begin_token_idx =
+                initializer.deferred_init_begin_token_idx;
+            cloned_initializer.deferred_init_end_token_idx =
+                initializer.deferred_init_end_token_idx;
+            cloned_initializer.location = initializer.location;
+
+            std::string clone_error;
+            if (initializer.member_expr) {
+                cloned_initializer.member_expr =
+                    substitution_pass.clone_expr(
+                        initializer.member_expr.get(),
+                        &clone_error);
+                if (!cloned_initializer.member_expr) {
+                    if (error_out) {
+                        *error_out =
+                            clone_error.empty()
+                                ? "constructor template initializer target cloning is not supported"
+                                : clone_error;
+                    }
+                    return false;
+                }
+            }
+            if (initializer.init_expr) {
+                cloned_initializer.init_expr =
+                    substitution_pass.clone_expr(
+                        initializer.init_expr.get(),
+                        &clone_error);
+                if (!cloned_initializer.init_expr) {
+                    if (error_out) {
+                        *error_out =
+                            clone_error.empty()
+                                ? "constructor template initializer expression cloning is not supported"
+                                : clone_error;
+                    }
+                    return false;
+                }
+            }
+            specialized_ctor->ctor_initializers.push_back(
+                std::move(cloned_initializer));
+        }
+        return true;
+    }
+
+    bool clone_deferred_member_template_body(
+        const FuncDecl* pattern_function,
+        FuncDecl* specialized_function,
+        TemplateSubstitutionPass& substitution_pass,
+        const std::string& failure_context,
+        std::string* error_out) {
+        if (!pattern_function || !specialized_function) {
+            return false;
+        }
+        specialized_function->body.reset();
+        specialized_function->stmt_labels = pattern_function->stmt_labels;
+        if (!pattern_function->body) {
+            return true;
+        }
+
+        std::string clone_error;
+        auto cloned_body =
+            substitution_pass.clone_stmt(pattern_function->body.get(), &clone_error);
+        if (!cloned_body) {
+            if (error_out) {
+                *error_out =
+                    failure_context + " body pattern cloning is not supported" +
+                    (clone_error.empty() ? std::string() : ": " + clone_error);
+            }
+            return false;
+        }
+
+        specialized_function->body = std::move(cloned_body);
+        if (pattern_function->scope) {
+            auto scope_it =
+                substitution_pass.context().scope_remap.find(
+                    pattern_function->scope.get());
+            if (scope_it != substitution_pass.context().scope_remap.end()) {
+                specialized_function->scope = scope_it->second;
+            }
+        }
+        return true;
+    }
+
     bool clone_pending_member_templates() {
         auto register_specialized_member_symbol =
             [this](const std::shared_ptr<Symbol>& sym) {
@@ -4949,42 +5055,28 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
 
             if (pattern_ctor_decl && specialized_ctor_decl) {
-                if (!clone_ctor_initializers_for_specialization(
+                if (!clone_deferred_member_template_ctor_initializers(
                         pattern_ctor_decl,
                         specialized_ctor_decl,
                         member_template_clone_pass,
-                        member_template_resolution_pass,
                         &clone_error)) {
                     return fail_instantiation(
                         clone_error.empty()
-                            ? "constructor template initializer cloning is not supported"
-                            : clone_error,
-                        pattern_ctor_decl->location);
-                }
-                if (!finalize_specialized_ctor_initializers(
-                        collect,
-                        specialized_ctor_decl,
-                        &clone_error)) {
-                    return fail_instantiation(
-                        clone_error.empty()
-                            ? "constructor template initializer finalization failed"
+                            ? "constructor template initializer pattern cloning is not supported"
                             : clone_error,
                         pattern_ctor_decl->location);
                 }
             }
 
-            if (!clone_function_body_for_specialization(
-                    collect,
+            if (!clone_deferred_member_template_body(
                     pattern_function,
                     specialized_function,
                     member_template_clone_pass,
-                    member_template_resolution_pass,
                     "class template member template",
-                    false,
                     &clone_error)) {
                 return fail_instantiation(
                     clone_error.empty()
-                        ? "class template member template body cloning is not supported"
+                        ? "class template member template body pattern cloning is not supported"
                         : clone_error,
                     pattern_function->body ? pattern_function->body->location
                                            : pattern_function->location);
