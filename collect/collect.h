@@ -232,7 +232,8 @@ public:
 
     void collect_start_function_definition(const std::string& name,
                                            QualType function_type,
-                                           CppThisContext cpp_this_context) ;
+                                           CppThisContext cpp_this_context,
+                                           bool is_template_pattern_body = false) ;
 
     void collect_finish_function_definition(const std::shared_ptr<Scope>& function_scope) ;
 
@@ -1552,6 +1553,7 @@ private:
         QualType current_function_cxx_auto_return_pattern = nullptr;
         bool current_function_is_cpp_member = false;
         bool current_function_is_static_cpp_member = false;
+        bool current_function_is_template_pattern_body = false;
         QualType current_function_cpp_this_type = nullptr;
         // When in a friended function, this defines the function's friend class
         QualType current_function_cpp_friend_access_type = nullptr;

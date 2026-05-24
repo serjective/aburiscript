@@ -609,7 +609,10 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
             active_record_lookup_type);
     }
     collect_->collect_start_function_definition(
-        fin_funcdecl->name, QualType(fin_funcdecl->type), cpp_this_context);
+        fin_funcdecl->name,
+        QualType(fin_funcdecl->type),
+        cpp_this_context,
+        is_in_template_pattern_context());
     current_language_linkage_ = LanguageLinkage::None;
     Collect::ImmediateFunctionContextScope immediate_function_context_guard(
         collect_.get(), fin_funcdecl->is_consteval != 0);

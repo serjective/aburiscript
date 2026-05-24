@@ -1045,7 +1045,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
             func_type = ctor_decl->type;
             current_language_linkage_ = LanguageLinkage::None;
             collect_->collect_start_function_definition(
-                ctor_decl->name, QualType(ctor_decl->type), cpp_this_context);
+                ctor_decl->name,
+                QualType(ctor_decl->type),
+                cpp_this_context,
+                is_in_template_pattern_context());
 
             Collect::ImmediateFunctionContextScope immediate_function_context_guard(
                 collect_.get(), ctor_decl->is_consteval != 0);
@@ -1705,7 +1708,10 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
             func_type = dtor_decl->type;
             current_language_linkage_ = LanguageLinkage::None;
             collect_->collect_start_function_definition(
-                dtor_decl->name, QualType(dtor_decl->type), cpp_this_context);
+                dtor_decl->name,
+                QualType(dtor_decl->type),
+                cpp_this_context,
+                is_in_template_pattern_context());
 
             for (auto& param_decl_base : dtor_decl->parameters) {
                 auto* param_decl = dyn_cast<ParamDecl>(param_decl_base.get());

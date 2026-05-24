@@ -500,6 +500,7 @@ void Collect::collect_start_translation_unit() {
     session_.func_state_.label_reference_locs.clear();
     session_.func_state_.current_function_is_cpp_member = false;
     session_.func_state_.current_function_is_static_cpp_member = false;
+    session_.func_state_.current_function_is_template_pattern_body = false;
     session_.func_state_.current_function_cpp_this_type = nullptr;
     session_.func_state_.current_function_cpp_friend_access_type = nullptr;
     session_.func_state_.current_function_cpp_access_context_type = nullptr;
@@ -584,7 +585,8 @@ std::unique_ptr<TranslationUnit> Collect::collect_finish_translation_unit(std::v
 
 void Collect::collect_start_function_definition(const std::string& name,
                                                 QualType function_type,
-                                                CppThisContext cpp_this_context) {
+                                                CppThisContext cpp_this_context,
+                                                bool is_template_pattern_body) {
 
     if (session_.func_state_.in_function) {
         session_.function_definition_stack_.push_back(
@@ -606,6 +608,8 @@ void Collect::collect_start_function_definition(const std::string& name,
     session_.func_state_.current_function_is_cpp_member = cpp_this_context.is_member_function;
     session_.func_state_.current_function_is_static_cpp_member =
         cpp_this_context.is_static_member_function;
+    session_.func_state_.current_function_is_template_pattern_body =
+        is_template_pattern_body;
     session_.func_state_.current_function_cpp_this_type = cpp_this_context.this_type;
     session_.func_state_.current_function_cpp_friend_access_type =
         cpp_this_context.friend_access_type;

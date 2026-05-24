@@ -691,7 +691,8 @@ void Parser::build_cpp_record_parse_deferred_bodies(
         collect_->collect_start_function_definition(
             member_decl->name,
             QualType(member_decl->type),
-            cpp_this_context);
+            cpp_this_context,
+            is_in_template_pattern_context());
         Collect::ImmediateFunctionContextScope immediate_function_context_guard(
             collect_.get(), member_decl->is_consteval != 0);
 
@@ -822,7 +823,8 @@ void Parser::build_cpp_record_parse_deferred_bodies(
         collect_->collect_start_function_definition(
             function_decl->name,
             QualType(function_decl->type),
-            cpp_this_context);
+            cpp_this_context,
+            is_in_template_pattern_context());
         Collect::ImmediateFunctionContextScope immediate_function_context_guard(
             collect_.get(), function_decl->is_consteval != 0);
 

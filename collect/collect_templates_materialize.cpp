@@ -1,6 +1,30 @@
 #include "collect.h"
 #include "collect_templates_internal.h"
 
+namespace {
+bool nested_template_arguments_are_dependent(
+    const Decl* nested_template,
+    const std::vector<TemplateArgument>& arguments,
+    const ASTContext* ast_ctx) {
+    return template_specialization_components_are_dependent(
+        nested_template,
+        arguments,
+        /*explicitly_dependent=*/false,
+        ast_ctx);
+}
+
+QualType make_deferred_nested_template_specialization_type(
+    const std::string& name,
+    const Decl* nested_template,
+    const std::vector<TemplateArgument>& arguments) {
+    return QualType(std::make_shared<TemplateSpecializationType>(
+        name,
+        nested_template,
+        arguments,
+        /*is_dependent=*/true));
+}
+} // namespace
+
 void Collect::note_specialization_use_for_symbol(
     const std::shared_ptr<Symbol>& symbol,
     SrcLoc loc) const {
@@ -170,6 +194,18 @@ QualType Collect::collect_lookup_record_nested_template_type(
     }
     if (matched_template) {
         *matched_template = true;
+    }
+
+    const auto* nested_template_decl =
+        static_cast<const Decl*>(nested_template->decl);
+    if (nested_template_arguments_are_dependent(
+            nested_template_decl,
+            arguments,
+            ast_ctx_.get())) {
+        return make_deferred_nested_template_specialization_type(
+            name,
+            nested_template_decl,
+            arguments);
     }
 
     if (auto* alias_template =

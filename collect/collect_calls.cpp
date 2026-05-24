@@ -1271,14 +1271,16 @@ std::unique_ptr<Expr> Collect::collect_function_call(
             callee_is_dependent = false;
         }
         if (callee_is_dependent || any_arg_is_dependent) {
-            if (auto typed_dependent_call =
-                    try_collect_typed_dependent_function_template_call(
-                        callee,
-                        {},
-                        false,
-                        args,
-                        loc)) {
-                return typed_dependent_call;
+            if (!session_.func_state_.current_function_is_template_pattern_body) {
+                if (auto typed_dependent_call =
+                        try_collect_typed_dependent_function_template_call(
+                            callee,
+                            {},
+                            false,
+                            args,
+                            loc)) {
+                    return typed_dependent_call;
+                }
             }
             if (callee_has_function_template_candidates) {
                 if (auto unresolved_template_call =
@@ -1765,14 +1767,16 @@ std::unique_ptr<Expr> Collect::collect_explicit_template_call_impl(
     if (explicit_args_are_dependent ||
         callee_is_dependent ||
         any_arg_is_dependent) {
-        if (auto typed_dependent_call =
-                try_collect_typed_dependent_function_template_call(
-                    callee,
-                    explicit_template_args,
-                    true,
-                    args,
-                    loc)) {
-            return typed_dependent_call;
+        if (!session_.func_state_.current_function_is_template_pattern_body) {
+            if (auto typed_dependent_call =
+                    try_collect_typed_dependent_function_template_call(
+                        callee,
+                        explicit_template_args,
+                        true,
+                        args,
+                        loc)) {
+                return typed_dependent_call;
+            }
         }
         return build_dependent_explicit_template_call(
             std::move(callee),

@@ -1894,7 +1894,8 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
         collect_->collect_start_function_definition(
             semantic_info.closure_name() + "::operator()",
             QualType(call_operator_type),
-            enclosing_this_context);
+            enclosing_this_context,
+            is_in_template_pattern_context());
 
         std::unique_ptr<CompoundStmt> body;
         std::unordered_set<std::string> lambda_stmt_labels;
@@ -2051,7 +2052,8 @@ std::unique_ptr<Expr> Parser::parse_block_literal_expression() {
         collect_->collect_start_function_definition(
             make_block_internal_name(block_loc) + "::__invoke",
             QualType(block_function_type),
-            Collect::CppThisContext{});
+            Collect::CppThisContext{},
+            is_in_template_pattern_context());
 
         std::unique_ptr<CompoundStmt> body;
         std::unordered_set<std::string> block_stmt_labels;
