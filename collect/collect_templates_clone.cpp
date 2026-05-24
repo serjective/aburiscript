@@ -1437,6 +1437,18 @@ bool clone_function_parameters_for_specialization(
 
     specialization->parameters.reserve(pattern->parameters.size());
     default_arguments_out.clear();
+    auto pick_parameter_substitution_pattern =
+        [](const ParamDecl* param_decl) -> QualType {
+        if (!param_decl) {
+            return QualType();
+        }
+        QualType original_type(param_decl->original_type);
+        if (original_type &&
+            !auto_type_utils::has_cxx_auto_type(original_type.get_shared())) {
+            return original_type;
+        }
+        return param_decl->type;
+    };
     for (size_t index = 0; index < pattern->parameters.size(); ++index) {
         auto* pattern_param = dyn_cast<ParamDecl>(pattern->parameters[index].get());
         if (!pattern_param) {
@@ -1449,19 +1461,6 @@ bool clone_function_parameters_for_specialization(
         }
 
         if (!pattern_param->is_parameter_pack) {
-            auto pick_parameter_substitution_pattern =
-                [](const ParamDecl* param_decl) -> QualType {
-                    if (!param_decl) {
-                        return QualType();
-                    }
-                    QualType original_type(param_decl->original_type);
-                    if (original_type &&
-                        !auto_type_utils::has_cxx_auto_type(
-                            original_type.get_shared())) {
-                        return original_type;
-                    }
-                    return param_decl->type;
-                };
             QualType spelled_param_type =
                 pick_parameter_substitution_pattern(pattern_param);
             auto substituted_param_type =
@@ -1535,11 +1534,63 @@ bool clone_function_parameters_for_specialization(
             continue;
         }
 
-        std::optional<size_t> pack_index;
-        if (!find_unique_parameter_pack_index_in_type(
-                pattern_param->type,
-                template_parameters,
-                pack_index)) {
+        auto pack_resolution = classify_parameter_pack_reference_in_type(
+            pattern_param->type,
+            template_parameters,
+            true);
+        if (pack_resolution.kind ==
+            TemplatePackReferenceResolutionKind::PreserveUnsubstituted) {
+            if (const Expr* default_expr =
+                    get_param_decl_default_argument(pattern_param)) {
+                (void)default_expr;
+                if (error_out) {
+                    *error_out =
+                        failure_context +
+                        " default arguments on function parameter packs are not supported yet";
+                }
+                return false;
+            }
+            QualType spelled_param_type =
+                pick_parameter_substitution_pattern(pattern_param);
+            auto substituted_param_type =
+                substitution_pass.rewrite_type(spelled_param_type);
+            if (auto_type_utils::auto_type_flavors_in(
+                    substituted_param_type.get_shared()) != 0) {
+                if (error_out) {
+                    *error_out =
+                        failure_context +
+                        " parameter substitution left an unresolved auto placeholder of type '" +
+                        substituted_param_type.to_string() + "'";
+                }
+                return false;
+            }
+            std::shared_ptr<Symbol> cloned_param_symbol = nullptr;
+            if (pattern_param->sym) {
+                cloned_param_symbol = clone_symbol_shallow_for_specialization(
+                    pattern_param->sym,
+                    substituted_param_type);
+                collect.collect_add_global_symbol(cloned_param_symbol);
+                substitution_pass.context().symbol_remap.emplace(
+                    pattern_param->sym.get(),
+                    cloned_param_symbol);
+            }
+            auto cloned_param_decl = collect.collect_make<ParamDecl>(
+                substituted_param_type,
+                pattern_param->get_name(),
+                cloned_param_symbol,
+                pattern_param->storage_class,
+                pattern_param->location);
+            cloned_param_decl->is_constexpr = pattern_param->is_constexpr;
+            cloned_param_decl->is_parameter_pack = true;
+            cloned_param_decl->original_type =
+                substitution_pass.rewrite_type(spelled_param_type).get_shared();
+
+            default_arguments_out.push_back(nullptr);
+            specialization->parameters.push_back(std::move(cloned_param_decl));
+            continue;
+        }
+        if (pack_resolution.kind ==
+            TemplatePackReferenceResolutionKind::Unsupported) {
             if (error_out) {
                 *error_out =
                     failure_context +
@@ -1547,7 +1598,8 @@ bool clone_function_parameters_for_specialization(
             }
             return false;
         }
-        if (!pack_index.has_value() || *pack_index >= specialization_bindings.size()) {
+        if (pack_resolution.kind == TemplatePackReferenceResolutionKind::None ||
+            !pack_resolution.parameter_index.has_value()) {
             if (error_out) {
                 *error_out =
                     "internal error: missing template pack binding while cloning " +
@@ -1555,7 +1607,16 @@ bool clone_function_parameters_for_specialization(
             }
             return false;
         }
-        const auto& pack_binding = specialization_bindings[*pack_index];
+        size_t pack_index = *pack_resolution.parameter_index;
+        if (pack_index >= specialization_bindings.size()) {
+            if (error_out) {
+                *error_out =
+                    "internal error: missing template pack binding while cloning " +
+                    failure_context;
+            }
+            return false;
+        }
+        const auto& pack_binding = specialization_bindings[pack_index];
         if (!pack_binding.is_pack()) {
             if (error_out) {
                 *error_out =

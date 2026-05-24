@@ -6,14 +6,15 @@
 
 using template_sema_internal::build_pack_element_argument_bindings;
 using template_sema_internal::build_pack_element_argument_bindings_for_shape;
+using template_sema_internal::classify_parameter_pack_reference_in_type;
 using template_sema_internal::collect_pack_expansion_shape_in_template_argument;
 using template_sema_internal::find_template_parameter_index_by_identity;
 using template_sema_internal::find_template_parameter_index_by_decl;
-using template_sema_internal::find_unique_parameter_pack_index_in_type;
 using template_sema_internal::make_template_binding_clone_pass_builder;
 using template_sema_internal::materialize_specialized_fold_expression;
 using template_sema_internal::normalize_concrete_template_value_argument;
 using template_sema_internal::TemplateClonePassBuilder;
+using template_sema_internal::TemplatePackReferenceResolutionKind;
 using template_sema_internal::template_arguments_depend_on_template_parameters;
 using template_sema_internal::TemplateSubstitutionPass;
 
@@ -1437,17 +1438,34 @@ QualType Collect::substitute_template_type_with_bindings(
             }
 
             changed = true;
-            std::optional<size_t> pack_index;
-            if (!find_unique_parameter_pack_index_in_type(
+            auto pack_resolution =
+                classify_parameter_pack_reference_in_type(
                     parameter,
                     parameters,
-                    pack_index)) {
+                    allow_unsubstituted_parameters);
+            if (pack_resolution.kind ==
+                TemplatePackReferenceResolutionKind::PreserveUnsubstituted) {
+                auto substituted_parameter = substitute_template_type_with_bindings(
+                    parameter,
+                    parameters,
+                    argument_bindings,
+                    loc,
+                    allow_unsubstituted_parameters,
+                    clone_context);
+                changed |= !substituted_parameter.equals_qualified(parameter);
+                substituted_parameters.push_back(std::move(substituted_parameter));
+                substituted_parameter_pack_flags.push_back(1);
+                continue;
+            }
+            if (pack_resolution.kind ==
+                TemplatePackReferenceResolutionKind::Unsupported) {
                 report_error(
                     "function type substitution currently supports only one pack per parameter type",
                     loc);
                 return type;
             }
-            if (!pack_index.has_value()) {
+            if (pack_resolution.kind == TemplatePackReferenceResolutionKind::None ||
+                !pack_resolution.parameter_index.has_value()) {
                 auto substituted_parameter = substitute_template_type_with_bindings(
                     parameter,
                     parameters,
@@ -1461,13 +1479,14 @@ QualType Collect::substitute_template_type_with_bindings(
                 continue;
             }
 
-            if (*pack_index >= argument_bindings.size()) {
+            size_t pack_index = *pack_resolution.parameter_index;
+            if (pack_index >= argument_bindings.size()) {
                 report_error(
                     "internal error: missing function type parameter-pack binding",
                     loc);
                 return type;
             }
-            const auto& pack_binding = argument_bindings[*pack_index];
+            const auto& pack_binding = argument_bindings[pack_index];
             if (!pack_binding.is_pack()) {
                 auto substituted_parameter = substitute_template_type_with_bindings(
                     parameter,

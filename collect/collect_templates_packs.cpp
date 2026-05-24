@@ -1074,6 +1074,45 @@ bool find_unique_parameter_pack_index_in_type(
     return found_index.has_value();
 }
 
+TemplatePackReferenceResolution classify_parameter_pack_reference_in_type(
+    QualType type,
+    const TemplateParameterList& parameters,
+    bool allow_unsubstituted_parameters) {
+    TemplatePackExpansionShape shape;
+    if (!collect_pack_expansion_shape_in_type(type, parameters, shape) ||
+        shape.has_unsupported_dependency) {
+        if (allow_unsubstituted_parameters &&
+            shape.has_unsupported_dependency &&
+            shape.referenced_parameters.empty()) {
+            return {
+                TemplatePackReferenceResolutionKind::PreserveUnsubstituted,
+                std::nullopt};
+        }
+        return {
+            TemplatePackReferenceResolutionKind::Unsupported,
+            std::nullopt};
+    }
+    if (shape.has_multiple_referenced_packs()) {
+        return {
+            TemplatePackReferenceResolutionKind::Unsupported,
+            std::nullopt};
+    }
+    auto unique = shape.unique_referenced_parameter();
+    if (!unique.has_value()) {
+        return {TemplatePackReferenceResolutionKind::None, std::nullopt};
+    }
+    auto parameter_index =
+        find_template_parameter_index_by_decl(*unique, parameters);
+    if (!parameter_index.has_value()) {
+        return {
+            TemplatePackReferenceResolutionKind::Unsupported,
+            std::nullopt};
+    }
+    return {
+        TemplatePackReferenceResolutionKind::ActivePack,
+        parameter_index};
+}
+
 std::optional<size_t> find_pack_expansion_arity_for_bindings(
     const TemplatePackExpansionShape& shape,
     const TemplateParameterList& parameters,

@@ -137,6 +137,24 @@ bool find_unique_parameter_pack_index_in_type(
     const TemplateParameterList& parameters,
     std::optional<size_t>& found_index);
 
+enum class TemplatePackReferenceResolutionKind {
+    None,
+    ActivePack,
+    PreserveUnsubstituted,
+    Unsupported,
+};
+
+struct TemplatePackReferenceResolution {
+    TemplatePackReferenceResolutionKind kind =
+        TemplatePackReferenceResolutionKind::None;
+    std::optional<size_t> parameter_index;
+};
+
+TemplatePackReferenceResolution classify_parameter_pack_reference_in_type(
+    QualType type,
+    const TemplateParameterList& parameters,
+    bool allow_unsubstituted_parameters);
+
 std::optional<size_t> find_pack_expansion_arity_for_bindings(
     const TemplatePackExpansionShape& shape,
     const TemplateParameterList& parameters,
