@@ -584,6 +584,10 @@ const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
 }
 
 std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
+    auto syntax_result = probe_cpp_template_name_argument_prefix_syntax();
+    if (syntax_result == tentative_syntax_probe::Result::NoMatch) {
+        return std::nullopt;
+    }
     if (!collect_) {
         return std::nullopt;
     }
@@ -3546,6 +3550,11 @@ bool Parser::can_start_cpp_constrained_placeholder_type_specifier_for_lookahead(
     if (!is_cxx_mode_active() || !lang_opts.is_cxx20_or_later()) {
         return false;
     }
+    auto syntax_result =
+        probe_cxx_constrained_placeholder_type_specifier_syntax();
+    if (syntax_result == tentative_syntax_probe::Result::NoMatch) {
+        return false;
+    }
 
     RevertingTentativeParsingAction tentative(*this);
     std::optional<CppTypeConstraint> type_constraint;
@@ -5937,6 +5946,13 @@ bool Parser::is_cpp_qualified_id_start() {
     if (!is_cxx_mode_active()) {
         return false;
     }
+    auto syntax_result = probe_cpp_qualified_id_start_syntax();
+    if (syntax_result == tentative_syntax_probe::Result::Match) {
+        return true;
+    }
+    if (syntax_result == tentative_syntax_probe::Result::NoMatch) {
+        return false;
+    }
     RevertingTentativeParsingAction tentative(*this);
     try {
         if (gentle_check(TokenType::DECLTYPE_KW)) {
@@ -7715,14 +7731,10 @@ Parser::TPResult Parser::try_parse_cpp_qualified_declarator() {
     RevertingTentativeParsingAction tentative(*this);
     size_t start_idx = tok_mgnt.get_token_idx();
 
-    tentative_syntax_probe::Config probe_cfg{
-        .cxx_mode = is_cxx_mode_active(),
-        .blocks_enabled = type_ctx && type_ctx->target &&
-            darwin_blocks::blocks_enabled_for_langopts(
-                lang_opts, *type_ctx->target)
-    };
     tentative_syntax_probe::Result syntax_probe_result =
-        tentative_syntax_probe::probe_cpp_qualified_declarator(tok_mgnt, probe_cfg);
+        tentative_syntax_probe::probe_cpp_qualified_declarator(
+            tok_mgnt,
+            syntax_probe_config());
     if (syntax_probe_result == tentative_syntax_probe::Result::Match) {
         return TPResult::True;
     }

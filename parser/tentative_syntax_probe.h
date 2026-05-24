@@ -305,6 +305,82 @@ public:
         return is_scope_resolution_here() ? Result::Match : Result::NoMatch;
     }
 
+    Result probe_cxx_constrained_placeholder_type_specifier() {
+        if (!cfg_.cxx_mode) {
+            return Result::NoMatch;
+        }
+
+        size_t offset = 0;
+        if (!consume_concept_name_at(offset)) {
+            return Result::NoMatch;
+        }
+        if (token_at(offset).type == TokenType::LESS_THAN &&
+            !skip_template_argument_list_at(offset)) {
+            return Result::Inconclusive;
+        }
+        return is_placeholder_type_specifier_at(offset) ? Result::Match
+                                                       : Result::NoMatch;
+    }
+
+    Result probe_cpp_qualified_id_start() {
+        if (!cfg_.cxx_mode) {
+            return Result::NoMatch;
+        }
+
+        size_t offset = 0;
+        if (token_at(offset).type == TokenType::DECLTYPE_KW) {
+            ++offset;
+            if (!skip_balanced_tokens_at(
+                    offset,
+                    TokenType::LEFT_PAREN,
+                    TokenType::RIGHT_PAREN)) {
+                return Result::Inconclusive;
+            }
+            return is_scope_resolution_at(offset) ? Result::Match
+                                                 : Result::NoMatch;
+        }
+
+        bool has_global_qualifier = consume_scope_resolution_at(offset);
+        if (token_at(offset).type == TokenType::OPERATOR_KW) {
+            return has_global_qualifier ? Result::Match : Result::NoMatch;
+        }
+        if (token_at(offset).type != TokenType::IDENTIFIER) {
+            return Result::NoMatch;
+        }
+
+        ++offset;
+        if (token_at(offset).type == TokenType::LESS_THAN &&
+            !skip_template_argument_list_at(offset)) {
+            return Result::Inconclusive;
+        }
+        return has_global_qualifier || is_scope_resolution_at(offset)
+            ? Result::Match
+            : Result::NoMatch;
+    }
+
+    Result probe_cpp_template_name_argument_prefix() {
+        if (!cfg_.cxx_mode) {
+            return Result::NoMatch;
+        }
+
+        size_t offset = 0;
+        consume_scope_resolution_at(offset);
+        if (token_at(offset).type != TokenType::IDENTIFIER) {
+            return Result::NoMatch;
+        }
+        ++offset;
+        if (token_at(offset).type == TokenType::LESS_THAN &&
+            !skip_template_argument_list_at(offset)) {
+            return Result::Inconclusive;
+        }
+        if (is_scope_resolution_at(offset) ||
+            is_cpp_template_argument_boundary_at(offset) ||
+            token_at(offset).type == TokenType::ELLIPSIS) {
+            return Result::Match;
+        }
+        return Result::NoMatch;
+    }
+
     CxxStatementDisambiguation probe_cxx_statement_disambiguation() {
         if (!cfg_.cxx_mode) {
             return CxxStatementDisambiguation::Invalid;
@@ -392,6 +468,53 @@ private:
         return false;
     }
 
+    bool is_scope_resolution_at(size_t offset) const {
+        return token_at(offset).type == TokenType::SCOPE_RESOLUTION ||
+               (token_at(offset).type == TokenType::COLON &&
+                token_at(offset + 1).type == TokenType::COLON);
+    }
+
+    bool is_placeholder_type_specifier_at(size_t offset) const {
+        if (token_at(offset).type == TokenType::AUTO) {
+            return true;
+        }
+        return token_at(offset).type == TokenType::DECLTYPE_KW &&
+               token_at(offset + 1).type == TokenType::LEFT_PAREN &&
+               token_at(offset + 2).type == TokenType::AUTO &&
+               token_at(offset + 3).type == TokenType::RIGHT_PAREN;
+    }
+
+    bool is_cpp_template_argument_boundary_at(size_t offset) const {
+        switch (token_at(offset).type) {
+            case TokenType::COMMA:
+            case TokenType::GREATER_THAN:
+            case TokenType::RIGHT_SHIFT:
+            case TokenType::ASSIGN_RSHIFT:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool consume_concept_name_at(size_t& offset) const {
+        consume_scope_resolution_at(offset);
+        if (token_at(offset).type != TokenType::IDENTIFIER) {
+            return false;
+        }
+
+        while (true) {
+            ++offset;
+            size_t after_scope = offset;
+            if (!consume_scope_resolution_at(after_scope)) {
+                return true;
+            }
+            if (token_at(after_scope).type != TokenType::IDENTIFIER) {
+                return false;
+            }
+            offset = after_scope;
+        }
+    }
+
     bool skip_balanced_tokens_at(size_t& offset,
                                  TokenType open_tok,
                                  TokenType close_tok) const {
@@ -458,6 +581,11 @@ private:
                 return depth == 0;
             }
             if (tok_type == TokenType::RIGHT_SHIFT) {
+                depth -= 2;
+                ++offset;
+                return depth <= 0;
+            }
+            if (tok_type == TokenType::ASSIGN_RSHIFT) {
                 depth -= 2;
                 ++offset;
                 return depth <= 0;
@@ -1242,6 +1370,24 @@ inline Result probe_declarator(TokenMgnt& mgnt, const Config& cfg) {
 inline Result probe_cpp_qualified_declarator(TokenMgnt& mgnt, const Config& cfg) {
     detail::SyntaxProbe probe(mgnt, cfg);
     return probe.probe_cpp_qualified_declarator();
+}
+
+inline Result probe_cxx_constrained_placeholder_type_specifier(
+    TokenMgnt& mgnt,
+    const Config& cfg) {
+    detail::SyntaxProbe probe(mgnt, cfg);
+    return probe.probe_cxx_constrained_placeholder_type_specifier();
+}
+
+inline Result probe_cpp_qualified_id_start(TokenMgnt& mgnt, const Config& cfg) {
+    detail::SyntaxProbe probe(mgnt, cfg);
+    return probe.probe_cpp_qualified_id_start();
+}
+
+inline Result probe_cpp_template_name_argument_prefix(TokenMgnt& mgnt,
+                                                      const Config& cfg) {
+    detail::SyntaxProbe probe(mgnt, cfg);
+    return probe.probe_cpp_template_name_argument_prefix();
 }
 
 inline CxxStatementDisambiguation

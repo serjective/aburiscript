@@ -512,33 +512,38 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                          t.type == TokenType::SCOPE_RESOLUTION ||
                          (t.type == TokenType::COLON &&
                           mgnt->peek_token().type == TokenType::COLON))) {
-                        Parser::RevertingTentativeParsingAction tentative(*pars);
-                        std::optional<CppTypeConstraint> type_constraint;
-                        try {
-                            type_constraint =
-                                pars->parse_cpp_type_constraint(
-                                    /*diagnose_on_failure=*/false);
-                        } catch (const ParseError&) {
-                            type_constraint = std::nullopt;
-                        } catch (const FatalErrorLimitReached&) {
-                            throw;
-                        }
-                        bool followed_by_placeholder =
-                            type_constraint &&
-                            (mgnt->current_token().type == TokenType::AUTO ||
-                             (mgnt->current_token().type ==
-                                  TokenType::DECLTYPE_KW &&
-                              mgnt->peek_token(1).type ==
-                                  TokenType::LEFT_PAREN &&
-                              mgnt->peek_token(2).type == TokenType::AUTO &&
-                              mgnt->peek_token(3).type ==
-                                  TokenType::RIGHT_PAREN));
-                        if (followed_by_placeholder) {
-                            tentative.commit();
-                            pending_cxx_auto_type_constraint =
-                                std::make_shared<CppTypeConstraint>(
-                                    std::move(*type_constraint));
-                            continue;
+                        auto constraint_syntax =
+                            pars->probe_cxx_constrained_placeholder_type_specifier_syntax();
+                        if (constraint_syntax !=
+                            tentative_syntax_probe::Result::NoMatch) {
+                            Parser::RevertingTentativeParsingAction tentative(*pars);
+                            std::optional<CppTypeConstraint> type_constraint;
+                            try {
+                                type_constraint =
+                                    pars->parse_cpp_type_constraint(
+                                        /*diagnose_on_failure=*/false);
+                            } catch (const ParseError&) {
+                                type_constraint = std::nullopt;
+                            } catch (const FatalErrorLimitReached&) {
+                                throw;
+                            }
+                            bool followed_by_placeholder =
+                                type_constraint &&
+                                (mgnt->current_token().type == TokenType::AUTO ||
+                                 (mgnt->current_token().type ==
+                                      TokenType::DECLTYPE_KW &&
+                                  mgnt->peek_token(1).type ==
+                                      TokenType::LEFT_PAREN &&
+                                  mgnt->peek_token(2).type == TokenType::AUTO &&
+                                  mgnt->peek_token(3).type ==
+                                      TokenType::RIGHT_PAREN));
+                            if (followed_by_placeholder) {
+                                tentative.commit();
+                                pending_cxx_auto_type_constraint =
+                                    std::make_shared<CppTypeConstraint>(
+                                        std::move(*type_constraint));
+                                continue;
+                            }
                         }
                     }
                     if (is_gnu_attribute_token(t)) {

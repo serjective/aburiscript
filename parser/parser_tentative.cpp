@@ -163,6 +163,51 @@ bool Parser::is_in_tentative_context() const {
     return !tentative_context_stack_.empty();
 }
 
+tentative_syntax_probe::Config Parser::syntax_probe_config() const {
+    return tentative_syntax_probe::Config{
+        .cxx_mode = is_cxx_mode_active(),
+        .blocks_enabled = type_ctx && type_ctx->target &&
+            darwin_blocks::blocks_enabled_for_langopts(
+                lang_opts, *type_ctx->target)};
+}
+
+tentative_syntax_probe::Result
+Parser::probe_cxx_constrained_placeholder_type_specifier_syntax() {
+    size_t start_idx = tok_mgnt.get_token_idx();
+    auto split_state = tok_mgnt.get_split_token_state();
+    auto result =
+        tentative_syntax_probe::probe_cxx_constrained_placeholder_type_specifier(
+            tok_mgnt,
+            syntax_probe_config());
+    tok_mgnt.set_token_idx(start_idx);
+    tok_mgnt.set_split_token_state(split_state);
+    return result;
+}
+
+tentative_syntax_probe::Result Parser::probe_cpp_qualified_id_start_syntax() {
+    size_t start_idx = tok_mgnt.get_token_idx();
+    auto split_state = tok_mgnt.get_split_token_state();
+    auto result = tentative_syntax_probe::probe_cpp_qualified_id_start(
+        tok_mgnt,
+        syntax_probe_config());
+    tok_mgnt.set_token_idx(start_idx);
+    tok_mgnt.set_split_token_state(split_state);
+    return result;
+}
+
+tentative_syntax_probe::Result
+Parser::probe_cpp_template_name_argument_prefix_syntax() {
+    size_t start_idx = tok_mgnt.get_token_idx();
+    auto split_state = tok_mgnt.get_split_token_state();
+    auto result =
+        tentative_syntax_probe::probe_cpp_template_name_argument_prefix(
+            tok_mgnt,
+            syntax_probe_config());
+    tok_mgnt.set_token_idx(start_idx);
+    tok_mgnt.set_split_token_state(split_state);
+    return result;
+}
+
 Parser::TentativeParsingAction::TentativeParsingAction(Parser& parser)
     : parser_(parser),
       context_id_(parser_.begin_tentative_context()) {
@@ -239,14 +284,8 @@ Parser::TPResult Parser::try_parse_type_name() {
     RevertingTentativeParsingAction tentative(*this);
     size_t start_idx = tok_mgnt.get_token_idx();
 
-    tentative_syntax_probe::Config probe_cfg{
-        .cxx_mode = is_cxx_mode_active(),
-        .blocks_enabled = type_ctx && type_ctx->target &&
-            darwin_blocks::blocks_enabled_for_langopts(
-                lang_opts, *type_ctx->target)
-    };
     tentative_syntax_probe::Result syntax_probe_result =
-        tentative_syntax_probe::probe_type_name(tok_mgnt, probe_cfg);
+        tentative_syntax_probe::probe_type_name(tok_mgnt, syntax_probe_config());
     if (syntax_probe_result == tentative_syntax_probe::Result::Match) {
         return TPResult::True;
     }
@@ -292,14 +331,8 @@ Parser::TPResult Parser::try_parse_declarator() {
     RevertingTentativeParsingAction tentative(*this);
     size_t start_idx = tok_mgnt.get_token_idx();
 
-    tentative_syntax_probe::Config probe_cfg{
-        .cxx_mode = is_cxx_mode_active(),
-        .blocks_enabled = type_ctx && type_ctx->target &&
-            darwin_blocks::blocks_enabled_for_langopts(
-                lang_opts, *type_ctx->target)
-    };
     tentative_syntax_probe::Result syntax_probe_result =
-        tentative_syntax_probe::probe_declarator(tok_mgnt, probe_cfg);
+        tentative_syntax_probe::probe_declarator(tok_mgnt, syntax_probe_config());
     if (syntax_probe_result == tentative_syntax_probe::Result::Match) {
         return TPResult::True;
     }
@@ -390,15 +423,10 @@ Parser::CxxStmtDisambiguation Parser::classify_cxx_stmt_disambiguation() {
     // or expression-statement, it is interpreted as a declaration.
     auto start_idx = tok_mgnt.get_token_idx();
     auto split_state = tok_mgnt.get_split_token_state();
-    tentative_syntax_probe::Config probe_cfg{
-        .cxx_mode = true,
-        .blocks_enabled = type_ctx && type_ctx->target &&
-            darwin_blocks::blocks_enabled_for_langopts(
-                lang_opts, *type_ctx->target)
-    };
     auto syntax_result =
         tentative_syntax_probe::probe_cxx_statement_disambiguation(
-            tok_mgnt, probe_cfg);
+            tok_mgnt,
+            syntax_probe_config());
     tok_mgnt.set_token_idx(start_idx);
     tok_mgnt.set_split_token_state(split_state);
 
