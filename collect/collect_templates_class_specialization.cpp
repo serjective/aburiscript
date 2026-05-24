@@ -2499,20 +2499,23 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         std::unordered_map<const TemplateParameterDecl*,
                            const TemplateParameterDecl*>& parameter_rebinds,
         const std::string& failure_context,
-        SrcLoc fallback_loc) {
+        SrcLoc fallback_loc,
+        std::unordered_map<const Symbol*, std::shared_ptr<Symbol>>*
+            symbol_remap_out = nullptr) {
         cloned_parameters.clear();
         cloned_parameters.reserve(pattern_parameters.size());
 
-        for (const auto& parameter : pattern_parameters) {
+        std::function<std::unique_ptr<TemplateParameterDecl>(
+            const TemplateParameterDecl*)>
+            clone_parameter =
+                [&](const TemplateParameterDecl* parameter)
+                    -> std::unique_ptr<TemplateParameterDecl> {
             if (!parameter) {
-                return fail_instantiation(
-                    "internal error: missing " + failure_context +
-                        " template parameter",
-                    fallback_loc);
+                return nullptr;
             }
 
             if (auto* type_parameter =
-                    dyn_cast<TemplateTypeParmDecl>(parameter.get())) {
+                    dyn_cast<TemplateTypeParmDecl>(parameter)) {
                 auto cloned_parameter_type =
                     std::make_shared<TemplateTypeParmType>(
                         type_parameter->name,
@@ -2531,12 +2534,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 parameter_rebinds.emplace(
                     type_parameter,
                     cloned_parameter.get());
-                cloned_parameters.push_back(std::move(cloned_parameter));
-                continue;
+                return cloned_parameter;
             }
 
             if (auto* non_type_parameter =
-                    dyn_cast<TemplateNonTypeParmDecl>(parameter.get())) {
+                    dyn_cast<TemplateNonTypeParmDecl>(parameter)) {
                 auto rewritten_parameter_type =
                     remap_template_parameter_types_in_type(
                         template_clone_pass.rewrite_type(
@@ -2551,9 +2553,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                                 template_clone_pass.rewrite_type(
                                     non_type_parameter->sym->type),
                                 parameter_rebinds));
-                    template_clone_pass.context().symbol_remap.emplace(
-                        non_type_parameter->sym.get(),
-                        cloned_parameter_symbol);
+                    if (symbol_remap_out) {
+                        symbol_remap_out->emplace(
+                            non_type_parameter->sym.get(),
+                            cloned_parameter_symbol);
+                    } else {
+                        template_clone_pass.context().symbol_remap.emplace(
+                            non_type_parameter->sym.get(),
+                            cloned_parameter_symbol);
+                    }
                 }
 
                 auto cloned_parameter =
@@ -2568,14 +2576,141 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 parameter_rebinds.emplace(
                     non_type_parameter,
                     cloned_parameter.get());
-                cloned_parameters.push_back(std::move(cloned_parameter));
-                continue;
+                return cloned_parameter;
             }
 
-            return fail_instantiation(
-                failure_context +
-                    " instantiation for this template parameter kind is not supported yet",
-                parameter->location);
+            if (auto* template_parameter =
+                    dyn_cast<TemplateTemplateParmDecl>(parameter)) {
+                TemplateParameterList cloned_inner_parameters;
+                cloned_inner_parameters.reserve(
+                    template_parameter->parameters.size());
+                for (const auto& inner_parameter :
+                     template_parameter->parameters) {
+                    auto cloned_inner_parameter =
+                        clone_parameter(inner_parameter.get());
+                    if (!cloned_inner_parameter) {
+                        return nullptr;
+                    }
+                    cloned_inner_parameters.push_back(
+                        std::move(cloned_inner_parameter));
+                }
+
+                auto cloned_parameter =
+                    collect.collect_make<TemplateTemplateParmDecl>(
+                        std::move(cloned_inner_parameters),
+                        template_parameter->name,
+                        template_parameter->depth,
+                        template_parameter->index,
+                        template_parameter->uses_typename_keyword,
+                        template_parameter->is_parameter_pack,
+                        template_parameter->location);
+                parameter_rebinds.emplace(
+                    template_parameter,
+                    cloned_parameter.get());
+                return cloned_parameter;
+            }
+
+            return nullptr;
+        };
+
+        for (const auto& parameter : pattern_parameters) {
+            if (!parameter) {
+                return fail_instantiation(
+                    "internal error: missing " + failure_context +
+                        " template parameter",
+                    fallback_loc);
+            }
+
+            auto cloned_parameter = clone_parameter(parameter.get());
+            if (!cloned_parameter) {
+                return fail_instantiation(
+                    failure_context +
+                        " instantiation for this template parameter kind is not supported yet",
+                    parameter->location);
+            }
+            cloned_parameters.push_back(std::move(cloned_parameter));
+        }
+        return true;
+    }
+
+    bool clone_template_parameter_defaults_in_list(
+        const TemplateParameterList& pattern_parameters,
+        TemplateParameterList& cloned_parameters,
+        TemplateSubstitutionPass& template_clone_pass,
+        const std::unordered_map<const TemplateParameterDecl*,
+                                 const TemplateParameterDecl*>& parameter_rebinds,
+        const std::string& failure_context,
+        SrcLoc fallback_loc) {
+        for (size_t index = 0;
+             index < pattern_parameters.size() &&
+             index < cloned_parameters.size();
+             ++index) {
+            const auto* pattern_parameter = pattern_parameters[index].get();
+            auto* cloned_parameter = cloned_parameters[index].get();
+            if (!pattern_parameter || !cloned_parameter) {
+                return fail_instantiation(
+                    "internal error: missing " + failure_context +
+                        " default argument parameter",
+                    fallback_loc);
+            }
+
+            const auto* default_argument =
+                get_template_parameter_default_argument(pattern_parameter);
+            if (default_argument) {
+                auto rewritten_defaults =
+                    collect.substitute_template_arguments_with_bindings(
+                        {*default_argument},
+                        *selected_parameters,
+                        specialization_bindings,
+                        loc);
+                if (rewritten_defaults.size() != 1) {
+                    return fail_instantiation(
+                        "internal error: failed to rewrite " +
+                            failure_context + " default argument",
+                        pattern_parameter->location);
+                }
+
+                auto rewritten_default = std::move(rewritten_defaults.front());
+                std::string default_error;
+                if (!remap_template_argument_after_outer_substitution(
+                        rewritten_default,
+                        parameter_rebinds,
+                        template_clone_pass.context(),
+                        &default_error)) {
+                    return fail_instantiation(
+                        default_error.empty()
+                            ? failure_context +
+                                  " default argument cloning is not supported"
+                            : default_error,
+                        pattern_parameter->location);
+                }
+                set_template_parameter_default_argument(
+                    cloned_parameter,
+                    std::move(rewritten_default));
+            }
+
+            auto* pattern_template_parameter =
+                dyn_cast<TemplateTemplateParmDecl>(
+                    const_cast<TemplateParameterDecl*>(pattern_parameter));
+            auto* cloned_template_parameter =
+                dyn_cast<TemplateTemplateParmDecl>(cloned_parameter);
+            if (pattern_template_parameter || cloned_template_parameter) {
+                if (!pattern_template_parameter || !cloned_template_parameter) {
+                    return fail_instantiation(
+                        "internal error: mismatched " + failure_context +
+                            " template-template parameter clone",
+                        pattern_parameter->location);
+                }
+                if (!clone_template_parameter_defaults_in_list(
+                        pattern_template_parameter->parameters,
+                        cloned_template_parameter->parameters,
+                        template_clone_pass,
+                        parameter_rebinds,
+                        failure_context,
+                        pattern_template_parameter->location)) {
+                    return false;
+                }
+            }
         }
         return true;
     }
@@ -2590,46 +2725,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         if (!pattern_template || !cloned_template) {
             return false;
         }
-        for (size_t index = 0;
-             index < pattern_template->parameters.size() &&
-             index < cloned_template->parameters.size();
-             ++index) {
-            const auto* default_argument = get_template_parameter_default_argument(
-                pattern_template->parameters[index].get());
-            if (!default_argument) {
-                continue;
-            }
-
-            auto rewritten_defaults =
-                collect.substitute_template_arguments_with_bindings(
-                    {*default_argument},
-                    *selected_parameters,
-                    specialization_bindings,
-                    loc);
-            if (rewritten_defaults.size() != 1) {
-                return fail_instantiation(
-                    "internal error: failed to rewrite " + failure_context +
-                        " default argument",
-                    pattern_template->location);
-            }
-
-            auto rewritten_default = std::move(rewritten_defaults.front());
-            std::string default_error;
-            if (!remap_template_argument_after_outer_substitution(
-                    rewritten_default,
-                    parameter_rebinds,
-                    template_clone_pass.context(),
-                    &default_error)) {
-                return fail_instantiation(
-                    default_error.empty()
-                        ? failure_context +
-                              " default argument cloning is not supported"
-                        : default_error,
-                    pattern_template->location);
-            }
-            set_template_parameter_default_argument(
-                cloned_template->parameters[index].get(),
-                std::move(rewritten_default));
+        if (!clone_template_parameter_defaults_in_list(
+                pattern_template->parameters,
+                cloned_template->parameters,
+                template_clone_pass,
+                parameter_rebinds,
+                failure_context,
+                pattern_template->location)) {
+            return false;
         }
 
         if (!merge_template_decl_default_arguments(cloned_template, nullptr)) {
@@ -3080,127 +3183,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         auto alias_template_clone_pass =
             alias_template_builder.build_substitution_pass();
 
-        std::function<std::unique_ptr<TemplateParameterDecl>(
-            const TemplateParameterDecl*,
-            std::unordered_map<const TemplateParameterDecl*,
-                               const TemplateParameterDecl*>&)>
-            clone_alias_template_parameter =
-                [&](const TemplateParameterDecl* parameter,
-                    std::unordered_map<const TemplateParameterDecl*,
-                                       const TemplateParameterDecl*>& active_rebinds)
-                    -> std::unique_ptr<TemplateParameterDecl> {
-            if (!parameter) {
-                return nullptr;
-            }
-
-            if (auto* type_parameter =
-                    dyn_cast<TemplateTypeParmDecl>(parameter)) {
-                auto cloned_parameter_type =
-                    std::make_shared<TemplateTypeParmType>(
-                        type_parameter->name,
-                        type_parameter->depth,
-                        type_parameter->index,
-                        type_parameter->is_parameter_pack);
-                auto cloned_parameter =
-                    collect.collect_make<TemplateTypeParmDecl>(
-                        type_parameter->name,
-                        type_parameter->depth,
-                        type_parameter->index,
-                        cloned_parameter_type,
-                        type_parameter->is_parameter_pack,
-                        type_parameter->location);
-                cloned_parameter_type->parameter_decl = cloned_parameter.get();
-                active_rebinds.emplace(type_parameter, cloned_parameter.get());
-                return cloned_parameter;
-            }
-
-            if (auto* non_type_parameter =
-                    dyn_cast<TemplateNonTypeParmDecl>(parameter)) {
-                auto rewritten_parameter_type =
-                    remap_template_parameter_types_in_type(
-                        alias_template_clone_pass.rewrite_type(
-                            non_type_parameter->type),
-                        active_rebinds);
-                std::shared_ptr<Symbol> cloned_parameter_symbol = nullptr;
-                if (non_type_parameter->sym) {
-                    cloned_parameter_symbol =
-                        clone_symbol_shallow_for_specialization(
-                            non_type_parameter->sym,
-                            remap_template_parameter_types_in_type(
-                                alias_template_clone_pass.rewrite_type(
-                                    non_type_parameter->sym->type),
-                                active_rebinds));
-                    alias_template_clone_pass.context().symbol_remap.emplace(
-                        non_type_parameter->sym.get(),
-                        cloned_parameter_symbol);
-                }
-
-                auto cloned_parameter =
-                    collect.collect_make<TemplateNonTypeParmDecl>(
-                        non_type_parameter->name,
-                        non_type_parameter->depth,
-                        non_type_parameter->index,
-                        rewritten_parameter_type,
-                        cloned_parameter_symbol,
-                        non_type_parameter->is_parameter_pack,
-                        non_type_parameter->location);
-                active_rebinds.emplace(non_type_parameter, cloned_parameter.get());
-                return cloned_parameter;
-            }
-
-            if (auto* template_parameter =
-                    dyn_cast<TemplateTemplateParmDecl>(parameter)) {
-                auto inner_rebinds = active_rebinds;
-                TemplateParameterList cloned_inner_parameters;
-                cloned_inner_parameters.reserve(
-                    template_parameter->parameters.size());
-                for (const auto& inner_parameter :
-                     template_parameter->parameters) {
-                    auto cloned_inner_parameter =
-                        clone_alias_template_parameter(
-                            inner_parameter.get(),
-                            inner_rebinds);
-                    if (!cloned_inner_parameter) {
-                        return nullptr;
-                    }
-                    cloned_inner_parameters.push_back(
-                        std::move(cloned_inner_parameter));
-                }
-
-                auto cloned_parameter =
-                    collect.collect_make<TemplateTemplateParmDecl>(
-                        std::move(cloned_inner_parameters),
-                        template_parameter->name,
-                        template_parameter->depth,
-                        template_parameter->index,
-                        template_parameter->uses_typename_keyword,
-                        template_parameter->is_parameter_pack,
-                        template_parameter->location);
-                active_rebinds.emplace(template_parameter, cloned_parameter.get());
-                return cloned_parameter;
-            }
-
-            return nullptr;
-        };
-
-        for (const auto& parameter : alias_template_decl->parameters) {
-            if (!parameter) {
-                return fail_instantiation(
-                    "internal error: missing class template nested alias template parameter",
-                    alias_template_decl->location);
-            }
-
-            auto cloned_parameter =
-                clone_alias_template_parameter(
-                    parameter.get(),
-                    parameter_rebinds);
-            if (!cloned_parameter) {
-                return fail_instantiation(
-                    "class template nested alias template instantiation for this template parameter kind is not supported yet",
-                    parameter->location);
-            }
-            cloned_template_decl->parameters.push_back(
-                std::move(cloned_parameter));
+        if (!clone_template_parameters_into(
+                alias_template_decl->parameters,
+                cloned_template_decl->parameters,
+                alias_template_clone_pass,
+                parameter_rebinds,
+                "class template nested alias template",
+                alias_template_decl->location)) {
+            return false;
         }
 
         auto rewritten_alias_type = remap_template_parameter_types_in_type(
@@ -3225,51 +3215,13 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         rewritten_alias_decl->underlying = desugar_type(rewritten_alias_type);
         rewritten_alias_decl->sym = cloned_alias_symbol;
 
-        for (size_t index = 0;
-             index < alias_template_decl->parameters.size() &&
-             index < cloned_template_decl->parameters.size();
-             ++index) {
-            const auto* default_argument = get_template_parameter_default_argument(
-                alias_template_decl->parameters[index].get());
-            if (!default_argument) {
-                continue;
-            }
-
-            auto rewritten_defaults = collect.substitute_template_arguments_with_bindings(
-                {*default_argument},
-                *selected_parameters,
-                specialization_bindings,
-                loc);
-            if (rewritten_defaults.size() != 1) {
-                return fail_instantiation(
-                    "internal error: failed to rewrite class template nested alias template default argument",
-                    alias_template_decl->location);
-            }
-
-            auto rewritten_default = std::move(rewritten_defaults.front());
-            std::string default_error;
-            if (!remap_template_argument_after_outer_substitution(
-                    rewritten_default,
-                    parameter_rebinds,
-                    alias_template_clone_pass.context(),
-                    &default_error)) {
-                return fail_instantiation(
-                    default_error.empty()
-                        ? "class template nested alias template default argument cloning is not supported"
-                        : default_error,
-                    alias_template_decl->location);
-            }
-            set_template_parameter_default_argument(
-                cloned_template_decl->parameters[index].get(),
-                std::move(rewritten_default));
-        }
-
-        if (!merge_template_decl_default_arguments(
+        if (!clone_template_parameter_defaults(
+                alias_template_decl,
                 cloned_template_decl.get(),
-                nullptr)) {
-            return fail_instantiation(
-                "internal error: failed to register class template nested alias template defaults",
-                alias_template_decl->location);
+                alias_template_clone_pass,
+                parameter_rebinds,
+                "class template nested alias template")) {
+            return false;
         }
 
         RecordSemanticState::NestedTemplate nested_template;
@@ -3433,78 +3385,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         pending_method_template.symbol_remap.reserve(
             method_template_decl->parameters.size());
 
-        for (const auto& parameter : method_template_decl->parameters) {
-            if (!parameter) {
-                return fail_instantiation(
-                    "internal error: missing class template member template parameter",
-                    method_template_decl->location);
-            }
-
-            if (auto* type_parameter =
-                    dyn_cast<TemplateTypeParmDecl>(parameter.get())) {
-                auto cloned_parameter_type =
-                    std::make_shared<TemplateTypeParmType>(
-                        type_parameter->name,
-                        type_parameter->depth,
-                        type_parameter->index,
-                        type_parameter->is_parameter_pack);
-                auto cloned_parameter =
-                    collect.collect_make<TemplateTypeParmDecl>(
-                        type_parameter->name,
-                        type_parameter->depth,
-                        type_parameter->index,
-                        cloned_parameter_type,
-                        type_parameter->is_parameter_pack,
-                        type_parameter->location);
-                cloned_parameter_type->parameter_decl = cloned_parameter.get();
-                pending_method_template.parameter_rebinds.emplace(
-                    type_parameter,
-                    cloned_parameter.get());
-                cloned_template_decl->parameters.push_back(
-                    std::move(cloned_parameter));
-                continue;
-            }
-
-            if (auto* non_type_parameter =
-                    dyn_cast<TemplateNonTypeParmDecl>(parameter.get())) {
-                auto rewritten_parameter_type =
-                    remap_template_parameter_types_in_type(
-                        clone_pass.rewrite_type(non_type_parameter->type),
-                        pending_method_template.parameter_rebinds);
-                std::shared_ptr<Symbol> cloned_parameter_symbol = nullptr;
-                if (non_type_parameter->sym) {
-                    cloned_parameter_symbol =
-                        clone_symbol_shallow_for_specialization(
-                            non_type_parameter->sym,
-                            remap_template_parameter_types_in_type(
-                                clone_pass.rewrite_type(
-                                    non_type_parameter->sym->type),
-                                pending_method_template.parameter_rebinds));
-                    pending_method_template.symbol_remap.emplace(
-                        non_type_parameter->sym.get(),
-                        cloned_parameter_symbol);
-                }
-
-                auto cloned_parameter =
-                    collect.collect_make<TemplateNonTypeParmDecl>(
-                        non_type_parameter->name,
-                        non_type_parameter->depth,
-                        non_type_parameter->index,
-                        rewritten_parameter_type,
-                        cloned_parameter_symbol,
-                        non_type_parameter->is_parameter_pack,
-                        non_type_parameter->location);
-                pending_method_template.parameter_rebinds.emplace(
-                    non_type_parameter,
-                    cloned_parameter.get());
-                cloned_template_decl->parameters.push_back(
-                    std::move(cloned_parameter));
-                continue;
-            }
-
-            return fail_instantiation(
-                "class template member template instantiation for this template parameter kind is not supported yet",
-                parameter->location);
+        if (!clone_template_parameters_into(
+                method_template_decl->parameters,
+                cloned_template_decl->parameters,
+                clone_pass,
+                pending_method_template.parameter_rebinds,
+                "class template member template",
+                method_template_decl->location,
+                &pending_method_template.symbol_remap)) {
+            return false;
         }
 
         RecordSemanticState::MethodTemplate semantic_method_template;
@@ -3612,78 +3501,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         pending_friend_template.symbol_remap.reserve(
             function_template_decl->parameters.size());
 
-        for (const auto& parameter : function_template_decl->parameters) {
-            if (!parameter) {
-                return fail_instantiation(
-                    "internal error: missing class template friend function template parameter",
-                    function_template_decl->location);
-            }
-
-            if (auto* type_parameter =
-                    dyn_cast<TemplateTypeParmDecl>(parameter.get())) {
-                auto cloned_parameter_type =
-                    std::make_shared<TemplateTypeParmType>(
-                        type_parameter->name,
-                        type_parameter->depth,
-                        type_parameter->index,
-                        type_parameter->is_parameter_pack);
-                auto cloned_parameter =
-                    collect.collect_make<TemplateTypeParmDecl>(
-                        type_parameter->name,
-                        type_parameter->depth,
-                        type_parameter->index,
-                        cloned_parameter_type,
-                        type_parameter->is_parameter_pack,
-                        type_parameter->location);
-                cloned_parameter_type->parameter_decl = cloned_parameter.get();
-                pending_friend_template.parameter_rebinds.emplace(
-                    type_parameter,
-                    cloned_parameter.get());
-                cloned_template_decl->parameters.push_back(
-                    std::move(cloned_parameter));
-                continue;
-            }
-
-            if (auto* non_type_parameter =
-                    dyn_cast<TemplateNonTypeParmDecl>(parameter.get())) {
-                auto rewritten_parameter_type =
-                    remap_template_parameter_types_in_type(
-                        clone_pass.rewrite_type(non_type_parameter->type),
-                        pending_friend_template.parameter_rebinds);
-                std::shared_ptr<Symbol> cloned_parameter_symbol = nullptr;
-                if (non_type_parameter->sym) {
-                    cloned_parameter_symbol =
-                        clone_symbol_shallow_for_specialization(
-                            non_type_parameter->sym,
-                            remap_template_parameter_types_in_type(
-                                clone_pass.rewrite_type(
-                                    non_type_parameter->sym->type),
-                                pending_friend_template.parameter_rebinds));
-                    pending_friend_template.symbol_remap.emplace(
-                        non_type_parameter->sym.get(),
-                        cloned_parameter_symbol);
-                }
-
-                auto cloned_parameter =
-                    collect.collect_make<TemplateNonTypeParmDecl>(
-                        non_type_parameter->name,
-                        non_type_parameter->depth,
-                        non_type_parameter->index,
-                        rewritten_parameter_type,
-                        cloned_parameter_symbol,
-                        non_type_parameter->is_parameter_pack,
-                        non_type_parameter->location);
-                pending_friend_template.parameter_rebinds.emplace(
-                    non_type_parameter,
-                    cloned_parameter.get());
-                cloned_template_decl->parameters.push_back(
-                    std::move(cloned_parameter));
-                continue;
-            }
-
-            return fail_instantiation(
-                "class template friend function template instantiation for this template parameter kind is not supported yet",
-                parameter->location);
+        if (!clone_template_parameters_into(
+                function_template_decl->parameters,
+                cloned_template_decl->parameters,
+                clone_pass,
+                pending_friend_template.parameter_rebinds,
+                "class template friend function template",
+                function_template_decl->location,
+                &pending_friend_template.symbol_remap)) {
+            return false;
         }
 
         auto* cloned_template_ptr = cloned_template_decl.get();
@@ -5009,52 +4835,13 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     std::move(cloned_requires);
             }
 
-            for (size_t index = 0;
-                 index < pattern_template->parameters.size() &&
-                 index < specialized_template->parameters.size();
-                 ++index) {
-                const auto* default_argument =
-                    get_template_parameter_default_argument(
-                        pattern_template->parameters[index].get());
-                if (!default_argument) {
-                    continue;
-                }
-
-                auto rewritten_defaults =
-                    collect.substitute_template_arguments_with_bindings(
-                        {*default_argument},
-                        *selected_parameters,
-                        specialization_bindings,
-                        loc);
-                if (rewritten_defaults.size() != 1) {
-                    return fail_instantiation(
-                        "internal error: failed to rewrite class template member template default argument",
-                        pattern_template->location);
-                }
-
-                auto rewritten_default = std::move(rewritten_defaults.front());
-                std::string default_error;
-                if (!remap_template_argument_after_outer_substitution(
-                        rewritten_default,
-                        pending_method_template.parameter_rebinds,
-                        member_template_clone_pass.context(),
-                        &default_error)) {
-                    return fail_instantiation(
-                        default_error.empty()
-                            ? "class template member template default argument cloning is not supported"
-                            : default_error,
-                        pattern_template->location);
-                }
-                set_template_parameter_default_argument(
-                    specialized_template->parameters[index].get(),
-                    std::move(rewritten_default));
-            }
-            if (!merge_template_decl_default_arguments(
+            if (!clone_template_parameter_defaults(
+                    pattern_template,
                     specialized_template,
-                    nullptr)) {
-                return fail_instantiation(
-                    "internal error: failed to register class template member template defaults",
-                    pattern_template->location);
+                    member_template_clone_pass,
+                    pending_method_template.parameter_rebinds,
+                    "class template member template")) {
+                return false;
             }
 
             specialized_function->parameters.clear();

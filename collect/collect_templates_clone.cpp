@@ -613,37 +613,84 @@ bool remap_template_argument_after_outer_substitution(
                              const TemplateParameterDecl*>& parameter_rebinds,
     ASTCloneContext& clone_ctx,
     std::string* error_out) {
-    if (argument.kind != TemplateArgumentKind::Value) {
-        return true;
-    }
-
-    if (argument.referenced_parameter) {
-        auto parameter_it = parameter_rebinds.find(argument.referenced_parameter);
+    auto remap_referenced_parameter =
+        [&parameter_rebinds](const TemplateParameterDecl*& referenced_parameter) {
+        if (!referenced_parameter) {
+            return;
+        }
+        auto parameter_it = parameter_rebinds.find(referenced_parameter);
         if (parameter_it != parameter_rebinds.end() && parameter_it->second) {
-            argument.referenced_parameter = parameter_it->second;
+            referenced_parameter = parameter_it->second;
+        }
+    };
+
+    switch (argument.kind) {
+        case TemplateArgumentKind::Type:
+            argument.type = remap_template_parameter_types_in_type(
+                argument.type,
+                parameter_rebinds,
+                &clone_ctx);
+            break;
+
+        case TemplateArgumentKind::Template:
+            remap_referenced_parameter(argument.referenced_parameter);
+            if (argument.dependent_template_qualifier_type) {
+                argument.dependent_template_qualifier_type =
+                    remap_template_parameter_types_in_type(
+                        argument.dependent_template_qualifier_type,
+                        parameter_rebinds,
+                        &clone_ctx);
+            }
+            break;
+
+        case TemplateArgumentKind::Value: {
+            argument.value_type = remap_template_parameter_types_in_type(
+                argument.value_type,
+                parameter_rebinds,
+                &clone_ctx);
+            remap_referenced_parameter(argument.referenced_parameter);
+            remap_template_argument_symbol_references(argument, clone_ctx);
+            if (argument.value_expr) {
+                std::string clone_error;
+                auto cloned_expr = clone_expr_with_substitution(
+                    argument.value_expr.get(),
+                    clone_ctx,
+                    &clone_error);
+                if (!cloned_expr) {
+                    if (error_out && error_out->empty()) {
+                        *error_out =
+                            clone_error.empty()
+                                ? "member template default argument expression is not supported"
+                                : clone_error;
+                    }
+                    return false;
+                }
+
+                argument.value_expr = std::shared_ptr<Expr>(cloned_expr.release());
+            }
+            break;
         }
     }
-    remap_template_argument_symbol_references(argument, clone_ctx);
-    if (!argument.value_expr) {
-        return true;
-    }
 
-    std::string clone_error;
-    auto cloned_expr = clone_expr_with_substitution(
-        argument.value_expr.get(),
-        clone_ctx,
-        &clone_error);
-    if (!cloned_expr) {
-        if (error_out && error_out->empty()) {
-            *error_out =
-                clone_error.empty()
-                    ? "member template default argument expression is not supported"
-                    : clone_error;
+    for (auto*& parameter : argument.pack_expansion_parameters) {
+        auto parameter_it = parameter_rebinds.find(parameter);
+        if (parameter_it != parameter_rebinds.end() && parameter_it->second) {
+            parameter = parameter_it->second;
         }
-        return false;
     }
-
-    argument.value_expr = std::shared_ptr<Expr>(cloned_expr.release());
+    argument.is_dependent =
+        template_argument_depends_on_template_parameters(
+            argument,
+            clone_ctx.ast_ctx);
+    if (argument.kind == TemplateArgumentKind::Value &&
+        !argument.is_dependent &&
+        argument.value_type) {
+        std::string ignored_error;
+        normalize_concrete_template_value_argument(
+            argument,
+            argument.value_type,
+            &ignored_error);
+    }
     return true;
 }
 
