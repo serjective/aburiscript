@@ -4568,6 +4568,9 @@ std::unique_ptr<Expr> Collect::collect_explicit_cast(std::unique_ptr<Expr> expr,
     if (target_type && contains_deferred_semantic_type(target_type.get_shared())) {
         target_type = resolve_typeof_types(target_type, loc);
     }
+    if (canonical_type_kind(target_type, ast_ctx_.get()) == TypeKind::Reference) {
+        return collect_make<ExplicitCast>(std::move(expr), target_type, loc);
+    }
     expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
     if (expr && canonical_type_kind(target_type) == TypeKind::Vector) {
         auto expr_type = expr->get_type();
@@ -5368,6 +5371,24 @@ std::unique_ptr<Expr> Collect::cpp_static_named_cast(
         source_type.as_shared<ObjectType>();
     auto target_object_type =
         target_no_ref.as_shared<ObjectType>();
+    bool target_is_reference =
+        canonical_type_kind(target_type, ast_ctx_.get()) == TypeKind::Reference;
+    bool same_object_type =
+        source_object_type &&
+        target_object_type &&
+        source_type.equals_unqualified(target_no_ref);
+    bool derived_to_base_object =
+        source_object_type &&
+        target_object_type &&
+        can_convert_derived_to_base_object(source_type, target_no_ref);
+
+    if (target_is_reference && (same_object_type || derived_to_base_object)) {
+        return collect_make<ExplicitCast>(
+            std::move(expr),
+            target_type,
+            loc,
+            ExplicitCastKind::CppStaticCast);
+    }
 
     if (lang_opts_.is_cxx_mode() &&
         (source_object_type || target_object_type)) {
@@ -5386,14 +5407,6 @@ std::unique_ptr<Expr> Collect::cpp_static_named_cast(
                     loc);
         }
 
-        bool same_object_type =
-            source_object_type &&
-            target_object_type &&
-            source_type.equals_unqualified(target_no_ref);
-        bool derived_to_base_object =
-            source_object_type &&
-            target_object_type &&
-            can_convert_derived_to_base_object(source_type, target_no_ref);
         if (!same_object_type && !derived_to_base_object) {
             return named_cast_error(
                 "invalid static_cast between object types",
@@ -5438,18 +5451,31 @@ std::unique_ptr<Expr> Collect::collect_cpp_named_cast(CppNamedCastKind cast_kind
             std::move(expr), target_type, target_no_ref, loc);
     }
 
-    expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
-    if (!expr) {
-        return named_cast_error("named cast requires a valid expression operand", loc);
-    }
-
     if (cast_kind == CppNamedCastKind::Reinterpret) {
+        if (canonical_type_kind(target_type, ast_ctx_.get()) !=
+            TypeKind::Reference) {
+            expr = collect_apply_standard_conversions(
+                std::move(expr), ExprUseContext::RValue);
+            if (!expr) {
+                return named_cast_error(
+                    "named cast requires a valid expression operand", loc);
+            }
+        }
         auto source_type =
             remove_reference_and_desugar(expr->get_type(), ast_ctx_.get());
         return cpp_reinterpret_named_cast(
             std::move(expr), source_type, target_type, target_no_ref, loc);
     }
     if (cast_kind == CppNamedCastKind::Static) {
+        if (canonical_type_kind(target_type, ast_ctx_.get()) !=
+            TypeKind::Reference) {
+            expr = collect_apply_standard_conversions(
+                std::move(expr), ExprUseContext::RValue);
+            if (!expr) {
+                return named_cast_error(
+                    "named cast requires a valid expression operand", loc);
+            }
+        }
         auto source_type =
             remove_reference_and_desugar(expr->get_type(), ast_ctx_.get());
         return cpp_static_named_cast(

@@ -2955,6 +2955,8 @@ bool clone_function_decl_common_state(const FuncDecl* source,
     destination->is_defaulted = source->is_defaulted;
     destination->is_defaulted_on_first_declaration =
         source->is_defaulted_on_first_declaration;
+    destination->has_deferred_defaulted_body =
+        source->has_deferred_defaulted_body;
     destination->external_semantic_owner_id =
         source->external_semantic_owner_id;
     destination->set_language_linkage(source->get_language_linkage());

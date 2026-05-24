@@ -1177,6 +1177,19 @@ std::unique_ptr<Expr> Collect::collect_function_call(
             std::move(args),
             loc);
     }
+    if (callee_var_ref &&
+        callee_var_ref->symref &&
+        callee_var_ref->symref->kind == SymbolKind::FUNCTION) {
+        if (!collect_ensure_defaulted_special_member_body(
+                callee_var_ref->symref, loc)) {
+            report_error(
+                "failed to materialize defaulted function '" +
+                    callee_var_ref->symref->name + "'",
+                loc);
+            return collect_make<ErrorExpr>(
+                "failed to materialize defaulted function", loc);
+        }
+    }
     if (lang_opts_.is_cxx_mode()) {
         bool callee_is_dependent =
             expression_depends_on_template_parameters(callee.get()) ||
@@ -3759,15 +3772,18 @@ bool Collect::resolve_dependent_expr_after_substitution(
         } else if (explicit_cast->cast_kind == ExplicitCastKind::CppStaticCast) {
             auto owned_cast = std::unique_ptr<ExplicitCast>(
                 static_cast<ExplicitCast*>(expr.release()));
-            owned_cast->expr = collect_apply_standard_conversions(
-                std::move(owned_cast->expr),
-                ExprUseContext::RValue);
-            if (!owned_cast->expr) {
-                if (error_out) {
-                    *error_out = "static_cast operand became invalid after substitution";
+            if (canonical_type_kind(owned_cast->ctype, ast_ctx_.get()) !=
+                TypeKind::Reference) {
+                owned_cast->expr = collect_apply_standard_conversions(
+                    std::move(owned_cast->expr),
+                    ExprUseContext::RValue);
+                if (!owned_cast->expr) {
+                    if (error_out) {
+                        *error_out = "static_cast operand became invalid after substitution";
+                    }
+                    expr = std::move(owned_cast);
+                    return false;
                 }
-                expr = std::move(owned_cast);
-                return false;
             }
 
             QualType source_type =
@@ -3798,15 +3814,18 @@ bool Collect::resolve_dependent_expr_after_substitution(
         } else if (explicit_cast->cast_kind == ExplicitCastKind::CppReinterpretCast) {
             auto owned_cast = std::unique_ptr<ExplicitCast>(
                 static_cast<ExplicitCast*>(expr.release()));
-            owned_cast->expr = collect_apply_standard_conversions(
-                std::move(owned_cast->expr),
-                ExprUseContext::RValue);
-            if (!owned_cast->expr) {
-                if (error_out) {
-                    *error_out = "reinterpret_cast operand became invalid after substitution";
+            if (canonical_type_kind(owned_cast->ctype, ast_ctx_.get()) !=
+                TypeKind::Reference) {
+                owned_cast->expr = collect_apply_standard_conversions(
+                    std::move(owned_cast->expr),
+                    ExprUseContext::RValue);
+                if (!owned_cast->expr) {
+                    if (error_out) {
+                        *error_out = "reinterpret_cast operand became invalid after substitution";
+                    }
+                    expr = std::move(owned_cast);
+                    return false;
                 }
-                expr = std::move(owned_cast);
-                return false;
             }
 
             QualType source_type =
@@ -6357,6 +6376,25 @@ std::unique_ptr<Expr> Collect::finalize_call_expression(
         note_specialization_use_for_symbol(context.callee_symbol, loc);
     } else if (context.constructor_call && context.constructor_symbol) {
         note_specialization_use_for_symbol(context.constructor_symbol, loc);
+    }
+    auto selected_symbol =
+        context.callee_symbol ? context.callee_symbol : context.constructor_symbol;
+    if (selected_symbol &&
+        !collect_ensure_defaulted_special_member_body(selected_symbol, loc)) {
+        report_error(
+            "failed to materialize defaulted function '" +
+                selected_symbol->name + "'",
+            loc);
+        return collect_make<ErrorExpr>(
+            "failed to materialize defaulted function", loc);
+    }
+    if (selected_symbol) {
+        QualType refreshed_called_type =
+            extract_called_function_type(selected_symbol->type, ast_ctx_.get());
+        if (auto refreshed_function_type =
+                refreshed_called_type.as_shared<FunctionType>()) {
+            context.function_type = std::move(refreshed_function_type);
+        }
     }
     if (context.callee_symbol && context.callee_symbol->is_deleted) {
         report_error(

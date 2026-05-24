@@ -686,6 +686,7 @@ struct FuncDecl: Decl {
     uint8_t is_deleted : 1;
     uint8_t is_defaulted : 1;
     uint8_t is_defaulted_on_first_declaration : 1;
+    uint8_t has_deferred_defaulted_body : 1;
     uint8_t language_linkage : 2;
     mutable uint32_t external_semantic_owner_id = 0; // See ownership conventions at top of file
 
@@ -727,6 +728,7 @@ protected:
                is_consteval(false),
                is_deleted(false), is_defaulted(false),
                is_defaulted_on_first_declaration(false),
+               has_deferred_defaulted_body(false),
                language_linkage(static_cast<uint8_t>(LanguageLinkage::None)) {}
     FuncDecl(DeclKind kind, SrcLoc loc = SrcLoc()): Decl(kind, loc), type(nullptr), body(nullptr), scope(nullptr),
                                                      asm_label(nullptr),
@@ -737,6 +739,7 @@ protected:
                                                      is_deleted(false),
                                                      is_defaulted(false),
                                                      is_defaulted_on_first_declaration(false),
+                                                     has_deferred_defaulted_body(false),
                                                      language_linkage(static_cast<uint8_t>(LanguageLinkage::None)) {}
 
 private:

@@ -1794,7 +1794,7 @@ public:
             collect_.collect_record_synthesize_implicit_members(ctx);
             collect_.collect_record_resolve_virtual_dispatch(ctx);
             collect_.collect_record_compute_layout(ctx);
-            collect_.collect_record_materialize_defaulted_method_bodies(ctx);
+            collect_.collect_record_prepare_deferred_defaulted_method_bodies(ctx);
             collect_.collect_record_infer_constexpr_special_members(ctx);
             collect_.collect_record_publish_semantics(ctx);
             if (ctx.record_type) {
@@ -2622,6 +2622,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             ensure_namespace_qualifier_prefix(ctor_prefix);
             set_func_decl_cxx_qualifier_prefix(ctor_decl, ctor_prefix);
             set_func_decl_owner_record_type(ctor_decl, QualType(ctx.record_type));
+            if (ctor_decl->is_defaulted) {
+                ctor_decl->has_deferred_defaulted_body = true;
+            }
 
             bool is_definition = function_decl_defines_entity(ctor_decl);
             bool ctor_is_delegating = false;
@@ -2922,6 +2925,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
         ensure_namespace_qualifier_prefix(method_prefix);
         set_func_decl_cxx_qualifier_prefix(method_decl, method_prefix);
         set_func_decl_owner_record_type(method_decl, QualType(ctx.record_type));
+        if (method_decl->is_defaulted) {
+            method_decl->has_deferred_defaulted_body = true;
+        }
 
         bool is_static_method = method_decl->storage_class == StorageClass::STATIC;
         bool is_operator_new_delete =
@@ -3105,6 +3111,7 @@ void Collect::collect_record_synthesize_implicit_members(
         ctor_decl->is_deleted = is_deleted;
         ctor_decl->is_defaulted = true;
         ctor_decl->is_defaulted_on_first_declaration = true;
+        ctor_decl->has_deferred_defaulted_body = true;
         ctor_decl->is_constexpr = !is_deleted;
         ctor_decl->set_language_linkage(LanguageLinkage::CXX);
 
@@ -3218,6 +3225,7 @@ void Collect::collect_record_synthesize_implicit_members(
         method_decl->is_deleted = is_deleted;
         method_decl->is_defaulted = true;
         method_decl->is_defaulted_on_first_declaration = true;
+        method_decl->has_deferred_defaulted_body = true;
         method_decl->is_constexpr = !is_deleted;
         method_decl->set_language_linkage(LanguageLinkage::CXX);
 
@@ -3354,6 +3362,7 @@ void Collect::collect_record_synthesize_implicit_members(
         method_decl->is_inline = true;
         method_decl->is_deleted = false;
         method_decl->is_defaulted = true;
+        method_decl->has_deferred_defaulted_body = true;
         method_decl->set_language_linkage(LanguageLinkage::CXX);
 
         std::string method_prefix = ctx.tag;
@@ -3964,6 +3973,297 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
         ast_ctx_.get());
 }
 
+void Collect::collect_record_prepare_deferred_defaulted_method_bodies(
+    CollectRecordBuildContext& ctx) {
+    if (!ctx.semantic_decl || !ctx.record_type) {
+        return;
+    }
+
+    std::function<bool(const Expr*)> initializer_expr_needs_callable_body;
+    initializer_expr_needs_callable_body = [&](const Expr* expr) -> bool {
+        if (!expr) {
+            return false;
+        }
+        if (const auto* construct = dyn_cast<CppConstructExpr>(expr)) {
+            return static_cast<bool>(construct->ctor_sym);
+        }
+        if (const auto* init_list = dyn_cast<InitListExpr>(expr)) {
+            for (const auto& element : init_list->elements) {
+                if (initializer_expr_needs_callable_body(element.value.get())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    std::function<bool(QualType)> default_initialization_needs_callable_body;
+    default_initialization_needs_callable_body = [&](QualType type) -> bool {
+        QualType canonical = desugar_type(type, ast_ctx_.get());
+        if (!canonical) {
+            return false;
+        }
+        if (auto array_type = canonical.as_shared<ArrayType>()) {
+            return default_initialization_needs_callable_body(
+                array_type->element_type);
+        }
+        auto object_type = canonical.as_shared<ObjectType>();
+        if (!object_type) {
+            return false;
+        }
+        const ObjectDecl* record_decl =
+            canonical_cpp_record_decl(
+                dyn_cast<ObjectDecl>(object_type->get_decl()));
+        const RecordSemanticState* state =
+            record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
+        if (!state || state->constructors.empty()) {
+            return false;
+        }
+        for (const auto& ctor : state->constructors) {
+            if (ctor.is_deleted || !ctor.symbol) {
+                continue;
+            }
+            RecordSemanticState::Constructor ctor_probe = ctor;
+            CppConstructorUserParamInfo param_info =
+                cpp_compute_constructor_user_param_info(ctor_probe);
+            if (param_info.required_user_param_count == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto implicit_default_constructor_can_use_recursive_lowering =
+        [&](const RecordSemanticState::Constructor& ctor,
+            const CppConstructorDecl* ctor_decl) {
+        if (!ctor.is_implicit || !ctor_decl || !ctor_decl->is_defaulted ||
+            ctor_decl->is_deleted) {
+            return false;
+        }
+
+        RecordSemanticState::Constructor ctor_probe = ctor;
+        ctor_probe.type = QualType(ctor_decl->type);
+        QualType owner_type(ctx.record_type);
+        if (cpp_constructor_is_copy_constructor(
+                ctor_probe,
+                owner_type,
+                ast_ctx_.get()) ||
+            cpp_constructor_is_move_constructor(
+                ctor_probe,
+                owner_type,
+                ast_ctx_.get())) {
+            return false;
+        }
+
+        CppConstructorUserParamInfo param_info =
+            cpp_compute_constructor_user_param_info(ctor_probe);
+        if (param_info.required_user_param_count != 0) {
+            return false;
+        }
+
+        for (const auto& base : ctx.bases) {
+            if (default_initialization_needs_callable_body(base.type)) {
+                return false;
+            }
+        }
+        for (const auto& virtual_base : ctx.virtual_bases) {
+            if (default_initialization_needs_callable_body(virtual_base.type)) {
+                return false;
+            }
+        }
+        for (const auto& field : ctx.fields) {
+            if (field.is_base_subobject || field.is_virtual_base_storage) {
+                continue;
+            }
+            if (field.decl &&
+                initializer_expr_needs_callable_body(
+                    field.decl->default_member_initializer.get())) {
+                return false;
+            }
+            if (default_initialization_needs_callable_body(field.type)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    for (auto& ctor : ctx.constructors) {
+        auto* ctor_decl = const_cast<CppConstructorDecl*>(ctor.decl);
+        if (!implicit_default_constructor_can_use_recursive_lowering(
+                ctor,
+                ctor_decl)) {
+            continue;
+        }
+        ctor.symbol.reset();
+    }
+}
+
+bool Collect::collect_ensure_defaulted_special_member_body(
+    const std::shared_ptr<Symbol>& symbol,
+    SrcLoc loc) {
+    if (!symbol || symbol->kind != SymbolKind::FUNCTION ||
+        !symbol->function_definition) {
+        return true;
+    }
+
+    auto* function_decl =
+        const_cast<FuncDecl*>(symbol->function_definition);
+    if (!function_decl || !function_decl->is_defaulted) {
+        return true;
+    }
+
+    auto sync_symbol = [&]() {
+        symbol->is_deleted = function_decl->is_deleted;
+        symbol->is_defaulted = function_decl->is_defaulted;
+        symbol->is_defined =
+            function_decl->body != nullptr || function_decl->is_deleted;
+        symbol->type = QualType(function_decl->type);
+        symbol->function_definition = function_decl;
+    };
+
+    if (isa<CppDestructorDecl>(function_decl)) {
+        function_decl->has_deferred_defaulted_body = false;
+        sync_symbol();
+        return true;
+    }
+
+    if (!function_decl->has_deferred_defaulted_body &&
+        function_decl->body &&
+        !isa<CppConstructorDecl>(function_decl)) {
+        sync_symbol();
+        return true;
+    }
+
+    QualType owner_type = get_func_decl_owner_record_type(function_decl);
+    if (!owner_type) {
+        owner_type = get_symbol_owner_record_type(symbol.get());
+    }
+    if (!owner_type) {
+        owner_type = function_decl->friend_access_type;
+    }
+    if (!owner_type) {
+        owner_type = symbol->friend_access_type;
+    }
+
+    auto owner_object =
+        desugar_type(owner_type, ast_ctx_.get()).as_shared<ObjectType>();
+    const ObjectDecl* owner_record_decl =
+        canonical_cpp_record_decl(
+            dyn_cast<ObjectDecl>(
+                owner_object ? owner_object->get_decl() : nullptr));
+    if (!owner_record_decl) {
+        return true;
+    }
+
+    const RecordSemanticState* owner_state =
+        query_lookup_record_semantics(owner_record_decl);
+    if (!owner_state) {
+        owner_state = ensure_record_semantics_available(owner_type, loc);
+    }
+    if (!owner_state) {
+        return false;
+    }
+
+    bool materialized = false;
+    const FriendDecl* friend_decl = nullptr;
+    if (auto* ctor_decl = dyn_cast<CppConstructorDecl>(function_decl)) {
+        materialized = collect_materialize_defaulted_constructor(
+            ctor_decl,
+            owner_record_decl,
+            *owner_state);
+    } else if (auto* method_decl = dyn_cast<CppMethodDecl>(function_decl)) {
+        materialized = collect_materialize_defaulted_copy_assignment_body(
+            method_decl,
+            owner_record_decl,
+            *owner_state);
+        if (!materialized) {
+            materialized = collect_materialize_defaulted_move_assignment_body(
+                method_decl,
+                owner_record_decl,
+                *owner_state);
+        }
+        if (!materialized) {
+            materialized = collect_materialize_defaulted_comparison_body(
+                method_decl,
+                owner_record_decl,
+                *owner_state);
+        }
+    } else if (is_defaulted_comparison_operator_name(function_decl->name)) {
+        for (const auto& candidate : owner_state->friend_functions) {
+            if (candidate.function_decl == function_decl ||
+                candidate.symbol.get() == symbol.get()) {
+                friend_decl = candidate.decl;
+                break;
+            }
+        }
+        materialized = collect_materialize_defaulted_comparison_body(
+            function_decl,
+            friend_decl,
+            owner_record_decl,
+            *owner_state);
+    }
+
+    if (!materialized) {
+        sync_symbol();
+        return true;
+    }
+
+    sync_symbol();
+
+    RecordSemanticState updated_state = *owner_state;
+    if (auto* ctor_decl = dyn_cast<CppConstructorDecl>(function_decl)) {
+        for (auto& ctor : updated_state.constructors) {
+            if (ctor.decl != ctor_decl && ctor.symbol.get() != symbol.get()) {
+                continue;
+            }
+            ctor.is_deleted = ctor_decl->is_deleted;
+            ctor.is_defaulted = ctor_decl->is_defaulted;
+            ctor.is_constexpr = ctor_decl->is_constexpr;
+            ctor.is_consteval = ctor_decl->is_consteval;
+            ctor.symbol = symbol;
+            break;
+        }
+    } else if (auto* method_decl = dyn_cast<CppMethodDecl>(function_decl)) {
+        for (auto& method : updated_state.methods) {
+            if (method.decl != method_decl && method.symbol.get() != symbol.get()) {
+                continue;
+            }
+            method.is_deleted = method_decl->is_deleted;
+            method.is_defaulted = method_decl->is_defaulted;
+            method.is_constexpr = method_decl->is_constexpr;
+            method.is_consteval = method_decl->is_consteval;
+            method.symbol = symbol;
+            break;
+        }
+    } else {
+        for (auto& friend_function : updated_state.friend_functions) {
+            if (friend_function.function_decl != function_decl &&
+                friend_function.symbol.get() != symbol.get()) {
+                continue;
+            }
+            friend_function.symbol = symbol;
+            break;
+        }
+    }
+
+    cpp_recompute_special_member_definition_data(
+        updated_state.definition_data,
+        owner_type,
+        updated_state.constructors,
+        updated_state.method_templates,
+        updated_state.methods,
+        updated_state.destructors,
+        ast_ctx_.get());
+
+    query_publish_record_semantics(owner_record_decl, updated_state);
+    if (const ObjectDecl* canonical_decl =
+            canonical_cpp_record_decl(owner_record_decl);
+        canonical_decl && canonical_decl != owner_record_decl) {
+        query_publish_record_semantics(canonical_decl, updated_state);
+    }
+    return true;
+}
+
 void Collect::collect_record_infer_constexpr_special_members(
     CollectRecordBuildContext& ctx) const {
     if (!ctx.record_type) {
@@ -4091,6 +4391,7 @@ bool Collect::collect_materialize_defaulted_constructor(
         return false;
     }
     if (ctor_decl->is_deleted) {
+        ctor_decl->has_deferred_defaulted_body = false;
         return true;
     }
 
@@ -4128,6 +4429,7 @@ bool Collect::collect_materialize_defaulted_constructor(
         ctor_decl->is_deleted = true;
         ctor_decl->body.reset();
         ctor_decl->ctor_initializers.clear();
+        ctor_decl->has_deferred_defaulted_body = false;
         return true;
     }
 
@@ -4150,6 +4452,7 @@ bool Collect::collect_materialize_defaulted_constructor(
                 ctor_decl->is_deleted = true;
                 ctor_decl->body.reset();
                 ctor_decl->ctor_initializers.clear();
+                ctor_decl->has_deferred_defaulted_body = false;
                 return true;
             }
         }
@@ -4174,6 +4477,7 @@ bool Collect::collect_materialize_defaulted_constructor(
                 ctor_decl->is_deleted = true;
                 ctor_decl->body.reset();
                 ctor_decl->ctor_initializers.clear();
+                ctor_decl->has_deferred_defaulted_body = false;
                 return true;
             }
             if (field.name.empty() &&
@@ -4182,6 +4486,7 @@ bool Collect::collect_materialize_defaulted_constructor(
                 ctor_decl->is_deleted = true;
                 ctor_decl->body.reset();
                 ctor_decl->ctor_initializers.clear();
+                ctor_decl->has_deferred_defaulted_body = false;
                 return true;
             }
         }
@@ -4445,6 +4750,7 @@ bool Collect::collect_materialize_defaulted_constructor(
         ctor_decl->is_deleted = true;
         ctor_decl->body.reset();
         ctor_decl->ctor_initializers.clear();
+        ctor_decl->has_deferred_defaulted_body = false;
         return true;
     }
 
@@ -4467,6 +4773,7 @@ bool Collect::collect_materialize_defaulted_constructor(
                 ctor_decl->location)
                 .release());
     }
+    ctor_decl->has_deferred_defaulted_body = false;
     return true;
 }
 
@@ -4479,6 +4786,7 @@ bool Collect::collect_materialize_defaulted_assignment_body(
         return false;
     }
     if (method_decl->body || method_decl->is_deleted) {
+        method_decl->has_deferred_defaulted_body = false;
         return true;
     }
 
@@ -4506,6 +4814,7 @@ bool Collect::collect_materialize_defaulted_assignment_body(
     if (!rhs_param) {
         method_decl->is_deleted = true;
         method_decl->body.reset();
+        method_decl->has_deferred_defaulted_body = false;
         return true;
     }
 
@@ -4521,11 +4830,13 @@ bool Collect::collect_materialize_defaulted_assignment_body(
             if (!supported) {
                 method_decl->is_deleted = true;
                 method_decl->body.reset();
+                method_decl->has_deferred_defaulted_body = false;
                 return true;
             }
             if (!find_direct_base_assignment_offset(owner_state, base).has_value()) {
                 method_decl->is_deleted = true;
                 method_decl->body.reset();
+                method_decl->has_deferred_defaulted_body = false;
                 return true;
             }
         }
@@ -4755,6 +5066,7 @@ bool Collect::collect_materialize_defaulted_assignment_body(
     if (!build_ok) {
         method_decl->is_deleted = true;
         method_decl->body.reset();
+        method_decl->has_deferred_defaulted_body = false;
         return true;
     }
 
@@ -4764,6 +5076,9 @@ bool Collect::collect_materialize_defaulted_assignment_body(
         method_decl->location);
     method_decl->body = std::unique_ptr<CompoundStmt>(
         dyn_cast<CompoundStmt>(body_stmt.release()));
+    if (method_decl->body) {
+        method_decl->has_deferred_defaulted_body = false;
+    }
     return method_decl->body != nullptr;
 }
 
@@ -4799,6 +5114,7 @@ bool Collect::collect_materialize_defaulted_comparison_body(
         return false;
     }
     if (function_decl->body || function_decl->is_deleted) {
+        function_decl->has_deferred_defaulted_body = false;
         return true;
     }
 
@@ -4829,6 +5145,7 @@ bool Collect::collect_materialize_defaulted_comparison_body(
     auto mark_deleted = [&]() {
         function_decl->is_deleted = true;
         function_decl->body.reset();
+        function_decl->has_deferred_defaulted_body = false;
     };
 
     if (owner_record_decl->get_record_type() &&
@@ -5232,6 +5549,9 @@ bool Collect::collect_materialize_defaulted_comparison_body(
                     return false;
                 }
                 QualType result_type = result_category->type;
+                if (has_auto_return) {
+                    function_type->ret_type = result_type;
+                }
 
                 auto make_temp_ref = [&](const DefaultedThreeWayStep& step)
                     -> std::unique_ptr<Expr> {
@@ -5327,6 +5647,9 @@ bool Collect::collect_materialize_defaulted_comparison_body(
         function_decl->location);
     function_decl->body = std::unique_ptr<CompoundStmt>(
         dyn_cast<CompoundStmt>(body_stmt.release()));
+    if (function_decl->body) {
+        function_decl->has_deferred_defaulted_body = false;
+    }
     return function_decl->body != nullptr;
 }
 

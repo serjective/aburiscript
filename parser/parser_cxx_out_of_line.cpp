@@ -60,6 +60,8 @@ void merge_out_of_line_constructor_definition(
     matched_ctor_decl->is_deleted = parsed_ctor->is_deleted;
     matched_ctor_decl->is_defaulted = parsed_ctor->is_defaulted;
     matched_ctor_decl->is_defaulted_on_first_declaration = false;
+    matched_ctor_decl->has_deferred_defaulted_body =
+        matched_ctor_decl->is_defaulted;
     matched_ctor_decl->is_constexpr = parsed_ctor->is_constexpr;
     matched_ctor_decl->is_consteval = parsed_ctor->is_consteval;
     if (matched_ctor_decl->is_consteval) {
@@ -143,6 +145,8 @@ void merge_out_of_line_constructor_template_definition(
     matched_ctor_decl->is_deleted = parsed_ctor->is_deleted;
     matched_ctor_decl->is_defaulted = parsed_ctor->is_defaulted;
     matched_ctor_decl->is_defaulted_on_first_declaration = false;
+    matched_ctor_decl->has_deferred_defaulted_body =
+        matched_ctor_decl->is_defaulted;
     matched_ctor_decl->is_constexpr = parsed_ctor->is_constexpr;
     matched_ctor_decl->is_consteval = parsed_ctor->is_consteval;
     if (matched_ctor_decl->is_consteval) {
@@ -1774,6 +1778,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
     matched_dtor_decl->is_deleted = parsed_dtor->is_deleted;
     matched_dtor_decl->is_defaulted = parsed_dtor->is_defaulted;
     matched_dtor_decl->is_defaulted_on_first_declaration = false;
+    matched_dtor_decl->has_deferred_defaulted_body =
+        matched_dtor_decl->is_defaulted;
     matched_dtor_decl->is_override = parsed_dtor->is_override;
     matched_dtor_decl->is_final = parsed_dtor->is_final;
     matched_dtor_decl->is_pure = parsed_dtor->is_pure;

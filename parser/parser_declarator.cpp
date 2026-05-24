@@ -1479,6 +1479,15 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                             if (ctype == nullptr) {
                                 return false;
                             }
+                            if (!dp->name.empty()) {
+                                auto temp_sym = std::make_shared<Symbol>(
+                                    dp->name, SymbolKind::VARIABLE,
+                                    QualType(ctype, dp->qualifiers), dp->str_class,
+                                    VariableLinkage::NONE);
+                                pars->collect_->collect_bind_symbol_in_current_scope(
+                                    dp->name, temp_sym);
+                                dp->preparsed_sym = temp_sym;
+                            }
 
                             bool has_default_argument = false;
                             if (mgnt->gentle_check(TokenType::ASSIGN)) {

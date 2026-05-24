@@ -2206,7 +2206,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         collect.collect_record_synthesize_implicit_members(ctx);
         collect.collect_record_resolve_virtual_dispatch(ctx);
         collect.collect_record_compute_layout(ctx);
-        collect.collect_record_materialize_defaulted_method_bodies(ctx);
+        collect.collect_record_prepare_deferred_defaulted_method_bodies(ctx);
         collect.collect_record_infer_constexpr_special_members(ctx);
         collect.collect_record_publish_semantics(ctx);
 
@@ -3275,6 +3275,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_decl->is_defaulted = function_decl->is_defaulted;
             cloned_decl->is_defaulted_on_first_declaration =
                 function_decl->is_defaulted_on_first_declaration;
+            cloned_decl->has_deferred_defaulted_body =
+                function_decl->has_deferred_defaulted_body;
             cloned_decl->set_language_linkage(
                 function_decl->get_language_linkage());
             if (function_decl->trailing_requires_clause) {
@@ -3450,6 +3452,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_function->is_defaulted = function_decl->is_defaulted;
         cloned_function->is_defaulted_on_first_declaration =
             function_decl->is_defaulted_on_first_declaration;
+        cloned_function->has_deferred_defaulted_body =
+            function_decl->has_deferred_defaulted_body;
         cloned_function->friend_access_type = owner_type;
         cloned_function->set_language_linkage(function_decl->get_language_linkage());
         if (function_decl->asm_label) {
@@ -3752,6 +3756,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_defaulted = method_decl->is_defaulted;
         cloned_decl->is_defaulted_on_first_declaration =
             method_decl->is_defaulted_on_first_declaration;
+        cloned_decl->has_deferred_defaulted_body =
+            method_decl->has_deferred_defaulted_body;
         cloned_decl->set_language_linkage(method_decl->get_language_linkage());
         if (method_decl->trailing_requires_clause) {
             std::string clone_error;
@@ -3913,6 +3919,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_defaulted = ctor_decl->is_defaulted;
         cloned_decl->is_defaulted_on_first_declaration =
             ctor_decl->is_defaulted_on_first_declaration;
+        cloned_decl->has_deferred_defaulted_body =
+            ctor_decl->has_deferred_defaulted_body;
         if (ctor_decl->trailing_requires_clause) {
             std::string clone_error;
             cloned_decl->trailing_requires_clause =
@@ -4022,6 +4030,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_defaulted = dtor_decl->is_defaulted;
         cloned_decl->is_defaulted_on_first_declaration =
             dtor_decl->is_defaulted_on_first_declaration;
+        cloned_decl->has_deferred_defaulted_body =
+            dtor_decl->has_deferred_defaulted_body;
         cloned_decl->is_virtual = dtor_decl->is_virtual;
         cloned_decl->is_override = dtor_decl->is_override;
         cloned_decl->is_final = dtor_decl->is_final;

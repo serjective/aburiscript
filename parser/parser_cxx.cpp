@@ -8202,6 +8202,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
         std::move(trailing_requires_clause);
     ctor_decl->is_defaulted_on_first_declaration =
         is_defaulted && is_parsing_cpp_record_body();
+    ctor_decl->has_deferred_defaulted_body = is_defaulted;
     ctor_decl->set_language_linkage(current_decl_language_linkage());
     ctor_decl->ctor_initializers = std::move(parsed_ctor_initializers);
     ast_ctx->append_attrs(ctor_decl->node_id, std::move(leading_attrs));
@@ -8520,6 +8521,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
     dtor_decl->is_defaulted = is_defaulted;
     dtor_decl->is_defaulted_on_first_declaration =
         is_defaulted && is_parsing_cpp_record_body();
+    dtor_decl->has_deferred_defaulted_body = is_defaulted;
     dtor_decl->is_override = is_override;
     dtor_decl->is_final = is_final;
     dtor_decl->is_pure = is_pure;

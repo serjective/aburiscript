@@ -3850,6 +3850,8 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
             matched_method_decl->is_defaulted =
                 out_of_line_method->is_defaulted;
             matched_method_decl->is_defaulted_on_first_declaration = false;
+            matched_method_decl->has_deferred_defaulted_body =
+                matched_method_decl->is_defaulted;
             matched_method_decl->is_conversion_function =
                 out_of_line_method->is_conversion_function;
             matched_method_decl->is_explicit_conversion =
@@ -3869,17 +3871,6 @@ Parser::DeclaratorHandlingResult Parser::handle_function_declarator(
                     get_func_decl_cxx_qualifier_prefix(out_of_line_method.get())) {
                 set_func_decl_cxx_qualifier_prefix(
                     matched_method_decl, *parsed_prefix);
-            }
-
-            if (matched_method_decl->is_defaulted) {
-                if (const auto* owner_state =
-                        collect_->query_lookup_record_semantics(
-                            qualified_declarator.owner_record_decl)) {
-                    collect_->collect_materialize_defaulted_copy_assignment_body(
-                        matched_method_decl,
-                        qualified_declarator.owner_record_decl,
-                        *owner_state);
-                }
             }
 
             if (method_sym) {
@@ -5502,6 +5493,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 ctor_decl->is_defaulted = ctor_is_defaulted;
                 ctor_decl->is_defaulted_on_first_declaration =
                     ctor_is_defaulted;
+                ctor_decl->has_deferred_defaulted_body = ctor_is_defaulted;
                 ctor_decl->set_language_linkage(current_decl_language_linkage());
                 ctor_decl->ctor_initializers = std::move(parsed_ctor_initializers);
                 if (ctor_is_defaulted) {
@@ -5763,6 +5755,8 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 cpp_method->is_defaulted = parsed_method->is_defaulted;
                 cpp_method->is_defaulted_on_first_declaration =
                     parsed_method->is_defaulted;
+                cpp_method->has_deferred_defaulted_body =
+                    cpp_method->is_defaulted;
                 cpp_method->is_conversion_function =
                     decl_parser.is_conversion_function;
                 cpp_method->is_explicit_conversion = member_explicit;

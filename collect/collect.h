@@ -1464,6 +1464,11 @@ public:
         CollectRecordBuildContext& ctx) const;
     void collect_record_materialize_defaulted_method_bodies(
         CollectRecordBuildContext& ctx);
+    void collect_record_prepare_deferred_defaulted_method_bodies(
+        CollectRecordBuildContext& ctx);
+    bool collect_ensure_defaulted_special_member_body(
+        const std::shared_ptr<Symbol>& symbol,
+        SrcLoc loc);
     void collect_record_infer_constexpr_special_members(
         CollectRecordBuildContext& ctx) const;
     bool collect_materialize_defaulted_constructor(

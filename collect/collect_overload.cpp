@@ -2298,6 +2298,20 @@ std::unique_ptr<Expr> Collect::build_cpp_selected_user_defined_conversion_expr(
                 "failed to instantiate selected conversion-constructor template specialization")) {
         return completion_error;
     }
+    if (!collect_ensure_defaulted_special_member_body(ctor_symbol, loc)) {
+        report_error(
+            "failed to materialize defaulted constructor '" +
+                ctor_symbol->name + "'",
+            loc);
+        return collect_make<ErrorExpr>(
+            "failed to materialize defaulted constructor", loc);
+    }
+    if (ctor_symbol->is_deleted) {
+        report_error(
+            "call to deleted constructor '" + ctor_symbol->name + "'",
+            loc);
+        return collect_make<ErrorExpr>("deleted constructor call", loc);
+    }
 
     std::vector<std::unique_ptr<Expr>> ctor_args;
     ctor_args.reserve(conversion_match.constructor.max_user_param_count);

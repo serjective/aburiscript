@@ -1030,6 +1030,78 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
     }
 }
 
+namespace {
+
+bool cpp_construct_expr_requires_value_zero_initialization(
+    const CppConstructExpr* ctor_init) {
+    if (!ctor_init || !ctor_init->is_list_init || !ctor_init->args.empty() ||
+        !ctor_init->ctor_sym) {
+        return false;
+    }
+
+    const auto* function_decl = ctor_init->ctor_sym->function_definition;
+    const auto* ctor_decl =
+        function_decl ? dyn_cast<CppConstructorDecl>(function_decl) : nullptr;
+    return ctor_decl &&
+           ctor_decl->is_defaulted &&
+           ctor_decl->is_defaulted_on_first_declaration;
+}
+
+bool cpp_construct_expr_has_no_runtime_constructor_work(
+    const CppConstructExpr* ctor_init,
+    const ASTToLLVM* lower) {
+    if (!ctor_init || !ctor_init->ctor_sym || !lower ||
+        !ctor_init->args.empty()) {
+        return false;
+    }
+
+    const auto* function_decl = ctor_init->ctor_sym->function_definition;
+    const auto* ctor_decl =
+        function_decl ? dyn_cast<CppConstructorDecl>(function_decl) : nullptr;
+    if (!ctor_decl ||
+        !ctor_decl->is_defaulted ||
+        !ctor_decl->is_defaulted_on_first_declaration ||
+        ctor_decl->has_deferred_defaulted_body ||
+        !ctor_decl->ctor_initializers.empty()) {
+        return false;
+    }
+
+    if (ctor_decl->body) {
+        const auto* body = dyn_cast<CompoundStmt>(ctor_decl->body.get());
+        if (!body || !body->statements.empty()) {
+            return false;
+        }
+    }
+
+    auto object_record =
+        desugar_type(ctor_init->ctype, lower->ast_ctx.get())
+            .as_shared<ObjectType>();
+    const auto* object_decl =
+        object_record
+            ? lower->canonical_cpp_record_decl(
+                  dyn_cast<ObjectDecl>(object_record->get_decl()))
+            : nullptr;
+    const RecordSemanticState* object_state =
+        object_decl ? lower->lookup_cpp_record_state(object_decl) : nullptr;
+    if (!object_state) {
+        return false;
+    }
+    if (!object_state->bases.empty() || !object_state->virtual_bases.empty()) {
+        return false;
+    }
+    for (const auto& field : object_state->fields) {
+        if (field.is_base_subobject || field.is_virtual_base_storage) {
+            continue;
+        }
+        if (field.decl && field.decl->has_default_member_initializer()) {
+            return false;
+        }
+    }
+    return !lower->cpp_record_uses_vptr(object_state);
+}
+
+} // namespace
+
 bool ASTToLLVM::emit_cpp_construct_call(const CppConstructExpr* ctor_init,
                                         llvm::Value* object_addr,
                                         SrcLoc loc,
@@ -1037,6 +1109,26 @@ bool ASTToLLVM::emit_cpp_construct_call(const CppConstructExpr* ctor_init,
                                         CppCtorDtorVariant variant) {
     if (!ctor_init) {
         return false;
+    }
+    if (cpp_construct_expr_requires_value_zero_initialization(ctor_init)) {
+        llvm::Type* object_type = convert_type(ctor_init->ctype.get_shared());
+        if (!object_type || object_type->isVoidTy()) {
+            error(context + ": failed to lower value-initialized constructor type",
+                  loc);
+            return false;
+        }
+        auto* store = builder.CreateStore(
+            llvm::Constant::getNullValue(object_type),
+            object_addr);
+        apply_store_qualifiers(
+            store,
+            ctor_init->ctype,
+            module->getDataLayout());
+    }
+    if (cpp_construct_expr_has_no_runtime_constructor_work(
+            ctor_init,
+            this)) {
+        return true;
     }
     return emit_cpp_construct_call(
         ctor_init->ctor_sym,

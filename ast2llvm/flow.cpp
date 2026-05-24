@@ -1673,6 +1673,19 @@ void ASTToLLVM::emit_cpp_lambda_invoker_body(
 void ASTToLLVM::convert_function_declaration(Decl *decl) {
     auto *node = dyn_cast<FuncDecl>(decl);
     if (!node) { error("convert_function_declaration(): unexpected subclass", decl->location); return; }
+    auto unresolved_deferred_defaulted_type =
+        dyn_cast_shared<FunctionType>(node->type);
+    if (lang_opts.is_cxx_mode() &&
+        node->is_defaulted &&
+        node->has_deferred_defaulted_body &&
+        node->body == nullptr &&
+        unresolved_deferred_defaulted_type) {
+        QualType return_type =
+            desugar_type(unresolved_deferred_defaulted_type->ret_type, ast_ctx.get());
+        if (return_type && return_type->kind == TypeKind::Auto) {
+            return;
+        }
+    }
     const bool uses_gnu_inline_semantics = lang_opts.uses_gnu_inline_semantics();
     const bool is_inline_equivalent =
         function_decl_is_inline_equivalent(*node);

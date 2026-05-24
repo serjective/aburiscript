@@ -150,7 +150,9 @@ bool empty_class_initialization_needs_default_constructor_overload(
         if (!aggregate_initialization_candidate) {
             return true;
         }
-        return !ctor.decl->ctor_initializers.empty();
+        return ctor.symbol &&
+               (ctor.decl->has_deferred_defaulted_body ||
+                !ctor.decl->ctor_initializers.empty());
     }
 
     return false;
@@ -737,6 +739,19 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         loc);
     decl->original_type = written_declared_type;
     if (selection.used_constructor_initialization && selection.constructor_symbol) {
+        if (!collect_ensure_defaulted_special_member_body(
+                selection.constructor_symbol,
+                loc)) {
+            report_error(
+                "failed to materialize defaulted constructor '" +
+                    selection.constructor_symbol->name + "'",
+                loc);
+        } else if (selection.constructor_symbol->is_deleted) {
+            report_error(
+                "call to deleted constructor '" +
+                    selection.constructor_symbol->name + "'",
+                loc);
+        }
         decl->init = collect_make<CppConstructExpr>(
             selection.constructor_symbol,
             std::move(selection.constructor_args),
@@ -971,6 +986,23 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
         }
         if (!selection.constructor_symbol) {
             return nullptr;
+        }
+        if (!collect_ensure_defaulted_special_member_body(
+                selection.constructor_symbol,
+                loc)) {
+            report_error(
+                "failed to materialize defaulted constructor '" +
+                    selection.constructor_symbol->name + "'",
+                loc);
+            return collect_make<ErrorExpr>(
+                "failed to materialize defaulted constructor", loc);
+        }
+        if (selection.constructor_symbol->is_deleted) {
+            report_error(
+                "call to deleted constructor '" +
+                    selection.constructor_symbol->name + "'",
+                loc);
+            return collect_make<ErrorExpr>("deleted constructor call", loc);
         }
         return collect_make<CppConstructExpr>(
             selection.constructor_symbol,

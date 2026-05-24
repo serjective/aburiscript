@@ -659,6 +659,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_ctor->is_defaulted = pattern_ctor->is_defaulted;
             specialized_ctor->is_defaulted_on_first_declaration =
                 pattern_ctor->is_defaulted_on_first_declaration;
+            specialized_ctor->has_deferred_defaulted_body =
+                pattern_ctor->has_deferred_defaulted_body;
             specialized_ctor->set_language_linkage(
                 pattern_ctor->get_language_linkage());
             specialized_ctor->is_explicit = pattern_ctor->is_explicit;
@@ -697,6 +699,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_method->is_defaulted = pattern_method->is_defaulted;
             specialized_method->is_defaulted_on_first_declaration =
                 pattern_method->is_defaulted_on_first_declaration;
+            specialized_method->has_deferred_defaulted_body =
+                pattern_method->has_deferred_defaulted_body;
             specialized_method->set_language_linkage(
                 pattern_method->get_language_linkage());
             specialized_method->is_virtual = pattern_method->is_virtual;
@@ -755,6 +759,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             specialized_function->is_defaulted = pattern->is_defaulted;
             specialized_function->is_defaulted_on_first_declaration =
                 pattern->is_defaulted_on_first_declaration;
+            specialized_function->has_deferred_defaulted_body =
+                pattern->has_deferred_defaulted_body;
             specialized_function->set_language_linkage(
                 pattern->get_language_linkage());
             if (pattern->asm_label) {
