@@ -61,6 +61,20 @@ QualType clone_top_level_incomplete_array(QualType type) {
     return QualType(cloned_raw, type.get_qualifiers());
 }
 
+bool init_list_has_lowered_semantics_for_type(const InitListExpr* init_list,
+                                              QualType target_type,
+                                              const ASTContext* ast_ctx) {
+    if (!init_list || !target_type || !init_list->type) {
+        return false;
+    }
+    if (!init_list->elements.empty() ||
+        (init_list->actions.empty() && init_list->mappings.empty())) {
+        return false;
+    }
+    return desugar_type(init_list->type, ast_ctx)
+        .equals_unqualified(desugar_type(target_type, ast_ctx));
+}
+
 std::string describe_consteval_failure(const ConstEvalResult& result) {
     if (!result.message.empty()) {
         return result.message;

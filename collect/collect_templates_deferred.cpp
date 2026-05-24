@@ -883,6 +883,11 @@ bool expr_depends_on_template_parameters_impl(const Expr* expr,
         case StmtKind::CppConstructExpr: {
             const auto* construct =
                 static_cast<const CppConstructExpr*>(stripped);
+            if (type_depends_on_template_parameters(
+                    construct->ctype,
+                    ast_ctx)) {
+                return true;
+            }
             for (const auto& arg : construct->args) {
                 if (expr_depends_on_template_parameters_impl(
                         arg.get(),

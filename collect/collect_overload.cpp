@@ -2418,6 +2418,11 @@ std::unique_ptr<Expr> Collect::convert_cpp_braced_init_argument(
         return working;
     }
 
+    if (init_list_has_lowered_semantics_for_type(
+            init_list, target_type, ast_ctx_.get())) {
+        return working;
+    }
+
     bool is_list_init = !init_list->is_paren_init;
     auto owned_list = std::unique_ptr<InitListExpr>(
         static_cast<InitListExpr*>(working.release()));

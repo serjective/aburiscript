@@ -377,7 +377,14 @@ QualType implicit_this_type_for_specialized_function(const FuncDecl* decl);
 
 bool finalize_specialized_decl_semantics(Collect& collect,
                                          std::unique_ptr<Decl>& decl,
-                                         std::string* error_out);
+                                         std::string* error_out,
+                                         std::vector<std::unique_ptr<Decl>>*
+                                             extra_decls_out = nullptr);
+
+bool finalize_specialized_local_record_declarations(
+    Collect& collect,
+    std::unique_ptr<Stmt>& stmt,
+    std::string* error_out);
 
 bool finalize_specialized_stmt_semantics(Collect& collect,
                                          std::unique_ptr<Stmt>& stmt,

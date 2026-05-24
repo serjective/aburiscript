@@ -41,6 +41,10 @@ struct BitfieldLayoutConfig {
 
     // True if the enclosing record has __attribute__((packed)).
     bool record_packed = false;
+
+    // ABI pointer size. C++ reference data members are stored as pointers even
+    // though sizeof(T&) is the size of T.
+    size_t pointer_size_bytes = 8;
 };
 
 // Engine for computing bitfield layouts according to ABI rules
@@ -75,6 +79,9 @@ private:
 
     // Get alignment requirement for a type (in bytes)
     size_t get_type_alignment(const std::shared_ptr<CType>& type);
+
+    // Get non-bitfield storage size for a record member.
+    size_t get_field_storage_size(const ObjectType::Field& field);
 
     // Compute layout for struct (non-union), Itanium ABI
     void compute_struct_layout_itanium(std::vector<ObjectType::Field>& fields,

@@ -830,6 +830,66 @@ bool rewrite_call_argument_vector(std::vector<std::unique_ptr<Expr>>& args,
     return rewrite_expr_vector(args, ctx, error_out);
 }
 
+bool rewrite_cpp_explicit_specifier_in_place(CppExplicitSpecifier& specifier,
+                                             ASTCloneContext& ctx,
+                                             std::string* error_out) {
+    if (!specifier.condition) {
+        return true;
+    }
+    auto rewritten_condition =
+        clone_expr_with_substitution(specifier.condition.get(), ctx, error_out);
+    if (!rewritten_condition) {
+        return false;
+    }
+    specifier.condition = std::shared_ptr<Expr>(rewritten_condition.release());
+    return true;
+}
+
+bool rewrite_ctor_initializers_in_place(
+    std::vector<CppCtorInitializer>& initializers,
+    ASTCloneContext& ctx,
+    std::string* error_out) {
+    for (auto& initializer : initializers) {
+        initializer.target_type = rewrite_type(initializer.target_type, ctx);
+        initializer.resolved_target_type =
+            rewrite_type(initializer.resolved_target_type, ctx);
+        if (!rewrite_expr_tree(initializer.member_expr, ctx, error_out) ||
+            !rewrite_expr_tree(initializer.init_expr, ctx, error_out)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool rewrite_function_decl_signature_in_place(FuncDecl* function_decl,
+                                              ASTCloneContext& ctx,
+                                              std::string* error_out) {
+    if (!function_decl) {
+        return true;
+    }
+    function_decl->type =
+        rewrite_type(QualType(function_decl->type), ctx).get_shared();
+    function_decl->friend_access_type =
+        rewrite_type(function_decl->friend_access_type, ctx);
+    if (!rewrite_decl_vector(function_decl->parameters, ctx, error_out)) {
+        return false;
+    }
+    if (!rewrite_expr_tree(
+            function_decl->trailing_requires_clause,
+            ctx,
+            error_out)) {
+        return false;
+    }
+    function_decl->explicit_specialization_arguments =
+        rewrite_template_arguments(
+            function_decl->explicit_specialization_arguments,
+            ctx,
+            error_out);
+    return !(function_decl->explicit_specialization_arguments.empty() &&
+             function_decl->has_explicit_specialization_argument_list &&
+             error_out && !error_out->empty());
+}
+
 bool rewrite_init_element_vector(std::vector<InitElement>& elements,
                                  ASTCloneContext& ctx,
                                  std::string* error_out) {
@@ -1842,6 +1902,46 @@ bool rewrite_decl_tree_in_place_impl(std::unique_ptr<Decl>& decl,
         }
         case DeclKind::CppAccessSpecDecl:
             return true;
+        case DeclKind::FuncDecl: {
+            return rewrite_function_decl_signature_in_place(
+                static_cast<FuncDecl*>(decl.get()),
+                ctx,
+                error_out);
+        }
+        case DeclKind::CppMethodDecl: {
+            auto* method_decl = static_cast<CppMethodDecl*>(decl.get());
+            method_decl->conversion_target_type =
+                rewrite_type(method_decl->conversion_target_type, ctx);
+            return rewrite_function_decl_signature_in_place(
+                       method_decl,
+                       ctx,
+                       error_out) &&
+                   rewrite_cpp_explicit_specifier_in_place(
+                       method_decl->explicit_specifier,
+                       ctx,
+                       error_out);
+        }
+        case DeclKind::CppConstructorDecl: {
+            auto* ctor_decl = static_cast<CppConstructorDecl*>(decl.get());
+            return rewrite_function_decl_signature_in_place(
+                       ctor_decl,
+                       ctx,
+                       error_out) &&
+                   rewrite_cpp_explicit_specifier_in_place(
+                       ctor_decl->explicit_specifier,
+                       ctx,
+                       error_out) &&
+                   rewrite_ctor_initializers_in_place(
+                       ctor_decl->ctor_initializers,
+                       ctx,
+                       error_out);
+        }
+        case DeclKind::CppDestructorDecl: {
+            return rewrite_function_decl_signature_in_place(
+                static_cast<CppDestructorDecl*>(decl.get()),
+                ctx,
+                error_out);
+        }
         case DeclKind::ObjectDecl: {
             auto* object_decl = static_cast<ObjectDecl*>(decl.get());
             auto record_type = object_decl->get_record_type();
@@ -2737,6 +2837,179 @@ std::shared_ptr<ObjectType> clone_object_type_for_decl(
     return cloned_type;
 }
 
+ObjectDecl* clone_cpp_record_provisional_semantic_owner(
+    const ObjectDecl* owner,
+    ASTCloneContext& ctx,
+    std::string* error_out) {
+    if (!owner) {
+        return nullptr;
+    }
+    if (auto it = ctx.record_type_remap.find(owner);
+        it != ctx.record_type_remap.end() && it->second) {
+        auto remapped_type = it->second.as_shared<ObjectType>();
+        if (auto* remapped_owner =
+                dyn_cast<ObjectDecl>(
+                    remapped_type ? remapped_type->get_decl() : nullptr)) {
+            return const_cast<ObjectDecl*>(remapped_owner);
+        }
+    }
+    if (!ctx.ast_ctx) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "cannot clone local class semantic owner without AST context";
+        }
+        return nullptr;
+    }
+
+    auto cloned_owner_decl = clone_decl_impl(owner, ctx, error_out);
+    auto* cloned_owner = dyn_cast<ObjectDecl>(cloned_owner_decl.get());
+    if (!cloned_owner || !cloned_owner->get_record_type()) {
+        if (error_out && error_out->empty()) {
+            *error_out = "failed to clone local class semantic owner";
+        }
+        return nullptr;
+    }
+    ObjectDecl* retained_owner = cloned_owner;
+    ctx.record_type_remap[owner] = QualType(cloned_owner->get_record_type());
+    ctx.ast_ctx->retain_external_decl(std::move(cloned_owner_decl));
+    return retained_owner;
+}
+
+bool clone_cpp_explicit_specifier(const CppExplicitSpecifier& source,
+                                  CppExplicitSpecifier& destination,
+                                  ASTCloneContext& ctx,
+                                  std::string* error_out) {
+    destination = source;
+    if (!source.condition) {
+        return true;
+    }
+    auto cloned_condition =
+        clone_expr_with_substitution(source.condition.get(), ctx, error_out);
+    if (!cloned_condition) {
+        return false;
+    }
+    destination.condition = std::shared_ptr<Expr>(cloned_condition.release());
+    return true;
+}
+
+bool clone_ctor_initializers(const std::vector<CppCtorInitializer>& source,
+                             std::vector<CppCtorInitializer>& destination,
+                             ASTCloneContext& ctx,
+                             std::string* error_out) {
+    destination.clear();
+    destination.reserve(source.size());
+    for (const auto& initializer : source) {
+        CppCtorInitializer cloned_initializer;
+        cloned_initializer.member_name = initializer.member_name;
+        cloned_initializer.target_spelling = initializer.target_spelling;
+        cloned_initializer.target_type =
+            rewrite_type(initializer.target_type, ctx);
+        cloned_initializer.resolved_target_type =
+            rewrite_type(initializer.resolved_target_type, ctx);
+        cloned_initializer.is_base_initializer =
+            initializer.is_base_initializer;
+        cloned_initializer.is_delegating_initializer =
+            initializer.is_delegating_initializer;
+        cloned_initializer.is_list_init = initializer.is_list_init;
+        cloned_initializer.is_pack_expansion = initializer.is_pack_expansion;
+        cloned_initializer.deferred_init_begin_token_idx =
+            initializer.deferred_init_begin_token_idx;
+        cloned_initializer.deferred_init_end_token_idx =
+            initializer.deferred_init_end_token_idx;
+        cloned_initializer.location = initializer.location;
+        cloned_initializer.member_expr = clone_expr_with_substitution(
+            initializer.member_expr.get(),
+            ctx,
+            error_out);
+        cloned_initializer.init_expr = clone_expr_with_substitution(
+            initializer.init_expr.get(),
+            ctx,
+            error_out);
+        if ((initializer.member_expr && !cloned_initializer.member_expr) ||
+            (initializer.init_expr && !cloned_initializer.init_expr)) {
+            return false;
+        }
+        destination.push_back(std::move(cloned_initializer));
+    }
+    return true;
+}
+
+bool clone_function_decl_common_state(const FuncDecl* source,
+                                      FuncDecl* destination,
+                                      ASTCloneContext& ctx,
+                                      std::string* error_out) {
+    if (!source || !destination) {
+        return false;
+    }
+    destination->location = source->location;
+    destination->name = source->name;
+    destination->type = rewrite_type(QualType(source->type), ctx).get_shared();
+    destination->stmt_labels = source->stmt_labels;
+    destination->storage_class = source->storage_class;
+    destination->is_inline = source->is_inline;
+    destination->has_prior_non_inline_declaration =
+        source->has_prior_non_inline_declaration;
+    destination->is_constexpr = source->is_constexpr;
+    destination->is_consteval = source->is_consteval;
+    destination->is_deleted = source->is_deleted;
+    destination->is_defaulted = source->is_defaulted;
+    destination->is_defaulted_on_first_declaration =
+        source->is_defaulted_on_first_declaration;
+    destination->external_semantic_owner_id =
+        source->external_semantic_owner_id;
+    destination->set_language_linkage(source->get_language_linkage());
+    destination->friend_access_type =
+        rewrite_type(source->friend_access_type, ctx);
+    destination->has_explicit_specialization_argument_list =
+        source->has_explicit_specialization_argument_list;
+    destination->explicit_specialization_arguments =
+        rewrite_template_arguments(
+            source->explicit_specialization_arguments,
+            ctx,
+            error_out);
+    if (destination->explicit_specialization_arguments.empty() &&
+        !source->explicit_specialization_arguments.empty() &&
+        error_out && !error_out->empty()) {
+        return false;
+    }
+    if (source->asm_label) {
+        destination->set_asm_label(*source->asm_label);
+    } else {
+        destination->clear_asm_label();
+    }
+    destination->scope = clone_scope(source->scope, ctx);
+
+    destination->parameters.clear();
+    destination->parameters.reserve(source->parameters.size());
+    for (const auto& parameter : source->parameters) {
+        auto cloned_parameter =
+            clone_decl_impl(parameter.get(), ctx, error_out);
+        if (parameter && !cloned_parameter) {
+            return false;
+        }
+        destination->parameters.push_back(std::move(cloned_parameter));
+    }
+
+    if (source->trailing_requires_clause) {
+        destination->trailing_requires_clause =
+            clone_expr_with_substitution(
+                source->trailing_requires_clause.get(),
+                ctx,
+                error_out);
+        if (!destination->trailing_requires_clause) {
+            return false;
+        }
+    }
+
+    if (source->body) {
+        destination->body = clone_stmt_impl(source->body.get(), ctx, error_out);
+        if (!destination->body) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::vector<ObjectType::Field> build_record_fields_from_decl_members(
     const ObjectDecl* record_decl) {
     std::vector<ObjectType::Field> fields;
@@ -2987,6 +3260,142 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
             }
             return result;
         }
+        case DeclKind::FuncDecl: {
+            const auto* function_decl = static_cast<const FuncDecl*>(decl);
+            auto result = std::make_unique<FuncDecl>(function_decl->location);
+            if (!clone_function_decl_common_state(
+                    function_decl,
+                    result.get(),
+                    ctx,
+                    error_out)) {
+                return nullptr;
+            }
+            assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables_impl(
+                    decl,
+                    result.get(),
+                    ctx,
+                    error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::CppMethodDecl: {
+            const auto* method_decl = static_cast<const CppMethodDecl*>(decl);
+            auto result = std::make_unique<CppMethodDecl>(method_decl->location);
+            if (!clone_function_decl_common_state(
+                    method_decl,
+                    result.get(),
+                    ctx,
+                    error_out)) {
+                return nullptr;
+            }
+            result->has_deferred_inline_body_tokens =
+                method_decl->has_deferred_inline_body_tokens;
+            result->is_virtual = method_decl->is_virtual;
+            result->is_override = method_decl->is_override;
+            result->is_final = method_decl->is_final;
+            result->is_pure = method_decl->is_pure;
+            result->is_conversion_function =
+                method_decl->is_conversion_function;
+            result->is_explicit_conversion =
+                method_decl->is_explicit_conversion;
+            result->deferred_inline_body_begin_token_idx =
+                method_decl->deferred_inline_body_begin_token_idx;
+            result->deferred_inline_body_end_token_idx =
+                method_decl->deferred_inline_body_end_token_idx;
+            result->conversion_target_type =
+                rewrite_type(method_decl->conversion_target_type, ctx);
+            if (!clone_cpp_explicit_specifier(
+                    method_decl->explicit_specifier,
+                    result->explicit_specifier,
+                    ctx,
+                    error_out)) {
+                return nullptr;
+            }
+            assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables_impl(
+                    decl,
+                    result.get(),
+                    ctx,
+                    error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::CppConstructorDecl: {
+            const auto* ctor_decl =
+                static_cast<const CppConstructorDecl*>(decl);
+            auto result =
+                std::make_unique<CppConstructorDecl>(ctor_decl->location);
+            if (!clone_function_decl_common_state(
+                    ctor_decl,
+                    result.get(),
+                    ctx,
+                    error_out)) {
+                return nullptr;
+            }
+            result->is_explicit = ctor_decl->is_explicit;
+            result->has_deferred_inline_body_tokens =
+                ctor_decl->has_deferred_inline_body_tokens;
+            result->deferred_inline_body_begin_token_idx =
+                ctor_decl->deferred_inline_body_begin_token_idx;
+            result->deferred_inline_body_end_token_idx =
+                ctor_decl->deferred_inline_body_end_token_idx;
+            if (!clone_cpp_explicit_specifier(
+                    ctor_decl->explicit_specifier,
+                    result->explicit_specifier,
+                    ctx,
+                    error_out) ||
+                !clone_ctor_initializers(
+                    ctor_decl->ctor_initializers,
+                    result->ctor_initializers,
+                    ctx,
+                    error_out)) {
+                return nullptr;
+            }
+            assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables_impl(
+                    decl,
+                    result.get(),
+                    ctx,
+                    error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::CppDestructorDecl: {
+            const auto* dtor_decl =
+                static_cast<const CppDestructorDecl*>(decl);
+            auto result =
+                std::make_unique<CppDestructorDecl>(dtor_decl->location);
+            if (!clone_function_decl_common_state(
+                    dtor_decl,
+                    result.get(),
+                    ctx,
+                    error_out)) {
+                return nullptr;
+            }
+            result->has_deferred_inline_body_tokens =
+                dtor_decl->has_deferred_inline_body_tokens;
+            result->is_virtual = dtor_decl->is_virtual;
+            result->is_override = dtor_decl->is_override;
+            result->is_final = dtor_decl->is_final;
+            result->is_pure = dtor_decl->is_pure;
+            result->deferred_inline_body_begin_token_idx =
+                dtor_decl->deferred_inline_body_begin_token_idx;
+            result->deferred_inline_body_end_token_idx =
+                dtor_decl->deferred_inline_body_end_token_idx;
+            assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables_impl(
+                    decl,
+                    result.get(),
+                    ctx,
+                    error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
         case DeclKind::ObjectDecl: {
             const auto* object_decl = static_cast<const ObjectDecl*>(decl);
             auto cloned_type =
@@ -3036,6 +3445,17 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
         }
         case DeclKind::CppRecordDecl: {
             const auto* record_decl = static_cast<const CppRecordDecl*>(decl);
+            ObjectDecl* cloned_provisional_semantic_owner = nullptr;
+            if (record_decl->provisional_semantic_owner) {
+                cloned_provisional_semantic_owner =
+                    clone_cpp_record_provisional_semantic_owner(
+                        record_decl->provisional_semantic_owner,
+                        ctx,
+                        error_out);
+                if (!cloned_provisional_semantic_owner) {
+                    return nullptr;
+                }
+            }
             std::vector<CppBaseSpecifier> cloned_bases;
             cloned_bases.reserve(record_decl->bases.size());
             for (const auto& base : record_decl->bases) {
@@ -3066,6 +3486,8 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 record_decl->location);
             result->default_access = record_decl->default_access;
             result->definition_data = record_decl->definition_data;
+            result->provisional_semantic_owner =
+                cloned_provisional_semantic_owner;
             assign_node_id(result.get(), ctx.ast_ctx);
             if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;

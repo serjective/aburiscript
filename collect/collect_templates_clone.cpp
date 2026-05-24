@@ -1945,8 +1945,10 @@ bool clone_function_body_for_specialization(Collect& collect,
         }
         return false;
     }
+    resolution_pass.sync_from_substitution_pass(substitution_pass);
     enum class BodyCloneFailurePhase {
         None,
+        LocalRecordCompletion,
         DependentResolution,
         SemanticFinalization,
     };
@@ -1957,6 +1959,15 @@ bool clone_function_body_for_specialization(Collect& collect,
     if (!collect.with_function_definition_state(
             specialization,
             [&]() {
+                if (finalize_body_semantics &&
+                    !finalize_specialized_local_record_declarations(
+                        collect,
+                        cloned_body,
+                        &clone_error)) {
+                    failure_phase =
+                        BodyCloneFailurePhase::LocalRecordCompletion;
+                    return false;
+                }
                 if (!resolution_pass.resolve_stmt_in_place(
                         cloned_body,
                         &clone_error)) {
@@ -1977,7 +1988,9 @@ bool clone_function_body_for_specialization(Collect& collect,
             effective_friend_access_type)) {
         if (error_out) {
             const char* phase_message =
-                failure_phase == BodyCloneFailurePhase::DependentResolution
+                failure_phase == BodyCloneFailurePhase::LocalRecordCompletion
+                    ? " local record completion is not supported"
+                : failure_phase == BodyCloneFailurePhase::DependentResolution
                     ? " dependent body resolution is not supported"
                     : " body semantic finalization is not supported";
             *error_out =

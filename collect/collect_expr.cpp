@@ -38,6 +38,20 @@ bool template_lookup_blocks_current_record_member_lookup(
            scope_is_before_current_record_member_lookup(lookup.scope->flags);
 }
 
+bool scope_is_within_current_function_body(
+    const std::shared_ptr<Scope>& current_scope,
+    const std::shared_ptr<Scope>& candidate_scope) {
+    for (auto scope = current_scope; scope; scope = scope->parent) {
+        if (scope == candidate_scope) {
+            return true;
+        }
+        if (scope_flags_contains(scope->flags, ScopeFlags::FunctionScope)) {
+            return false;
+        }
+    }
+    return false;
+}
+
 struct CppBasePathAccessSummary {
     size_t accessible_nonvirtual_paths = 0;
     size_t inaccessible_nonvirtual_paths = 0;
@@ -1559,12 +1573,25 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
         }
     }
     bool symbol_is_local = is_local_variable_or_parameter_symbol(sym);
+    bool symbol_is_current_function_local =
+        symbol_is_local &&
+        scope_is_within_current_function_body(
+            session_.current_scope_,
+            ordinary_lookup.scope);
     bool symbol_is_template_parameter =
         sym && sym->template_parameter_decl != nullptr;
     bool ordinary_lookup_blocks_record_member_lookup =
         ordinary_lookup_blocks_current_record_member_lookup(ordinary_lookup) ||
         template_lookup_blocks_current_record_member_lookup(
             ordinary_template_lookup);
+    if (session_.func_state_.current_function_is_cpp_member &&
+        ordinary_lookup_blocks_record_member_lookup &&
+        ordinary_lookup.scope &&
+        !scope_is_within_current_function_body(
+            session_.current_scope_,
+            ordinary_lookup.scope)) {
+        ordinary_lookup_blocks_record_member_lookup = false;
+    }
     bool is_predefined_ident =
         (name == "__func__" || name == "__FUNCTION__" ||
          name == "__PRETTY_FUNCTION__");
@@ -1672,7 +1699,7 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
         auto member_lookup = lookup_record_member_name(current_record.get(), name);
         if (member_lookup.has_member_match() &&
             !ordinary_lookup_blocks_record_member_lookup &&
-            !symbol_is_local &&
+            !symbol_is_current_function_local &&
             !symbol_is_template_parameter) {
             size_t static_template_candidate_matches =
                 member_lookup.static_method_template_matches;
@@ -1725,7 +1752,7 @@ std::unique_ptr<Expr> Collect::collect_unqualified_identifier_expression(
         session_.current_cpp_record_lookup_type_ &&
         !session_.func_state_.current_function_is_cpp_member &&
         !ordinary_lookup_blocks_record_member_lookup &&
-        !symbol_is_local &&
+        !symbol_is_current_function_local &&
         !symbol_is_template_parameter) {
         auto current_record =
             desugar_type(session_.current_cpp_record_lookup_type_, ast_ctx_.get())

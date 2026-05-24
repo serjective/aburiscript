@@ -1048,7 +1048,8 @@ const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
 
     if (const auto* existing_state =
             collect_->query_lookup_record_semantics(semantic_decl)) {
-        if (record.is_definition && !existing_state->is_incomplete) {
+        if (record.is_definition && !existing_state->is_incomplete &&
+            !existing_state->is_template_pattern_provisional) {
             record.provisional_semantic_owner = semantic_decl;
             return semantic_decl;
         }
@@ -1059,6 +1060,7 @@ const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
 
     RecordSemanticState state;
     state.is_incomplete = !record.is_definition;
+    state.is_template_pattern_provisional = true;
     state.alignment = 1;
     state.non_virtual_alignment = 1;
     if (const auto* definition_data = record.get_definition_data()) {
@@ -1186,12 +1188,23 @@ const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
         }
     }
 
+    RecordSemanticState deferred_semantic_state = state;
     collect_->query_publish_record_semantics(semantic_decl, std::move(state));
     record.provisional_semantic_owner = semantic_decl;
     if (owned_semantic_decl) {
         if (!record.name.empty()) {
             collect_->collect_add_tag_decl(record.name, semantic_decl);
         }
+    }
+
+    CppRecordDeferredParseContext deferred_ctx{
+        record,
+        record_type,
+        std::move(deferred_semantic_state),
+        semantic_decl};
+    build_cpp_record_parse_deferred_bodies(deferred_ctx);
+
+    if (owned_semantic_decl) {
         cpp_transient_semantic_decls_.push_back(
             std::move(owned_semantic_decl));
     }

@@ -142,6 +142,19 @@ std::unique_ptr<Decl> Parser::parse_static_assert_declaration() {
 
 // aka block-item/6.8.2
 std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
+    auto collect_declaration_statement =
+        [&](std::vector<std::unique_ptr<Decl>> decls) -> std::unique_ptr<Stmt> {
+        if (is_cxx_mode_active() && is_in_template_pattern_context()) {
+            for (auto& decl : decls) {
+                if (auto* record = dyn_cast<CppRecordDecl>(decl.get())) {
+                    ensure_cpp_template_pattern_nested_record_semantics(
+                        *record);
+                }
+            }
+        }
+        return collect_->collect_decl_statement(std::move(decls));
+    };
+
     // Handle __extension__ as a no-op prefix in statement/decl context
     if (gentle_check(TokenType::EXTENSION_KW)) {
         advance(); // consume __extension__
@@ -183,7 +196,7 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
             try {
                 auto decl = parse_declaration();
                 tentative.commit();
-                return collect_->collect_decl_statement(std::move(decl));
+                return collect_declaration_statement(std::move(decl));
             } catch (const ParseError&) {
             } catch (const FatalErrorLimitReached&) {
             }
@@ -193,7 +206,7 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
     }
     if (is_cxx_mode_active() && gentle_check(TokenType::NAMESPACE)) {
         auto decl = parse_declaration();
-        return collect_->collect_decl_statement(std::move(decl));
+        return collect_declaration_statement(std::move(decl));
     }
     auto starts_with_record_qualified_id = [&]() -> bool {
         if (!is_cxx_mode_active()) {
@@ -242,7 +255,7 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
                 return parse_stmt();
             }
             auto decl = parse_declaration();
-            return collect_->collect_decl_statement(std::move(decl));
+            return collect_declaration_statement(std::move(decl));
         }
         if (current_token().type == TokenType::IDENTIFIER) {
             {
@@ -250,7 +263,7 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
                 try {
                     auto decl = parse_declaration();
                     tentative.commit();
-                    return collect_->collect_decl_statement(std::move(decl));
+                    return collect_declaration_statement(std::move(decl));
                 } catch (const ParseError&) {
                 } catch (const FatalErrorLimitReached&) {
                 }
@@ -258,7 +271,7 @@ std::unique_ptr<Stmt> Parser::parse_stmt_or_decl() {
             return parse_stmt();
         }
         auto decl = parse_declaration();
-        return collect_->collect_decl_statement(std::move(decl));
+        return collect_declaration_statement(std::move(decl));
     }
     return parse_stmt();
 }

@@ -74,6 +74,38 @@ void strip_stale_object_initializer_cast(std::unique_ptr<Expr>& expr,
     }
 }
 
+class ScopedSpecializedScope {
+public:
+    ScopedSpecializedScope(Collect& collect,
+                           std::shared_ptr<Scope> scope,
+                           ScopeFlags fallback_flags = ScopeFlags::BlockScope)
+        : collect_(collect),
+          saved_scope_(collect.collect_current_scope()),
+          active_(scope != nullptr) {
+        if (!active_) {
+            return;
+        }
+        if (saved_scope_ && scope->parent != saved_scope_) {
+            scope->parent = saved_scope_;
+        }
+        ScopeFlags flags = scope->flags == ScopeFlags::None
+            ? fallback_flags
+            : scope->flags;
+        collect_.collect_enter_scope(flags, std::move(scope));
+    }
+
+    ~ScopedSpecializedScope() {
+        if (active_) {
+            collect_.collect_set_current_scope(std::move(saved_scope_));
+        }
+    }
+
+private:
+    Collect& collect_;
+    std::shared_ptr<Scope> saved_scope_;
+    bool active_ = false;
+};
+
 QualType specialized_ctor_owner_type(const CppConstructorDecl* ctor_decl) {
     if (!ctor_decl) {
         return QualType();
@@ -470,6 +502,121 @@ bool finalize_specialized_control_condition_declaration(
         error_out);
 }
 
+bool finalize_specialized_local_record_function_body(Collect& collect,
+                                                     FuncDecl* function_decl,
+                                                     std::string* error_out) {
+    if (!function_decl || !function_decl->body) {
+        return true;
+    }
+
+    return collect.with_function_definition_state(
+        function_decl,
+        [&]() {
+            if (auto* ctor_decl = dyn_cast<CppConstructorDecl>(function_decl)) {
+                if (!finalize_specialized_ctor_initializers(
+                        collect,
+                        ctor_decl,
+                        error_out)) {
+                    return false;
+                }
+            }
+            return finalize_specialized_stmt_semantics(
+                collect,
+                function_decl->body,
+                QualType(function_decl->type),
+                error_out);
+        },
+        function_decl->friend_access_type);
+}
+
+bool finalize_specialized_local_record_member_bodies(Collect& collect,
+                                                     CppRecordDecl* record,
+                                                     std::string* error_out) {
+    if (!record) {
+        return true;
+    }
+
+    for (auto& member : record->members) {
+        if (!member) {
+            continue;
+        }
+        if (auto* function_decl = dyn_cast<FuncDecl>(member.get())) {
+            if (!finalize_specialized_local_record_function_body(
+                    collect,
+                    function_decl,
+                    error_out)) {
+                return false;
+            }
+            continue;
+        }
+    }
+    return true;
+}
+
+bool record_semantic_owner_is_complete(const CppRecordDecl* record) {
+    if (!record || !record->provisional_semantic_owner) {
+        return false;
+    }
+    const auto* state =
+        record_semantics_cache_lookup(record->provisional_semantic_owner);
+    return state && !state->is_incomplete &&
+           !state->is_template_pattern_provisional;
+}
+
+bool finalize_specialized_local_record_decl(
+    Collect& collect,
+    CppRecordDecl* record,
+    std::vector<std::unique_ptr<Decl>>* extra_decls_out,
+    std::string* error_out) {
+    if (!record || !record->is_definition) {
+        return true;
+    }
+    if (record_semantic_owner_is_complete(record)) {
+        return true;
+    }
+    if (!extra_decls_out) {
+        return true;
+    }
+
+    std::vector<std::unique_ptr<Decl>> transient_decls;
+    auto semantic_decl = collect.collect_build_cpp_record_semantic_decl(
+        *record,
+        std::nullopt,
+        &transient_decls,
+        Collect::CppRecordDeferredBodyCallback{},
+        false,
+        record->name.empty());
+    if (!semantic_decl) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "failed to complete local class declaration after template substitution";
+        }
+        return false;
+    }
+    auto* semantic_object = dyn_cast<ObjectDecl>(semantic_decl.get());
+    if (!semantic_object || !semantic_object->get_record_type()) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "local class declaration produced a non-record semantic owner";
+        }
+        return false;
+    }
+
+    record->provisional_semantic_owner = semantic_object;
+    if (!finalize_specialized_local_record_member_bodies(
+            collect,
+            record,
+            error_out)) {
+        return false;
+    }
+
+    for (auto& transient_decl : transient_decls) {
+        extra_decls_out->push_back(std::move(transient_decl));
+    }
+    extra_decls_out->push_back(std::move(semantic_decl));
+    return true;
+}
+
 } // namespace
 
 QualType implicit_this_type_for_specialized_function(const FuncDecl* decl) {
@@ -490,7 +637,9 @@ QualType implicit_this_type_for_specialized_function(const FuncDecl* decl) {
 
 bool finalize_specialized_decl_semantics(Collect& collect,
                                          std::unique_ptr<Decl>& decl,
-                                         std::string* error_out) {
+                                         std::string* error_out,
+                                         std::vector<std::unique_ptr<Decl>>*
+                                             extra_decls_out) {
     if (!decl) {
         return true;
     }
@@ -623,6 +772,12 @@ bool finalize_specialized_decl_semantics(Collect& collect,
             field->default_member_initializer = std::move(rebuilt_init);
             return true;
         }
+        case DeclKind::CppRecordDecl:
+            return finalize_specialized_local_record_decl(
+                collect,
+                static_cast<CppRecordDecl*>(decl.get()),
+                extra_decls_out,
+                error_out);
         case DeclKind::StaticAssertDecl: {
             auto owned_static_assert = std::unique_ptr<StaticAssertDecl>(
                 static_cast<StaticAssertDecl*>(decl.release()));
@@ -648,6 +803,209 @@ bool finalize_specialized_decl_semantics(Collect& collect,
     }
 }
 
+bool finalize_specialized_local_record_declarations(
+    Collect& collect,
+    std::unique_ptr<Stmt>& stmt,
+    std::string* error_out) {
+    if (!stmt) {
+        return true;
+    }
+
+    switch (stmt->get_kind()) {
+        case StmtKind::CompoundStmt: {
+            auto* compound = static_cast<CompoundStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(collect, compound->scope);
+            for (auto& child : compound->statements) {
+                if (!finalize_specialized_local_record_declarations(
+                        collect,
+                        child,
+                        error_out)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        case StmtKind::Decl2Stmt: {
+            auto* decl_stmt = static_cast<Decl2Stmt*>(stmt.get());
+            std::vector<std::unique_ptr<Decl>> finalized_decls;
+            finalized_decls.reserve(decl_stmt->decls.size());
+            for (auto& decl : decl_stmt->decls) {
+                std::vector<std::unique_ptr<Decl>> extra_decls;
+                if (auto* record = dyn_cast<CppRecordDecl>(decl.get())) {
+                    if (!finalize_specialized_local_record_decl(
+                            collect,
+                            record,
+                            &extra_decls,
+                            error_out)) {
+                        return false;
+                    }
+                }
+                finalized_decls.push_back(std::move(decl));
+                for (auto& extra_decl : extra_decls) {
+                    finalized_decls.push_back(std::move(extra_decl));
+                }
+            }
+            decl_stmt->decls = std::move(finalized_decls);
+            return true;
+        }
+        case StmtKind::IfStmt: {
+            auto* if_stmt = static_cast<IfStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(collect, if_stmt->scope);
+            return finalize_specialized_local_record_declarations(
+                       collect,
+                       if_stmt->init_stmt,
+                       error_out) &&
+                   finalize_specialized_local_record_declarations(
+                       collect,
+                       if_stmt->condition.declaration,
+                       error_out) &&
+                   finalize_specialized_local_record_declarations(
+                       collect,
+                       if_stmt->then_stmt,
+                       error_out) &&
+                   finalize_specialized_local_record_declarations(
+                       collect,
+                       if_stmt->else_stmt,
+                       error_out);
+        }
+        case StmtKind::SwitchStmt: {
+            auto* switch_stmt = static_cast<SwitchStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(
+                collect,
+                switch_stmt->scope,
+                ScopeFlags::SwitchScope);
+            return finalize_specialized_local_record_declarations(
+                       collect,
+                       switch_stmt->condition.declaration,
+                       error_out) &&
+                   finalize_specialized_local_record_declarations(
+                       collect,
+                       switch_stmt->stmt,
+                       error_out);
+        }
+        case StmtKind::WhileStmt: {
+            auto* while_stmt = static_cast<WhileStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(
+                collect,
+                while_stmt->scope,
+                ScopeFlags::LoopScope);
+            return finalize_specialized_local_record_declarations(
+                       collect,
+                       while_stmt->condition.declaration,
+                       error_out) &&
+                   finalize_specialized_local_record_declarations(
+                       collect,
+                       while_stmt->body_stmt,
+                       error_out);
+        }
+        case StmtKind::DoWhileStmt: {
+            auto* do_while_stmt = static_cast<DoWhileStmt*>(stmt.get());
+            return finalize_specialized_local_record_declarations(
+                collect,
+                do_while_stmt->body_stmt,
+                error_out);
+        }
+        case StmtKind::ForStmt: {
+            auto* for_stmt = static_cast<ForStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(
+                collect,
+                for_stmt->scope,
+                ScopeFlags::LoopScope);
+            return finalize_specialized_local_record_declarations(
+                       collect,
+                       for_stmt->init,
+                       error_out) &&
+                   finalize_specialized_local_record_declarations(
+                       collect,
+                       for_stmt->cond.declaration,
+                       error_out) &&
+                   finalize_specialized_local_record_declarations(
+                       collect,
+                       for_stmt->body_stmt,
+                       error_out);
+        }
+        case StmtKind::CppRangeForStmt: {
+            auto* range_for = static_cast<CppRangeForStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(
+                collect,
+                range_for->scope,
+                ScopeFlags::LoopScope);
+            if (!finalize_specialized_local_record_declarations(
+                    collect,
+                    range_for->init_statement,
+                    error_out)) {
+                return false;
+            }
+            std::vector<std::unique_ptr<Decl>> range_side_decls;
+            range_side_decls.reserve(
+                range_for->range_declaration_side_decls.size());
+            for (auto& decl : range_for->range_declaration_side_decls) {
+                std::vector<std::unique_ptr<Decl>> extra_decls;
+                if (auto* record = dyn_cast<CppRecordDecl>(decl.get())) {
+                    if (!finalize_specialized_local_record_decl(
+                            collect,
+                            record,
+                            &extra_decls,
+                            error_out)) {
+                        return false;
+                    }
+                }
+                range_side_decls.push_back(std::move(decl));
+                for (auto& extra_decl : extra_decls) {
+                    range_side_decls.push_back(std::move(extra_decl));
+                }
+            }
+            range_for->range_declaration_side_decls =
+                std::move(range_side_decls);
+            return finalize_specialized_local_record_declarations(
+                collect,
+                range_for->body_stmt,
+                error_out);
+        }
+        case StmtKind::CaseStmt: {
+            auto* case_stmt = static_cast<CaseStmt*>(stmt.get());
+            return finalize_specialized_local_record_declarations(
+                collect,
+                case_stmt->stmt,
+                error_out);
+        }
+        case StmtKind::DefaultStmt: {
+            auto* default_stmt = static_cast<DefaultStmt*>(stmt.get());
+            return finalize_specialized_local_record_declarations(
+                collect,
+                default_stmt->stmt,
+                error_out);
+        }
+        case StmtKind::LabeledStmt: {
+            auto* labeled_stmt = static_cast<LabeledStmt*>(stmt.get());
+            return finalize_specialized_local_record_declarations(
+                collect,
+                labeled_stmt->stmt,
+                error_out);
+        }
+        case StmtKind::CppTryStmt: {
+            auto* try_stmt = static_cast<CppTryStmt*>(stmt.get());
+            if (!finalize_specialized_local_record_declarations(
+                    collect,
+                    try_stmt->try_block,
+                    error_out)) {
+                return false;
+            }
+            for (auto& handler : try_stmt->handlers) {
+                if (!finalize_specialized_local_record_declarations(
+                        collect,
+                        handler.handler,
+                        error_out)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        default:
+            return true;
+    }
+}
+
 bool finalize_specialized_stmt_semantics(Collect& collect,
                                          std::unique_ptr<Stmt>& stmt,
                                          QualType expected_return_type,
@@ -659,6 +1017,7 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
     switch (stmt->get_kind()) {
         case StmtKind::CompoundStmt: {
             auto* compound = static_cast<CompoundStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(collect, compound->scope);
             for (auto& child : compound->statements) {
                 if (!finalize_specialized_stmt_semantics(
                         collect,
@@ -672,14 +1031,23 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::Decl2Stmt: {
             auto* decl_stmt = static_cast<Decl2Stmt*>(stmt.get());
+            std::vector<std::unique_ptr<Decl>> finalized_decls;
+            finalized_decls.reserve(decl_stmt->decls.size());
             for (auto& decl : decl_stmt->decls) {
+                std::vector<std::unique_ptr<Decl>> extra_decls;
                 if (!finalize_specialized_decl_semantics(
                         collect,
                         decl,
-                        error_out)) {
+                        error_out,
+                        &extra_decls)) {
                     return false;
                 }
+                finalized_decls.push_back(std::move(decl));
+                for (auto& extra_decl : extra_decls) {
+                    finalized_decls.push_back(std::move(extra_decl));
+                }
             }
+            decl_stmt->decls = std::move(finalized_decls);
             return true;
         }
         case StmtKind::ReturnStmt: {
@@ -714,6 +1082,7 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::IfStmt: {
             auto* if_stmt = static_cast<IfStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(collect, if_stmt->scope);
             if (!finalize_specialized_stmt_semantics(
                     collect,
                     if_stmt->init_stmt,
@@ -813,6 +1182,10 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::SwitchStmt: {
             auto* switch_stmt = static_cast<SwitchStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(
+                collect,
+                switch_stmt->scope,
+                ScopeFlags::SwitchScope);
             if (!finalize_specialized_control_condition_declaration(
                     collect,
                     switch_stmt->condition,
@@ -835,6 +1208,10 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::WhileStmt: {
             auto* while_stmt = static_cast<WhileStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(
+                collect,
+                while_stmt->scope,
+                ScopeFlags::LoopScope);
             if (!finalize_specialized_control_condition_declaration(
                     collect,
                     while_stmt->condition,
@@ -877,6 +1254,10 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::ForStmt: {
             auto* for_stmt = static_cast<ForStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(
+                collect,
+                for_stmt->scope,
+                ScopeFlags::LoopScope);
             if (!finalize_specialized_stmt_semantics(
                     collect,
                     for_stmt->init,
@@ -913,6 +1294,10 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
         }
         case StmtKind::CppRangeForStmt: {
             auto* range_for = static_cast<CppRangeForStmt*>(stmt.get());
+            ScopedSpecializedScope scope_guard(
+                collect,
+                range_for->scope,
+                ScopeFlags::LoopScope);
             if (!finalize_specialized_stmt_semantics(
                     collect,
                     range_for->init_statement,

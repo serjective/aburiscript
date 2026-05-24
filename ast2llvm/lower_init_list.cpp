@@ -1488,11 +1488,10 @@ void ASTToLLVM::emit_init_list_store(InitListExpr* initList, llvm::Value* base_p
             continue;
         }
 
-        llvm::Value* val = convert_expression(action.value.get());
-        if (!val) {
-            return;
-        }
-        bool src_unsigned = action.value->get_type() && action.value->get_type()->isUnsigned();
+        llvm::Value* val = nullptr;
+        bool lowered_value = false;
+        bool src_unsigned =
+            action.value->get_type() && action.value->get_type()->isUnsigned();
         for (const auto& path : action.paths) {
             InitPathInfo info = resolve_path(base_ptr, semantic_type, path, action.loc);
             if (!info.ptr) {
@@ -1502,6 +1501,13 @@ void ASTToLLVM::emit_init_list_store(InitListExpr* initList, llvm::Value* base_p
                 TypeKind::Reference) {
                 if (store_reference_binding(info, action.value.get(), action.loc)) {
                     continue;
+                }
+            }
+            if (!lowered_value) {
+                val = convert_expression(action.value.get());
+                lowered_value = true;
+                if (!val) {
+                    return;
                 }
             }
             store_scalar(info, val, src_unsigned, action.loc);

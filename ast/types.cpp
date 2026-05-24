@@ -17,6 +17,21 @@
 #include <unordered_set>
 
 namespace {
+size_t pointer_storage_size_bytes_for_abi(const AbiPolicy* abi_policy) {
+    if (abi_policy) {
+        switch (abi_policy->data_model) {
+            case DataModelKind::ILP32:
+                return 4;
+            case DataModelKind::LP64:
+            case DataModelKind::LLP64:
+                return 8;
+            case DataModelKind::Unknown:
+                break;
+        }
+    }
+    return 8;
+}
+
 bool cpp_type_constraints_equal(const CppTypeConstraint* lhs,
                                 const CppTypeConstraint* rhs) {
     if (lhs == rhs) {
@@ -2066,6 +2081,89 @@ bool type_depends_on_template_parameter_for_argument(QualType type,
         }
         if (auto object_type = dyn_cast_shared<ObjectType>(raw)) {
             if (!object_type->is_class_template_specialization()) {
+                const auto* record_decl =
+                    dyn_cast<ObjectDecl>(object_type->get_decl());
+                if (!record_decl) {
+                    return false;
+                }
+
+                static thread_local std::unordered_set<const CType*>
+                    active_object_dependency_checks;
+                auto [_, inserted] =
+                    active_object_dependency_checks.insert(raw.get());
+                if (!inserted) {
+                    return false;
+                }
+                struct ActiveObjectDependencyGuard {
+                    std::unordered_set<const CType*>& active;
+                    const CType* type = nullptr;
+                    ~ActiveObjectDependencyGuard() {
+                        active.erase(type);
+                    }
+                } active_guard{active_object_dependency_checks, raw.get()};
+
+                const auto* state =
+                    record_semantics_cache_lookup(record_decl, ast_ctx);
+                if (!state) {
+                    return false;
+                }
+                auto semantic_type_depends =
+                    [ast_ctx](QualType semantic_type) {
+                    return type_depends_on_template_parameter_for_argument(
+                        semantic_type,
+                        ast_ctx);
+                };
+                for (const auto& base : state->bases) {
+                    if (semantic_type_depends(base.type)) {
+                        return true;
+                    }
+                }
+                for (const auto& virtual_base : state->virtual_bases) {
+                    if (semantic_type_depends(virtual_base.type)) {
+                        return true;
+                    }
+                }
+                for (const auto& field : state->fields) {
+                    if (semantic_type_depends(field.type)) {
+                        return true;
+                    }
+                }
+                for (const auto& method : state->methods) {
+                    if (semantic_type_depends(method.type) ||
+                        semantic_type_depends(method.conversion_target_type)) {
+                        return true;
+                    }
+                }
+                for (const auto& static_member : state->static_data_members) {
+                    if (semantic_type_depends(static_member.type)) {
+                        return true;
+                    }
+                }
+                for (const auto& nested_type : state->nested_types) {
+                    if (semantic_type_depends(nested_type.type)) {
+                        return true;
+                    }
+                }
+                for (const auto& friend_function : state->friend_functions) {
+                    if (semantic_type_depends(friend_function.type)) {
+                        return true;
+                    }
+                }
+                for (const auto& friend_type : state->friend_types) {
+                    if (semantic_type_depends(friend_type.type)) {
+                        return true;
+                    }
+                }
+                for (const auto& ctor : state->constructors) {
+                    if (semantic_type_depends(ctor.type)) {
+                        return true;
+                    }
+                }
+                for (const auto& dtor : state->destructors) {
+                    if (semantic_type_depends(dtor.type)) {
+                        return true;
+                    }
+                }
                 return false;
             }
             for (const auto& argument :
@@ -5114,12 +5212,17 @@ bool type_contains_vla(const std::shared_ptr<CType>& type) {
     }
 }
 
-size_t object_field_storage_size_bytes(const ObjectType::Field& field) {
+size_t object_field_storage_size_bytes(const ObjectType::Field& field,
+                                       const AbiPolicy* abi_policy) {
     if (field.storage_size_override > 0) {
         return field.storage_size_override;
     }
     if (!field.type) {
         return 0;
+    }
+    auto canonical = desugar_type(field.type);
+    if (canonical && canonical->kind == TypeKind::Reference) {
+        return pointer_storage_size_bytes_for_abi(abi_policy);
     }
     int64_t width_bytes = field.type->getWidthBytes();
     return width_bytes > 0 ? static_cast<size_t>(width_bytes) : 0;
@@ -5174,6 +5277,8 @@ RecordSemanticState compute_record_semantics(std::vector<ObjectType::Field> fiel
             config.abi = abi_policy->bitfield_abi;
             config.plain_int_is_signed = abi_policy->plain_int_bitfield_signed;
             config.lsb_first = abi_policy->endianness == EndiannessKind::Little;
+            config.pointer_size_bytes =
+                pointer_storage_size_bytes_for_abi(abi_policy);
         }
         config.pack_alignment = pack_alignment;
         if (is_packed && config.pack_alignment == 0) {
@@ -5210,6 +5315,9 @@ RecordSemanticState compute_record_semantics(std::vector<ObjectType::Field> fiel
         if (auto *obj = canonical.as<ObjectType>()) {
             return obj->getAlignment();
         }
+        if (canonical->kind == TypeKind::Reference) {
+            return pointer_storage_size_bytes_for_abi(abi_policy);
+        }
         if (auto *arr = canonical.as<ArrayType>()) {
             return get_type_alignment(arr->element_type);
         }
@@ -5221,7 +5329,8 @@ RecordSemanticState compute_record_semantics(std::vector<ObjectType::Field> fiel
         size_t max_size = 0;
         for (auto& field : state.fields) {
             field.offset = 0;
-            size_t field_size = object_field_storage_size_bytes(field);
+            size_t field_size =
+                object_field_storage_size_bytes(field, abi_policy);
             if (field_size == 0) {
                 field_size = 1;
             }
@@ -5298,7 +5407,7 @@ RecordSemanticState compute_record_semantics(std::vector<ObjectType::Field> fiel
         }
 
         field.offset = current_offset;
-        current_offset += object_field_storage_size_bytes(field);
+        current_offset += object_field_storage_size_bytes(field, abi_policy);
         if (is_fam) {
             state.has_flexible_array_member = true;
         }

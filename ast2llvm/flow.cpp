@@ -1994,6 +1994,12 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
         // this a function declaration, nothing else to do
         return;
     }
+    if (node->body != nullptr && builder.GetInsertBlock() != nullptr) {
+        if (deferred_inline_set.insert(node).second) {
+            deferred_inline_defs.push_back(node);
+        }
+        return;
+    }
 
     // Header-only inline definitions and unused static inline helpers should
     // only be emitted if they are actually referenced in this translation

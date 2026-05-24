@@ -44,6 +44,13 @@ size_t BitfieldLayoutEngine::get_type_alignment(const std::shared_ptr<CType>& ty
     if (!canonical) {
         return 1;
     }
+    if (canonical->kind == TypeKind::Reference) {
+        size_t align = config_.pointer_size_bytes;
+        if (config_.pack_alignment > 0 && align > config_.pack_alignment) {
+            align = config_.pack_alignment;
+        }
+        return align > 0 ? align : 1;
+    }
     if (auto builtin = dyn_cast_shared<BuiltinType>(canonical)) {
         int64_t width = builtin->getWidth();
         size_t align = static_cast<size_t>((width + 7) / 8);
@@ -61,11 +68,11 @@ size_t BitfieldLayoutEngine::get_type_alignment(const std::shared_ptr<CType>& ty
         return align;
     }
     if (canonical->kind == TypeKind::Pointer) {
-        size_t align = 8;
+        size_t align = config_.pointer_size_bytes;
         if (config_.pack_alignment > 0 && align > config_.pack_alignment) {
             align = config_.pack_alignment;
         }
-        return align;
+        return align > 0 ? align : 1;
     }
     if (canonical->kind == TypeKind::Array) {
         auto arr = dyn_cast_shared<ArrayType>(canonical);
@@ -80,6 +87,28 @@ size_t BitfieldLayoutEngine::get_type_alignment(const std::shared_ptr<CType>& ty
         return align;
     }
     return 1;
+}
+
+size_t BitfieldLayoutEngine::get_field_storage_size(
+    const ObjectType::Field& field) {
+    if (field.storage_size_override > 0) {
+        return field.storage_size_override;
+    }
+    if (!field.type) {
+        return 0;
+    }
+    auto canonical = desugar_type(field.type);
+    if (canonical && canonical->kind == TypeKind::Reference) {
+        return config_.pointer_size_bytes > 0 ? config_.pointer_size_bytes : 1;
+    }
+    size_t field_size = static_cast<size_t>(field.type->getWidthBytes());
+    if (field_size == 0) {
+        auto arr = dyn_cast_shared<ArrayType>(field.type.get_shared());
+        if (!arr || arr->size_kind != ArraySizeKind::Incomplete) {
+            field_size = 1;
+        }
+    }
+    return field_size;
 }
 
 void BitfieldLayoutEngine::compute_layout(std::vector<ObjectType::Field>& fields,
@@ -182,13 +211,7 @@ void BitfieldLayoutEngine::compute_struct_layout_itanium(
             size_t current_byte = (current_bit_pos + 7) / 8;
 
             size_t field_align = get_type_alignment(field.type.get_shared());
-            size_t field_size = static_cast<size_t>(field.type->getWidthBytes());
-            if (field_size == 0) {
-                auto arr = dyn_cast_shared<ArrayType>(field.type.get_shared());
-                if (!arr || arr->size_kind != ArraySizeKind::Incomplete) {
-                    field_size = 1;
-                }
-            }
+            size_t field_size = get_field_storage_size(field);
 
             if (current_byte % field_align != 0) {
                 current_byte += field_align - (current_byte % field_align);
@@ -295,13 +318,7 @@ void BitfieldLayoutEngine::compute_struct_layout_msvc(
             }
 
             size_t field_align = get_type_alignment(field.type.get_shared());
-            size_t field_size = static_cast<size_t>(field.type->getWidthBytes());
-            if (field_size == 0) {
-                auto arr = dyn_cast_shared<ArrayType>(field.type.get_shared());
-                if (!arr || arr->size_kind != ArraySizeKind::Incomplete) {
-                    field_size = 1;
-                }
-            }
+            size_t field_size = get_field_storage_size(field);
 
             if (current_byte_offset % field_align != 0) {
                 current_byte_offset += field_align - (current_byte_offset % field_align);
@@ -374,13 +391,7 @@ void BitfieldLayoutEngine::compute_union_layout(std::vector<ObjectType::Field>& 
             field.bit_width = 0;
             field.storage_size = 0;
 
-            size_t field_size = static_cast<size_t>(field.type->getWidthBytes());
-            if (field_size == 0) {
-                auto arr = dyn_cast_shared<ArrayType>(field.type.get_shared());
-                if (!arr || arr->size_kind != ArraySizeKind::Incomplete) {
-                    field_size = 1;
-                }
-            }
+            size_t field_size = get_field_storage_size(field);
 
             if (field_size > max_size) {
                 max_size = field_size;

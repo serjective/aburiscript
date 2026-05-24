@@ -663,6 +663,84 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
                 static_cast<InitListExpr*>(init_expr.release()));
             retain_type_specifier_decl_if_needed(parse_decl);
             tentative.commit();
+
+            auto init_list_depends_on_template_parameters =
+                [&](const InitListExpr* list, const auto& self) -> bool {
+                if (!list) {
+                    return false;
+                }
+                for (const auto& element : list->elements) {
+                    for (const auto& designator : element.designators) {
+                        if (expr_depends_on_active_template_parameter(
+                                designator.index.get()) ||
+                            expr_depends_on_active_template_parameter(
+                                designator.range_end.get())) {
+                            return true;
+                        }
+                    }
+                    if (!element.value) {
+                        continue;
+                    }
+                    if (auto* nested =
+                            dyn_cast<InitListExpr>(element.value.get())) {
+                        if (self(nested, self)) {
+                            return true;
+                        }
+                    }
+                    if (expr_depends_on_active_template_parameter(
+                            element.value.get()) ||
+                        type_depends_on_template_parameters(
+                            element.value->get_type(),
+                            ast_ctx.get())) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            bool dependent_list_initialization =
+                type_depends_on_template_parameters(
+                    target_type,
+                    ast_ctx.get()) ||
+                init_list_depends_on_template_parameters(
+                    owned_init_list.get(),
+                    init_list_depends_on_template_parameters);
+            if (dependent_list_initialization) {
+                if (!owned_init_list->actions.empty() ||
+                    !owned_init_list->mappings.empty()) {
+                    error_custloc(
+                        "dependent braced type construction does not support lowered initializer actions",
+                        loc);
+                    return collect_->collect_error_expression(
+                        "unsupported dependent braced type construction",
+                        loc);
+                }
+
+                std::vector<std::unique_ptr<Expr>> args;
+                args.reserve(owned_init_list->elements.size());
+                for (auto& element : owned_init_list->elements) {
+                    if (!element.designators.empty()) {
+                        error_custloc(
+                            "dependent braced type construction does not support designators",
+                            element.loc);
+                        return collect_->collect_error_expression(
+                            "unsupported dependent braced type construction",
+                            element.loc);
+                    }
+                    args.push_back(std::move(element.value));
+                }
+
+                auto deferred = collect_->collect_cpp_function_style_cast(
+                    target_type,
+                    std::move(args),
+                    loc);
+                if (auto* cast =
+                        dyn_cast<CppFunctionStyleCastExpr>(deferred.get())) {
+                    cast->is_list_init = true;
+                }
+                return deferred;
+            }
+
             return collect_->collect_cpp_type_list_initialization_expression(
                 target_type,
                 std::move(owned_init_list),

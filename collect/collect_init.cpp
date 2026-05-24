@@ -622,6 +622,43 @@ std::unique_ptr<Expr> Collect::transform_init_value(std::unique_ptr<Expr> expr, 
     }
     if (lang_opts_.is_cxx_mode() &&
         type &&
+        canonical_type_kind(QualType(type), ast_ctx_.get()) ==
+            TypeKind::Reference) {
+        auto ref_type = desugar_type(QualType(type), ast_ctx_.get())
+            .as_shared<ReferenceType>();
+        if (!ref_type || !ref_type->referred_type) {
+            report_error("invalid reference initializer",
+                         expr ? expr->location : SrcLoc());
+            return expr;
+        }
+
+        Expr* raw_init = strip_implicit_casts(expr.get());
+        auto init_category =
+            classify_value_category(raw_init ? raw_init : expr.get());
+        if (ref_type->isLValueReference()) {
+            bool binds_temporary =
+                init_category == ValueCategory::PRValue ||
+                init_category == ValueCategory::XValue;
+            if (binds_temporary && !ref_type->referred_type.is_const()) {
+                report_error(
+                    "non-const lvalue reference cannot bind to temporary",
+                    expr ? expr->location : SrcLoc());
+            }
+        } else if (ref_type->isRValueReference() &&
+                   init_category == ValueCategory::LValue) {
+            report_error(
+                "rvalue reference cannot bind to lvalue",
+                expr ? expr->location : SrcLoc());
+        }
+
+        if (expr && expr->get_type() &&
+            init_category != ValueCategory::LValue) {
+            expr = cast_if_needed(std::move(expr), ref_type->referred_type);
+        }
+        return expr;
+    }
+    if (lang_opts_.is_cxx_mode() &&
+        type &&
         canonical_type_kind(QualType(type), ast_ctx_.get()) == TypeKind::Object &&
         !is_aggregate_type(type)) {
         if (is_same_type_object_prvalue_for_initialization(
@@ -1286,6 +1323,10 @@ std::unique_ptr<Expr> Collect::process_initializer_for_type(std::unique_ptr<Expr
     }
 
     if (auto* init_list = dyn_cast<InitListExpr>(init.get())) {
+        if (collect_internal::init_list_has_lowered_semantics_for_type(
+                init_list, declared_type, ast_ctx_.get())) {
+            return init;
+        }
         if (expression_depends_on_template_parameters(init_list) ||
             type_depends_on_template_parameters(declared_type, ast_ctx_.get())) {
             return init;

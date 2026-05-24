@@ -1710,8 +1710,16 @@ public:
                 "tag '" + tag + "' was previously declared as a different kind",
                 record_.location);
         }
+        const RecordSemanticState* existing_state =
+            existing_obj_decl
+                ? collect_.query_lookup_record_semantics(existing_obj_decl)
+                : nullptr;
+        bool existing_decl_is_template_pattern_provisional =
+            existing_state &&
+            existing_state->is_template_pattern_provisional;
         if (record_.is_definition && existing_obj_decl && record_type &&
-            !record_type->isIncomplete()) {
+            !record_type->isIncomplete() &&
+            !existing_decl_is_template_pattern_provisional) {
             collect_.report_error(
                 "redefinition of " +
                     std::string(cpp_record_kind_spelling(record_.record_kind)) +

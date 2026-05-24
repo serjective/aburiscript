@@ -1728,6 +1728,7 @@ struct RecordSemanticState {
     };
 
     bool is_incomplete = true;
+    bool is_template_pattern_provisional = false;
     bool is_polymorphic = false;
     bool is_abstract = false;
     bool has_virtual_destructor = false;
@@ -1802,7 +1803,8 @@ RecordSemanticState compute_record_semantics(std::vector<ObjectType::Field> fiel
                                              size_t pack_alignment,
                                              bool is_incomplete = false,
                                              const AbiPolicy* abi_policy = nullptr);
-size_t object_field_storage_size_bytes(const ObjectType::Field& field);
+size_t object_field_storage_size_bytes(const ObjectType::Field& field,
+                                       const AbiPolicy* abi_policy = nullptr);
 size_t object_field_storage_alignment(const ObjectType::Field& field);
 std::vector<ObjectType::Field> get_record_fields_for_type_matching(
     const ObjectType* record_type);
