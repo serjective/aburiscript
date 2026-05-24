@@ -14,6 +14,7 @@ class ASTContext;
 struct ASTCloneContext {
     ASTContext* ast_ctx = nullptr;
     bool publish_type_resolution_to_persistent_store = false;
+    bool preserve_unexpanded_pack_expansions = false;
     std::function<QualType(QualType)> rewrite_type;
     std::function<std::vector<TemplateArgument>(
         const std::vector<TemplateArgument>&,

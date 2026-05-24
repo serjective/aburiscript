@@ -242,6 +242,12 @@ bool collect_pack_expansion_shape_in_type(
             parameters,
             shape_out);
     }
+    if (auto decltype_type = dyn_cast_shared<DecltypeExprType>(raw)) {
+        return collect_pack_expansion_shape_in_expr(
+            decltype_type->expr.get(),
+            parameters,
+            shape_out);
+    }
     if (auto pack_element =
             dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
         return collect_pack_expansion_shape_in_template_arguments(
@@ -282,11 +288,6 @@ bool collect_pack_expansion_shape_in_type(
     }
     return true;
 }
-
-bool collect_pack_expansion_shape_in_expr(
-    const Expr* expr,
-    const TemplateParameterList& parameters,
-    TemplatePackExpansionShape& shape_out);
 
 bool collect_pack_expansion_shape_in_template_argument(
     const TemplateArgument& argument,

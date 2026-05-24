@@ -1497,6 +1497,48 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
         }
     } lambda_template_scope_guard;
 
+    struct LambdaTemplatePatternGuard {
+        uint32_t& depth;
+        bool active = false;
+
+        void enter() {
+            if (!active) {
+                ++depth;
+                active = true;
+            }
+        }
+
+        ~LambdaTemplatePatternGuard() {
+            if (active) {
+                --depth;
+            }
+        }
+    } lambda_template_pattern_guard{template_pattern_depth_};
+
+    auto ensure_lambda_template_parameter_stack = [&]() {
+        if (lambda_template_scope_guard.stack_active) {
+            return;
+        }
+        lambda_template_scope_guard.stack = &active_template_parameter_stack_;
+        active_template_parameter_stack_.emplace_back();
+        lambda_template_scope_guard.stack_active = true;
+    };
+
+    auto append_lambda_template_parameters_to_active_stack =
+        [&](size_t first_index) {
+            if (first_index >= call_operator_template_parameters.size()) {
+                return;
+            }
+            ensure_lambda_template_parameter_stack();
+            auto& active_parameters = active_template_parameter_stack_.back();
+            for (size_t index = first_index;
+                 index < call_operator_template_parameters.size();
+                 ++index) {
+                active_parameters.push_back(
+                    call_operator_template_parameters[index].get());
+            }
+        };
+
     if (gentle_check(TokenType::LESS_THAN)) {
         if (!lang_opts.is_cxx20_or_later()) {
             error_custloc(
@@ -1620,12 +1662,6 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
                             "internal error: lambda parameter did not produce ParamDecl",
                             lambda_loc);
                     }
-                    if (param_decl->is_parameter_pack) {
-                        fail_cpp_future_work(
-                            "lambda parameter pack",
-                            "lambda_parameter_pack",
-                            param_decl->location);
-                    }
                     if (auto_type_utils::has_cxx_auto_type(
                             param_decl->type.get_shared())) {
                         is_generic = true;
@@ -1641,6 +1677,8 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
         }
 
         if (has_auto_template_parameters) {
+            size_t previous_template_parameter_count =
+                call_operator_template_parameters.size();
             call_operator_template_parameters =
                 lower_generic_lambda_parameter_placeholders(
                     parameters,
@@ -1648,6 +1686,12 @@ std::unique_ptr<Expr> Parser::parse_cpp_lambda_expression() {
                     semantic_info.closure_name(),
                     lambda_template_parameter_depth,
                     lambda_loc);
+            append_lambda_template_parameters_to_active_stack(
+                previous_template_parameter_count);
+        }
+
+        if (is_generic) {
+            lambda_template_pattern_guard.enter();
         }
 
         lambda_function_type->clear_parameters();

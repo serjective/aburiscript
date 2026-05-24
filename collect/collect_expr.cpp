@@ -2121,6 +2121,7 @@ bool Collect::finalize_cpp_lambda_semantics(
 
     ASTCloneContext clone_ctx;
     clone_ctx.ast_ctx = ast_ctx_.get();
+    clone_ctx.preserve_unexpanded_pack_expansions = lambda.is_generic;
     clone_ctx.finalize_lambda_expr =
         [this](CppLambdaExpr& nested_lambda,
                std::string* nested_error_out) -> bool {

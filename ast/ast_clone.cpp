@@ -779,6 +779,14 @@ bool rewrite_expr_vector(ExprPtrVec& exprs,
         }
         if (auto* pack = dyn_cast<PackExpansionExpr>(expr.get())) {
             if (!ctx.expand_pack_expansion) {
+                if (ctx.preserve_unexpanded_pack_expansions) {
+                    if (pack->pattern &&
+                        !rewrite_expr_tree(pack->pattern, ctx, error_out)) {
+                        return false;
+                    }
+                    rewritten_exprs.push_back(std::move(expr));
+                    continue;
+                }
                 return set_expr_error(
                     error_out,
                     "pack expansion requires template specialization context");
@@ -842,6 +850,14 @@ bool rewrite_init_element_vector(std::vector<InitElement>& elements,
         }
         if (auto* pack = dyn_cast<PackExpansionExpr>(element.value.get())) {
             if (!ctx.expand_pack_expansion) {
+                if (ctx.preserve_unexpanded_pack_expansions) {
+                    if (pack->pattern &&
+                        !rewrite_expr_tree(pack->pattern, ctx, error_out)) {
+                        return false;
+                    }
+                    rewritten_elements.push_back(std::move(element));
+                    continue;
+                }
                 return set_expr_error(
                     error_out,
                     "pack expansion requires template specialization context");
@@ -887,6 +903,14 @@ bool rewrite_init_action_vector(std::vector<InitAction>& actions,
         }
         if (auto* pack = dyn_cast<PackExpansionExpr>(action.value.get())) {
             if (!ctx.expand_pack_expansion) {
+                if (ctx.preserve_unexpanded_pack_expansions) {
+                    if (pack->pattern &&
+                        !rewrite_expr_tree(pack->pattern, ctx, error_out)) {
+                        return false;
+                    }
+                    rewritten_actions.push_back(std::move(action));
+                    continue;
+                }
                 return set_expr_error(
                     error_out,
                     "pack expansion requires template specialization context");
@@ -943,6 +967,14 @@ bool rewrite_init_mapping_map(std::map<size_t, std::shared_ptr<Expr>>& mappings,
         }
         if (auto* pack = dyn_cast<PackExpansionExpr>(mapped_expr.get())) {
             if (!ctx.expand_pack_expansion) {
+                if (ctx.preserve_unexpanded_pack_expansions) {
+                    if (pack->pattern &&
+                        !rewrite_expr_tree(pack->pattern, ctx, error_out)) {
+                        return false;
+                    }
+                    rewritten_mappings[index] = std::move(mapped_expr);
+                    continue;
+                }
                 return set_expr_error(
                     error_out,
                     "pack expansion requires template specialization context");
