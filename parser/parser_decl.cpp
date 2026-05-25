@@ -284,7 +284,7 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
         is_cxx_mode_active() &&
         !decl_parser->is_friend &&
         !cxx_record_parse_stack_.empty() &&
-        cxx_record_parse_stack_.back().kind != CppRecordKind::Union;
+        !cxx_record_parse_stack_.back().name.empty();
     bool is_static_member =
         in_class_member_context &&
         decl_parser->str_class == StorageClass::STATIC;
@@ -536,7 +536,6 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     QualType active_record_lookup_type;
     if (is_cxx_mode_active() &&
         !cxx_record_parse_stack_.empty() &&
-        cxx_record_parse_stack_.back().kind != CppRecordKind::Union &&
         !cxx_record_parse_stack_.back().name.empty()) {
         const auto& record_frame = cxx_record_parse_stack_.back();
         cpp_this_context.is_member_function = true;

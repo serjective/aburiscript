@@ -593,11 +593,15 @@ private:
     void prepare_cpp_template_pattern_record(ClassTemplateDecl& class_template);
     void prepare_cpp_template_pattern_record(
         ClassTemplatePartialSpecializationDecl& class_template);
-    void ensure_cpp_class_placeholder_type(const std::string& name, SrcLoc loc);
+    void ensure_cpp_record_placeholder_type(const std::string& name,
+                                            bool is_union_record,
+                                            SrcLoc loc);
     const ObjectDecl* ensure_cpp_template_pattern_nested_record_semantics(
         CppRecordDecl& record);
     std::unique_ptr<ObjectDecl> take_cpp_transient_semantic_object_decl(
         const std::string& tag_name);
+    std::unique_ptr<ObjectDecl> take_cpp_transient_semantic_object_decl(
+        const ObjectDecl* target_decl);
     bool can_parse_namespace_scope_template_declaration() const;
     bool is_in_template_pattern_context() const;
     bool is_parsing_cpp_record_body() const;

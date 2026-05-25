@@ -481,18 +481,12 @@ const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
     for (const auto& argument : specialization_arguments) {
         switch (argument.kind) {
             case TemplateArgumentKind::Type:
-                if (!argument.type ||
-                    type_depends_on_template_parameters(
-                        argument.type,
-                        ast_ctx.get())) {
+                if (!argument.type) {
                     return nullptr;
                 }
                 break;
             case TemplateArgumentKind::Value:
-                if (!argument.value_type ||
-                    type_depends_on_template_parameters(
-                        argument.value_type,
-                        ast_ctx.get())) {
+                if (!argument.value_type) {
                     return nullptr;
                 }
                 break;
@@ -5433,7 +5427,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     auto member_template_constructor_name_offset = [&]() -> std::optional<size_t> {
         if (!member_template_declaration ||
             cxx_record_parse_stack_.empty() ||
-            cxx_record_parse_stack_.back().kind == CppRecordKind::Union ||
             cxx_record_parse_stack_.back().name.empty()) {
             return std::nullopt;
         }
@@ -8171,7 +8164,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_constructor_member() {
         error("internal error: constructor parser invoked outside C++ class scope");
     }
     const auto& record_frame = cxx_record_parse_stack_.back();
-    if (record_frame.kind == CppRecordKind::Union || record_frame.name.empty()) {
+    if (record_frame.name.empty()) {
         error("internal error: constructor parser requires a named class context");
     }
     const std::string& record_name = record_frame.name;
@@ -8796,6 +8789,26 @@ std::unique_ptr<Decl> Parser::parse_cpp_destructor_member() {
             fail_cpp_unsupported("destructor declaration suffix", suffix_loc);
         }
     }
+    if (record_frame.kind == CppRecordKind::Union) {
+        if (is_override) {
+            error_custloc(
+                "union destructor cannot be declared 'override'",
+                dtor_name_tok.loc);
+            is_override = false;
+        }
+        if (is_final) {
+            error_custloc(
+                "union destructor cannot be declared 'final'",
+                dtor_name_tok.loc);
+            is_final = false;
+        }
+        if (is_pure) {
+            error_custloc(
+                "union destructor cannot be pure",
+                dtor_name_tok.loc);
+            is_pure = false;
+        }
+    }
 
     auto dtor_fn_type = std::make_shared<FunctionType>();
     dtor_fn_type->ret_type = QualType(type_ctx->get_builtin(BuiltinTypes::Void));
@@ -9120,11 +9133,13 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         }
     }
 
-    if (record_kind != CppRecordKind::Union &&
-        !name.empty() &&
+    if (!name.empty() &&
         gentle_check(TokenType::LEFT_BRACE) &&
         !suppress_placeholder_type) {
-        ensure_cpp_class_placeholder_type(name, key_tok.loc);
+        ensure_cpp_record_placeholder_type(
+            name,
+            record_kind == CppRecordKind::Union,
+            key_tok.loc);
     }
 
     if (!gentle_check(TokenType::LEFT_BRACE)) {
@@ -9736,8 +9751,6 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
             if (!cxx_record_parse_stack_.empty() &&
                 !cxx_record_parse_stack_.back().name.empty()) {
                 const std::string& record_name = cxx_record_parse_stack_.back().name;
-                bool in_named_record =
-                    cxx_record_parse_stack_.back().kind != CppRecordKind::Union;
                 auto skip_balanced_tokens =
                     [&](size_t& offset, TokenType open_tok, TokenType close_tok)
                     -> bool {
@@ -9831,28 +9844,26 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                             return offset;
                         }
                 };
-                if (in_named_record) {
-                    size_t constructor_name_offset =
-                        skip_special_member_prefix(/*allow_explicit=*/true);
-                    Token ctor_name_tok = peek_token_shortcut(constructor_name_offset);
-                    bool looks_like_constructor =
-                        ctor_name_tok.type == TokenType::IDENTIFIER &&
-                        ctor_name_tok.value == record_name &&
-                        peek_token_shortcut(constructor_name_offset + 1).type ==
-                            TokenType::LEFT_PAREN;
-                    if (looks_like_constructor) {
-                        if (member_leading_virtual) {
-                            error_custloc(
-                                "constructor cannot be declared 'virtual'",
-                                current_token().loc);
-                        }
-                        auto ctor_member = parse_cpp_constructor_member();
-                        if (ctor_member) {
-                            append_record_member(std::move(ctor_member));
-                            diag_engine->sync_point_reached();
-                            last_recovery_idx = std::numeric_limits<size_t>::max();
-                            continue;
-                        }
+                size_t constructor_name_offset =
+                    skip_special_member_prefix(/*allow_explicit=*/true);
+                Token ctor_name_tok = peek_token_shortcut(constructor_name_offset);
+                bool looks_like_constructor =
+                    ctor_name_tok.type == TokenType::IDENTIFIER &&
+                    ctor_name_tok.value == record_name &&
+                    peek_token_shortcut(constructor_name_offset + 1).type ==
+                        TokenType::LEFT_PAREN;
+                if (looks_like_constructor) {
+                    if (member_leading_virtual) {
+                        error_custloc(
+                            "constructor cannot be declared 'virtual'",
+                            current_token().loc);
+                    }
+                    auto ctor_member = parse_cpp_constructor_member();
+                    if (ctor_member) {
+                        append_record_member(std::move(ctor_member));
+                        diag_engine->sync_point_reached();
+                        last_recovery_idx = std::numeric_limits<size_t>::max();
+                        continue;
                     }
                 }
                 size_t destructor_prefix_offset =
@@ -9867,7 +9878,11 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                         TokenType::LEFT_PAREN) {
                     auto dtor_member = parse_cpp_destructor_member();
                     if (member_leading_virtual) {
-                        if (auto* dtor_decl = dyn_cast<CppDestructorDecl>(dtor_member.get())) {
+                        if (cxx_record_parse_stack_.back().kind == CppRecordKind::Union) {
+                            error_custloc(
+                                "union destructor cannot be declared 'virtual'",
+                                current_token().loc);
+                        } else if (auto* dtor_decl = dyn_cast<CppDestructorDecl>(dtor_member.get())) {
                             dtor_decl->is_virtual = true;
                         }
                     }

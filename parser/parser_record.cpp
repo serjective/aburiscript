@@ -963,19 +963,33 @@ std::unique_ptr<Decl> Parser::build_cpp_record_semantic_decl(
     return semantic_decl;
 }
 
-void Parser::ensure_cpp_class_placeholder_type(const std::string& name, SrcLoc loc) {
+void Parser::ensure_cpp_record_placeholder_type(const std::string& name,
+                                                bool is_union_record,
+                                                SrcLoc loc) {
     if (!collect_ || name.empty()) {
         return;
     }
     if (auto* existing_tag_decl = collect_->collect_lookup_tag_decl(name, false)) {
-        if (!dyn_cast<ObjectDecl>(existing_tag_decl)) {
+        auto* existing_object_decl = dyn_cast<ObjectDecl>(existing_tag_decl);
+        if (!existing_object_decl || !existing_object_decl->get_record_type()) {
             error_custloc("tag '" + name + "' was previously declared with a different kind", loc);
+            return;
+        }
+        if (existing_object_decl->get_record_type()->is_union != is_union_record) {
+            error_custloc("tag '" + name + "' was previously declared as a different kind", loc);
         }
         return;
     }
 
-    auto placeholder_type = std::make_shared<ObjectType>(name, false, true);
-    auto placeholder_decl = collect_->collect_record_declaration(name, placeholder_type, false, loc);
+    auto placeholder_type = std::make_shared<ObjectType>(
+        name,
+        is_union_record,
+        true);
+    auto placeholder_decl = collect_->collect_record_declaration(
+        name,
+        placeholder_type,
+        is_union_record,
+        loc);
     if (!placeholder_decl) {
         return;
     }
@@ -995,6 +1009,28 @@ std::unique_ptr<ObjectDecl> Parser::take_cpp_transient_semantic_object_decl(
         auto it = cpp_transient_semantic_decls_.begin() + (idx - 1);
         auto* object_decl = dyn_cast<ObjectDecl>(it->get());
         if (!object_decl || object_decl->tag != tag_name) {
+            continue;
+        }
+
+        std::unique_ptr<Decl> owned_decl = std::move(*it);
+        cpp_transient_semantic_decls_.erase(it);
+        return std::unique_ptr<ObjectDecl>(
+            static_cast<ObjectDecl*>(owned_decl.release()));
+    }
+
+    return nullptr;
+}
+
+std::unique_ptr<ObjectDecl> Parser::take_cpp_transient_semantic_object_decl(
+    const ObjectDecl* target_decl) {
+    if (!target_decl) {
+        return nullptr;
+    }
+
+    for (size_t idx = cpp_transient_semantic_decls_.size(); idx > 0; --idx) {
+        auto it = cpp_transient_semantic_decls_.begin() + (idx - 1);
+        auto* object_decl = dyn_cast<ObjectDecl>(it->get());
+        if (object_decl != target_decl) {
             continue;
         }
 
@@ -1246,7 +1282,14 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
 
     auto* placeholder_decl = class_template.pattern_semantic_decl();
     if (!placeholder_decl) {
-        auto owned_placeholder = take_cpp_transient_semantic_object_decl(record->name);
+        std::unique_ptr<ObjectDecl> owned_placeholder;
+        if (record->provisional_semantic_owner) {
+            owned_placeholder = take_cpp_transient_semantic_object_decl(
+                record->provisional_semantic_owner);
+        }
+        if (!owned_placeholder) {
+            owned_placeholder = take_cpp_transient_semantic_object_decl(record->name);
+        }
         if (!owned_placeholder) {
             error_custloc(
                 "internal error: missing class template pattern semantic owner",
@@ -5070,7 +5113,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
         is_cxx_mode_active() &&
         is_parsing_cpp_record_body() &&
         !cxx_record_parse_stack_.empty() &&
-        cxx_record_parse_stack_.back().kind != CppRecordKind::Union;
+        !cxx_record_parse_stack_.back().name.empty();
     std::shared_ptr<CType> base_type = nullptr;
     base_type = decl_parser.parse_declaration(false);
     bool declaration_leading_virtual = leading_virtual_specifier;
@@ -5237,7 +5280,6 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
         // In C++ record bodies, function declarators are methods/constructors, not fields.
         if (is_cxx_mode_active() &&
             is_parsing_cpp_record_body() &&
-            cxx_record_parse_stack_.back().kind != CppRecordKind::Union &&
             field_type &&
             canonical_type_kind(field_type) == TypeKind::Function) {
             if (decl_parser.is_mutable) {
@@ -5245,6 +5287,9 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     "'mutable' cannot be applied to functions",
                     decl_parser.begin_loc);
             }
+            bool current_record_is_union =
+                !cxx_record_parse_stack_.empty() &&
+                cxx_record_parse_stack_.back().kind == CppRecordKind::Union;
             std::string record_name =
                 !cxx_record_parse_stack_.empty()
                     ? cxx_record_parse_stack_.back().name
@@ -5737,6 +5782,32 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
 
             if (method_is_pure && decl_parser.str_class == StorageClass::STATIC) {
                 error("static member function cannot be pure");
+            }
+            if (current_record_is_union) {
+                if (method_is_virtual) {
+                    error_custloc(
+                        "union member function cannot be declared 'virtual'",
+                        t.loc);
+                    method_is_virtual = false;
+                }
+                if (method_is_override) {
+                    error_custloc(
+                        "union member function cannot be declared 'override'",
+                        t.loc);
+                    method_is_override = false;
+                }
+                if (method_is_final) {
+                    error_custloc(
+                        "union member function cannot be declared 'final'",
+                        t.loc);
+                    method_is_final = false;
+                }
+                if (method_is_pure) {
+                    error_custloc(
+                        "union member function cannot be pure",
+                        t.loc);
+                    method_is_pure = false;
+                }
             }
 
             bool has_inline_body = gentle_check(TokenType::LEFT_BRACE) ||
