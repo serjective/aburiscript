@@ -1186,6 +1186,31 @@ const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
             }
             continue;
         }
+        if (const auto* friend_decl = dyn_cast<FriendDecl>(member.get())) {
+            if (const auto* function_decl =
+                    friend_decl->function_pattern_decl()) {
+                RecordSemanticState::FriendFunction friend_function;
+                friend_function.name = function_decl->name;
+                friend_function.type = QualType(function_decl->type);
+                friend_function.decl = friend_decl;
+                friend_function.function_decl = function_decl;
+                friend_function.function_template =
+                    friend_decl->function_template_decl();
+                friend_function.symbol = friend_function.function_template
+                    ? nullptr
+                    : friend_decl->function_symbol;
+                state.friend_functions.push_back(std::move(friend_function));
+            } else if (friend_decl->get_friend_kind() == CppFriendKind::Type &&
+                       friend_decl->friend_type) {
+                RecordSemanticState::FriendType friend_type;
+                friend_type.type = friend_decl->friend_type;
+                friend_type.decl = friend_decl;
+                friend_type.class_template =
+                    friend_decl->friend_class_template;
+                state.friend_types.push_back(std::move(friend_type));
+            }
+            continue;
+        }
     }
 
     RecordSemanticState deferred_semantic_state = state;

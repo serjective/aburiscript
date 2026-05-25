@@ -37,6 +37,9 @@ bool set_expr_error(std::string* error_out, const std::string& message) {
     return false;
 }
 
+const TemplateDecl* remap_template_decl(const TemplateDecl* template_decl,
+                                        ASTCloneContext& ctx);
+
 QualType get_sizeof_result_type(ASTContext* ast_ctx) {
     if (ast_ctx && ast_ctx->type_ctx) {
         if (auto size_t_type =
@@ -1942,6 +1945,29 @@ bool rewrite_decl_tree_in_place_impl(std::unique_ptr<Decl>& decl,
                 ctx,
                 error_out);
         }
+        case DeclKind::FriendDecl: {
+            auto* friend_decl = static_cast<FriendDecl*>(decl.get());
+            if (friend_decl->target_decl &&
+                !rewrite_decl_tree_in_place_impl(
+                    friend_decl->target_decl,
+                    ctx,
+                    error_out)) {
+                return false;
+            }
+            friend_decl->friend_type =
+                rewrite_type(friend_decl->friend_type, ctx);
+            friend_decl->friend_class_template =
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<TemplateDecl*>(
+                        remap_template_decl(
+                            friend_decl->friend_class_template,
+                            ctx)));
+            friend_decl->granting_record_type =
+                rewrite_type(friend_decl->granting_record_type, ctx);
+            friend_decl->function_symbol =
+                remap_symbol(friend_decl->function_symbol, ctx);
+            return true;
+        }
         case DeclKind::ObjectDecl: {
             auto* object_decl = static_cast<ObjectDecl*>(decl.get());
             auto record_type = object_decl->get_record_type();
@@ -3394,6 +3420,51 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                     result.get(),
                     ctx,
                     error_out)) {
+                return nullptr;
+            }
+            return result;
+        }
+        case DeclKind::FriendDecl: {
+            const auto* friend_decl =
+                static_cast<const FriendDecl*>(decl);
+            QualType cloned_granting_record_type =
+                rewrite_type(friend_decl->granting_record_type, ctx);
+            std::unique_ptr<FriendDecl> result;
+            if (friend_decl->target_decl) {
+                auto cloned_target = clone_decl_impl(
+                    friend_decl->target_decl.get(),
+                    ctx,
+                    error_out);
+                if (!cloned_target) {
+                    return nullptr;
+                }
+                result = std::make_unique<FriendDecl>(
+                    std::move(cloned_target),
+                    cloned_granting_record_type,
+                    friend_decl->get_friend_kind(),
+                    friend_decl->location);
+            } else {
+                result = std::make_unique<FriendDecl>(
+                    rewrite_type(friend_decl->friend_type, ctx),
+                    cloned_granting_record_type,
+                    friend_decl->location);
+            }
+            result->friend_class_template =
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<TemplateDecl*>(
+                        remap_template_decl(
+                            friend_decl->friend_class_template,
+                            ctx)));
+            result->function_symbol =
+                remap_symbol(friend_decl->function_symbol, ctx);
+            result->has_deferred_inline_body_tokens =
+                friend_decl->has_deferred_inline_body_tokens;
+            result->deferred_inline_body_begin_token_idx =
+                friend_decl->deferred_inline_body_begin_token_idx;
+            result->deferred_inline_body_end_token_idx =
+                friend_decl->deferred_inline_body_end_token_idx;
+            assign_node_id(result.get(), ctx.ast_ctx);
+            if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;
             }
             return result;

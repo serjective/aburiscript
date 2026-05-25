@@ -316,18 +316,26 @@ QualType Parser::try_build_cpp_injected_current_instantiation_type(
         return QualType();
     }
 
-    const auto& current_record = cxx_record_parse_stack_.back();
-    if (current_record.name != type_name) {
+    for (auto it = cxx_record_parse_stack_.rbegin();
+         it != cxx_record_parse_stack_.rend();
+         ++it) {
+        const auto& current_record = *it;
+        if (current_record.name != type_name) {
+            continue;
+        }
+        if (current_record.current_instantiation_type) {
+            return current_record.current_instantiation_type;
+        }
+        if (current_record.primary_class_template) {
+            return build_cpp_primary_current_instantiation_type(
+                current_record.primary_class_template,
+                type_name,
+                loc);
+        }
         return QualType();
     }
-    if (current_record.current_instantiation_type) {
-        return current_record.current_instantiation_type;
-    }
 
-    return build_cpp_primary_current_instantiation_type(
-        current_record.primary_class_template,
-        type_name,
-        loc);
+    return QualType();
 }
 
 std::optional<std::vector<TemplateArgument>>
