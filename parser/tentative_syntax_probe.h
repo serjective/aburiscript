@@ -394,6 +394,10 @@ public:
             return CxxStatementDisambiguation::Expression;
         }
 
+        if (starts_with_cxx_postfix_member_access_statement()) {
+            return CxxStatementDisambiguation::Expression;
+        }
+
         auto function_style_result =
             classify_cxx_function_style_cast_statement();
         if (function_style_result) {
@@ -494,6 +498,59 @@ private:
             default:
                 return false;
         }
+    }
+
+    bool starts_with_cxx_postfix_member_access_statement() const {
+        if (!cfg_.cxx_mode) {
+            return false;
+        }
+
+        size_t offset = 0;
+        if (token_at(offset).type == TokenType::THIS_KW) {
+            ++offset;
+        } else {
+            consume_scope_resolution_at(offset);
+            if (token_at(offset).type != TokenType::IDENTIFIER) {
+                return false;
+            }
+            ++offset;
+            if (token_at(offset).type == TokenType::LESS_THAN &&
+                !skip_template_argument_list_at(offset)) {
+                return false;
+            }
+            while (consume_scope_resolution_at(offset)) {
+                if (token_at(offset).type == TokenType::TEMPLATE) {
+                    ++offset;
+                }
+                if (token_at(offset).type != TokenType::IDENTIFIER &&
+                    token_at(offset).type != TokenType::OPERATOR_KW) {
+                    return false;
+                }
+                if (token_at(offset).type == TokenType::OPERATOR_KW) {
+                    ++offset;
+                    if (token_at(offset).type == TokenType::LEFT_PAREN &&
+                        token_at(offset + 1).type == TokenType::RIGHT_PAREN) {
+                        offset += 2;
+                    } else if (token_at(offset).type == TokenType::LEFT_BRACKET &&
+                               token_at(offset + 1).type == TokenType::RIGHT_BRACKET) {
+                        offset += 2;
+                    } else {
+                        ++offset;
+                    }
+                } else {
+                    ++offset;
+                }
+                if (token_at(offset).type == TokenType::LESS_THAN &&
+                    !skip_template_argument_list_at(offset)) {
+                    return false;
+                }
+            }
+        }
+
+        return token_at(offset).type == TokenType::DOT ||
+               token_at(offset).type == TokenType::ARROW ||
+               token_at(offset).type == TokenType::DOT_STAR ||
+               token_at(offset).type == TokenType::ARROW_STAR;
     }
 
     bool consume_concept_name_at(size_t& offset) const {
