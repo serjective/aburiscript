@@ -7,7 +7,9 @@
 using template_sema_internal::build_pack_element_argument_bindings;
 using template_sema_internal::build_pack_element_argument_bindings_for_shape;
 using template_sema_internal::classify_parameter_pack_reference_in_type;
+using template_sema_internal::collect_pack_expansion_shape_in_expr;
 using template_sema_internal::collect_pack_expansion_shape_in_template_argument;
+using template_sema_internal::find_pack_expansion_arity_for_bindings;
 using template_sema_internal::find_template_parameter_index_by_identity;
 using template_sema_internal::find_template_parameter_index_by_decl;
 using template_sema_internal::make_template_binding_clone_pass_builder;
@@ -92,27 +94,28 @@ const TemplateArgument* find_template_argument_for_non_type_parameter_symbol(
     return nullptr;
 }
 
-using FinishSubstitutedFoldPatternElement =
+using FinishSubstitutedPackPatternElement =
     std::function<bool(std::unique_ptr<Expr>&,
                        const TemplateArgumentBindings&,
                        const TemplateClonePassBuilder&,
                        const TemplateSubstitutionPass&,
                        std::string*)>;
-using RewriteSubstitutedFoldElementType =
+using RewriteSubstitutedPackElementType =
     std::function<QualType(QualType, const TemplateArgumentBindings&)>;
-using RewriteSubstitutedFoldElementArguments =
+using RewriteSubstitutedPackElementArguments =
     std::function<std::vector<TemplateArgument>(
         const std::vector<TemplateArgument>&,
         const TemplateArgumentBindings&)>;
 
-// Shared setup for the two substitution paths that materialize folds: bind the
-// selected pack element, clone the fold pattern under those bindings, then let
+// Shared setup for substitution paths that materialize pack-driven patterns:
+// bind the selected pack element, clone the pattern under those bindings, then let
 // the caller run its path-specific resolution.
-std::unique_ptr<Expr> clone_substituted_fold_pattern_element(
+std::unique_ptr<Expr> clone_substituted_pack_pattern_element(
     Collect& collect,
     ASTContext* ast_ctx,
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& active_bindings,
+    const template_sema_internal::TemplatePackExpansionShape* expansion_shape,
     ASTCloneContext* clone_context,
     size_t element_index,
     const Expr* pattern_expr,
@@ -120,19 +123,28 @@ std::unique_ptr<Expr> clone_substituted_fold_pattern_element(
     const char* binding_error_message,
     const char* value_error_message,
     const char* clone_error_message,
-    const RewriteSubstitutedFoldElementType& rewrite_type_for_bindings,
-    const RewriteSubstitutedFoldElementArguments&
+    const RewriteSubstitutedPackElementType& rewrite_type_for_bindings,
+    const RewriteSubstitutedPackElementArguments&
         rewrite_arguments_for_bindings,
-    const FinishSubstitutedFoldPatternElement& finish_element,
+    const FinishSubstitutedPackPatternElement& finish_element,
     std::string* error_out) {
     TemplateArgumentBindings element_bindings;
     std::string binding_error;
-    if (!build_pack_element_argument_bindings(
-            parameters,
-            active_bindings,
-            element_index,
-            element_bindings,
-            &binding_error)) {
+    bool built_bindings = expansion_shape
+        ? build_pack_element_argument_bindings_for_shape(
+              parameters,
+              active_bindings,
+              *expansion_shape,
+              element_index,
+              element_bindings,
+              &binding_error)
+        : build_pack_element_argument_bindings(
+              parameters,
+              active_bindings,
+              element_index,
+              element_bindings,
+              &binding_error);
+    if (!built_bindings) {
         if (error_out && error_out->empty()) {
             *error_out =
                 binding_error.empty() ? binding_error_message : binding_error;
@@ -192,6 +204,174 @@ std::unique_ptr<Expr> clone_substituted_fold_pattern_element(
         return nullptr;
     }
     return element_expr;
+}
+
+void inherit_clone_context_symbol_remaps(TemplateClonePassBuilder& builder,
+                                         ASTCloneContext* clone_context);
+
+std::unique_ptr<Expr> clone_preserved_substituted_pack_expansion(
+    Collect& collect,
+    ASTContext* ast_ctx,
+    const TemplateParameterList& parameters,
+    const TemplateArgumentBindings& active_bindings,
+    ASTCloneContext* clone_context,
+    SrcLoc loc,
+    const Expr* pattern_expr,
+    const char* value_error_message,
+    const char* preserve_error_message,
+    const RewriteSubstitutedPackElementType& rewrite_type_for_bindings,
+    const RewriteSubstitutedPackElementArguments&
+        rewrite_arguments_for_bindings,
+    std::string* error_out) {
+    auto preserve_builder =
+        make_template_binding_clone_pass_builder(
+            ast_ctx,
+            &collect,
+            parameters,
+            active_bindings,
+            loc,
+            value_error_message,
+            [&](QualType type) -> QualType {
+                return rewrite_type_for_bindings(type, active_bindings);
+            },
+            [&](const std::vector<TemplateArgument>& template_arguments)
+                -> std::vector<TemplateArgument> {
+                return rewrite_arguments_for_bindings(
+                    template_arguments,
+                    active_bindings);
+            },
+            {},
+            {});
+    inherit_clone_context_symbol_remaps(preserve_builder, clone_context);
+    auto preserve_pass = preserve_builder.build_substitution_pass();
+    preserve_pass.context().preserve_unexpanded_pack_expansions = true;
+
+    std::string clone_error;
+    auto cloned_pattern = preserve_pass.clone_expr(pattern_expr, &clone_error);
+    if (!cloned_pattern) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                clone_error.empty() ? preserve_error_message : clone_error;
+        }
+        return nullptr;
+    }
+    return std::make_unique<PackExpansionExpr>(
+        std::move(cloned_pattern),
+        pattern_expr ? pattern_expr->location : loc);
+}
+
+bool expand_substituted_pack_expression(
+    Collect& collect,
+    ASTContext* ast_ctx,
+    const TemplateParameterList& parameters,
+    const TemplateArgumentBindings& active_bindings,
+    ASTCloneContext* clone_context,
+    SrcLoc loc,
+    const Expr* pattern_expr,
+    std::vector<std::unique_ptr<Expr>>& expanded_out,
+    const char* shape_error_message,
+    const char* empty_shape_error_message,
+    const char* binding_error_message,
+    const char* value_error_message,
+    const char* clone_error_message,
+    const char* preserve_error_message,
+    const RewriteSubstitutedPackElementType& rewrite_type_for_bindings,
+    const RewriteSubstitutedPackElementArguments&
+        rewrite_arguments_for_bindings,
+    const FinishSubstitutedPackPatternElement& finish_element,
+    std::string* error_out) {
+    auto preserve = [&]() -> bool {
+        auto preserved =
+            clone_preserved_substituted_pack_expansion(
+                collect,
+                ast_ctx,
+                parameters,
+                active_bindings,
+                clone_context,
+                loc,
+                pattern_expr,
+                value_error_message,
+                preserve_error_message,
+                rewrite_type_for_bindings,
+                rewrite_arguments_for_bindings,
+                error_out);
+        if (!preserved) {
+            return false;
+        }
+        expanded_out.clear();
+        expanded_out.push_back(std::move(preserved));
+        return true;
+    };
+
+    template_sema_internal::TemplatePackExpansionShape shape;
+    if (!collect_pack_expansion_shape_in_expr(
+            pattern_expr,
+            parameters,
+            shape)) {
+        if (shape.has_unsupported_dependency) {
+            return preserve();
+        }
+        if (error_out && error_out->empty()) {
+            *error_out = shape_error_message;
+        }
+        return false;
+    }
+    if (shape.has_unsupported_dependency) {
+        return preserve();
+    }
+    if (shape.referenced_parameters.empty()) {
+        if (error_out && error_out->empty()) {
+            *error_out = empty_shape_error_message;
+        }
+        return false;
+    }
+
+    std::string arity_error;
+    auto expansion_arity =
+        find_pack_expansion_arity_for_bindings(
+            shape,
+            parameters,
+            active_bindings,
+            &arity_error);
+    if (!expansion_arity.has_value()) {
+        if (arity_error.empty()) {
+            return preserve();
+        }
+        if (error_out && error_out->empty()) {
+            *error_out = arity_error;
+        }
+        return false;
+    }
+
+    expanded_out.clear();
+    expanded_out.reserve(*expansion_arity);
+    for (size_t element_index = 0;
+         element_index < *expansion_arity;
+         ++element_index) {
+        auto element_expr =
+            clone_substituted_pack_pattern_element(
+                collect,
+                ast_ctx,
+                parameters,
+                active_bindings,
+                &shape,
+                clone_context,
+                element_index,
+                pattern_expr,
+                loc,
+                binding_error_message,
+                value_error_message,
+                clone_error_message,
+                rewrite_type_for_bindings,
+                rewrite_arguments_for_bindings,
+                finish_element,
+                error_out);
+        if (!element_expr) {
+            return false;
+        }
+        expanded_out.push_back(std::move(element_expr));
+    }
+    return true;
 }
 
 const Expr* integer_pack_size_operand_from_expr(const Expr* expr) {
@@ -633,6 +813,83 @@ QualType Collect::substitute_template_type_with_bindings(
                     }
                     return true;
                 };
+            auto rewrite_substituted_pack_element_type =
+                [&](QualType nested_type,
+                    const TemplateArgumentBindings& element_bindings)
+                -> QualType {
+                    auto rewritten_type =
+                        substitute_template_type_with_bindings(
+                            nested_type,
+                            parameters,
+                            element_bindings,
+                            loc,
+                            allow_unsubstituted_parameters,
+                            clone_context);
+                    return finalize_deferred_semantic_type(
+                        rewritten_type,
+                        loc);
+                };
+            auto rewrite_substituted_pack_element_arguments =
+                [&](const std::vector<TemplateArgument>& template_arguments,
+                    const TemplateArgumentBindings& element_bindings)
+                -> std::vector<TemplateArgument> {
+                    return substitute_template_arguments_with_bindings(
+                        template_arguments,
+                        parameters,
+                        element_bindings,
+                        loc,
+                        allow_unsubstituted_parameters,
+                        clone_context);
+                };
+            clone_pass_builder.expand_pack_expansion =
+                [&](const Expr* pattern_expr,
+                    std::vector<std::unique_ptr<Expr>>& expanded_out,
+                    std::string* error_out) -> bool {
+                    return expand_substituted_pack_expression(
+                        *this,
+                        ast_ctx_.get(),
+                        parameters,
+                        argument_bindings,
+                        clone_context,
+                        loc,
+                        pattern_expr,
+                        expanded_out,
+                        "failed to collect expression type pack expansion shape",
+                        "pack expansion expression does not reference a template parameter pack",
+                        "failed to materialize expression type pack expansion bindings",
+                        "failed to substitute expression type pack expansion pattern",
+                        "expression type pack expansion pattern cloning is not supported",
+                        "failed to preserve unexpanded pack expansion",
+                        rewrite_substituted_pack_element_type,
+                        rewrite_substituted_pack_element_arguments,
+                        [&](std::unique_ptr<Expr>& element_expr,
+                            const TemplateArgumentBindings& element_bindings,
+                            const TemplateClonePassBuilder& element_builder,
+                            const TemplateSubstitutionPass& element_clone_pass,
+                            std::string* nested_error_out) -> bool {
+                            auto element_resolution_pass =
+                                element_builder.build_dependent_resolution_pass(
+                                    element_clone_pass,
+                                    [&](std::unique_ptr<Expr>& nested_expr,
+                                        std::string* resolution_error_out)
+                                        -> bool {
+                                        if (!resolve_specialized_expr(
+                                                nested_expr,
+                                                element_bindings,
+                                                resolution_error_out)) {
+                                            return false;
+                                        }
+                                        return resolve_dependent_expr_after_substitution(
+                                            nested_expr,
+                                            QualType(nullptr),
+                                            resolution_error_out);
+                                    });
+                            return element_resolution_pass.resolve_expr_in_place(
+                                element_expr,
+                                nested_error_out);
+                        },
+                        error_out);
+                };
             resolve_specialized_expr =
                 [&](std::unique_ptr<Expr>& rewritten_expr,
                     const TemplateArgumentBindings& active_bindings,
@@ -643,44 +900,17 @@ QualType Collect::substitute_template_type_with_bindings(
                             error_out)) {
                         return false;
                     }
-                    auto rewrite_fold_element_type =
-                        [&](QualType nested_type,
-                            const TemplateArgumentBindings& element_bindings)
-                        -> QualType {
-                            auto rewritten_type =
-                                substitute_template_type_with_bindings(
-                                    nested_type,
-                                    parameters,
-                                    element_bindings,
-                                    loc,
-                                    allow_unsubstituted_parameters,
-                                    clone_context);
-                            return finalize_deferred_semantic_type(
-                                rewritten_type,
-                                loc);
-                        };
-                    auto rewrite_fold_element_arguments =
-                        [&](const std::vector<TemplateArgument>& template_arguments,
-                            const TemplateArgumentBindings& element_bindings)
-                        -> std::vector<TemplateArgument> {
-                            return substitute_template_arguments_with_bindings(
-                                template_arguments,
-                                parameters,
-                                element_bindings,
-                                loc,
-                                allow_unsubstituted_parameters,
-                                clone_context);
-                        };
                     auto clone_fold_pattern_element =
                         [&](size_t element_index,
                             const Expr* pattern_expr,
                             std::string* element_error_out)
                             -> std::unique_ptr<Expr> {
-                            return clone_substituted_fold_pattern_element(
+                            return clone_substituted_pack_pattern_element(
                                 *this,
                                 ast_ctx_.get(),
                                 parameters,
                                 active_bindings,
+                                nullptr,
                                 clone_context,
                                 element_index,
                                 pattern_expr,
@@ -688,8 +918,8 @@ QualType Collect::substitute_template_type_with_bindings(
                                 "failed to materialize fold-expression bindings",
                                 "failed to substitute fold-expression pattern",
                                 "fold-expression pattern cloning is not supported",
-                                rewrite_fold_element_type,
-                                rewrite_fold_element_arguments,
+                                rewrite_substituted_pack_element_type,
+                                rewrite_substituted_pack_element_arguments,
                                 [&](std::unique_ptr<Expr>& element_expr,
                                     const TemplateArgumentBindings&
                                         element_bindings,
@@ -1563,6 +1793,67 @@ QualType Collect::substitute_template_type_with_bindings(
                 {},
                 {});
             inherit_clone_context_symbol_remaps(clone_pass_builder, clone_context);
+            auto rewrite_noexcept_pack_element_type =
+                [&](QualType nested_type,
+                    const TemplateArgumentBindings& element_bindings)
+                -> QualType {
+                    auto rewritten_type =
+                        substitute_template_type_with_bindings(
+                            nested_type,
+                            parameters,
+                            element_bindings,
+                            loc,
+                            allow_unsubstituted_parameters,
+                            clone_context);
+                    return finalize_deferred_semantic_type(
+                        rewritten_type,
+                        loc);
+                };
+            auto rewrite_noexcept_pack_element_arguments =
+                [&](const std::vector<TemplateArgument>& template_arguments,
+                    const TemplateArgumentBindings& element_bindings)
+                -> std::vector<TemplateArgument> {
+                    return substitute_template_arguments_with_bindings(
+                        template_arguments,
+                        parameters,
+                        element_bindings,
+                        loc,
+                        allow_unsubstituted_parameters,
+                        clone_context);
+                };
+            clone_pass_builder.expand_pack_expansion =
+                [&](const Expr* pattern_expr,
+                    std::vector<std::unique_ptr<Expr>>& expanded_out,
+                    std::string* error_out) -> bool {
+                    return expand_substituted_pack_expression(
+                        *this,
+                        ast_ctx_.get(),
+                        parameters,
+                        argument_bindings,
+                        clone_context,
+                        loc,
+                        pattern_expr,
+                        expanded_out,
+                        "failed to collect function noexcept pack expansion shape",
+                        "function noexcept pack expansion does not reference a template parameter pack",
+                        "failed to materialize function noexcept pack expansion bindings",
+                        "failed to substitute function noexcept pack expansion pattern",
+                        "function noexcept pack expansion pattern cloning is not supported",
+                        "failed to preserve unexpanded function noexcept pack expansion",
+                        rewrite_noexcept_pack_element_type,
+                        rewrite_noexcept_pack_element_arguments,
+                        [&](std::unique_ptr<Expr>& element_expr,
+                            const TemplateArgumentBindings&,
+                            const TemplateClonePassBuilder&,
+                            const TemplateSubstitutionPass&,
+                            std::string* nested_error_out) -> bool {
+                            return resolve_dependent_expr_after_substitution(
+                                element_expr,
+                                QualType(),
+                                nested_error_out);
+                        },
+                        error_out);
+                };
             auto clone_pass = clone_pass_builder.build_substitution_pass();
             std::string clone_error;
             auto cloned_exception_expr =
@@ -2055,11 +2346,12 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                             const Expr* pattern_expr,
                             std::string* element_error_out)
                             -> std::unique_ptr<Expr> {
-                            return clone_substituted_fold_pattern_element(
+                            return clone_substituted_pack_pattern_element(
                                 *this,
                                 ast_ctx_.get(),
                                 parameters,
                                 active_bindings,
+                                nullptr,
                                 clone_context,
                                 element_index,
                                 pattern_expr,
