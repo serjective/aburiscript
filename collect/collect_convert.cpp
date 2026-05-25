@@ -164,29 +164,49 @@ std::unique_ptr<Expr> Collect::collect_value_expression(std::unique_ptr<Expr> ex
     return collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
 }
 
+std::unique_ptr<Expr> Collect::collect_contextual_bool_conversion(
+    std::unique_ptr<Expr> expr,
+    SrcLoc loc,
+    std::string_view diagnostic_context) const {
 
-std::unique_ptr<Expr> Collect::collect_condition_expression(std::unique_ptr<Expr> condition, SrcLoc loc, const std::string& stmt_name) const {
-    if (lang_opts_.is_cxx_mode() && condition && ast_ctx_) {
-        auto condition_type = condition->get_type();
-        bool condition_is_dependent =
-            expression_depends_on_template_parameters(condition.get()) ||
-            (condition_type &&
-             type_depends_on_template_parameters(condition_type, ast_ctx_.get()));
-        if (!condition_is_dependent &&
-            condition_type &&
-            !allows_condition_conversion(condition_type, ast_ctx_.get())) {
+    auto report_contextual_bool_failure = [&](QualType type) {
+        if (diagnostic_context == "logical not") {
+            report_error("logical not requires scalar operand", loc);
+            return;
+        }
+        if (diagnostic_context == "logical operator") {
+            report_error("logical operator requires scalar operands", loc);
+            return;
+        }
+        if (!type) {
+            report_error(std::string(diagnostic_context) + " has unknown type", loc);
+            return;
+        }
+        report_error("statement requires expression of scalar type ('" +
+            type.to_string() + "' invalid)", loc);
+    };
+
+    if (lang_opts_.is_cxx_mode() && expr && ast_ctx_) {
+        auto expr_type = expr->get_type();
+        bool expr_is_dependent =
+            expression_depends_on_template_parameters(expr.get()) ||
+            (expr_type &&
+             type_depends_on_template_parameters(expr_type, ast_ctx_.get()));
+        if (!expr_is_dependent &&
+            expr_type &&
+            !allows_condition_conversion(expr_type, ast_ctx_.get())) {
             QualType bool_type(get_builtin_bool());
             auto conversion_match =
                 const_cast<Collect*>(this)->select_cpp_user_defined_conversion(
-                    condition.get(),
+                    expr.get(),
                     bool_type,
                     /*allow_explicit_constructors=*/false,
                     /*allow_explicit_conversion_functions=*/true);
             if (conversion_match.has_value()) {
-                condition =
+                expr =
                     const_cast<Collect*>(this)
                         ->build_cpp_selected_user_defined_conversion_expr(
-                            std::move(condition),
+                            std::move(expr),
                             bool_type,
                             *conversion_match,
                             loc);
@@ -194,30 +214,29 @@ std::unique_ptr<Expr> Collect::collect_condition_expression(std::unique_ptr<Expr
         }
     }
 
-    condition = collect_apply_standard_conversions(std::move(condition), ExprUseContext::Condition);
-    if (!condition) {
+    expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::Condition);
+    if (!expr) {
         return nullptr;
     }
-    auto condition_type = condition->get_type();
-    if (!condition_type) {
-        report_error(stmt_name + " condition has unknown type", loc);
-        return condition;
-    }
-    bool condition_is_dependent =
+    auto expr_type = expr->get_type();
+    bool expr_is_dependent =
         lang_opts_.is_cxx_mode() &&
-        (expression_depends_on_template_parameters(condition.get()) ||
-         type_depends_on_template_parameters(condition_type, ast_ctx_.get()));
-    if (condition_is_dependent) {
-        return condition;
+        (expression_depends_on_template_parameters(expr.get()) ||
+         (expr_type &&
+          type_depends_on_template_parameters(expr_type, ast_ctx_.get())));
+    if (expr_is_dependent) {
+        return expr;
     }
-    if (!condition_type->isScalar()) {
-        if (!allows_condition_conversion(condition_type, ast_ctx_.get())) {
-            report_error("statement requires expression of scalar type ('" +
-                condition_type.to_string() + "' invalid)", loc);
-        }
-    } else if (!allows_condition_conversion(condition_type, ast_ctx_.get())) {
-        report_error("statement requires expression of scalar type ('" +
-            condition_type.to_string() + "' invalid)", loc);
+    if (!expr_type ||
+        !allows_condition_conversion(expr_type, ast_ctx_.get())) {
+        report_contextual_bool_failure(expr_type);
     }
-    return condition;
+    return expr;
+}
+
+std::unique_ptr<Expr> Collect::collect_condition_expression(std::unique_ptr<Expr> condition, SrcLoc loc, const std::string& stmt_name) const {
+    return collect_contextual_bool_conversion(
+        std::move(condition),
+        loc,
+        stmt_name + " condition");
 }

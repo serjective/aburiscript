@@ -16,6 +16,16 @@
 #include <optional>
 #include <unordered_set>
 
+namespace {
+bool expression_type_is_bool(Expr* expr, const ASTContext* ast_ctx) {
+    if (!expr) {
+        return false;
+    }
+    auto builtin = desugar_type(expr->get_type(), ast_ctx).as_shared<BuiltinType>();
+    return builtin && builtin->builtin_kind == BuiltinTypes::Bool;
+}
+} // namespace
+
 llvm::Value * ASTToLLVM::convert_unary_expr(Expr *expr) {
     auto* uexpr = dyn_cast<UnaryOperation>(expr);
     if (!uexpr) return nullptr;
@@ -265,7 +275,11 @@ llvm::Value * ASTToLLVM::convert_unary_expr(Expr *expr) {
         // ! (logical not) - true if value is zero
         llvm::Value *is_nonzero = emit_bool_conversion(operand, "lognot");
         llvm::Value *cmp = builder.CreateNot(is_nonzero, "lognot.not");
-        ret = builder.CreateZExt(cmp, llvm::Type::getInt32Ty(*context), "lognot_ext");
+        if (expression_type_is_bool(uexpr, ast_ctx.get())) {
+            ret = cmp;
+        } else {
+            ret = builder.CreateZExt(cmp, llvm::Type::getInt32Ty(*context), "lognot_ext");
+        }
     } else if (uexpr->uop == UnaryOpTypes::REAL_PART || uexpr->uop == UnaryOpTypes::IMAG_PART) {
         auto exp_type = uexpr->exp->get_type();
         if (exp_type && exp_type->isComplex()) {
@@ -342,6 +356,17 @@ llvm::Value* ASTToLLVM::emit_bool_conversion(llvm::Value* val, const std::string
 }
 
 llvm::Value * ASTToLLVM::convert_logical_or_expr(BinaryOperation* expr) {
+    bool result_is_bool = expression_type_is_bool(expr, ast_ctx.get());
+    llvm::Type* result_type = result_is_bool
+        ? llvm::Type::getInt1Ty(*context)
+        : llvm::Type::getInt32Ty(*context);
+    auto materialize_result = [&](llvm::Value* cond, const char* name) -> llvm::Value* {
+        if (result_is_bool) {
+            return cond;
+        }
+        return builder.CreateZExt(cond, result_type, name);
+    };
+
     if (!builder.GetInsertBlock()) {
         auto const_eval = eval_constexpr_i64(expr, ConstEvalMode::c_ice());
         if (!const_eval.has_value()) {
@@ -349,8 +374,7 @@ llvm::Value * ASTToLLVM::convert_logical_or_expr(BinaryOperation* expr) {
                   expr->location);
             return nullptr;
         }
-        return llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context),
-                                      *const_eval != 0);
+        return llvm::ConstantInt::get(result_type, *const_eval != 0);
     }
 
     // Logic: Res = L || R
@@ -376,7 +400,7 @@ llvm::Value * ASTToLLVM::convert_logical_or_expr(BinaryOperation* expr) {
     llvm::Value *right = convert_expression(expr->right.get());
     if (!right) return nullptr;
     llvm::Value *rightCond = emit_bool_conversion(right, "or.cond.rhs");
-    llvm::Value *rightVal = builder.CreateZExt(rightCond, llvm::Type::getInt32Ty(*context), "or.val.rhs");
+    llvm::Value *rightVal = materialize_result(rightCond, "or.val.rhs");
 
     builder.CreateBr(MergeBB);
     llvm::BasicBlock *RightEndBB = builder.GetInsertBlock(); // convert_expression might have changed the block
@@ -384,14 +408,24 @@ llvm::Value * ASTToLLVM::convert_logical_or_expr(BinaryOperation* expr) {
     // --- Emit Merge Block ---
     MergeBB->insertInto(TheFunction);
     builder.SetInsertPoint(MergeBB);
-    llvm::PHINode *phi = builder.CreatePHI(llvm::Type::getInt32Ty(*context), 2, "or.res");
-    phi->addIncoming(llvm::ConstantInt::get(*context,
-        llvm::APInt(32, 1)), LeftBB); // Short-circuited true
+    llvm::PHINode *phi = builder.CreatePHI(result_type, 2, "or.res");
+    phi->addIncoming(llvm::ConstantInt::get(result_type, 1), LeftBB); // Short-circuited true
     phi->addIncoming(rightVal, RightEndBB); // Result from RHS
 
     return phi;
 }
 llvm::Value * ASTToLLVM::convert_logical_and_expr(BinaryOperation* expr) {
+    bool result_is_bool = expression_type_is_bool(expr, ast_ctx.get());
+    llvm::Type* result_type = result_is_bool
+        ? llvm::Type::getInt1Ty(*context)
+        : llvm::Type::getInt32Ty(*context);
+    auto materialize_result = [&](llvm::Value* cond, const char* name) -> llvm::Value* {
+        if (result_is_bool) {
+            return cond;
+        }
+        return builder.CreateZExt(cond, result_type, name);
+    };
+
     if (!builder.GetInsertBlock()) {
         auto const_eval = eval_constexpr_i64(expr, ConstEvalMode::c_ice());
         if (!const_eval.has_value()) {
@@ -399,8 +433,7 @@ llvm::Value * ASTToLLVM::convert_logical_and_expr(BinaryOperation* expr) {
                   expr->location);
             return nullptr;
         }
-        return llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context),
-                                      *const_eval != 0);
+        return llvm::ConstantInt::get(result_type, *const_eval != 0);
     }
 
     // Logic: Res = L && R
@@ -427,7 +460,7 @@ llvm::Value * ASTToLLVM::convert_logical_and_expr(BinaryOperation* expr) {
     if (!right) return nullptr;
 
     llvm::Value *rightCond = emit_bool_conversion(right, "and.cond.rhs");
-    llvm::Value *rightVal = builder.CreateZExt(rightCond, llvm::Type::getInt32Ty(*context), "and.val.rhs");
+    llvm::Value *rightVal = materialize_result(rightCond, "and.val.rhs");
 
     builder.CreateBr(MergeBB);
     llvm::BasicBlock *RightEndBB = builder.GetInsertBlock();
@@ -435,9 +468,8 @@ llvm::Value * ASTToLLVM::convert_logical_and_expr(BinaryOperation* expr) {
     // --- Emit Merge Block ---
     MergeBB->insertInto(TheFunction);
     builder.SetInsertPoint(MergeBB);
-    llvm::PHINode *phi = builder.CreatePHI(llvm::Type::getInt32Ty(*context), 2, "and.res");
-    phi->addIncoming(llvm::ConstantInt::get(*context,
-        llvm::APInt(32, 0)), LeftBB); // Short-circuited false
+    llvm::PHINode *phi = builder.CreatePHI(result_type, 2, "and.res");
+    phi->addIncoming(llvm::ConstantInt::get(result_type, 0), LeftBB); // Short-circuited false
     phi->addIncoming(rightVal, RightEndBB); // Result from RHS
 
     return phi;

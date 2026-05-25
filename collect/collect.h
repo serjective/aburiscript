@@ -676,6 +676,11 @@ public:
                                                              ExprUseContext context,
                                                              QualType target_type = QualType()) const ;
 
+    std::unique_ptr<Expr> collect_contextual_bool_conversion(
+        std::unique_ptr<Expr> expr,
+        SrcLoc loc,
+        std::string_view diagnostic_context) const ;
+
     std::unique_ptr<Expr> collect_condition_expression(std::unique_ptr<Expr> condition,
                                                        SrcLoc loc,
                                                        const std::string& stmt_name) const ;

@@ -6758,6 +6758,11 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
         if (!exp_type || !exp_type->isComplex()) {
             expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
         }
+    } else if (uop == UnaryOpTypes::LOGICAL_NOT) {
+        expr = collect_contextual_bool_conversion(
+            std::move(expr),
+            loc,
+            "logical not");
     } else if (uop != UnaryOpTypes::ADDRESS_OF && !is_incdec) {
         expr = collect_apply_standard_conversions(std::move(expr), ExprUseContext::RValue);
     }
@@ -6824,9 +6829,6 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
             break;
         }
         case UnaryOpTypes::LOGICAL_NOT:
-            if (!allows_condition_conversion(exp_type, ast_ctx_.get())) {
-                report_error("logical not requires scalar operand", loc);
-            }
             node->ctype = lang_opts_.is_cxx_mode()
                               ? QualType(get_builtin_bool())
                               : QualType(get_builtin_int());
@@ -7233,8 +7235,11 @@ std::unique_ptr<Expr> Collect::collect_binary_operation_impl(
         } else if (bop == BinOpTypes::COMMA && rhs) {
             dependent_result_type = rhs->get_type();
         } else if (bop == BinOpTypes::LOGICAL_AND ||
-                   bop == BinOpTypes::LOGICAL_OR ||
-                   bop == BinOpTypes::LESS_THAN ||
+                   bop == BinOpTypes::LOGICAL_OR) {
+            dependent_result_type = lang_opts_.is_cxx_mode()
+                ? QualType(get_builtin_bool())
+                : QualType(get_builtin_int());
+        } else if (bop == BinOpTypes::LESS_THAN ||
                    bop == BinOpTypes::GREATER_THAN ||
                    bop == BinOpTypes::LESS_EQUAL_THAN ||
                    bop == BinOpTypes::GREATER_EQUAL_THAN ||
@@ -7272,6 +7277,16 @@ std::unique_ptr<Expr> Collect::collect_binary_operation_impl(
 
     if (bop == BinOpTypes::ASSIGN) {
         rhs = collect_apply_standard_conversions(std::move(rhs), ExprUseContext::RValue);
+    } else if (bop == BinOpTypes::LOGICAL_AND ||
+               bop == BinOpTypes::LOGICAL_OR) {
+        lhs = collect_contextual_bool_conversion(
+            std::move(lhs),
+            loc,
+            "logical operator");
+        rhs = collect_contextual_bool_conversion(
+            std::move(rhs),
+            loc,
+            "logical operator");
     } else {
         lhs = collect_apply_standard_conversions(std::move(lhs), ExprUseContext::RValue);
         if (!(lang_opts_.is_cxx_mode() && bop == BinOpTypes::COMMA)) {
@@ -7433,13 +7448,9 @@ std::unique_ptr<Expr> Collect::collect_binary_operation_impl(
         // --- Logical operators ---
         case BinOpTypes::LOGICAL_AND:
         case BinOpTypes::LOGICAL_OR: {
-            if ((lhs_ty &&
-                 !allows_condition_conversion(lhs_ty, ast_ctx_.get())) ||
-                (rhs_ty &&
-                 !allows_condition_conversion(rhs_ty, ast_ctx_.get()))) {
-                report_error("logical operator requires scalar operands", loc);
-            }
-            node->ctype = QualType(get_builtin_int());
+            node->ctype = lang_opts_.is_cxx_mode()
+                              ? QualType(get_builtin_bool())
+                              : QualType(get_builtin_int());
             break;
         }
         // --- Comparisons (equality + relational) ---
@@ -8478,7 +8489,10 @@ std::unique_ptr<Expr> Collect::collect_compound_assign_operation(std::unique_ptr
 std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Expr> cond,
     std::unique_ptr<Expr> true_expr, std::unique_ptr<Expr> false_expr, QualType forced_type, SrcLoc loc) const {
 
-    cond = collect_apply_standard_conversions(std::move(cond), ExprUseContext::Condition);
+    cond = collect_contextual_bool_conversion(
+        std::move(cond),
+        loc,
+        "conditional expression condition");
     bool preserve_cpp_conditional_operands = lang_opts_.is_cxx_mode();
     if (true_expr && !preserve_cpp_conditional_operands) {
         true_expr = collect_apply_standard_conversions(std::move(true_expr), ExprUseContext::ConditionalOperand);
@@ -8490,12 +8504,6 @@ std::unique_ptr<Expr> Collect::collect_conditional_expression(std::unique_ptr<Ex
     if (cond) {
         auto cond_ty = cond->get_type();
         cond_is_dependent = expression_depends_on_template_parameters(cond.get());
-        if (!cond_is_dependent &&
-            cond_ty &&
-            !allows_condition_conversion(cond_ty, ast_ctx_.get())) {
-            report_error("statement requires expression of scalar type ('" +
-                cond_ty.to_string() + "' invalid)", loc);
-        }
     }
 
     QualType result_type = forced_type;

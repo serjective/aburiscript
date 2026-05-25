@@ -2095,6 +2095,8 @@ std::string_view unary_operator_function_suffix(UnaryOpTypes uop) {
         case UnaryOpTypes::DECREMENT_PREFIX:
         case UnaryOpTypes::DECREMENT_POSTFIX:
             return "--";
+        case UnaryOpTypes::DEREFERENCE:
+            return "*";
         default:
             return {};
     }
