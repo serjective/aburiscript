@@ -1616,6 +1616,21 @@ TemplateArgument Parser::parse_cpp_template_argument() {
 }
 
 std::vector<TemplateArgument> Parser::parse_cpp_template_argument_list() {
+    struct TemplateArgumentListBoundaryGuard {
+        Parser& parser;
+        uint32_t saved_group_depth = 0;
+
+        explicit TemplateArgumentListBoundaryGuard(Parser& parser)
+            : parser(parser),
+              saved_group_depth(parser.template_argument_group_depth_) {
+            parser.template_argument_group_depth_ = 0;
+        }
+
+        ~TemplateArgumentListBoundaryGuard() {
+            parser.template_argument_group_depth_ = saved_group_depth;
+        }
+    } boundary_guard(*this);
+
     std::vector<TemplateArgument> arguments;
     check_and_consume(TokenType::LESS_THAN);
     if (gentle_check(TokenType::GREATER_THAN)) {
