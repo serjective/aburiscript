@@ -1075,7 +1075,24 @@ std::unique_ptr<Expr> make_constant_expr_for_template_argument(
         !argument.value_type) {
         return nullptr;
     }
-    if (argument.value_expr) {
+    auto can_materialize_directly_from_value = [&]() {
+        switch (argument.value.kind) {
+            case ConstValueKind::Boolean:
+            case ConstValueKind::Integer:
+            case ConstValueKind::NullPointer:
+            case ConstValueKind::MemberPointer:
+                return true;
+            case ConstValueKind::Address:
+                return argument.value.address_value.symbol != nullptr &&
+                       argument.value.address_value.byte_offset == 0;
+            case ConstValueKind::Invalid:
+            case ConstValueKind::Floating:
+            case ConstValueKind::Object:
+                return false;
+        }
+        return false;
+    };
+    if (argument.value_expr && !can_materialize_directly_from_value()) {
         std::string clone_error;
         if (auto cloned =
                 clone_expr_tree(argument.value_expr.get(), ast_ctx, &clone_error)) {

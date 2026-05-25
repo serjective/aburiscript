@@ -2,6 +2,7 @@
 #include "lower_helpers.h"
 #include "const_lowering.h"
 #include "../abi/darwin_blocks.h"
+#include "../helpers/auto_type_utils.h"
 #include "../helpers/casting.h"
 #include "../constexpr/consteval_compat.h"
 #include "../numeric_utils.h"
@@ -617,9 +618,28 @@ llvm::GlobalValue* get_or_create_variable_weakref_alias(
         lower.module.get());
 }
 
+bool variable_decl_has_unresolved_template_owner(ASTToLLVM& lower,
+                                                 const VariableDecl* var_decl) {
+    if (!var_decl || !var_decl->sym) {
+        return false;
+    }
+
+    QualType owner_type = get_symbol_owner_record_type(var_decl->sym.get());
+    if (!owner_type) {
+        return false;
+    }
+    if (type_depends_on_template_parameters(owner_type, lower.ast_ctx.get())) {
+        return true;
+    }
+    return auto_type_utils::auto_type_flavors_in(owner_type.get_shared()) != 0;
+}
+
 bool variable_decl_is_definition_bearing(ASTToLLVM& lower,
                                          const VariableDecl* var_decl) {
     if (!var_decl) {
+        return false;
+    }
+    if (variable_decl_has_unresolved_template_owner(lower, var_decl)) {
         return false;
     }
     if (variable_decl_is_static_data_member(lower, var_decl)) {
@@ -718,6 +738,9 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
     }
     if (sym->linkage != VariableLinkage::EXTERNAL && sym->linkage != VariableLinkage::INTERNAL) {
         error("deal_global_variable_declaration(): Invalid declaration linkage", decl->location);
+        return;
+    }
+    if (variable_decl_has_unresolved_template_owner(*this, varDecl)) {
         return;
     }
     std::string mangled = mangleCIdentifier(sym->uid);

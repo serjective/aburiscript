@@ -2,6 +2,33 @@
 
 namespace auto_type_utils {
 
+namespace {
+
+uint8_t auto_type_flavors_in_template_argument(const TemplateArgument& argument) {
+    switch (argument.kind) {
+        case TemplateArgumentKind::Type:
+            return auto_type_flavors_in(argument.type.get_shared());
+        case TemplateArgumentKind::Value:
+            return auto_type_flavors_in(argument.value_type.get_shared());
+        case TemplateArgumentKind::Template:
+            return auto_type_flavors_in(
+                argument.dependent_template_qualifier_type.get_shared());
+    }
+    return 0;
+}
+
+uint8_t auto_type_flavors_in_template_arguments(
+    const std::vector<TemplateArgument>& arguments) {
+    uint8_t flags = 0;
+    for (const auto& argument : arguments) {
+        flags = static_cast<uint8_t>(
+            flags | auto_type_flavors_in_template_argument(argument));
+    }
+    return flags;
+}
+
+} // namespace
+
 uint8_t auto_type_flavors_in(const std::shared_ptr<CType>& type) {
     if (!type) {
         return 0;
@@ -41,6 +68,20 @@ uint8_t auto_type_flavors_in(const std::shared_ptr<CType>& type) {
     if (type->kind == TypeKind::Typedef) {
         auto alias = std::static_pointer_cast<TypedefType>(type);
         return auto_type_flavors_in(alias->underlying_type.get_shared());
+    }
+    if (type->kind == TypeKind::Object) {
+        auto object = std::static_pointer_cast<ObjectType>(type);
+        if (object->is_class_template_specialization()) {
+            return auto_type_flavors_in_template_arguments(
+                object->get_template_specialization_arguments());
+        }
+        return 0;
+    }
+    if (type->kind == TypeKind::TemplateSpecialization) {
+        auto specialization =
+            std::static_pointer_cast<TemplateSpecializationType>(type);
+        return auto_type_flavors_in_template_arguments(
+            specialization->arguments);
     }
     if (type->kind == TypeKind::Function) {
         auto func = std::static_pointer_cast<FunctionType>(type);
