@@ -9018,6 +9018,33 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         *specialization_arguments_out = parse_cpp_template_argument_list();
     }
 
+    auto class_final_specifier_follows = [&]() {
+        if (name.empty() ||
+            !gentle_check(TokenType::IDENTIFIER) ||
+            current_token().value != "final") {
+            return false;
+        }
+        Token next = peek_token();
+        if (next.type == TokenType::LEFT_BRACE ||
+            next.type == TokenType::COLON) {
+            return true;
+        }
+        return next.type == TokenType::IDENTIFIER &&
+               next.value == "final" &&
+               (peek_token(2).type == TokenType::LEFT_BRACE ||
+                peek_token(2).type == TokenType::COLON);
+    };
+
+    bool record_is_final = false;
+    while (class_final_specifier_follows()) {
+        if (record_is_final) {
+            error_custloc("duplicate 'final' specifier",
+                          current_token().loc);
+        }
+        record_is_final = true;
+        advance();
+    }
+
     std::vector<CppBaseSpecifier> bases;
     if (gentle_check(TokenType::COLON)) {
         if (record_kind == CppRecordKind::Union) {
@@ -9199,6 +9226,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
             std::move(bases),
             false,
             key_tok.loc);
+        record->is_final = record_is_final;
         ast_ctx->append_attrs(record->node_id, std::move(head_attrs));
         return record;
     }
@@ -9332,6 +9360,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
             bases,
             true,
             key_tok.loc);
+        provisional_record.is_final = record_is_final;
         provisional_record.provisional_semantic_owner = semantic_owner;
         collect_->collect_publish_cpp_record_provisional_bases(
             provisional_record,
@@ -10004,6 +10033,7 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
         std::move(members),
         true,
         key_tok.loc);
+    record->is_final = record_is_final;
     record->provisional_semantic_owner = semantic_owner;
     ast_ctx->append_attrs(record->node_id, std::move(head_attrs));
     return record;

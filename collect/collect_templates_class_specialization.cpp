@@ -1246,6 +1246,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 "base class '" + specialized_base.name + "' is incomplete",
                 base_loc);
         }
+        if (base_state->is_final) {
+            return fail_instantiation(
+                "base class '" + specialized_base.name + "' is marked 'final'",
+                base_loc);
+        }
 
         specialized_base.record_decl = canonical_base_decl;
         specialized_base.type = QualType(canonical_base_decl->get_record_type());
@@ -2211,6 +2216,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             &entry->member_decls,
             nullptr};
         ctx.semantic_state.is_incomplete = false;
+        ctx.semantic_state.is_final = cloned_record->is_final;
         ctx.semantic_state.alignment = 1;
         ctx.semantic_state.non_virtual_alignment = 1;
         if (const auto* definition_data = cloned_record->get_definition_data()) {
@@ -2919,6 +2925,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         ctx.semantic_decl = semantic_owner;
         ctx.transient_decls_out = &entry->member_decls;
         ctx.semantic_state.is_incomplete = !cloned_record->is_definition;
+        ctx.semantic_state.is_final = cloned_record->is_final;
         ctx.semantic_state.alignment = 1;
         ctx.semantic_state.non_virtual_alignment = 1;
         if (const auto* definition_data = cloned_record->get_definition_data()) {
@@ -4551,6 +4558,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     bool build_semantic_state() {
         semantic_state = RecordSemanticState{};
         semantic_state.is_incomplete = !pattern->is_definition;
+        semantic_state.is_final = pattern->is_final;
         if (pattern->get_definition_data()) {
             semantic_state.definition_data = *pattern->get_definition_data();
         }

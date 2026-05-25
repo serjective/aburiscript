@@ -1749,6 +1749,7 @@ public:
                 transient_decls_out_,
                 std::move(deferred_body_callback_)};
             ctx.semantic_state.is_incomplete = false;
+            ctx.semantic_state.is_final = record_.is_final;
             ctx.semantic_state.alignment = 1;
             ctx.semantic_state.non_virtual_alignment = 1;
             if (const auto* definition_data = record_.get_definition_data()) {
@@ -2029,6 +2030,11 @@ void Collect::collect_record_resolve_bases(CollectRecordBuildContext& ctx) const
         if (!base_state || base_state->is_incomplete) {
             report_error(
                 "base class '" + base_name + "' is incomplete",
+                base_spec.location);
+        }
+        if (base_state && base_state->is_final) {
+            report_error(
+                "base class '" + base_name + "' is marked 'final'",
                 base_spec.location);
         }
 
@@ -6050,6 +6056,7 @@ void Collect::collect_record_compute_layout(CollectRecordBuildContext& ctx) cons
     RecordSemanticState::DefinitionData definition_data =
         ctx.semantic_state.definition_data;
     bool record_is_incomplete = ctx.semantic_state.is_incomplete;
+    bool semantic_is_final = ctx.semantic_state.is_final;
     bool semantic_is_polymorphic = ctx.semantic_state.is_polymorphic;
     bool semantic_requires_vptr =
         semantic_is_polymorphic || !ctx.virtual_bases.empty();
@@ -6153,6 +6160,7 @@ void Collect::collect_record_compute_layout(CollectRecordBuildContext& ctx) cons
         record_is_incomplete,
         abi_policy);
     ctx.semantic_state.definition_data = definition_data;
+    ctx.semantic_state.is_final = semantic_is_final;
     ctx.semantic_state.non_virtual_size_bits = ctx.semantic_state.size_bits;
     ctx.semantic_state.non_virtual_alignment = ctx.semantic_state.alignment;
     for (size_t base_index = 0; base_index < ctx.bases.size(); ++base_index) {

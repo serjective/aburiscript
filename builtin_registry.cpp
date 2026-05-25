@@ -39,6 +39,7 @@ bool is_builtin_type_trait_kind(BuiltinKind kind) {
         case BuiltinKind::IS_NOTHROW_ASSIGNABLE:
         case BuiltinKind::IS_BASE_OF:
         case BuiltinKind::IS_CLASS:
+        case BuiltinKind::IS_FINAL:
         case BuiltinKind::IS_MEMBER_POINTER:
         case BuiltinKind::IS_MEMBER_OBJECT_POINTER:
         case BuiltinKind::IS_MEMBER_FUNCTION_POINTER:
@@ -105,6 +106,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__is_nothrow_assignable", BuiltinKind::IS_NOTHROW_ASSIGNABLE, 2, 2, true, true});
     register_builtin({"__is_base_of", BuiltinKind::IS_BASE_OF, 2, 2, true, true});
     register_builtin({"__is_class", BuiltinKind::IS_CLASS, 1, 1, true, true});
+    register_builtin({"__is_final", BuiltinKind::IS_FINAL, 1, 1, true, true});
     register_builtin({"__is_member_pointer", BuiltinKind::IS_MEMBER_POINTER, 1, 1, true, true});
     register_builtin({"__is_member_object_pointer", BuiltinKind::IS_MEMBER_OBJECT_POINTER, 1, 1, true, true});
     register_builtin({"__is_member_function_pointer", BuiltinKind::IS_MEMBER_FUNCTION_POINTER, 1, 1, true, true});

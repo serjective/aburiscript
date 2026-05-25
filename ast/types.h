@@ -1729,6 +1729,7 @@ struct RecordSemanticState {
 
     bool is_incomplete = true;
     bool is_template_pattern_provisional = false;
+    bool is_final = false;
     bool is_polymorphic = false;
     bool is_abstract = false;
     bool has_virtual_destructor = false;

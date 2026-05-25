@@ -4123,6 +4123,23 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             auto object_type = type_arg->as_shared<ObjectType>();
             return object_type && !object_type->is_union;
         }
+        case BuiltinKind::IS_FINAL: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto object_type = type_arg->as_shared<ObjectType>();
+            if (!object_type) {
+                return false;
+            }
+            const auto* record_decl = canonical_record_decl(
+                dyn_cast<ObjectDecl>(object_type->get_decl()));
+            if (!record_decl) {
+                return false;
+            }
+            const auto* state = query_lookup_record_semantics(record_decl);
+            return state && !state->is_incomplete && state->is_final;
+        }
         case BuiltinKind::IS_MEMBER_POINTER: {
             auto type_arg = get_canonical_arg(0);
             if (!type_arg) {

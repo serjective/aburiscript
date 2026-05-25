@@ -3563,6 +3563,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 record_decl->is_definition != 0,
                 record_decl->location);
             result->default_access = record_decl->default_access;
+            result->is_final = record_decl->is_final;
             result->definition_data = record_decl->definition_data;
             result->provisional_semantic_owner =
                 cloned_provisional_semantic_owner;

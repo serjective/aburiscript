@@ -3088,6 +3088,7 @@ struct CppRecordDecl : Decl {
     CppAccessSpecifier default_access;
     const ObjectDecl* provisional_semantic_owner = nullptr;
     uint8_t is_definition : 1;
+    uint8_t is_final : 1;
 
     CppRecordDecl(CppRecordKind record_kind, std::string name,
                   std::vector<CppBaseSpecifier> bases,
@@ -3103,7 +3104,8 @@ struct CppRecordDecl : Decl {
                     RecordSemanticState::DefinitionData{})
               : std::nullopt),
           default_access(default_access_for(record_kind)),
-          is_definition(is_definition) {}
+          is_definition(is_definition),
+          is_final(false) {}
 
     CppRecordDecl(CppRecordKind record_kind, std::string name,
                   std::vector<CppBaseSpecifier> bases,
@@ -3117,7 +3119,8 @@ struct CppRecordDecl : Decl {
                     RecordSemanticState::DefinitionData{})
               : std::nullopt),
           default_access(default_access_for(record_kind)),
-          is_definition(is_definition) {}
+          is_definition(is_definition),
+          is_final(false) {}
 
     bool is_class() const { return record_kind == CppRecordKind::Class; }
     bool is_struct() const { return record_kind == CppRecordKind::Struct; }
