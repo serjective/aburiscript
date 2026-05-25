@@ -253,6 +253,8 @@ Parser::TentativeParserState Parser::capture_tentative_state() {
     state.template_argument_expression_depth =
         template_argument_expression_depth_;
     state.template_argument_group_depth = template_argument_group_depth_;
+    state.cpp_template_declaration_subject_parse_depth =
+        cpp_template_declaration_subject_parse_depth_;
     return state;
 }
 
@@ -275,6 +277,8 @@ void Parser::restore_tentative_state(const TentativeParserState& state) {
     template_argument_expression_depth_ =
         state.template_argument_expression_depth;
     template_argument_group_depth_ = state.template_argument_group_depth;
+    cpp_template_declaration_subject_parse_depth_ =
+        state.cpp_template_declaration_subject_parse_depth;
 }
 
 Parser::TPResult Parser::try_parse_type_name() {

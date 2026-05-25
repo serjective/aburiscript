@@ -961,10 +961,12 @@ struct FriendDecl : Decl {
     std::unique_ptr<Decl> target_decl;
     QualType friend_type;
     const ClassTemplateDecl* friend_class_template;
+    std::string unresolved_friend_type_name;
     QualType granting_record_type;
     std::shared_ptr<Symbol> function_symbol;
     uint8_t friend_kind : 3;
     uint8_t has_deferred_inline_body_tokens : 1;
+    uint8_t unresolved_friend_type_is_union : 1;
     size_t deferred_inline_body_begin_token_idx;
     size_t deferred_inline_body_end_token_idx;
 
@@ -979,6 +981,7 @@ struct FriendDecl : Decl {
           granting_record_type(std::move(granting_record_type)),
           friend_kind(static_cast<uint8_t>(friend_kind)),
           has_deferred_inline_body_tokens(false),
+          unresolved_friend_type_is_union(false),
           deferred_inline_body_begin_token_idx(0),
           deferred_inline_body_end_token_idx(0) {}
 
@@ -992,11 +995,21 @@ struct FriendDecl : Decl {
           granting_record_type(std::move(granting_record_type)),
           friend_kind(static_cast<uint8_t>(CppFriendKind::Type)),
           has_deferred_inline_body_tokens(false),
+          unresolved_friend_type_is_union(false),
           deferred_inline_body_begin_token_idx(0),
           deferred_inline_body_end_token_idx(0) {}
 
     CppFriendKind get_friend_kind() const {
         return static_cast<CppFriendKind>(friend_kind);
+    }
+
+    bool has_unresolved_friend_type_name() const {
+        return !unresolved_friend_type_name.empty();
+    }
+
+    void set_unresolved_friend_type_name(std::string name, bool is_union) {
+        unresolved_friend_type_name = std::move(name);
+        unresolved_friend_type_is_union = is_union;
     }
 
     Decl* target() { return target_decl.get(); }
@@ -3437,13 +3450,16 @@ struct VariableTemplatePartialSpecializationDecl;
 struct ClassTemplatePartialSpecializationDecl;
 
 struct ClassTemplateDecl : TemplateDecl {
+    uint8_t is_hidden_friend : 1;
+
     ClassTemplateDecl(TemplateParameterList parameters,
                       std::unique_ptr<Decl> templated_decl,
                       SrcLoc loc = SrcLoc())
         : TemplateDecl(DeclKind::ClassTemplateDecl,
                        std::move(parameters),
                        std::move(templated_decl),
-                       loc) {}
+                       loc),
+          is_hidden_friend(false) {}
 
     CppRecordDecl* record_decl() {
         return static_cast<CppRecordDecl*>(templated_decl.get());

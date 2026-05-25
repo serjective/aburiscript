@@ -4437,6 +4437,139 @@ Parser::find_hidden_friend_function_template_redeclaration(
     return nullptr;
 }
 
+const ClassTemplateDecl*
+Parser::find_hidden_friend_class_template_redeclaration(
+    const std::string& template_name,
+    const std::shared_ptr<Scope>& namespace_scope,
+    const ClassTemplateDecl* current_template) const {
+    if (template_name.empty() || !namespace_scope || !current_template) {
+        return nullptr;
+    }
+
+    for (const auto& candidate : hidden_friend_class_templates_) {
+        const auto* candidate_template = candidate.decl;
+        if (!candidate_template || candidate.namespace_scope != namespace_scope ||
+            candidate_template == current_template) {
+            continue;
+        }
+        const auto* candidate_record = candidate_template->record_decl();
+        if (!candidate_record || candidate_record->name != template_name) {
+            continue;
+        }
+        if (!cpp_template_decls_match_for_redeclaration(
+                candidate_template,
+                current_template,
+                &template_name)) {
+            continue;
+        }
+        const TemplateDecl* canonical =
+            get_template_decl_canonical_decl(candidate_template);
+        auto* canonical_class_template =
+            dyn_cast<ClassTemplateDecl>(
+                const_cast<TemplateDecl*>(canonical));
+        return canonical_class_template ? canonical_class_template
+                                        : candidate_template;
+    }
+    return nullptr;
+}
+
+const ClassTemplateDecl*
+Parser::materialize_cpp_hidden_friend_class_template_decl(
+    FriendDecl* friend_decl,
+    TemplateParameterList parameters,
+    std::unique_ptr<Expr> associated_constraint,
+    SrcLoc template_loc) {
+    if (!friend_decl || !friend_decl->has_unresolved_friend_type_name() ||
+        !ast_ctx) {
+        return nullptr;
+    }
+
+    const std::string template_name = friend_decl->unresolved_friend_type_name;
+    auto build_argument = [&](const TemplateParameterDecl* parameter)
+        -> TemplateArgument {
+        TemplateArgument argument;
+        if (auto* type_parameter = dyn_cast<TemplateTypeParmDecl>(
+                const_cast<TemplateParameterDecl*>(parameter))) {
+            argument = TemplateArgument(QualType(type_parameter->type));
+        } else if (auto* non_type_parameter =
+                       dyn_cast<TemplateNonTypeParmDecl>(
+                           const_cast<TemplateParameterDecl*>(parameter))) {
+            std::shared_ptr<Expr> argument_expr = nullptr;
+            if (non_type_parameter->sym && collect_) {
+                auto expr = collect_->collect_identifier_reference(
+                    non_type_parameter->name,
+                    non_type_parameter->sym,
+                    non_type_parameter->location);
+                argument_expr = std::shared_ptr<Expr>(expr.release());
+            }
+            argument = TemplateArgument::dependent_value_argument(
+                non_type_parameter->type,
+                std::move(argument_expr),
+                non_type_parameter->name,
+                non_type_parameter);
+        } else if (auto* template_parameter =
+                       dyn_cast<TemplateTemplateParmDecl>(
+                           const_cast<TemplateParameterDecl*>(parameter))) {
+            argument = TemplateArgument::dependent_template_argument(
+                template_parameter->name,
+                template_parameter);
+        }
+        if (parameter && parameter->is_parameter_pack) {
+            argument = argument.as_pack_expansion({parameter});
+        }
+        return argument;
+    };
+
+    std::vector<TemplateArgument> friend_arguments;
+    friend_arguments.reserve(parameters.size());
+    for (const auto& parameter : parameters) {
+        friend_arguments.push_back(build_argument(parameter.get()));
+    }
+
+    CppRecordKind record_kind = friend_decl->unresolved_friend_type_is_union
+        ? CppRecordKind::Union
+        : CppRecordKind::Class;
+    auto record_decl = make_ast<CppRecordDecl>(
+        *ast_ctx,
+        record_kind,
+        template_name,
+        std::vector<CppBaseSpecifier>{},
+        false,
+        friend_decl->location);
+    auto class_template = make_ast<ClassTemplateDecl>(
+        *ast_ctx,
+        std::move(parameters),
+        std::move(record_decl),
+        template_loc);
+    class_template->associated_constraint =
+        std::move(associated_constraint);
+    class_template->is_hidden_friend = true;
+
+    const ClassTemplateDecl* hidden_template_ptr = class_template.get();
+    auto friend_scope = nearest_cpp_friend_namespace_scope();
+    const ClassTemplateDecl* canonical_template =
+        find_hidden_friend_class_template_redeclaration(
+            template_name,
+            friend_scope,
+            hidden_template_ptr);
+    if (!canonical_template) {
+        canonical_template = hidden_template_ptr;
+        hidden_friend_class_templates_.push_back(
+            HiddenFriendClassTemplate{hidden_template_ptr, friend_scope});
+    }
+    set_template_decl_canonical_decl(hidden_template_ptr, canonical_template);
+
+    friend_decl->friend_class_template = canonical_template;
+    friend_decl->friend_type =
+        QualType(std::make_shared<TemplateSpecializationType>(
+            template_name,
+            canonical_template,
+            std::move(friend_arguments),
+            true));
+    friend_decl->target_decl = std::move(class_template);
+    return canonical_template;
+}
+
 QualType Parser::lookup_friend_access_type_for_current_function_template_redeclaration(
     const FuncDecl* function_decl) const {
     if (!is_cxx_mode_active() || !collect_ || !function_decl ||
@@ -4623,17 +4756,35 @@ const TemplateDecl* Parser::resolve_matching_primary_template_redeclaration(
             false,
             lookup_namespace);
     auto resolve_hidden_friend_redeclaration = [&]() -> const TemplateDecl* {
-        if (lookup_namespace != LookupNamespace::Ordinary) {
-            return nullptr;
+        if (lookup_namespace == LookupNamespace::Ordinary) {
+            auto* current_function_template =
+                dyn_cast<FunctionTemplateDecl>(
+                    const_cast<TemplateDecl*>(current_template));
+            if (!current_function_template) {
+                return nullptr;
+            }
+            return find_hidden_friend_function_template_redeclaration(
+                current_function_template);
         }
-        auto* current_function_template =
-            dyn_cast<FunctionTemplateDecl>(
-                const_cast<TemplateDecl*>(current_template));
-        if (!current_function_template) {
-            return nullptr;
+        if (lookup_namespace == LookupNamespace::Tag) {
+            auto* current_class_template =
+                dyn_cast<ClassTemplateDecl>(
+                    const_cast<TemplateDecl*>(current_template));
+            if (!current_class_template ||
+                (!scope_flags_contains(
+                     current_scope->flags,
+                     ScopeFlags::FileScope) &&
+                 !scope_flags_contains(
+                     current_scope->flags,
+                     ScopeFlags::NamespaceScope))) {
+                return nullptr;
+            }
+            return find_hidden_friend_class_template_redeclaration(
+                template_name,
+                current_scope,
+                current_class_template);
         }
-        return find_hidden_friend_function_template_redeclaration(
-            current_function_template);
+        return nullptr;
     };
     if (!binding) {
         return resolve_hidden_friend_redeclaration();
@@ -5408,72 +5559,82 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
         }
     };
 
-    if (member_template_constructor_name_offset().has_value()) {
-        AbbreviatedFunctionTemplateContextGuard abbreviated_context_guard{
-            this,
-            &parameters,
-            parameter_depth};
-        templated_decls.push_back(parse_cpp_constructor_member());
-    } else if (gentle_check(TokenType::CLASS) ||
-        gentle_check(TokenType::STRUCT) ||
-        gentle_check(TokenType::UNION)) {
-        auto record_decl =
-            parse_cpp_record_specifier(
-                &record_specialization_arguments,
-                &record_has_specialization_argument_list,
-                false,
-                provisional_class_template_ptr);
-        check_and_consume(TokenType::SEMICOLON);
-        templated_decls.push_back(std::move(record_decl));
-    } else if (lang_opts.is_cxx20_or_later() &&
-               gentle_check(TokenType::CONCEPT_KW)) {
-        if (member_template_declaration) {
-            fail_cpp_unsupported("member concept declaration", current_token().loc);
-        }
-        advance(); // 'concept'
-        Token name_tok = current_token();
-        check_and_consume(TokenType::IDENTIFIER);
-        check_and_consume(TokenType::ASSIGN);
-        auto constraint_expr = parse_cpp_constraint_expression();
-        check_and_consume(TokenType::SEMICOLON);
-        templated_decls.push_back(make_ast<NopDecl>(*ast_ctx, template_tok.loc));
-        auto concept_decl = make_ast<ConceptDecl>(
-            *ast_ctx,
-            std::move(parameters),
-            name_tok.value,
-            std::move(constraint_expr),
-            template_tok.loc);
-        concept_decl->associated_constraint = std::move(leading_requires_clause);
-        // Delayed finalization below, once the shared template-redeclaration helpers
-        // are in scope.
-        templated_decls.front() = std::move(concept_decl);
-    } else if (member_template_declaration &&
-               gentle_check(TokenType::USING)) {
-        templated_decls = parse_cpp_using_alias_declaration();
-    } else if (member_template_declaration) {
-        AbbreviatedFunctionTemplateContextGuard abbreviated_context_guard{
-            this,
-            &parameters,
-            parameter_depth};
-        templated_decls = parse_struct_declaration(false);
-    } else {
-        struct PendingVariableTemplatePatternGuard {
-            PendingPrimaryVariableTemplatePattern*& slot;
-            PendingPrimaryVariableTemplatePattern* previous = nullptr;
-            ~PendingVariableTemplatePatternGuard() {
-                slot = previous;
-            }
-        } pending_variable_template_guard{
-            pending_primary_variable_template_pattern_,
-            pending_primary_variable_template_pattern_
+    {
+        ++cpp_template_declaration_subject_parse_depth_;
+        struct TemplateDeclarationSubjectGuard {
+            uint32_t& depth;
+            ~TemplateDeclarationSubjectGuard() { --depth; }
+        } template_declaration_subject_guard{
+            cpp_template_declaration_subject_parse_depth_
         };
-        pending_primary_variable_template_pattern_ =
-            &pending_variable_template_pattern;
-        AbbreviatedFunctionTemplateContextGuard abbreviated_context_guard{
-            this,
-            &parameters,
-            parameter_depth};
-        templated_decls = parse_declaration();
+
+        if (member_template_constructor_name_offset().has_value()) {
+            AbbreviatedFunctionTemplateContextGuard abbreviated_context_guard{
+                this,
+                &parameters,
+                parameter_depth};
+            templated_decls.push_back(parse_cpp_constructor_member());
+        } else if (gentle_check(TokenType::CLASS) ||
+            gentle_check(TokenType::STRUCT) ||
+            gentle_check(TokenType::UNION)) {
+            auto record_decl =
+                parse_cpp_record_specifier(
+                    &record_specialization_arguments,
+                    &record_has_specialization_argument_list,
+                    false,
+                    provisional_class_template_ptr);
+            check_and_consume(TokenType::SEMICOLON);
+            templated_decls.push_back(std::move(record_decl));
+        } else if (lang_opts.is_cxx20_or_later() &&
+                   gentle_check(TokenType::CONCEPT_KW)) {
+            if (member_template_declaration) {
+                fail_cpp_unsupported("member concept declaration", current_token().loc);
+            }
+            advance(); // 'concept'
+            Token name_tok = current_token();
+            check_and_consume(TokenType::IDENTIFIER);
+            check_and_consume(TokenType::ASSIGN);
+            auto constraint_expr = parse_cpp_constraint_expression();
+            check_and_consume(TokenType::SEMICOLON);
+            templated_decls.push_back(make_ast<NopDecl>(*ast_ctx, template_tok.loc));
+            auto concept_decl = make_ast<ConceptDecl>(
+                *ast_ctx,
+                std::move(parameters),
+                name_tok.value,
+                std::move(constraint_expr),
+                template_tok.loc);
+            concept_decl->associated_constraint = std::move(leading_requires_clause);
+            // Delayed finalization below, once the shared template-redeclaration helpers
+            // are in scope.
+            templated_decls.front() = std::move(concept_decl);
+        } else if (member_template_declaration &&
+                   gentle_check(TokenType::USING)) {
+            templated_decls = parse_cpp_using_alias_declaration();
+        } else if (member_template_declaration) {
+            AbbreviatedFunctionTemplateContextGuard abbreviated_context_guard{
+                this,
+                &parameters,
+                parameter_depth};
+            templated_decls = parse_struct_declaration(false);
+        } else {
+            struct PendingVariableTemplatePatternGuard {
+                PendingPrimaryVariableTemplatePattern*& slot;
+                PendingPrimaryVariableTemplatePattern* previous = nullptr;
+                ~PendingVariableTemplatePatternGuard() {
+                    slot = previous;
+                }
+            } pending_variable_template_guard{
+                pending_primary_variable_template_pattern_,
+                pending_primary_variable_template_pattern_
+            };
+            pending_primary_variable_template_pattern_ =
+                &pending_variable_template_pattern;
+            AbbreviatedFunctionTemplateContextGuard abbreviated_context_guard{
+                this,
+                &parameters,
+                parameter_depth};
+            templated_decls = parse_declaration();
+        }
     }
 
     std::unique_ptr<ClassTemplateDecl> prepared_class_template;
@@ -5737,6 +5898,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
     if (auto* friend_decl =
             dyn_cast<FriendDecl>(templated_decls.front().get())) {
         if (friend_decl->get_friend_kind() == CppFriendKind::Type) {
+            bool materialized_hidden_friend_template = false;
             const ClassTemplateDecl* friend_class_template =
                 canonical_class_template_decl(friend_decl->friend_class_template);
             if (!friend_class_template) {
@@ -5744,12 +5906,23 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_template_declaration() {
                     friend_decl->friend_type,
                     ast_ctx.get());
             }
+            if (!friend_class_template &&
+                friend_decl->has_unresolved_friend_type_name()) {
+                friend_class_template =
+                    materialize_cpp_hidden_friend_class_template_decl(
+                        friend_decl,
+                        std::move(parameters),
+                        std::move(leading_requires_clause),
+                        template_tok.loc);
+                materialized_hidden_friend_template = true;
+            }
             if (!friend_class_template) {
                 fail_cpp_unsupported(
                     "friend class template declaration without a class template target",
                     friend_decl->location);
             }
-            if (!template_template_parameter_lists_are_compatible(
+            if (!materialized_hidden_friend_template &&
+                !template_template_parameter_lists_are_compatible(
                     friend_class_template->parameters,
                     parameters)) {
                 error_custloc(

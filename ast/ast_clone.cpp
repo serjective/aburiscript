@@ -3455,6 +3455,10 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                         remap_template_decl(
                             friend_decl->friend_class_template,
                             ctx)));
+            result->unresolved_friend_type_name =
+                friend_decl->unresolved_friend_type_name;
+            result->unresolved_friend_type_is_union =
+                friend_decl->unresolved_friend_type_is_union;
             result->function_symbol =
                 remap_symbol(friend_decl->function_symbol, ctx);
             result->has_deferred_inline_body_tokens =
@@ -3719,6 +3723,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
                 std::move(cloned_templated_decl),
                 class_template->location);
             assign_node_id(result.get(), ctx.ast_ctx);
+            result->is_hidden_friend = class_template->is_hidden_friend;
             result->canonical_decl = result.get();
             result->set_pattern_template_decl(
                 class_template->get_pattern_template_decl());

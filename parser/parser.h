@@ -84,6 +84,7 @@ private:
         uint32_t template_parameter_depth = 0;
         uint32_t template_argument_expression_depth = 0;
         uint32_t template_argument_group_depth = 0;
+        uint32_t cpp_template_declaration_subject_parse_depth = 0;
     };
 
     struct ParsedCppTypeNameSpecifier {
@@ -612,6 +613,16 @@ private:
     const FunctionTemplateDecl*
     find_hidden_friend_function_template_redeclaration(
         const FunctionTemplateDecl* function_template) const;
+    const ClassTemplateDecl*
+    find_hidden_friend_class_template_redeclaration(
+        const std::string& template_name,
+        const std::shared_ptr<Scope>& namespace_scope,
+        const ClassTemplateDecl* current_template) const;
+    const ClassTemplateDecl* materialize_cpp_hidden_friend_class_template_decl(
+        FriendDecl* friend_decl,
+        TemplateParameterList parameters,
+        std::unique_ptr<Expr> associated_constraint,
+        SrcLoc template_loc);
     QualType lookup_friend_access_type_for_current_function_template_redeclaration(
         const FuncDecl* function_decl) const;
     void propagate_function_template_friend_access(
@@ -974,6 +985,7 @@ private:
     uint32_t template_head_requires_clause_depth_ = 0;
     uint32_t lambda_template_requires_clause_depth_ = 0;
     uint32_t cpp_explicit_specialization_parse_depth_ = 0;
+    uint32_t cpp_template_declaration_subject_parse_depth_ = 0;
     struct ActiveAbbreviatedFunctionTemplateContext {
         TemplateParameterList* parameters = nullptr;
         uint32_t parameter_depth = 0;
@@ -1016,6 +1028,11 @@ private:
     // declaration appears. Keep them out of normal lookup while still allowing
     // later redeclarations to inherit friendship.
     std::vector<const FunctionTemplateDecl*> hidden_friend_function_templates_;
+    struct HiddenFriendClassTemplate {
+        const ClassTemplateDecl* decl = nullptr;
+        std::shared_ptr<Scope> namespace_scope;
+    };
+    std::vector<HiddenFriendClassTemplate> hidden_friend_class_templates_;
 
     bool is_parsing_cpp_explicit_specialization() const {
         return cpp_explicit_specialization_parse_depth_ > 0;

@@ -5023,13 +5023,20 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                 friend_tok.loc);
         }
         if (fallback_elaborated_name) {
-            friend_type = resolve_or_declare_elaborated_friend_type(
-                fallback_name,
-                elaborated_is_union,
-                fallback_loc);
+            if (cpp_template_declaration_subject_parse_depth_ == 0) {
+                friend_type = resolve_or_declare_elaborated_friend_type(
+                    fallback_name,
+                    elaborated_is_union,
+                    fallback_loc);
+            }
         }
         if (!friend_type) {
-            error_custloc("friend type declaration requires a type", friend_tok.loc);
+            if (!fallback_elaborated_name ||
+                cpp_template_declaration_subject_parse_depth_ == 0) {
+                error_custloc(
+                    "friend type declaration requires a type",
+                    friend_tok.loc);
+            }
         }
         if (!has_elaborated_key &&
             canonical_type_kind(friend_type, ast_ctx.get()) != TypeKind::Object &&
@@ -5044,6 +5051,11 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
             friend_type,
             current_granting_record_type(),
             friend_tok.loc);
+        if (!friend_type && fallback_elaborated_name) {
+            friend_decl->set_unresolved_friend_type_name(
+                fallback_name,
+                elaborated_is_union);
+        }
         fields.push_back(std::move(friend_decl));
         check_and_consume(TokenType::SEMICOLON);
         return true;
