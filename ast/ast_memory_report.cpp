@@ -508,6 +508,12 @@ private:
                         visit_decl(imported.decl);
                     }
                 }
+                for (const auto& declarator : node->parsed_declarators) {
+                    for (const auto& qualifier : declarator.qualifiers) {
+                        add_ast_string(qualifier);
+                    }
+                    add_ast_string(declarator.terminal_name);
+                }
                 return;
             }
             case DeclKind::TypedefDecl: {

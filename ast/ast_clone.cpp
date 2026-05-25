@@ -3219,6 +3219,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
             result->template_decls = using_decl->template_decls;
             result->tag_decls = using_decl->tag_decls;
             result->replay_targets = using_decl->replay_targets;
+            result->parsed_declarators = using_decl->parsed_declarators;
             assign_node_id(result.get(), ctx.ast_ctx);
             if (!copy_decl_side_tables_impl(decl, result.get(), ctx, error_out)) {
                 return nullptr;

@@ -298,6 +298,20 @@ enum class CppUsingImportNamespace : uint8_t {
 };
 
 struct CppUsingDeclarationDecl: Decl {
+    enum class TerminalKind : uint8_t {
+        Identifier,
+        OperatorFunction
+    };
+
+    struct ParsedDeclarator {
+        bool has_global_qualifier = false;
+        std::vector<std::string> qualifiers;
+        std::string terminal_name;
+        TerminalKind terminal_kind = TerminalKind::Identifier;
+        SrcLoc terminal_loc;
+        bool is_pack_expansion = false;
+    };
+
     struct ImportedSymbol {
         std::string name;
         std::shared_ptr<Symbol> symbol;
@@ -329,6 +343,7 @@ struct CppUsingDeclarationDecl: Decl {
     std::vector<ImportedTemplate> template_decls;
     std::vector<ImportedTag> tag_decls;
     std::vector<ReplayTarget> replay_targets;
+    std::vector<ParsedDeclarator> parsed_declarators;
 
     CppUsingDeclarationDecl(SrcLoc loc = SrcLoc())
         : Decl(DeclKind::CppUsingDeclarationDecl, loc) {}

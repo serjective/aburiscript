@@ -7058,39 +7058,61 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
         set_token_idx(payload_begin_idx);
     }
 
-    struct ParsedUsingDeclarator {
-        bool has_global_qualifier = false;
-        std::vector<std::string> qualifiers;
-        std::string terminal_name;
-        SrcLoc terminal_loc;
-    };
+    using ParsedUsingDeclarator = CppUsingDeclarationDecl::ParsedDeclarator;
 
     auto parse_single_using_declarator =
         [&](std::string_view unsupported_feature) -> ParsedUsingDeclarator {
         ParsedUsingDeclarator declarator;
+        auto parse_using_terminal =
+            [&](ParsedUsingDeclarator& target, bool after_scope_resolution) {
+            if (gentle_check(TokenType::IDENTIFIER)) {
+                target.terminal_name = current_token().value;
+                target.terminal_kind =
+                    CppUsingDeclarationDecl::TerminalKind::Identifier;
+                target.terminal_loc = current_token().loc;
+                advance();
+                return;
+            }
+            if (gentle_check(TokenType::OPERATOR_KW)) {
+                target.terminal_loc = current_token().loc;
+                auto operator_name = try_parse_cpp_operator_function_id_name();
+                if (!operator_name) {
+                    error_custloc(
+                        "expected overloaded operator name after 'operator'",
+                        target.terminal_loc);
+                }
+                target.terminal_name = std::move(*operator_name);
+                target.terminal_kind =
+                    CppUsingDeclarationDecl::TerminalKind::OperatorFunction;
+                return;
+            }
+            if (after_scope_resolution) {
+                error_custloc(
+                    "expected identifier or operator-function-id after '::' in using-declaration",
+                    current_token().loc);
+            }
+            fail_cpp_unsupported(unsupported_feature, using_tok.loc);
+        };
+
         if (is_cpp_scope_resolution_here()) {
             consume_cpp_scope_resolution();
             declarator.has_global_qualifier = true;
         }
 
-        if (!gentle_check(TokenType::IDENTIFIER)) {
-            fail_cpp_unsupported(unsupported_feature, using_tok.loc);
-        }
-
-        declarator.terminal_name = current_token().value;
-        declarator.terminal_loc = current_token().loc;
-        advance();
+        parse_using_terminal(declarator, declarator.has_global_qualifier);
         while (is_cpp_scope_resolution_here()) {
+            if (declarator.terminal_kind ==
+                CppUsingDeclarationDecl::TerminalKind::OperatorFunction) {
+                error_custloc(
+                    "operator-function-id cannot appear before '::' in using-declaration",
+                    declarator.terminal_loc);
+            }
             consume_cpp_scope_resolution();
             declarator.qualifiers.push_back(std::move(declarator.terminal_name));
-            if (!gentle_check(TokenType::IDENTIFIER)) {
-                error_custloc(
-                    "expected identifier after '::' in using-declaration",
-                    current_token().loc);
-            }
-            declarator.terminal_name = current_token().value;
-            declarator.terminal_loc = current_token().loc;
-            advance();
+            parse_using_terminal(declarator, true);
+        }
+        if (gentle_check_and_consume(TokenType::ELLIPSIS)) {
+            declarator.is_pack_expansion = true;
         }
 
         return declarator;
@@ -7117,13 +7139,18 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_using_alias_declaration() {
                                      declarator.terminal_loc);
             }
         }
-        parsed_decls.push_back(collect_->collect_nop_declaration(using_tok.loc));
+        auto using_decl = make_ast<CppUsingDeclarationDecl>(*ast_ctx, using_tok.loc);
+        using_decl->parsed_declarators = std::move(using_declarators);
+        parsed_decls.push_back(std::move(using_decl));
         return parsed_decls;
     }
 
     auto replayable_using_decl = collect_->collect_is_in_function_definition()
         ? make_ast<CppUsingDeclarationDecl>(*ast_ctx, using_tok.loc)
         : nullptr;
+    if (replayable_using_decl) {
+        replayable_using_decl->parsed_declarators = using_declarators;
+    }
 
     auto using_import_namespace =
         [](LookupNamespace lookup_namespace) {
