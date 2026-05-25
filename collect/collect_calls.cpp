@@ -117,6 +117,38 @@ void append_unique_function_template_candidate(
     candidates.push_back(function_template);
 }
 
+const FunctionTemplateDecl* function_template_primary_for_symbol(
+    const std::shared_ptr<Symbol>& symbol) {
+    const auto* specialization_info =
+        symbol ? get_symbol_function_template_specialization(symbol.get()) : nullptr;
+    const auto* primary_template =
+        specialization_info ? specialization_info->primary_template : nullptr;
+    if (const auto* canonical = get_template_decl_canonical_decl(primary_template)) {
+        if (auto* canonical_function_template =
+                dyn_cast<FunctionTemplateDecl>(
+                    const_cast<TemplateDecl*>(canonical))) {
+            return canonical_function_template;
+        }
+    }
+    return primary_template;
+}
+
+bool function_symbols_refer_to_same_candidate(
+    const std::shared_ptr<Symbol>& lhs,
+    const std::shared_ptr<Symbol>& rhs) {
+    if (!lhs || !rhs) {
+        return false;
+    }
+    if (lhs == rhs) {
+        return true;
+    }
+    const auto* lhs_template = function_template_primary_for_symbol(lhs);
+    const auto* rhs_template = function_template_primary_for_symbol(rhs);
+    return lhs_template &&
+           rhs_template &&
+           template_decls_share_lookup_identity(lhs_template, rhs_template);
+}
+
 void append_unique_variable_template_candidate(
     std::vector<const VariableTemplateDecl*>& candidates,
     const Decl* decl) {
@@ -920,7 +952,9 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
             }
             bool duplicate = false;
             for (const auto& existing : function_candidates) {
-                if (existing == candidate.symbol) {
+                if (function_symbols_refer_to_same_candidate(
+                        existing,
+                        candidate.symbol)) {
                     duplicate = true;
                     break;
                 }
@@ -1032,6 +1066,18 @@ std::unique_ptr<Expr> Collect::resolve_overloaded_function_call(
         OverloadCallCandidate call_candidate;
         call_candidate.symbol = std::move(specialization_symbol);
         call_candidate.implicit_object_arg_kind = OverloadImplicitObjectArgKind::None;
+        bool duplicate = false;
+        for (const auto& existing : overload_candidates) {
+            if (function_symbols_refer_to_same_candidate(
+                    existing.symbol,
+                    call_candidate.symbol)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
         overload_candidates.push_back(std::move(call_candidate));
     }
 

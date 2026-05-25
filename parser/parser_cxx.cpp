@@ -4293,7 +4293,6 @@ bool Parser::cpp_function_template_decls_match_for_redeclaration(
         const auto* current_param = current->parameters[idx].get();
         if (!existing_param || !current_param ||
             existing_param->get_kind() != current_param->get_kind() ||
-            existing_param->index != current_param->index ||
             existing_param->is_parameter_pack != current_param->is_parameter_pack ||
             has_lookup_constraint(existing_param) ||
             has_lookup_constraint(current_param)) {
@@ -4358,11 +4357,99 @@ bool Parser::cpp_function_template_decls_match_for_redeclaration(
     return type_matches;
 }
 
+const FunctionTemplateDecl*
+Parser::find_hidden_friend_function_template_redeclaration(
+    const FuncDecl* function_decl) const {
+    if (!function_decl || function_decl->name.empty() ||
+        active_template_parameter_stack_.empty()) {
+        return nullptr;
+    }
+
+    auto namespaces_match = [](const FuncDecl* hidden_function,
+                               const FuncDecl* current_function) {
+        const std::string* hidden_prefix =
+            get_func_decl_cxx_qualifier_prefix(hidden_function);
+        const std::string* current_prefix =
+            get_func_decl_cxx_qualifier_prefix(current_function);
+        if (!hidden_prefix && !current_prefix) {
+            return true;
+        }
+        return hidden_prefix && current_prefix &&
+               *hidden_prefix == *current_prefix;
+    };
+
+    for (const auto* candidate_template : hidden_friend_function_templates_) {
+        auto* candidate_function = candidate_template
+            ? candidate_template->function_decl()
+            : nullptr;
+        std::unordered_map<
+            const TemplateParameterDecl*,
+            const TemplateParameterDecl*> parameter_rebinds;
+        if (!candidate_function ||
+            candidate_function->name != function_decl->name ||
+            !namespaces_match(candidate_function, function_decl) ||
+            !active_template_parameters_match_for_redeclaration(
+                candidate_template->parameters)) {
+            continue;
+        }
+        const auto& active_parameters = active_template_parameter_stack_.back();
+        parameter_rebinds.reserve(active_parameters.size());
+        for (size_t idx = 0; idx < active_parameters.size(); ++idx) {
+            parameter_rebinds.emplace(
+                active_parameters[idx],
+                candidate_template->parameters[idx].get());
+        }
+        QualType remapped_current_type =
+            template_sema_internal::remap_template_parameter_types_in_type(
+                QualType(function_decl->type),
+                parameter_rebinds);
+        if (!cpp_function_type_matches_for_template_redeclaration(
+                QualType(candidate_function->type),
+                remapped_current_type,
+                function_decl->location)) {
+            continue;
+        }
+        return candidate_template;
+    }
+    return nullptr;
+}
+
+const FunctionTemplateDecl*
+Parser::find_hidden_friend_function_template_redeclaration(
+    const FunctionTemplateDecl* function_template) const {
+    auto* function_decl =
+        function_template ? function_template->function_decl() : nullptr;
+    if (!function_decl || function_decl->name.empty()) {
+        return nullptr;
+    }
+
+    for (const auto* candidate_template : hidden_friend_function_templates_) {
+        if (!candidate_template || candidate_template == function_template) {
+            continue;
+        }
+        if (!cpp_function_template_decls_match_for_redeclaration(
+                candidate_template,
+                function_template)) {
+            continue;
+        }
+        return candidate_template;
+    }
+    return nullptr;
+}
+
 QualType Parser::lookup_friend_access_type_for_current_function_template_redeclaration(
     const FuncDecl* function_decl) const {
     if (!is_cxx_mode_active() || !collect_ || !function_decl ||
         function_decl->name.empty() || active_template_parameter_stack_.empty()) {
         return QualType();
+    }
+
+    if (const auto* hidden_friend =
+            find_hidden_friend_function_template_redeclaration(function_decl)) {
+        auto* hidden_function = hidden_friend->function_decl();
+        if (hidden_function && hidden_function->friend_access_type) {
+            return hidden_function->friend_access_type;
+        }
     }
 
     auto lookup_scope = collect_->collect_current_scope();
@@ -4535,8 +4622,21 @@ const TemplateDecl* Parser::resolve_matching_primary_template_redeclaration(
             current_scope,
             false,
             lookup_namespace);
+    auto resolve_hidden_friend_redeclaration = [&]() -> const TemplateDecl* {
+        if (lookup_namespace != LookupNamespace::Ordinary) {
+            return nullptr;
+        }
+        auto* current_function_template =
+            dyn_cast<FunctionTemplateDecl>(
+                const_cast<TemplateDecl*>(current_template));
+        if (!current_function_template) {
+            return nullptr;
+        }
+        return find_hidden_friend_function_template_redeclaration(
+            current_function_template);
+    };
     if (!binding) {
-        return nullptr;
+        return resolve_hidden_friend_redeclaration();
     }
 
     std::vector<const Decl*> candidates;
@@ -4590,6 +4690,10 @@ const TemplateDecl* Parser::resolve_matching_primary_template_redeclaration(
         const TemplateDecl* canonical =
             get_template_decl_canonical_decl(candidate_template);
         return canonical ? canonical : candidate_template;
+    }
+    if (const TemplateDecl* hidden_friend =
+            resolve_hidden_friend_redeclaration()) {
+        return hidden_friend;
     }
     return nullptr;
 }
@@ -4806,6 +4910,20 @@ void Parser::register_cpp_friend_function_template_decl(FriendDecl* friend_decl)
             function_template,
             visible_canonical_template);
         propagate_function_template_friend_access(function_template);
+    } else if (function_template->is_hidden_friend) {
+        bool already_registered = false;
+        for (const auto* candidate : hidden_friend_function_templates_) {
+            if (candidate == function_template ||
+                template_decls_share_lookup_identity(
+                    candidate,
+                    function_template)) {
+                already_registered = true;
+                break;
+            }
+        }
+        if (!already_registered) {
+            hidden_friend_function_templates_.push_back(function_template);
+        }
     }
 }
 

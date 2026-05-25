@@ -330,7 +330,16 @@ const FunctionTemplateDecl* function_template_primary_for_symbol(
     const std::shared_ptr<Symbol>& symbol) {
     const auto* specialization_info =
         symbol ? get_symbol_function_template_specialization(symbol.get()) : nullptr;
-    return specialization_info ? specialization_info->primary_template : nullptr;
+    const auto* primary_template =
+        specialization_info ? specialization_info->primary_template : nullptr;
+    if (const auto* canonical = get_template_decl_canonical_decl(primary_template)) {
+        if (auto* canonical_function_template =
+                dyn_cast<FunctionTemplateDecl>(
+                    const_cast<TemplateDecl*>(canonical))) {
+            return canonical_function_template;
+        }
+    }
+    return primary_template;
 }
 
 bool overload_symbols_refer_to_same_candidate(
@@ -1312,6 +1321,18 @@ void Collect::append_unqualified_function_template_overload_candidates(
                 deduction_args,
                 loc,
                 specialization_symbol)) {
+            continue;
+        }
+        bool duplicate = false;
+        for (const auto& existing : candidates_out) {
+            if (overload_symbols_refer_to_same_candidate(
+                    existing.symbol,
+                    specialization_symbol)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
             continue;
         }
 

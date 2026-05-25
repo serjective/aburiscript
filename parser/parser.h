@@ -606,6 +606,12 @@ private:
     void register_cpp_friend_function_template_decl(FriendDecl* friend_decl);
     bool active_template_parameters_match_for_redeclaration(
         const TemplateParameterList& parameters) const;
+    const FunctionTemplateDecl*
+    find_hidden_friend_function_template_redeclaration(
+        const FuncDecl* function_decl) const;
+    const FunctionTemplateDecl*
+    find_hidden_friend_function_template_redeclaration(
+        const FunctionTemplateDecl* function_template) const;
     QualType lookup_friend_access_type_for_current_function_template_redeclaration(
         const FuncDecl* function_decl) const;
     void propagate_function_template_friend_access(
@@ -1005,6 +1011,11 @@ private:
     // Owns temporary semantic decls created during C++ class parsing before
     // final semantic record decl emission in parse_declaration.
     std::vector<std::unique_ptr<Decl>> cpp_transient_semantic_decls_;
+    // Friend function templates first declared inside classes are namespace
+    // members, but not ordinary lookup candidates until a matching namespace
+    // declaration appears. Keep them out of normal lookup while still allowing
+    // later redeclarations to inherit friendship.
+    std::vector<const FunctionTemplateDecl*> hidden_friend_function_templates_;
 
     bool is_parsing_cpp_explicit_specialization() const {
         return cpp_explicit_specialization_parse_depth_ > 0;
