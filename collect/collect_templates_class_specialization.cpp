@@ -114,6 +114,47 @@ class_template_partial_specializations_for_instantiation(
     return partials;
 }
 
+} // namespace
+
+const TemplateExplicitSpecializationDecl*
+template_sema_internal::find_class_template_explicit_specialization_for_lookup_identity(
+    const ClassTemplateDecl* class_template,
+    const std::vector<TemplateArgument>& specialization_arguments,
+    const std::vector<TemplateArgument>& owner_specialization_arguments,
+    const Decl* primary_member_decl) {
+    std::vector<const ClassTemplateDecl*> candidates;
+    auto append_candidate = [&](const ClassTemplateDecl* candidate) {
+        if (!candidate) {
+            return;
+        }
+        for (const auto* existing : candidates) {
+            if (existing == candidate) {
+                return;
+            }
+        }
+        candidates.push_back(candidate);
+    };
+
+    const ClassTemplateDecl* canonical =
+        canonical_class_template_primary(class_template);
+    append_candidate(canonical);
+    append_candidate(class_template_definition_for_instantiation(canonical));
+    append_candidate(class_template);
+
+    for (const auto* candidate : candidates) {
+        if (const auto* explicit_specialization =
+                candidate->find_explicit_specialization(
+                    specialization_arguments,
+                    owner_specialization_arguments,
+                    primary_member_decl)) {
+            return explicit_specialization;
+        }
+    }
+    return nullptr;
+}
+
+namespace {
+
 struct ClassTemplatePartialSpecializationMatch {
     const ClassTemplatePartialSpecializationDecl* partial_specialization = nullptr;
     TemplateArgumentBindings bindings;
@@ -817,7 +858,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
     ObjectDecl* try_explicit_specialization() const {
         if (const auto* explicit_specialization =
-                class_template->find_explicit_specialization(
+                find_class_template_explicit_specialization_for_lookup_identity(
+                    class_template,
                     normalized_arguments)) {
             if (auto* explicit_decl =
                     explicit_specialization->specialized_record_semantic_decl()) {
@@ -1677,7 +1719,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         if (!primary_member_decl) {
             return nullptr;
         }
-        return class_template->find_explicit_specialization(
+        return find_class_template_explicit_specialization_for_lookup_identity(
+            class_template,
             normalized_arguments,
             {},
             primary_member_decl);

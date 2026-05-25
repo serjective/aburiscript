@@ -369,6 +369,13 @@ std::string make_class_template_specialization_name(
     const ClassTemplateDecl* class_template,
     const std::vector<TemplateArgument>& arguments);
 
+const TemplateExplicitSpecializationDecl*
+find_class_template_explicit_specialization_for_lookup_identity(
+    const ClassTemplateDecl* class_template,
+    const std::vector<TemplateArgument>& specialization_arguments,
+    const std::vector<TemplateArgument>& owner_specialization_arguments = {},
+    const Decl* primary_member_decl = nullptr);
+
 std::string make_function_template_specialization_name(
     const FunctionTemplateDecl* function_template,
     const std::vector<TemplateArgument>& arguments);

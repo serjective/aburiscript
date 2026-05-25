@@ -2441,19 +2441,59 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
             if (!qualified_declarator_matches_primary_class_template_owner(
                     class_template,
                     component.template_arguments)) {
+                context.info.targets_template_pattern = false;
+                bool resolved_explicit_class_specialization = false;
                 if (!is_parsing_cpp_explicit_specialization()) {
+                    std::string normalize_error;
+                    auto normalized_arguments =
+                        complete_cpp_template_id_arguments(
+                            class_template,
+                            component.template_arguments,
+                            context.info.loc,
+                            &normalize_error);
+                    const TemplateExplicitSpecializationDecl*
+                        explicit_specialization = nullptr;
+                    if (normalized_arguments.has_value()) {
+                        explicit_specialization =
+                            template_sema_internal::
+                                find_class_template_explicit_specialization_for_lookup_identity(
+                                    class_template,
+                                    *normalized_arguments);
+                    }
+                    const ObjectDecl* specialized_owner =
+                        explicit_specialization
+                            ? explicit_specialization
+                                  ->specialized_record_semantic_decl()
+                            : nullptr;
+                    if (specialized_owner) {
+                        context.info.owner_template_arguments =
+                            std::move(*normalized_arguments);
+                        context.info.owner_record_decl = specialized_owner;
+                        if (!specialized_owner->get_record_type()) {
+                            error_custloc(
+                                "internal error: explicit class specialization owner is missing its record type",
+                                context.info.loc);
+                        }
+                        context.info.owner_type =
+                            QualType(specialized_owner->get_record_type());
+                        resolved_explicit_class_specialization = true;
+                    }
+                }
+                if (!resolved_explicit_class_specialization &&
+                    !is_parsing_cpp_explicit_specialization()) {
                     error_custloc(
                         "out-of-line declaration target '" +
                             component.spelling() +
                             "' does not name the primary class template pattern",
                         context.info.loc);
                 }
-                context.info.targets_template_pattern = false;
             } else {
                 context.info.targets_template_pattern = true;
             }
-            context.info.owner_record_decl =
-                class_template->pattern_semantic_decl();
+            if (!context.info.owner_record_decl) {
+                context.info.owner_record_decl =
+                    class_template->pattern_semantic_decl();
+            }
             if (!context.info.owner_record_decl) {
                 error_custloc(
                     "internal error: missing primary class template pattern owner",
