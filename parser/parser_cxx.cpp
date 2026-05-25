@@ -1253,11 +1253,15 @@ QualType Parser::parse_cpp_decltype_type_specifier() {
     return decltype_type;
 }
 
-bool Parser::is_cpp_template_argument_boundary_here() {
-    return gentle_check(TokenType::COMMA) ||
-           gentle_check(TokenType::GREATER_THAN) ||
+bool Parser::is_cpp_template_argument_list_close_here() {
+    return gentle_check(TokenType::GREATER_THAN) ||
            gentle_check(TokenType::RIGHT_SHIFT) ||
            gentle_check(TokenType::ASSIGN_RSHIFT);
+}
+
+bool Parser::is_cpp_template_argument_boundary_here() {
+    return gentle_check(TokenType::COMMA) ||
+           is_cpp_template_argument_list_close_here();
 }
 
 const TemplateParameterDecl*
@@ -1633,7 +1637,7 @@ std::vector<TemplateArgument> Parser::parse_cpp_template_argument_list() {
 
     std::vector<TemplateArgument> arguments;
     check_and_consume(TokenType::LESS_THAN);
-    if (gentle_check(TokenType::GREATER_THAN)) {
+    if (is_cpp_template_argument_list_close_here()) {
         consume_cpp_template_argument_list_close();
         return arguments;
     }

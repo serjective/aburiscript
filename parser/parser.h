@@ -697,6 +697,7 @@ private:
     std::unique_ptr<Expr> parse_cpp_template_constraint_expression();
     std::unique_ptr<Expr> parse_cpp_constraint_logical_or_expression();
     std::unique_ptr<Expr> parse_cpp_constraint_primary_expression();
+    bool is_cpp_template_argument_list_close_here();
     bool is_cpp_template_argument_boundary_here();
     bool skip_balanced_group_for_template_id_lookahead(
         size_t& offset,
