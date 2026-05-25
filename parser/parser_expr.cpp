@@ -2680,7 +2680,7 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             return parsed;
         };
     auto unqualified_var_ref_names_template = [&](const VarRef* ref) {
-        if (!ref || ref->symref || ref->has_cpp_qualified_info() || !collect_) {
+        if (!ref || ref->has_cpp_qualified_info() || !collect_) {
             return false;
         }
         auto scope = collect_->collect_current_scope();
@@ -2692,9 +2692,43 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             scope,
             /*allow_enclosing_lookup=*/true,
             LookupNamespace::Ordinary);
-        return lookup.binding &&
-               (lookup.binding->template_decl ||
-                lookup.binding->has_template_overload_set());
+        if (!lookup.binding ||
+            (!lookup.binding->template_decl &&
+             !lookup.binding->has_template_overload_set())) {
+            return false;
+        }
+        if (ref->symref) {
+            auto ordinary_lookup =
+                LookupEngine::lookup_unqualified_ordinary_result(
+                    ref->get_name(),
+                    scope,
+                    /*look_parents=*/true,
+                    LookupEngine::OrdinaryFilter::Any);
+            if ((ordinary_lookup.found() || ordinary_lookup.blocked) &&
+                ordinary_lookup.scope_depth < lookup.scope_depth) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto member_expr_may_name_template = [](const MemberExpr* member) {
+        // Concrete data-member access has a resolved type. Method-template
+        // overload sets are intentionally left typeless here so the explicit
+        // template-id suffix can be parsed and resolved by Collect.
+        return member && !member->member_type;
+    };
+    auto can_tentatively_parse_explicit_template_suffix =
+        [&](const VarRef* callee_ref,
+            const MemberExpr* member_callee,
+            const UnresolvedMemberExpr* unresolved_member_callee,
+            const UnresolvedLookupExpr* unresolved_lookup_callee) {
+        if (unresolved_member_callee || unresolved_lookup_callee) {
+            return true;
+        }
+        if (member_expr_may_name_template(member_callee)) {
+            return true;
+        }
+        return callee_ref && !callee_ref->symref;
     };
     while (true) {
         SrcLoc loc = expr->location;
@@ -2746,6 +2780,13 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                         std::move(explicit_template_args),
                         loc);
                     continue;
+                }
+                if (!can_tentatively_parse_explicit_template_suffix(
+                        callee_ref,
+                        member_callee,
+                        unresolved_member_callee,
+                        unresolved_lookup_callee)) {
+                    break;
                 }
                 TentativeParsingAction tentative(*this);
                 try {
