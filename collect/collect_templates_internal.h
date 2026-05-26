@@ -288,7 +288,8 @@ bool clone_function_parameters_for_specialization(
     std::unordered_map<const Symbol*, std::vector<std::shared_ptr<Symbol>>>*
         pack_param_symbol_remap_out,
     std::vector<const Expr*>& default_arguments_out,
-    std::string* error_out);
+    std::string* error_out,
+    bool allow_dependent_value_template_argument_auto = false);
 
 bool clone_function_body_for_specialization(
     Collect& collect,

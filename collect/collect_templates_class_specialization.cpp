@@ -5105,7 +5105,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     },
                     nullptr,
                     default_arguments,
-                    &clone_error)) {
+                    &clone_error,
+                    true)) {
                 return fail_instantiation(
                     clone_error.empty()
                         ? "internal error: class template member template parameter clone failed"

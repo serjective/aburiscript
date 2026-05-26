@@ -14,6 +14,11 @@ constexpr uint8_t kGnuAutoFlavor = 0x1;
 constexpr uint8_t kCxxAutoFlavor = 0x2;
 constexpr uint8_t kDecltypeAutoFlavor = 0x4;
 
+enum class DependentValueTemplateArgumentAutoPolicy {
+    Count,
+    IgnoreValueType,
+};
+
 inline bool is_ordinary_cxx_auto_flavor(AutoTypeFlavor flavor) {
     return flavor == AutoTypeFlavor::Cxx ||
            flavor == AutoTypeFlavor::TemplateNonType;
@@ -24,7 +29,10 @@ inline bool is_decltype_auto_flavor(AutoTypeFlavor flavor) {
            flavor == AutoTypeFlavor::DecltypeAutoTemplateNonType;
 }
 
-uint8_t auto_type_flavors_in(const std::shared_ptr<CType>& type);
+uint8_t auto_type_flavors_in(
+    const std::shared_ptr<CType>& type,
+    DependentValueTemplateArgumentAutoPolicy dependent_value_policy =
+        DependentValueTemplateArgumentAutoPolicy::Count);
 
 inline bool has_gnu_auto_type(const std::shared_ptr<CType>& type) {
     return (auto_type_flavors_in(type) & kGnuAutoFlavor) != 0;

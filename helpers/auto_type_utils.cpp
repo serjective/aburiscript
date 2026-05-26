@@ -4,32 +4,50 @@ namespace auto_type_utils {
 
 namespace {
 
-uint8_t auto_type_flavors_in_template_argument(const TemplateArgument& argument) {
+uint8_t auto_type_flavors_in_template_argument(
+    const TemplateArgument& argument,
+    DependentValueTemplateArgumentAutoPolicy dependent_value_policy) {
     switch (argument.kind) {
         case TemplateArgumentKind::Type:
-            return auto_type_flavors_in(argument.type.get_shared());
+            return auto_type_flavors_in(
+                argument.type.get_shared(),
+                dependent_value_policy);
         case TemplateArgumentKind::Value:
-            return auto_type_flavors_in(argument.value_type.get_shared());
+            if (argument.is_dependent &&
+                dependent_value_policy ==
+                    DependentValueTemplateArgumentAutoPolicy::IgnoreValueType) {
+                return 0;
+            }
+            return auto_type_flavors_in(
+                argument.value_type.get_shared(),
+                dependent_value_policy);
         case TemplateArgumentKind::Template:
             return auto_type_flavors_in(
-                argument.dependent_template_qualifier_type.get_shared());
+                argument.dependent_template_qualifier_type.get_shared(),
+                dependent_value_policy);
     }
     return 0;
 }
 
 uint8_t auto_type_flavors_in_template_arguments(
-    const std::vector<TemplateArgument>& arguments) {
+    const std::vector<TemplateArgument>& arguments,
+    DependentValueTemplateArgumentAutoPolicy dependent_value_policy) {
     uint8_t flags = 0;
     for (const auto& argument : arguments) {
         flags = static_cast<uint8_t>(
-            flags | auto_type_flavors_in_template_argument(argument));
+            flags |
+            auto_type_flavors_in_template_argument(
+                argument,
+                dependent_value_policy));
     }
     return flags;
 }
 
 } // namespace
 
-uint8_t auto_type_flavors_in(const std::shared_ptr<CType>& type) {
+uint8_t auto_type_flavors_in(
+    const std::shared_ptr<CType>& type,
+    DependentValueTemplateArgumentAutoPolicy dependent_value_policy) {
     if (!type) {
         return 0;
     }
@@ -45,35 +63,50 @@ uint8_t auto_type_flavors_in(const std::shared_ptr<CType>& type) {
     }
     if (type->kind == TypeKind::Pointer) {
         auto ptr = std::static_pointer_cast<PointerType>(type);
-        return auto_type_flavors_in(ptr->pointed_type.get_shared());
+        return auto_type_flavors_in(
+            ptr->pointed_type.get_shared(),
+            dependent_value_policy);
     }
     if (type->kind == TypeKind::Reference) {
         auto ref = std::static_pointer_cast<ReferenceType>(type);
-        return auto_type_flavors_in(ref->referred_type.get_shared());
+        return auto_type_flavors_in(
+            ref->referred_type.get_shared(),
+            dependent_value_policy);
     }
     if (type->kind == TypeKind::BlockPointer) {
         auto blk = std::static_pointer_cast<BlockPointerType>(type);
-        return auto_type_flavors_in(blk->pointed_type.get_shared());
+        return auto_type_flavors_in(
+            blk->pointed_type.get_shared(),
+            dependent_value_policy);
     }
     if (type->kind == TypeKind::MemberPointer) {
         auto mem_ptr = std::static_pointer_cast<MemberPointerType>(type);
         return static_cast<uint8_t>(
-            auto_type_flavors_in(mem_ptr->class_type.get_shared()) |
-            auto_type_flavors_in(mem_ptr->member_type.get_shared()));
+            auto_type_flavors_in(
+                mem_ptr->class_type.get_shared(),
+                dependent_value_policy) |
+            auto_type_flavors_in(
+                mem_ptr->member_type.get_shared(),
+                dependent_value_policy));
     }
     if (type->kind == TypeKind::Array) {
         auto arr = std::static_pointer_cast<ArrayType>(type);
-        return auto_type_flavors_in(arr->element_type.get_shared());
+        return auto_type_flavors_in(
+            arr->element_type.get_shared(),
+            dependent_value_policy);
     }
     if (type->kind == TypeKind::Typedef) {
         auto alias = std::static_pointer_cast<TypedefType>(type);
-        return auto_type_flavors_in(alias->underlying_type.get_shared());
+        return auto_type_flavors_in(
+            alias->underlying_type.get_shared(),
+            dependent_value_policy);
     }
     if (type->kind == TypeKind::Object) {
         auto object = std::static_pointer_cast<ObjectType>(type);
         if (object->is_class_template_specialization()) {
             return auto_type_flavors_in_template_arguments(
-                object->get_template_specialization_arguments());
+                object->get_template_specialization_arguments(),
+                dependent_value_policy);
         }
         return 0;
     }
@@ -81,14 +114,20 @@ uint8_t auto_type_flavors_in(const std::shared_ptr<CType>& type) {
         auto specialization =
             std::static_pointer_cast<TemplateSpecializationType>(type);
         return auto_type_flavors_in_template_arguments(
-            specialization->arguments);
+            specialization->arguments,
+            dependent_value_policy);
     }
     if (type->kind == TypeKind::Function) {
         auto func = std::static_pointer_cast<FunctionType>(type);
-        uint8_t flags = auto_type_flavors_in(func->ret_type.get_shared());
+        uint8_t flags = auto_type_flavors_in(
+            func->ret_type.get_shared(),
+            dependent_value_policy);
         for (const auto& param : func->parameters) {
             flags = static_cast<uint8_t>(
-                flags | auto_type_flavors_in(param.get_shared()));
+                flags |
+                auto_type_flavors_in(
+                    param.get_shared(),
+                    dependent_value_policy));
         }
         return flags;
     }

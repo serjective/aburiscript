@@ -1477,7 +1477,8 @@ bool clone_function_parameters_for_specialization(
     std::unordered_map<const Symbol*, std::vector<std::shared_ptr<Symbol>>>*
         pack_param_symbol_remap_out,
     std::vector<const Expr*>& default_arguments_out,
-    std::string* error_out) {
+    std::string* error_out,
+    bool allow_dependent_value_template_argument_auto) {
     if (!pattern || !specialization) {
         return false;
     }
@@ -1512,8 +1513,15 @@ bool clone_function_parameters_for_specialization(
                 pick_parameter_substitution_pattern(pattern_param);
             auto substituted_param_type =
                 substitution_pass.rewrite_type(spelled_param_type);
+            auto dependent_value_policy =
+                allow_dependent_value_template_argument_auto
+                    ? auto_type_utils::DependentValueTemplateArgumentAutoPolicy::
+                          IgnoreValueType
+                    : auto_type_utils::DependentValueTemplateArgumentAutoPolicy::
+                          Count;
             if (auto_type_utils::auto_type_flavors_in(
-                    substituted_param_type.get_shared()) != 0) {
+                    substituted_param_type.get_shared(),
+                    dependent_value_policy) != 0) {
                 if (error_out) {
                     *error_out =
                         failure_context +
@@ -1601,8 +1609,15 @@ bool clone_function_parameters_for_specialization(
                 pick_parameter_substitution_pattern(pattern_param);
             auto substituted_param_type =
                 substitution_pass.rewrite_type(spelled_param_type);
+            auto dependent_value_policy =
+                allow_dependent_value_template_argument_auto
+                    ? auto_type_utils::DependentValueTemplateArgumentAutoPolicy::
+                          IgnoreValueType
+                    : auto_type_utils::DependentValueTemplateArgumentAutoPolicy::
+                          Count;
             if (auto_type_utils::auto_type_flavors_in(
-                    substituted_param_type.get_shared()) != 0) {
+                    substituted_param_type.get_shared(),
+                    dependent_value_policy) != 0) {
                 if (error_out) {
                     *error_out =
                         failure_context +
