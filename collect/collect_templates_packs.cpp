@@ -154,7 +154,14 @@ std::optional<size_t> find_template_parameter_index_by_identity(
         }
     }
     if (parm_type->index < parameters.size()) {
-        return static_cast<size_t>(parm_type->index);
+        const auto* candidate =
+            dyn_cast<TemplateTypeParmDecl>(parameters[parm_type->index].get());
+        if (candidate &&
+            candidate->depth == parm_type->depth &&
+            candidate->index == parm_type->index &&
+            candidate->is_parameter_pack == parm_type->is_parameter_pack) {
+            return static_cast<size_t>(parm_type->index);
+        }
     }
     return std::nullopt;
 }
