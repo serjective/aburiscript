@@ -542,12 +542,11 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             normalized_arguments,
             loc);
         substituted_function_type =
-            collect.finalize_deferred_semantic_type(
+            collect.finalize_template_semantic_type_for_storage(
                 substituted_function_type,
                 loc);
         auto canonical_function_type =
-            desugar_type(substituted_function_type, ast_ctx())
-                .as_shared<FunctionType>();
+            substituted_function_type.as_shared<FunctionType>();
         if (!canonical_function_type) {
             fail(
                 "internal error: function template specialization did not produce a function type",

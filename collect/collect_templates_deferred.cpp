@@ -2210,10 +2210,12 @@ QualType Collect::resolve_deferred_template_specialization_type(
     resolved_alias_type =
         resolve_deferred_semantic_type_impl(resolved_alias_type, loc, mode);
     if (resolved_alias_type) {
+        resolved_alias_type =
+            resolved_alias_type.with_qualifiers(original_type.get_qualifiers());
         query_publish_template_specialization_resolved_type(
             original_type,
             resolved_alias_type);
-        return original_type;
+        return resolved_alias_type;
     }
     return QualType();
 }
@@ -2339,6 +2341,18 @@ QualType Collect::finalize_deferred_semantic_type(QualType type, SrcLoc loc) {
         type,
         loc,
         DeferredTypeResolutionMode::Finalize);
+}
+
+QualType Collect::finalize_template_semantic_type_for_storage(
+    QualType type,
+    SrcLoc loc) {
+    auto finalized = finalize_deferred_semantic_type(type, loc);
+    if (!finalized) {
+        return QualType();
+    }
+
+    auto canonical = desugar_type(finalized, ast_ctx_.get());
+    return canonical ? canonical : finalized;
 }
 
 QualType Collect::resolve_deferred_semantic_type_impl(

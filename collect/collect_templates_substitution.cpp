@@ -453,6 +453,24 @@ bool substituted_value_argument_depends_on_template_parameters(
                argument.value_expr.get());
 }
 
+std::optional<size_t> find_non_type_template_parameter_index_by_spelling(
+    const std::string& spelling,
+    const TemplateParameterList& parameters) {
+    if (spelling.empty()) {
+        return std::nullopt;
+    }
+    for (size_t idx = 0; idx < parameters.size(); ++idx) {
+        const auto* parameter = parameters[idx].get();
+        if (!parameter || parameter->get_name() != spelling) {
+            continue;
+        }
+        if (isa<TemplateNonTypeParmDecl>(parameter)) {
+            return idx;
+        }
+    }
+    return std::nullopt;
+}
+
 bool append_integer_pack_template_arguments(
     Collect& collect,
     ASTContext* ast_ctx,
@@ -2221,21 +2239,30 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                 }
                 break;
             case TemplateArgumentKind::Value:
-                if (argument.referenced_parameter) {
-                    if (auto parameter_index = find_template_parameter_index_by_decl(
+                {
+                    std::optional<size_t> parameter_index;
+                    if (argument.referenced_parameter) {
+                        parameter_index = find_template_parameter_index_by_decl(
                             argument.referenced_parameter,
-                            parameters)) {
-                        if (*parameter_index < active_bindings.size()) {
-                            if (const auto* replacement =
-                                    active_bindings[*parameter_index]
-                                        .single_argument()) {
-                                auto substituted = *replacement;
-                                remap_template_argument_symbols_for_substitution(
-                                    substituted,
-                                    clone_context);
-                                rewritten.push_back(std::move(substituted));
-                                return true;
-                            }
+                            parameters);
+                    }
+                    if (!parameter_index) {
+                        parameter_index =
+                            find_non_type_template_parameter_index_by_spelling(
+                                argument.value_spelling,
+                                parameters);
+                    }
+                    if (parameter_index &&
+                        *parameter_index < active_bindings.size()) {
+                        if (const auto* replacement =
+                                active_bindings[*parameter_index]
+                                    .single_argument()) {
+                            auto substituted = *replacement;
+                            remap_template_argument_symbols_for_substitution(
+                                substituted,
+                                clone_context);
+                            rewritten.push_back(std::move(substituted));
+                            return true;
                         }
                     }
                 }

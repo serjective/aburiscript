@@ -666,6 +666,19 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return false;
     }
 
+    QualType finalize_member_storage_type(QualType type, SrcLoc type_loc) {
+        return collect.finalize_template_semantic_type_for_storage(
+            type,
+            type_loc);
+    }
+
+    std::shared_ptr<FunctionType> finalize_function_storage_type(
+        QualType type,
+        SrcLoc type_loc) {
+        auto storage_type = finalize_member_storage_type(type, type_loc);
+        return storage_type.as_shared<FunctionType>();
+    }
+
     bool substitute_member_explicit_specifier(
         const CppExplicitSpecifier& pattern_specifier,
         FuncDecl* specialized_decl,
@@ -2296,9 +2309,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             *selected_parameters,
             specialization_bindings,
             field_decl->location);
-        substituted_type = collect.finalize_deferred_semantic_type(
+        substituted_type = finalize_member_storage_type(
             substituted_type,
             field_decl->location);
+        if (!substituted_type) {
+            return fail_instantiation(
+                "failed to resolve class template field type after substitution",
+                field_decl->location);
+        }
 
         std::string clone_error;
         auto cloned_field_decl_base = clone_pass.clone_decl(
@@ -2359,6 +2377,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 field_decl->location);
         }
         substituted_type = cloned_field_decl->type;
+        substituted_type = finalize_member_storage_type(
+            substituted_type,
+            field_decl->location);
+        if (!substituted_type) {
+            return fail_instantiation(
+                "failed to finalize class template field type after substitution",
+                field_decl->location);
+        }
+        cloned_field_decl->type = substituted_type;
 
         auto canonical_field_type = desugar_type(substituted_type);
         auto* field_object_type = canonical_field_type.as<ObjectType>();
@@ -2422,6 +2449,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     : clone_error,
                 static_member->location);
         }
+        auto storage_type = finalize_member_storage_type(
+            cloned_decl->type,
+            static_member->location);
+        if (!storage_type) {
+            return fail_instantiation(
+                "failed to resolve class template static data member type after substitution",
+                static_member->location);
+        }
+        cloned_decl->type = storage_type;
 
         auto pattern_symbol_it = pattern_static_member_symbols.find(static_member);
         const std::shared_ptr<Symbol> pattern_symbol =
@@ -2480,6 +2516,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 "internal error: class template static data member lost its declaration kind during early finalization",
                 static_member->location);
         }
+        storage_type = finalize_member_storage_type(
+            cloned_decl->type,
+            static_member->location);
+        if (!storage_type) {
+            return fail_instantiation(
+                "failed to finalize class template static data member type after substitution",
+                static_member->location);
+        }
+        cloned_decl->type = storage_type;
 
         if (cloned_symbol) {
             cloned_symbol->type = desugar_type(cloned_decl->type);
@@ -2504,7 +2549,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         const TypedefDecl* typedef_decl,
         RecordMemberAccess declared_access) {
         auto rewritten_type = clone_pass.rewrite_type(typedef_decl->type);
-        rewritten_type = collect.finalize_deferred_semantic_type(
+        rewritten_type = finalize_member_storage_type(
             rewritten_type,
             typedef_decl->location);
         if (!rewritten_type) {
@@ -3247,6 +3292,14 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         auto rewritten_alias_type = remap_template_parameter_types_in_type(
             alias_template_clone_pass.rewrite_type(alias_decl->type),
             parameter_rebinds);
+        rewritten_alias_type = finalize_member_storage_type(
+            rewritten_alias_type,
+            alias_decl->location);
+        if (!rewritten_alias_type) {
+            return fail_instantiation(
+                "failed to resolve class template nested alias template type after substitution",
+                alias_decl->location);
+        }
         std::shared_ptr<Symbol> cloned_alias_symbol = nullptr;
         if (alias_decl->sym) {
             cloned_alias_symbol = clone_symbol_shallow_for_specialization(
@@ -3306,7 +3359,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
         auto rewritten_type = clone_pass.rewrite_type(QualType(function_decl->type));
         auto canonical_type =
-            desugar_type(rewritten_type, ast_ctx()).as_shared<FunctionType>();
+            finalize_function_storage_type(rewritten_type, function_decl->location);
         if (!canonical_type) {
             return fail_instantiation(
                 "internal error: class template member template specialization did not produce a function type",
@@ -3483,7 +3536,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         auto rewritten_type =
             clone_pass.rewrite_type(QualType(function_decl->type));
         auto canonical_type =
-            desugar_type(rewritten_type, ast_ctx()).as_shared<FunctionType>();
+            finalize_function_storage_type(rewritten_type, function_decl->location);
         if (!canonical_type) {
             return fail_instantiation(
                 "internal error: class template friend function template specialization did not produce a function type",
@@ -3612,6 +3665,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         if (friend_decl->get_friend_kind() == CppFriendKind::Type) {
             QualType rewritten_friend_type =
                 clone_pass.rewrite_type(friend_decl->friend_type);
+            rewritten_friend_type = finalize_member_storage_type(
+                rewritten_friend_type,
+                friend_decl->location);
             if (!rewritten_friend_type) {
                 return fail_instantiation(
                     "internal error: class template friend type specialization did not produce a type",
@@ -3644,7 +3700,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         auto rewritten_type =
             clone_pass.rewrite_type(QualType(function_decl->type));
         auto canonical_type =
-            desugar_type(rewritten_type, ast_ctx()).as_shared<FunctionType>();
+            finalize_function_storage_type(rewritten_type, function_decl->location);
         if (!canonical_type) {
             return fail_instantiation(
                 "internal error: class template friend specialization did not produce a function type",
@@ -3787,7 +3843,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
         auto rewritten_type = clone_pass.rewrite_type(QualType(method_decl->type));
         auto canonical_type =
-            desugar_type(rewritten_type, ast_ctx()).as_shared<FunctionType>();
+            finalize_function_storage_type(rewritten_type, method_decl->location);
         if (!canonical_type) {
             return fail_instantiation(
                 "internal error: class template method specialization did not produce a function type",
@@ -3939,7 +3995,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         RecordMemberAccess declared_access) {
         auto rewritten_type = clone_pass.rewrite_type(QualType(ctor_decl->type));
         auto canonical_type =
-            desugar_type(rewritten_type, ast_ctx()).as_shared<FunctionType>();
+            finalize_function_storage_type(rewritten_type, ctor_decl->location);
         if (!canonical_type) {
             return fail_instantiation(
                 "internal error: class template constructor specialization did not produce a function type",
@@ -4060,7 +4116,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         RecordMemberAccess declared_access) {
         auto rewritten_type = clone_pass.rewrite_type(QualType(dtor_decl->type));
         auto canonical_type =
-            desugar_type(rewritten_type, ast_ctx()).as_shared<FunctionType>();
+            finalize_function_storage_type(rewritten_type, dtor_decl->location);
         if (!canonical_type) {
             return fail_instantiation(
                 "internal error: class template destructor specialization did not produce a function type",
@@ -4964,8 +5020,9 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                         QualType(pattern_function->type)),
                     pending_method_template.parameter_rebinds);
             auto canonical_member_template_type =
-                desugar_type(rewritten_member_template_type, ast_ctx())
-                    .as_shared<FunctionType>();
+                finalize_function_storage_type(
+                    rewritten_member_template_type,
+                    pattern_function->location);
             if (!canonical_member_template_type) {
                 return fail_instantiation(
                     "internal error: class template member template specialization did not produce a function type",

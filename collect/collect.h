@@ -1882,6 +1882,10 @@ private:
     QualType finalize_deferred_semantic_type(QualType type,
                                              SrcLoc loc = SrcLoc()) ;
 
+    QualType finalize_template_semantic_type_for_storage(
+        QualType type,
+        SrcLoc loc = SrcLoc()) ;
+
     QualType resolve_deferred_semantic_type_impl(
         QualType type,
         SrcLoc loc,

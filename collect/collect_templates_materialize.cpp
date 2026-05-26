@@ -174,7 +174,13 @@ QualType Collect::instantiate_alias_template_specialization(
         alias_template->parameters,
         specialization_bindings,
         loc);
-    return finalize_deferred_semantic_type(rewritten, loc);
+    auto finalized = finalize_deferred_semantic_type(rewritten, loc);
+    if (!finalized) {
+        return QualType();
+    }
+
+    auto canonical = desugar_type(finalized, ast_ctx_.get());
+    return canonical ? canonical : finalized;
 }
 
 QualType Collect::collect_lookup_record_nested_template_type(

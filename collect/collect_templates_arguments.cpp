@@ -740,6 +740,23 @@ std::optional<size_t> find_template_parameter_index_by_decl(
             return idx;
         }
     }
+    for (size_t idx = 0; idx < parameters.size(); ++idx) {
+        const auto* candidate = parameters[idx].get();
+        if (!candidate) {
+            continue;
+        }
+        if (!candidate->get_name().empty() &&
+            !parameter->get_name().empty() &&
+            candidate->get_name() != parameter->get_name()) {
+            continue;
+        }
+        if (candidate->get_kind() == parameter->get_kind() &&
+            candidate->depth == parameter->depth &&
+            candidate->index == parameter->index &&
+            candidate->is_parameter_pack == parameter->is_parameter_pack) {
+            return idx;
+        }
+    }
     return std::nullopt;
 }
 
