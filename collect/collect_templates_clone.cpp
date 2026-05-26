@@ -2112,6 +2112,41 @@ bool clone_ctor_initializers_for_specialization(
     return true;
 }
 
+bool clone_and_finalize_ctor_initializers_for_specialization(
+    Collect& collect,
+    const CppConstructorDecl* pattern,
+    CppConstructorDecl* specialization,
+    TemplateSubstitutionPass& substitution_pass,
+    TemplateDependentResolutionPass& resolution_pass,
+    std::string* error_out,
+    QualType friend_access_type) {
+    if (!pattern || !specialization) {
+        return false;
+    }
+
+    QualType effective_friend_access_type =
+        friend_access_type ? friend_access_type
+                           : specialization->friend_access_type;
+    return collect.with_function_definition_state(
+        specialization,
+        [&]() {
+            specialization->ctor_initializers.clear();
+            if (!clone_ctor_initializers_for_specialization(
+                    pattern,
+                    specialization,
+                    substitution_pass,
+                    resolution_pass,
+                    error_out)) {
+                return false;
+            }
+            return finalize_specialized_ctor_initializers(
+                collect,
+                specialization,
+                error_out);
+        },
+        effective_friend_access_type);
+}
+
 bool substitute_cpp_explicit_specifier_for_specialization(
     Collect& collect,
     const CppExplicitSpecifier& pattern,

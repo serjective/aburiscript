@@ -2,11 +2,10 @@
 #include "collect_templates_internal.h"
 
 using template_sema_internal::build_pack_element_argument_bindings;
+using template_sema_internal::clone_and_finalize_ctor_initializers_for_specialization;
 using template_sema_internal::clone_function_body_for_specialization;
 using template_sema_internal::clone_function_parameters_for_specialization;
-using template_sema_internal::clone_ctor_initializers_for_specialization;
 using template_sema_internal::copy_cpp_member_decl_info;
-using template_sema_internal::finalize_specialized_ctor_initializers;
 using template_sema_internal::lookup_symbol_remap_in_clone_context;
 using template_sema_internal::make_template_binding_clone_pass_builder;
 using template_sema_internal::materialize_specialized_fold_expression;
@@ -1334,7 +1333,8 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                     "internal error: function template constructor specialization did not preserve a constructor declaration",
                     pattern->location);
             }
-            if (!clone_ctor_initializers_for_specialization(
+            if (!clone_and_finalize_ctor_initializers_for_specialization(
+                    collect,
                     pattern_ctor,
                     specialization_ctor,
                     clone_pass,
@@ -1342,17 +1342,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                     &clone_error)) {
                 return fail_instantiation(
                     clone_error.empty()
-                        ? "constructor template initializer cloning is not supported"
-                        : clone_error,
-                    pattern_ctor->location);
-            }
-            if (!finalize_specialized_ctor_initializers(
-                    collect,
-                    specialization_ctor,
-                    &clone_error)) {
-                return fail_instantiation(
-                    clone_error.empty()
-                        ? "constructor template initializer finalization failed"
+                        ? "constructor template initializer specialization failed"
                         : clone_error,
                     pattern_ctor->location);
             }

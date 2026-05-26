@@ -309,6 +309,15 @@ bool clone_ctor_initializers_for_specialization(
     TemplateDependentResolutionPass& resolution_pass,
     std::string* error_out);
 
+bool clone_and_finalize_ctor_initializers_for_specialization(
+    Collect& collect,
+    const CppConstructorDecl* pattern,
+    CppConstructorDecl* specialization,
+    TemplateSubstitutionPass& substitution_pass,
+    TemplateDependentResolutionPass& resolution_pass,
+    std::string* error_out,
+    QualType friend_access_type = QualType());
+
 bool substitute_cpp_explicit_specifier_for_specialization(
     Collect& collect,
     const CppExplicitSpecifier& pattern,

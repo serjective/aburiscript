@@ -5423,15 +5423,12 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         auto pattern_ctor = dyn_cast<CppConstructorDecl>(pattern_func);
         auto specialized_ctor = dyn_cast<CppConstructorDecl>(specialized_func);
         if (pattern_ctor && specialized_ctor) {
-            if (!clone_ctor_initializers_for_specialization(
+            if (!clone_and_finalize_ctor_initializers_for_specialization(
+                    collect,
                     pattern_ctor,
                     specialized_ctor,
                     clone_pass,
                     member_resolution_pass,
-                    &clone_error) ||
-                !finalize_specialized_ctor_initializers(
-                    collect,
-                    specialized_ctor,
                     &clone_error)) {
                 pending_body->failed = true;
                 collect.report_error(
