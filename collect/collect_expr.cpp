@@ -4632,6 +4632,7 @@ std::unique_ptr<Expr> Collect::collect_cpp_type_list_initialization_expression(
     }
 
     VariableDeclFlags flags;
+    flags.initialization_kind = VariableInitializationKind::DirectList;
     auto temp_decl = collect_variable_declaration(
         target_type,
         "__cpp_type_list_init_tmp",

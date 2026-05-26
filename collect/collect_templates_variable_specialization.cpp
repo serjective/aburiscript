@@ -622,6 +622,7 @@ struct Collect::VariableTemplateSpecializationInstantiator {
         specialization_decl->is_constexpr = pattern->is_constexpr;
         specialization_decl->is_thread_local = pattern->is_thread_local;
         specialization_decl->is_block_byref = pattern->is_block_byref;
+        specialization_decl->initialization_kind = pattern->initialization_kind;
         specialization_decl->original_type = build_specialization_type(
             selected_pattern->original_type ? selected_pattern->original_type
                                             : selected_pattern->type);

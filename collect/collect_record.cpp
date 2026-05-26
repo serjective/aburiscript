@@ -2459,7 +2459,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 false,
                 static_data_decl->is_thread_local != 0,
                 static_data_decl->is_block_byref != 0,
-                false,
+                static_data_decl->initialization_kind,
                 false};
             bool is_definition_bearing_static_member =
                 is_definition_bearing_variable_declaration(

@@ -1067,13 +1067,16 @@ std::unique_ptr<Stmt> Collect::collect_return_statement(std::unique_ptr<Expr> ex
             !same_type_prvalue_return &&
             !return_state->constructors.empty() &&
             return_state->definition_data.has_user_declared_constructor) {
+            VariableDeclFlags return_temp_flags;
+            return_temp_flags.initialization_kind =
+                VariableInitializationKind::Copy;
             auto temp_decl = collect_variable_declaration(
                 return_type,
                 "__return_ctor_init_tmp",
                 std::move(expr),
                 nullptr,
                 StorageClass::NONE,
-                {false, false, false, false, false, false, true, true, false},
+                return_temp_flags,
                 loc);
             auto* temp_var = dyn_cast<VariableDecl>(temp_decl.get());
             if (!temp_var) {

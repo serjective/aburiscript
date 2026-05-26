@@ -701,9 +701,10 @@ bool finalize_specialized_decl_semantics(Collect& collect,
                 variable->sym,
                 variable->name,
                 variable->location);
-            auto rebuilt_init = collect.collect_process_initializer_for_type(
+            auto rebuilt_init = collect.collect_variable_initializer_expression(
                 std::move(variable->init),
                 variable->type,
+                variable->initialization_kind,
                 variable->location);
             if (!rebuilt_init) {
                 if (error_out && error_out->empty()) {

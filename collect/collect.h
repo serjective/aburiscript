@@ -37,7 +37,7 @@ struct VariableDeclFlags {
     bool allow_constexpr_redeclaration_without_initializer = false;
     bool is_thread_local = false;
     bool is_block_byref = false;
-    bool is_copy_initialization = false;
+    VariableInitializationKind initialization_kind = VariableInitializationKind::None;
     bool allow_abstract_object_type_instantiation = false;
     bool caller_tracks_symbol_definition = false;
 };
@@ -418,6 +418,12 @@ public:
         SrcLoc loc) {
         return process_initializer_for_type(std::move(init), declared_type, loc);
     }
+    std::unique_ptr<Expr> collect_variable_initializer_expression(
+        std::unique_ptr<Expr> init,
+        QualType variable_type,
+        VariableInitializationKind initialization_kind,
+        SrcLoc loc,
+        bool allow_abstract_object_type_instantiation = false) ;
     void collect_resolve_auto_variable_type_from_expr(
         QualType& declared_type,
         const Expr* init_expr,
@@ -1222,6 +1228,15 @@ public:
         SrcLoc loc,
         bool allow_abstract_object_type_instantiation = false,
         bool is_copy_initialization = false) ;
+
+    std::unique_ptr<Expr> collect_class_object_initializer_expression(
+        std::vector<std::unique_ptr<Expr>> init_args,
+        QualType object_type,
+        bool is_list_init,
+        bool is_copy_initialization,
+        SrcLoc loc,
+        bool allow_abstract_object_type_instantiation = false,
+        const Expr* original_init_for_classification = nullptr) ;
 
     // === Template operations ===
 

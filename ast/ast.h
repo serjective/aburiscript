@@ -2866,6 +2866,25 @@ struct InitListExpr: Expr {
 
     static bool classof(const Stmt *s) { return s->get_kind() == StmtKind::InitListExpr; }
 };
+
+enum class VariableInitializationKind : uint8_t {
+    None,
+    Copy,
+    Direct,
+    DirectList,
+    CopyList,
+};
+
+inline bool variable_initialization_is_copy(VariableInitializationKind kind) {
+    return kind == VariableInitializationKind::Copy ||
+           kind == VariableInitializationKind::CopyList;
+}
+
+inline bool variable_initialization_is_list(VariableInitializationKind kind) {
+    return kind == VariableInitializationKind::DirectList ||
+           kind == VariableInitializationKind::CopyList;
+}
+
 struct VariableDecl: Decl {
     QualType type;
     QualType original_type;
@@ -2881,6 +2900,7 @@ struct VariableDecl: Decl {
     uint8_t is_thread_local : 1;
     uint8_t is_block_byref : 1;
     uint8_t language_linkage : 2;
+    VariableInitializationKind initialization_kind;
     mutable uint32_t external_semantic_owner_id = 0; // See ownership conventions at top of file
 
     bool is_const() const { return type.is_const(); }
@@ -2892,7 +2912,8 @@ struct VariableDecl: Decl {
     has_explicit_specialization_argument_list(false),
     is_inline(is_inline), is_constexpr(false), is_thread_local(false),
     is_block_byref(false),
-    language_linkage(static_cast<uint8_t>(LanguageLinkage::None)) {}
+    language_linkage(static_cast<uint8_t>(LanguageLinkage::None)),
+    initialization_kind(VariableInitializationKind::None) {}
 
     VariableDecl(QualType type, const std::string &name,
              std::unique_ptr<Expr> init, std::shared_ptr<Symbol> sym,
@@ -2902,7 +2923,8 @@ struct VariableDecl: Decl {
     has_explicit_specialization_argument_list(false),
     is_inline(is_inline), is_constexpr(false), is_thread_local(false),
     is_block_byref(false),
-    language_linkage(static_cast<uint8_t>(LanguageLinkage::None)) {}
+    language_linkage(static_cast<uint8_t>(LanguageLinkage::None)),
+    initialization_kind(VariableInitializationKind::None) {}
 
     void set_cxx_constructor_init(std::shared_ptr<Symbol> ctor_sym,
                                   std::vector<std::unique_ptr<Expr>> ctor_args,

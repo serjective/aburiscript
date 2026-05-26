@@ -572,13 +572,17 @@ ControlCondition Parser::parse_control_condition_declaration(
     }
 
     std::unique_ptr<Expr> init_expr;
-    bool is_copy_initialization = false;
+    VariableInitializationKind initialization_kind = VariableInitializationKind::None;
     if (gentle_check_and_consume(TokenType::ASSIGN)) {
-        is_copy_initialization = true;
-        init_expr = gentle_check(TokenType::LEFT_BRACE)
-            ? parse_init_list()
-            : parse_assignment_expression();
+        if (gentle_check(TokenType::LEFT_BRACE)) {
+            initialization_kind = VariableInitializationKind::CopyList;
+            init_expr = parse_init_list();
+        } else {
+            initialization_kind = VariableInitializationKind::Copy;
+            init_expr = parse_assignment_expression();
+        }
     } else if (gentle_check(TokenType::LEFT_BRACE)) {
+        initialization_kind = VariableInitializationKind::DirectList;
         init_expr = parse_init_list();
     } else {
         error_custloc(
@@ -631,7 +635,7 @@ ControlCondition Parser::parse_control_condition_declaration(
          false,
          false,
          false,
-         is_copy_initialization,
+         initialization_kind,
          false,
          false},
         decl_parser.loc.isInvalid() ? start_tok.loc : decl_parser.loc,

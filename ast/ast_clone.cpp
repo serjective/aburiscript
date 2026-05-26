@@ -3623,6 +3623,7 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
             result->is_constexpr = variable->is_constexpr;
             result->is_thread_local = variable->is_thread_local;
             result->is_block_byref = variable->is_block_byref;
+            result->initialization_kind = variable->initialization_kind;
             result->original_type = cloned_original_type;
             result->explicit_specialization_arguments =
                 rewrite_template_arguments(

@@ -4362,20 +4362,23 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
             declarator_token.loc);
     }
     std::unique_ptr<Expr> init_expr;
-    bool is_copy_initialization = false;
+    VariableInitializationKind initialization_kind = VariableInitializationKind::None;
     bool is_cxx_object_decl =
         is_cxx_mode_active() &&
         can_parse_cxx_object_initializer_syntax(declared_type);
     if (gentle_check_and_consume(TokenType::ASSIGN)) {
-        is_copy_initialization = true;
         if (gentle_check(TokenType::LEFT_BRACE)) {
+            initialization_kind = VariableInitializationKind::CopyList;
             init_expr = parse_init_list();
         } else {
+            initialization_kind = VariableInitializationKind::Copy;
             init_expr = parse_assignment_expression();
         }
     } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_PAREN)) {
+        initialization_kind = VariableInitializationKind::Direct;
         init_expr = parse_paren_init_list();
     } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_BRACE)) {
+        initialization_kind = VariableInitializationKind::DirectList;
         init_expr = parse_init_list();
     }
 
@@ -4406,7 +4409,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
              declaration_is_constexpr,
          decl_parser.is_thread_local,
          decl_parser.is_block_byref,
-         is_copy_initialization,
+         initialization_kind,
          false,
          qualified_declarator.owner_record_decl != nullptr &&
              !preserve_explicit_specialization_static_decl},
@@ -4472,7 +4475,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
                  false,
                  decl_parser.is_thread_local,
                  decl_parser.is_block_byref,
-                 is_copy_initialization,
+                 initialization_kind,
                  false},
                 var_decl->init.get());
         if (is_definition) {
@@ -4514,7 +4517,7 @@ Parser::DeclaratorHandlingResult Parser::handle_variable_declarator(
                  false,
                  decl_parser.is_thread_local,
                  decl_parser.is_block_byref,
-                 is_copy_initialization,
+                 initialization_kind,
                  false},
                 var_decl->init.get());
         if (is_definition &&
@@ -6218,20 +6221,24 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
 
                 QualType static_member_type(field_type, decl_parser.qualifiers);
                 std::unique_ptr<Expr> static_member_init;
-                bool is_copy_initialization = false;
+                VariableInitializationKind initialization_kind =
+                    VariableInitializationKind::None;
                 bool is_cxx_object_decl =
                     is_cxx_mode_active() &&
                     can_parse_cxx_object_initializer_syntax(static_member_type);
                 if (gentle_check_and_consume(TokenType::ASSIGN)) {
-                    is_copy_initialization = true;
                     if (gentle_check(TokenType::LEFT_BRACE)) {
+                        initialization_kind = VariableInitializationKind::CopyList;
                         static_member_init = parse_init_list();
                     } else {
+                        initialization_kind = VariableInitializationKind::Copy;
                         static_member_init = parse_assignment_expression();
                     }
                 } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_PAREN)) {
+                    initialization_kind = VariableInitializationKind::Direct;
                     static_member_init = parse_paren_init_list();
                 } else if (is_cxx_object_decl && gentle_check(TokenType::LEFT_BRACE)) {
+                    initialization_kind = VariableInitializationKind::DirectList;
                     static_member_init = parse_init_list();
                 }
 
@@ -6244,7 +6251,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_struct_declaration(bool leading
                     {decl_parser.is_constexpr, decl_parser.is_inline,
                      collect_->collect_is_file_scope(), true, false,
                      decl_parser.is_thread_local, decl_parser.is_block_byref,
-                     is_copy_initialization, false, false},
+                     initialization_kind, false, false},
                     t.loc,
                     current_decl_language_linkage());
                 auto* static_member_decl =
