@@ -10,6 +10,12 @@ enum class TemplateTypeDeductionMode : uint8_t {
     PartialOrdering,
 };
 
+enum class TemplateArgumentDeductionResult : uint8_t {
+    Match,
+    Mismatch,
+    NonDeduced,
+};
+
 bool deduce_function_template_argument_types(
     QualType pattern_type,
     QualType argument_type,
@@ -420,13 +426,18 @@ TemplateArgument materialize_template_argument_pack_element(
     return element_argument;
 }
 
-bool deduce_class_template_argument_binding(
+bool partial_specialization_deduction_can_continue(
+    TemplateArgumentDeductionResult result) {
+    return result != TemplateArgumentDeductionResult::Mismatch;
+}
+
+TemplateArgumentDeductionResult deduce_class_template_argument_binding(
     const TemplateArgument& pattern_argument,
     const TemplateArgument& argument_argument,
     const TemplateParameterList& parameters,
     TemplateArgumentBindings& deduced_bindings) {
     if (pattern_argument.kind != argument_argument.kind) {
-        return false;
+        return TemplateArgumentDeductionResult::Mismatch;
     }
     if (pattern_argument.kind == TemplateArgumentKind::Type) {
         auto pattern_argument_type = desugar_typedefs(pattern_argument.type);
@@ -439,28 +450,38 @@ bool deduce_class_template_argument_binding(
                     argument_argument_type.get_shared());
             if (!argument_ref ||
                 pattern_ref->reference_kind != argument_ref->reference_kind) {
-                return false;
+                return TemplateArgumentDeductionResult::Mismatch;
             }
         }
         if (!type_depends_on_template_parameters(pattern_argument.type)) {
             return desugar_type(pattern_argument.type).equals_qualified(
-                desugar_type(argument_argument.type));
+                       desugar_type(argument_argument.type))
+                ? TemplateArgumentDeductionResult::Match
+                : TemplateArgumentDeductionResult::Mismatch;
         }
         return deduce_template_argument_types_impl(
-            pattern_argument.type,
-            argument_argument.type,
-            parameters,
-            deduced_bindings,
-            TemplateTypeDeductionMode::PartialOrdering);
+                   pattern_argument.type,
+                   argument_argument.type,
+                   parameters,
+                   deduced_bindings,
+                   TemplateTypeDeductionMode::PartialOrdering)
+            ? TemplateArgumentDeductionResult::Match
+            : TemplateArgumentDeductionResult::Mismatch;
     }
 
     if (pattern_argument.is_dependent &&
         pattern_argument.referenced_parameter) {
         return bind_deduced_template_argument_value(
-            pattern_argument.referenced_parameter,
-            argument_argument,
-            parameters,
-            deduced_bindings);
+                   pattern_argument.referenced_parameter,
+                   argument_argument,
+                   parameters,
+                   deduced_bindings)
+            ? TemplateArgumentDeductionResult::Match
+            : TemplateArgumentDeductionResult::Mismatch;
+    }
+
+    if (pattern_argument.is_dependent) {
+        return TemplateArgumentDeductionResult::NonDeduced;
     }
 
     TemplateArgument normalized_pattern = pattern_argument;
@@ -468,15 +489,19 @@ bool deduce_class_template_argument_binding(
     QualType target_type = normalized_argument.value_type
         ? normalized_argument.value_type
         : normalized_pattern.value_type;
-    return template_sema_internal::normalize_concrete_template_value_argument(
-               normalized_pattern,
-               target_type,
-               nullptr) &&
-           template_sema_internal::normalize_concrete_template_value_argument(
-               normalized_argument,
-               target_type,
-               nullptr) &&
-           normalized_pattern.equals(normalized_argument);
+    bool arguments_match =
+        template_sema_internal::normalize_concrete_template_value_argument(
+            normalized_pattern,
+            target_type,
+            nullptr) &&
+        template_sema_internal::normalize_concrete_template_value_argument(
+            normalized_argument,
+            target_type,
+            nullptr) &&
+        normalized_pattern.equals(normalized_argument);
+    return arguments_match
+        ? TemplateArgumentDeductionResult::Match
+        : TemplateArgumentDeductionResult::Mismatch;
 }
 
 bool deduce_class_template_specialization_argument_list_into_existing_bindings(
@@ -503,11 +528,12 @@ bool deduce_class_template_specialization_argument_list_into_existing_bindings(
 
     if (!pattern_layout.pack_index.has_value()) {
         for (size_t idx = 0; idx < pattern_arguments.size(); ++idx) {
-            if (!deduce_class_template_argument_binding(
-                    pattern_arguments[idx],
-                    actual_arguments[idx],
-                    parameters,
-                    deduced_bindings)) {
+            if (!partial_specialization_deduction_can_continue(
+                    deduce_class_template_argument_binding(
+                        pattern_arguments[idx],
+                        actual_arguments[idx],
+                        parameters,
+                        deduced_bindings))) {
                 return false;
             }
         }
@@ -516,11 +542,12 @@ bool deduce_class_template_specialization_argument_list_into_existing_bindings(
     }
 
     for (size_t idx = 0; idx < pattern_layout.leading_count; ++idx) {
-        if (!deduce_class_template_argument_binding(
-                pattern_arguments[idx],
-                actual_arguments[idx],
-                parameters,
-                deduced_bindings)) {
+        if (!partial_specialization_deduction_can_continue(
+                deduce_class_template_argument_binding(
+                    pattern_arguments[idx],
+                    actual_arguments[idx],
+                    parameters,
+                    deduced_bindings))) {
             return false;
         }
     }
@@ -532,11 +559,12 @@ bool deduce_class_template_specialization_argument_list_into_existing_bindings(
             materialize_template_argument_pack_element(
                 pattern_arguments[*pattern_layout.pack_index]);
         for (size_t idx = 0; idx < pack_argument_count; ++idx) {
-            if (!deduce_class_template_argument_binding(
-                    pack_pattern_argument,
-                    actual_arguments[pattern_layout.leading_count + idx],
-                    parameters,
-                    deduced_bindings)) {
+            if (!partial_specialization_deduction_can_continue(
+                    deduce_class_template_argument_binding(
+                        pack_pattern_argument,
+                        actual_arguments[pattern_layout.leading_count + idx],
+                        parameters,
+                        deduced_bindings))) {
                 return false;
             }
         }
@@ -547,11 +575,12 @@ bool deduce_class_template_specialization_argument_list_into_existing_bindings(
             pattern_arguments.size() - pattern_layout.trailing_count + idx;
         const size_t argument_index =
             actual_arguments.size() - pattern_layout.trailing_count + idx;
-        if (!deduce_class_template_argument_binding(
-                pattern_arguments[pattern_index],
-                actual_arguments[argument_index],
-                parameters,
-                deduced_bindings)) {
+        if (!partial_specialization_deduction_can_continue(
+                deduce_class_template_argument_binding(
+                    pattern_arguments[pattern_index],
+                    actual_arguments[argument_index],
+                    parameters,
+                    deduced_bindings))) {
             return false;
         }
     }
@@ -1131,6 +1160,11 @@ bool deduce_template_argument_types_impl(
     auto pattern_raw = spelled_pattern.get_shared();
     if (!pattern_raw) {
         return false;
+    }
+
+    if (deduction_mode == TemplateTypeDeductionMode::PartialOrdering &&
+        isa<DecltypeExprType>(pattern_raw.get())) {
+        return true;
     }
 
     if (auto pattern_ref = dyn_cast_shared<ReferenceType>(pattern_raw)) {
