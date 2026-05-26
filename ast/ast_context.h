@@ -124,10 +124,15 @@ struct ClassTemplateSpecializationEntry {
     std::shared_ptr<ObjectType> specialization_type = nullptr;
     std::unique_ptr<ObjectDecl> specialization_decl;
     std::vector<std::unique_ptr<Decl>> member_decls;
+    // Specialized nested record semantic state can borrow declarations from
+    // the cloned syntax record. Keep those syntax clones alive without making
+    // them visible to semantic lookup/codegen member walks.
+    std::vector<std::unique_ptr<Decl>> nested_record_syntax_decls;
     // Member-template specializations can retain raw pointers to earlier
     // specialized member-template clones. Keep rebuilt members alive while
     // excluding them from current semantic lookup and codegen walks.
     std::vector<std::unique_ptr<Decl>> retired_member_decls;
+    std::vector<std::unique_ptr<Decl>> retired_nested_record_syntax_decls;
     SrcLoc first_required_loc;
     std::unordered_map<const Decl*, SrcLoc> primary_member_first_required_locs;
     std::unordered_map<const Decl*, const Decl*>

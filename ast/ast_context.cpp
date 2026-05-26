@@ -10,17 +10,24 @@
 static const AttributeList empty_attr_list{};
 
 void ClassTemplateSpecializationEntry::retire_member_decls_for_rebuild() {
-    if (member_decls.empty()) {
-        return;
-    }
-    retired_member_decls.reserve(
-        retired_member_decls.size() + member_decls.size());
+    retired_member_decls.reserve(retired_member_decls.size() +
+                                 member_decls.size());
     for (auto& member_decl : member_decls) {
         if (member_decl) {
             retired_member_decls.push_back(std::move(member_decl));
         }
     }
     member_decls.clear();
+
+    retired_nested_record_syntax_decls.reserve(
+        retired_nested_record_syntax_decls.size() +
+        nested_record_syntax_decls.size());
+    for (auto& syntax_decl : nested_record_syntax_decls) {
+        if (syntax_decl) {
+            retired_nested_record_syntax_decls.push_back(std::move(syntax_decl));
+        }
+    }
+    nested_record_syntax_decls.clear();
 }
 
 namespace {

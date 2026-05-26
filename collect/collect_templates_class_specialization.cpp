@@ -2298,6 +2298,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         publish_provisional_nested_members();
 
         entry->member_decls.push_back(std::move(semantic_decl));
+        entry->nested_record_syntax_decls.push_back(std::move(cloned_decl_base));
         return true;
     }
 
