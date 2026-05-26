@@ -1932,6 +1932,9 @@ private:
         SrcLoc loc,
         DeferredTypeResolutionMode mode) ;
 
+    bool dependent_name_type_lookup_should_defer(
+        const DependentNameType& dependent_name) const ;
+
     QualType lookup_deferred_dependent_name_type(
         const DependentNameType& dependent_name,
         SrcLoc loc,

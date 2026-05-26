@@ -2155,6 +2155,132 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             return type;
         }
 
+        if (auto typedef_type = dyn_cast_shared<TypedefType>(raw)) {
+            auto rewritten_underlying =
+                realize_nested_record_member_type(typedef_type->underlying_type);
+            if (rewritten_underlying.get_shared() ==
+                    typedef_type->underlying_type.get_shared() &&
+                rewritten_underlying.get_qualifiers() ==
+                    typedef_type->underlying_type.get_qualifiers()) {
+                return type;
+            }
+            return QualType(
+                std::make_shared<TypedefType>(
+                    typedef_type->name,
+                    rewritten_underlying,
+                    typedef_type->typedef_decl),
+                quals);
+        }
+
+        auto lookup_current_record_nested_type =
+            [&](const DependentNameType& dependent_name) -> QualType {
+            if (!ctx.semantic_decl || dependent_name.requires_template_keyword ||
+                !dependent_name.template_arguments.empty()) {
+                return QualType();
+            }
+            auto qualifier_type =
+                desugar_type(dependent_name.qualifier_type, ast_ctx_.get())
+                    .as_shared<ObjectType>();
+            auto* qualifier_decl = qualifier_type
+                ? dyn_cast<ObjectDecl>(qualifier_type->get_decl())
+                : nullptr;
+            if (canonical_cpp_record_decl(qualifier_decl) !=
+                canonical_cpp_record_decl(ctx.semantic_decl)) {
+                return QualType();
+            }
+            for (auto it = ctx.nested_types.rbegin();
+                 it != ctx.nested_types.rend();
+                 ++it) {
+                if (it->name == dependent_name.member_name) {
+                    return it->type;
+                }
+            }
+            return QualType();
+        };
+
+        if (auto dependent_name = dyn_cast_shared<DependentNameType>(raw)) {
+            if (auto nested_type = lookup_current_record_nested_type(*dependent_name)) {
+                return realize_nested_record_member_type(
+                    nested_type.with_qualifiers(quals));
+            }
+
+            auto rewritten_qualifier =
+                realize_nested_record_member_type(
+                    dependent_name->qualifier_type);
+            bool changed =
+                !rewritten_qualifier.equals_qualified(
+                    dependent_name->qualifier_type);
+            std::vector<TemplateArgument> rewritten_arguments;
+            rewritten_arguments.reserve(dependent_name->template_arguments.size());
+            for (const auto& argument : dependent_name->template_arguments) {
+                TemplateArgument rewritten_argument = argument;
+                if (argument.kind == TemplateArgumentKind::Type) {
+                    rewritten_argument.type =
+                        realize_nested_record_member_type(argument.type);
+                    changed = changed ||
+                        !rewritten_argument.type.equals_qualified(argument.type);
+                } else if (argument.kind == TemplateArgumentKind::Value) {
+                    rewritten_argument.value_type =
+                        realize_nested_record_member_type(argument.value_type);
+                    changed = changed ||
+                        !rewritten_argument.value_type.equals_qualified(
+                            argument.value_type);
+                }
+                rewritten_arguments.push_back(std::move(rewritten_argument));
+            }
+            if (!changed) {
+                return type;
+            }
+            return QualType(
+                std::make_shared<DependentNameType>(
+                    rewritten_qualifier,
+                    dependent_name->member_name,
+                    std::move(rewritten_arguments),
+                    dependent_name->is_current_instantiation,
+                    dependent_name->requires_typename_keyword,
+                    dependent_name->requires_template_keyword),
+                quals);
+        }
+
+        if (auto specialization =
+                dyn_cast_shared<TemplateSpecializationType>(raw)) {
+            bool changed = false;
+            std::vector<TemplateArgument> rewritten_arguments;
+            rewritten_arguments.reserve(specialization->arguments.size());
+            for (const auto& argument : specialization->arguments) {
+                TemplateArgument rewritten_argument = argument;
+                if (argument.kind == TemplateArgumentKind::Type) {
+                    rewritten_argument.type =
+                        realize_nested_record_member_type(argument.type);
+                    changed = changed ||
+                        !rewritten_argument.type.equals_qualified(argument.type);
+                } else if (argument.kind == TemplateArgumentKind::Value) {
+                    rewritten_argument.value_type =
+                        realize_nested_record_member_type(argument.value_type);
+                    changed = changed ||
+                        !rewritten_argument.value_type.equals_qualified(
+                            argument.value_type);
+                }
+                rewritten_arguments.push_back(std::move(rewritten_argument));
+            }
+            if (!changed) {
+                return type;
+            }
+            bool dependent = template_specialization_components_are_dependent(
+                specialization->primary_template,
+                rewritten_arguments,
+                /*explicitly_dependent=*/false,
+                ast_ctx_.get());
+            return QualType(
+                std::make_shared<TemplateSpecializationType>(
+                    specialization->template_name,
+                    specialization->primary_template,
+                    std::move(rewritten_arguments),
+                    dependent,
+                    specialization->is_class_template_placeholder),
+                quals);
+        }
+
         if (auto pointer_type = dyn_cast_shared<PointerType>(raw)) {
             auto rewritten_pointee =
                 realize_nested_record_member_type(pointer_type->pointed_type);
@@ -2283,6 +2409,173 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
 
         return type;
     };
+    // Nested typedefs can mention the record being collected through default
+    // template arguments. For this local realization, the current concrete
+    // record type is not dependent just because its member table is in flight.
+    std::function<bool(QualType)> type_depends_after_current_record_realization =
+        [&](QualType type) -> bool {
+        if (!type) {
+            return false;
+        }
+        auto raw = type.get_shared();
+        if (!raw) {
+            return false;
+        }
+        if (auto typedef_type = dyn_cast_shared<TypedefType>(raw)) {
+            return type_depends_after_current_record_realization(
+                typedef_type->underlying_type);
+        }
+        if (auto object_type = dyn_cast_shared<ObjectType>(raw)) {
+            auto* object_decl = dyn_cast<ObjectDecl>(object_type->get_decl());
+            if (!object_type->is_class_template_specialization() &&
+                canonical_cpp_record_decl(object_decl) ==
+                    canonical_cpp_record_decl(ctx.semantic_decl)) {
+                return false;
+            }
+            if (object_type->is_class_template_specialization()) {
+                for (const auto& argument :
+                     object_type->get_template_specialization_arguments()) {
+                    if (argument.kind == TemplateArgumentKind::Type) {
+                        if (type_depends_after_current_record_realization(
+                                argument.type)) {
+                            return true;
+                        }
+                    } else if (template_argument_depends_on_template_parameters(
+                                   argument,
+                                   ast_ctx_.get())) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            return type_depends_on_template_parameters(type, ast_ctx_.get());
+        }
+        if (auto specialization =
+                dyn_cast_shared<TemplateSpecializationType>(raw)) {
+            for (const auto& argument : specialization->arguments) {
+                if (argument.kind == TemplateArgumentKind::Type) {
+                    if (type_depends_after_current_record_realization(
+                            argument.type)) {
+                        return true;
+                    }
+                } else if (template_argument_depends_on_template_parameters(
+                               argument,
+                               ast_ctx_.get())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (auto pointer_type = dyn_cast_shared<PointerType>(raw)) {
+            return type_depends_after_current_record_realization(
+                pointer_type->pointed_type);
+        }
+        if (auto reference_type = dyn_cast_shared<ReferenceType>(raw)) {
+            return type_depends_after_current_record_realization(
+                reference_type->referred_type);
+        }
+        if (auto array_type = dyn_cast_shared<ArrayType>(raw)) {
+            return type_depends_after_current_record_realization(
+                array_type->element_type);
+        }
+        if (auto function_type = dyn_cast_shared<FunctionType>(raw)) {
+            if (type_depends_after_current_record_realization(
+                    function_type->ret_type)) {
+                return true;
+            }
+            for (const auto& param_type : function_type->parameters) {
+                if (type_depends_after_current_record_realization(param_type)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return type_depends_on_template_parameters(type, ast_ctx_.get());
+    };
+    std::function<void(QualType, SrcLoc)>
+        realize_current_record_template_specializations =
+            [&](QualType type, SrcLoc loc) {
+        if (!type) {
+            return;
+        }
+        auto raw = type.get_shared();
+        if (!raw) {
+            return;
+        }
+        if (auto typedef_type = dyn_cast_shared<TypedefType>(raw)) {
+            realize_current_record_template_specializations(
+                typedef_type->underlying_type,
+                loc);
+            return;
+        }
+        if (auto specialization =
+                dyn_cast_shared<TemplateSpecializationType>(raw)) {
+            for (auto& argument : specialization->arguments) {
+                if (argument.kind == TemplateArgumentKind::Type) {
+                    realize_current_record_template_specializations(
+                        argument.type,
+                        loc);
+                } else if (argument.kind == TemplateArgumentKind::Value) {
+                    realize_current_record_template_specializations(
+                        argument.value_type,
+                        loc);
+                }
+            }
+            if (type_depends_after_current_record_realization(type)) {
+                return;
+            }
+            specialization->is_dependent = false;
+            if (query_lookup_template_specialization_resolved_type(
+                    specialization.get())) {
+                return;
+            }
+            if (auto* class_template =
+                    dyn_cast<ClassTemplateDecl>(
+                        specialization->primary_template)) {
+                auto* specialization_decl =
+                    instantiate_class_template_specialization(
+                        class_template,
+                        specialization->arguments,
+                        loc);
+                if (specialization_decl &&
+                    specialization_decl->get_record_type()) {
+                    query_publish_template_specialization_resolved_type(
+                        type,
+                        QualType(specialization_decl->get_record_type(),
+                                 type.get_qualifiers()));
+                }
+            }
+            return;
+        }
+        if (auto pointer_type = dyn_cast_shared<PointerType>(raw)) {
+            realize_current_record_template_specializations(
+                pointer_type->pointed_type,
+                loc);
+            return;
+        }
+        if (auto reference_type = dyn_cast_shared<ReferenceType>(raw)) {
+            realize_current_record_template_specializations(
+                reference_type->referred_type,
+                loc);
+            return;
+        }
+        if (auto array_type = dyn_cast_shared<ArrayType>(raw)) {
+            realize_current_record_template_specializations(
+                array_type->element_type,
+                loc);
+            return;
+        }
+        if (auto function_type = dyn_cast_shared<FunctionType>(raw)) {
+            realize_current_record_template_specializations(
+                function_type->ret_type,
+                loc);
+            for (auto& param_type : function_type->parameters) {
+                realize_current_record_template_specializations(
+                    param_type,
+                    loc);
+            }
+        }
+    };
     RecordMemberAccess current_access = encode_cpp_access(ctx.record->default_access);
     const FieldDecl* union_default_member_initializer_field = nullptr;
     for (const auto& member : ctx.record->members) {
@@ -2343,7 +2636,41 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
         if (const auto* typedef_decl = dyn_cast<TypedefDecl>(member.get())) {
             RecordSemanticState::NestedType nested_type;
             nested_type.name = typedef_decl->name;
-            nested_type.type = typedef_decl->type;
+            QualType realized_typedef_type =
+                realize_nested_record_member_type(typedef_decl->type);
+            if (realized_typedef_type &&
+                (realized_typedef_type.get_shared() !=
+                     typedef_decl->type.get_shared() ||
+                 realized_typedef_type.get_qualifiers() !=
+                     typedef_decl->type.get_qualifiers())) {
+                realized_typedef_type = finalize_deferred_semantic_type(
+                    realized_typedef_type,
+                    typedef_decl->location);
+                realize_current_record_template_specializations(
+                    realized_typedef_type,
+                    typedef_decl->location);
+                auto* mutable_typedef_decl =
+                    const_cast<TypedefDecl*>(typedef_decl);
+                mutable_typedef_decl->type = realized_typedef_type;
+                mutable_typedef_decl->underlying =
+                    desugar_type(realized_typedef_type, ast_ctx_.get());
+                if (mutable_typedef_decl->sym) {
+                    if (auto typedef_symbol_type =
+                            dyn_cast_shared<TypedefType>(
+                                mutable_typedef_decl->sym->type.get_shared())) {
+                        QualType symbol_underlying = realized_typedef_type;
+                        if (auto realized_typedef =
+                                dyn_cast_shared<TypedefType>(
+                                    symbol_underlying.get_shared())) {
+                            symbol_underlying =
+                                realized_typedef->underlying_type;
+                        }
+                        typedef_symbol_type->underlying_type =
+                            symbol_underlying.without_qualifiers();
+                    }
+                }
+            }
+            nested_type.type = realized_typedef_type;
             nested_type.declared_access = current_access;
             nested_type.decl = typedef_decl;
             nested_type.symbol = typedef_decl->sym;
@@ -2942,6 +3269,16 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
             method_decl->name == "operatordelete" ||
             method_decl->name == "operatordelete[]";
         bool is_definition = function_decl_defines_entity(method_decl);
+        QualType realized_method_type =
+            realize_nested_record_member_type(QualType(method_decl->type));
+        if (realized_method_type &&
+            (realized_method_type.get_shared() != method_decl->type ||
+             realized_method_type.get_qualifiers() != QUAL_NONE)) {
+            realize_current_record_template_specializations(
+                realized_method_type,
+                method_decl->location);
+            method_decl->type = realized_method_type.get_shared();
+        }
         auto method_sym = collect_declare_function_symbol(
             method_decl->name,
             method_decl->type,
@@ -2997,7 +3334,7 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
 
         RecordSemanticState::Method method;
         method.name = method_decl->name;
-        method.type = method_decl->type;
+        method.type = QualType(method_decl->type);
         method.declared_access = current_access;
         method.is_implicit = false;
         method.is_static = is_static_method || is_operator_new_delete;

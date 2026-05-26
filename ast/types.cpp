@@ -2655,6 +2655,38 @@ void cache_existing_class_template_specialization_resolved_type(
     auto* entry = effective_ast_ctx->lookup_class_template_specialization(
         class_template,
         specialization->arguments);
+    if (!entry) {
+        // Redeclared class templates can leave equivalent template-id sugar
+        // pointing at a different declaration node. Reuse an existing
+        // specialization when the primary's lookup name and arguments match.
+        std::string template_name = template_decl_display_name(class_template);
+        auto arguments_match =
+            [](const std::vector<TemplateArgument>& lhs,
+               const std::vector<TemplateArgument>& rhs) {
+            if (lhs.size() != rhs.size()) {
+                return false;
+            }
+            for (size_t idx = 0; idx < lhs.size(); ++idx) {
+                if (!lhs[idx].equals(rhs[idx])) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        for (const auto& candidate :
+             effective_ast_ctx->class_template_specializations()) {
+            if (!candidate ||
+                !candidate->primary_template ||
+                template_decl_display_name(candidate->primary_template) !=
+                    template_name ||
+                !arguments_match(candidate->arguments,
+                                 specialization->arguments)) {
+                continue;
+            }
+            entry = candidate.get();
+            break;
+        }
+    }
     if (!entry || !entry->specialization_type) {
         return;
     }
@@ -4338,9 +4370,32 @@ QualType desugar_type(QualType type, const ASTContext* ast_ctx) {
             uint8_t quals = peeled.get_qualifiers();
             if (auto specialization =
                     dyn_cast_shared<TemplateSpecializationType>(current)) {
-                if (auto resolved_type = lookup_template_specialization_resolved_type(
+                bool actual_dependency =
+                    template_specialization_components_are_dependent(
+                        specialization->primary_template,
+                        specialization->arguments,
+                        /*explicitly_dependent=*/false,
+                        ast_ctx);
+                if (specialization->is_dependent && !actual_dependency) {
+                    specialization->is_dependent = false;
+                }
+                auto resolved_type = lookup_template_specialization_resolved_type(
+                    specialization.get(),
+                    ast_ctx);
+                if (!resolved_type && !actual_dependency) {
+                    // Non-dependent template-id sugar may be a clone or may
+                    // reference a redeclaration of an already-instantiated
+                    // class template. Populate the side-table before giving up.
+                    cache_existing_class_template_specialization_resolved_type(
+                        const_cast<ASTContext*>(
+                            effective_ast_context(ast_ctx)),
+                        QualType(specialization, quals),
+                        /*publish_to_persistent_store=*/false);
+                    resolved_type = lookup_template_specialization_resolved_type(
                         specialization.get(),
-                        ast_ctx)) {
+                        ast_ctx);
+                }
+                if (resolved_type) {
                     peeled = desugar_typedefs(resolved_type.with_qualifiers(quals));
                     continue;
                 }

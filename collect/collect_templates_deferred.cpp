@@ -2220,10 +2220,25 @@ QualType Collect::resolve_deferred_template_specialization_type(
     return QualType();
 }
 
+bool Collect::dependent_name_type_lookup_should_defer(
+    const DependentNameType& dependent_name) const {
+    return !dependent_name.is_current_instantiation &&
+           type_depends_on_template_parameters(
+               dependent_name.qualifier_type,
+               ast_ctx_.get());
+}
+
 QualType Collect::lookup_deferred_dependent_name_type(
     const DependentNameType& dependent_name,
     SrcLoc loc,
     bool* matched_nested_template) {
+    if (dependent_name_type_lookup_should_defer(dependent_name)) {
+        if (matched_nested_template) {
+            *matched_nested_template = false;
+        }
+        return QualType();
+    }
+
     bool has_template_argument_list =
         dependent_name.requires_template_keyword ||
         !dependent_name.template_arguments.empty();
@@ -2291,6 +2306,10 @@ QualType Collect::resolve_deferred_dependent_name_type(
         dependent_name.is_current_instantiation = false;
     }
     query_publish_dependent_name_resolved_type(original_type, nullptr);
+    if (dependent_name_type_lookup_should_defer(dependent_name)) {
+        return original_type;
+    }
+
     auto resolved_type =
         query_lookup_dependent_name_resolved_type(&dependent_name);
     if (resolved_type) {

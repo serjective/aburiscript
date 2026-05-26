@@ -641,6 +641,137 @@ static const ObjectDecl* canonical_cpp_record_decl(const ObjectDecl* decl) {
     return decl;
 }
 
+QualType realize_in_progress_record_nested_type(
+    QualType type,
+    const ObjectDecl* current_record_decl,
+    const std::vector<RecordSemanticState::NestedType>& nested_types,
+    const ASTContext* ast_ctx) {
+    std::function<QualType(QualType)> rewrite = [&](QualType current) -> QualType {
+        if (!current) {
+            return current;
+        }
+        auto raw = current.get_shared();
+        if (!raw) {
+            return current;
+        }
+        uint8_t quals = current.get_qualifiers();
+
+        if (auto dependent_name = dyn_cast_shared<DependentNameType>(raw)) {
+            if (!dependent_name->requires_template_keyword &&
+                dependent_name->template_arguments.empty() &&
+                current_record_decl) {
+                auto qualifier_type =
+                    desugar_type(dependent_name->qualifier_type, ast_ctx)
+                        .as_shared<ObjectType>();
+                auto* qualifier_decl = qualifier_type
+                    ? dyn_cast<ObjectDecl>(qualifier_type->get_decl())
+                    : nullptr;
+                if (canonical_cpp_record_decl(qualifier_decl) ==
+                    canonical_cpp_record_decl(current_record_decl)) {
+                    for (auto it = nested_types.rbegin();
+                         it != nested_types.rend();
+                         ++it) {
+                        if (it->name == dependent_name->member_name) {
+                            return rewrite(it->type.with_qualifiers(quals));
+                        }
+                    }
+                }
+            }
+
+            QualType rewritten_qualifier =
+                rewrite(dependent_name->qualifier_type);
+            bool changed =
+                !rewritten_qualifier.equals_qualified(
+                    dependent_name->qualifier_type);
+            std::vector<TemplateArgument> rewritten_arguments;
+            rewritten_arguments.reserve(dependent_name->template_arguments.size());
+            for (const auto& argument : dependent_name->template_arguments) {
+                TemplateArgument rewritten_argument = argument;
+                if (argument.kind == TemplateArgumentKind::Type) {
+                    rewritten_argument.type = rewrite(argument.type);
+                    changed = changed ||
+                        !rewritten_argument.type.equals_qualified(argument.type);
+                } else if (argument.kind == TemplateArgumentKind::Value) {
+                    rewritten_argument.value_type = rewrite(argument.value_type);
+                    changed = changed ||
+                        !rewritten_argument.value_type.equals_qualified(
+                            argument.value_type);
+                }
+                rewritten_arguments.push_back(std::move(rewritten_argument));
+            }
+            if (!changed) {
+                return current;
+            }
+            return QualType(
+                std::make_shared<DependentNameType>(
+                    rewritten_qualifier,
+                    dependent_name->member_name,
+                    std::move(rewritten_arguments),
+                    dependent_name->is_current_instantiation,
+                    dependent_name->requires_typename_keyword,
+                    dependent_name->requires_template_keyword),
+                quals);
+        }
+
+        if (auto typedef_type = dyn_cast_shared<TypedefType>(raw)) {
+            QualType rewritten_underlying = rewrite(typedef_type->underlying_type);
+            if (rewritten_underlying.get_shared() ==
+                    typedef_type->underlying_type.get_shared() &&
+                rewritten_underlying.get_qualifiers() ==
+                    typedef_type->underlying_type.get_qualifiers()) {
+                return current;
+            }
+            return QualType(
+                std::make_shared<TypedefType>(
+                    typedef_type->name,
+                    rewritten_underlying,
+                    typedef_type->typedef_decl),
+                quals);
+        }
+
+        if (auto specialization =
+                dyn_cast_shared<TemplateSpecializationType>(raw)) {
+            bool changed = false;
+            std::vector<TemplateArgument> rewritten_arguments;
+            rewritten_arguments.reserve(specialization->arguments.size());
+            for (const auto& argument : specialization->arguments) {
+                TemplateArgument rewritten_argument = argument;
+                if (argument.kind == TemplateArgumentKind::Type) {
+                    rewritten_argument.type = rewrite(argument.type);
+                    changed = changed ||
+                        !rewritten_argument.type.equals_qualified(argument.type);
+                } else if (argument.kind == TemplateArgumentKind::Value) {
+                    rewritten_argument.value_type = rewrite(argument.value_type);
+                    changed = changed ||
+                        !rewritten_argument.value_type.equals_qualified(
+                            argument.value_type);
+                }
+                rewritten_arguments.push_back(std::move(rewritten_argument));
+            }
+            if (!changed) {
+                return current;
+            }
+            bool dependent = template_specialization_components_are_dependent(
+                specialization->primary_template,
+                rewritten_arguments,
+                /*explicitly_dependent=*/false,
+                ast_ctx);
+            return QualType(
+                std::make_shared<TemplateSpecializationType>(
+                    specialization->template_name,
+                    specialization->primary_template,
+                    std::move(rewritten_arguments),
+                    dependent,
+                    specialization->is_class_template_placeholder),
+                quals);
+        }
+
+        return current;
+    };
+
+    return rewrite(type);
+}
+
 // Diamond inheritance path resolution for covariant return validation.
 // Each path from derived to base is encoded as a sequence of steps
 // (Normal:decl_ptr or Virtual:decl_ptr).  Key insight: when a path
@@ -1165,7 +1296,42 @@ const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
         if (const auto* typedef_decl = dyn_cast<TypedefDecl>(member.get())) {
             RecordSemanticState::NestedType nested_type;
             nested_type.name = typedef_decl->name;
-            nested_type.type = typedef_decl->type;
+            QualType realized_typedef_type = realize_in_progress_record_nested_type(
+                typedef_decl->type,
+                semantic_decl,
+                state.nested_types,
+                ast_ctx.get());
+            if (realized_typedef_type &&
+                (realized_typedef_type.get_shared() !=
+                     typedef_decl->type.get_shared() ||
+                 realized_typedef_type.get_qualifiers() !=
+                     typedef_decl->type.get_qualifiers())) {
+                realized_typedef_type =
+                    collect_->collect_finalize_deferred_semantic_type(
+                        realized_typedef_type,
+                        typedef_decl->location);
+                auto* mutable_typedef_decl =
+                    const_cast<TypedefDecl*>(typedef_decl);
+                mutable_typedef_decl->type = realized_typedef_type;
+                mutable_typedef_decl->underlying =
+                    desugar_type(realized_typedef_type, ast_ctx.get());
+                if (mutable_typedef_decl->sym) {
+                    if (auto typedef_symbol_type =
+                            dyn_cast_shared<TypedefType>(
+                                mutable_typedef_decl->sym->type.get_shared())) {
+                        QualType symbol_underlying = realized_typedef_type;
+                        if (auto realized_typedef =
+                                dyn_cast_shared<TypedefType>(
+                                    symbol_underlying.get_shared())) {
+                            symbol_underlying =
+                                realized_typedef->underlying_type;
+                        }
+                        typedef_symbol_type->underlying_type =
+                            symbol_underlying.without_qualifiers();
+                    }
+                }
+            }
+            nested_type.type = realized_typedef_type;
             nested_type.declared_access = current_access;
             nested_type.decl = typedef_decl;
             nested_type.symbol = typedef_decl->sym;
@@ -1563,7 +1729,42 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
         if (const auto* typedef_decl = dyn_cast<TypedefDecl>(member.get())) {
             RecordSemanticState::NestedType nested_type;
             nested_type.name = typedef_decl->name;
-            nested_type.type = typedef_decl->type;
+            QualType realized_typedef_type = realize_in_progress_record_nested_type(
+                typedef_decl->type,
+                placeholder_decl,
+                nested_types,
+                ast_ctx.get());
+            if (realized_typedef_type &&
+                (realized_typedef_type.get_shared() !=
+                     typedef_decl->type.get_shared() ||
+                 realized_typedef_type.get_qualifiers() !=
+                     typedef_decl->type.get_qualifiers())) {
+                realized_typedef_type =
+                    collect_->collect_finalize_deferred_semantic_type(
+                        realized_typedef_type,
+                        typedef_decl->location);
+                auto* mutable_typedef_decl =
+                    const_cast<TypedefDecl*>(typedef_decl);
+                mutable_typedef_decl->type = realized_typedef_type;
+                mutable_typedef_decl->underlying =
+                    desugar_type(realized_typedef_type, ast_ctx.get());
+                if (mutable_typedef_decl->sym) {
+                    if (auto typedef_symbol_type =
+                            dyn_cast_shared<TypedefType>(
+                                mutable_typedef_decl->sym->type.get_shared())) {
+                        QualType symbol_underlying = realized_typedef_type;
+                        if (auto realized_typedef =
+                                dyn_cast_shared<TypedefType>(
+                                    symbol_underlying.get_shared())) {
+                            symbol_underlying =
+                                realized_typedef->underlying_type;
+                        }
+                        typedef_symbol_type->underlying_type =
+                            symbol_underlying.without_qualifiers();
+                    }
+                }
+            }
+            nested_type.type = realized_typedef_type;
             nested_type.declared_access = current_access;
             nested_type.decl = typedef_decl;
             nested_type.symbol = typedef_decl->sym;
