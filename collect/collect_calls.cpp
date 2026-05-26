@@ -4778,6 +4778,25 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 .is_dependent;
         };
 
+    auto prepare_unresolved_member_base_after_substitution =
+        [&](UnresolvedMemberExpr* unresolved_member) -> bool {
+            if (!unresolved_member) {
+                return true;
+            }
+            if (unresolved_member->base &&
+                !resolve_dependent_expr_after_substitution(
+                    unresolved_member->base,
+                    implicit_this_type,
+                    error_out)) {
+                return false;
+            }
+            strip_stale_dependent_implicit_casts(unresolved_member->base);
+            realize_deferred_expr_type_after_substitution(
+                unresolved_member->base.get(),
+                /*allow_finalize=*/true);
+            return true;
+        };
+
     auto unresolved_lookup_still_dependent =
         [&](const UnresolvedLookupExpr* unresolved_lookup) -> bool {
             if (!unresolved_lookup) {
@@ -4822,17 +4841,10 @@ bool Collect::resolve_dependent_expr_after_substitution(
         [&](std::unique_ptr<UnresolvedMemberExpr> owned_member,
             bool allow_overloaded_method_set)
             -> std::unique_ptr<Expr> {
-            if (owned_member->base &&
-                !resolve_dependent_expr_after_substitution(
-                    owned_member->base,
-                    implicit_this_type,
-                    error_out)) {
+            if (!prepare_unresolved_member_base_after_substitution(
+                    owned_member.get())) {
                 return nullptr;
             }
-            strip_stale_dependent_implicit_casts(owned_member->base);
-            realize_deferred_expr_type_after_substitution(
-                owned_member->base.get(),
-                /*allow_finalize=*/true);
             return collect_member_expression(
                 std::move(owned_member->base),
                 owned_member->member_name,
@@ -4928,6 +4940,10 @@ bool Collect::resolve_dependent_expr_after_substitution(
         };
 
     if (auto* unresolved_member = dyn_cast<UnresolvedMemberExpr>(expr.get())) {
+        if (!prepare_unresolved_member_base_after_substitution(
+                unresolved_member)) {
+            return false;
+        }
         if (unresolved_member_still_dependent(unresolved_member)) {
             return true;
         }
@@ -5319,6 +5335,11 @@ bool Collect::resolve_dependent_expr_after_substitution(
         dyn_cast<UnresolvedMemberExpr>(dependent_call->callee.get());
     auto* unresolved_lookup =
         dyn_cast<UnresolvedLookupExpr>(dependent_call->callee.get());
+    if (unresolved_member &&
+        !prepare_unresolved_member_base_after_substitution(
+            unresolved_member)) {
+        return false;
+    }
     if (!unresolved_member && !unresolved_lookup) {
         auto owned_call = std::unique_ptr<DependentCallExpr>(
             static_cast<DependentCallExpr*>(expr.release()));
@@ -5418,11 +5439,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
     std::vector<TemplateArgument> explicit_template_args;
     if (auto* owned_member =
             dyn_cast<UnresolvedMemberExpr>(owned_call->callee.get())) {
-        if (owned_member->base &&
-            !resolve_dependent_expr_after_substitution(
-                owned_member->base,
-                implicit_this_type,
-                error_out)) {
+        if (!prepare_unresolved_member_base_after_substitution(
+                owned_member)) {
             return false;
         }
     }
@@ -5434,9 +5452,10 @@ bool Collect::resolve_dependent_expr_after_substitution(
         return true;
     }
 
-    if (unresolved_member) {
+    if (dyn_cast<UnresolvedMemberExpr>(owned_call->callee.get())) {
         auto owned_member = std::unique_ptr<UnresolvedMemberExpr>(
-            static_cast<UnresolvedMemberExpr*>(owned_call->callee.release()));
+            static_cast<UnresolvedMemberExpr*>(
+                owned_call->callee.release()));
         bool has_explicit_template_args =
             owned_member->explicit_template_arguments.has_value();
         if (has_explicit_template_args) {
