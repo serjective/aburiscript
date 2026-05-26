@@ -1714,9 +1714,13 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
 
     std::string llvm_name = get_function_llvm_name(*node);
     auto mainFunc = module->getFunction(llvm_name);
-    // If existing LLVM function has a different param count and the new declaration
-    // has a proper prototype (not K&R), replace the function with the correct signature.
+    // Empty declarations can be created before template bodies finish
+    // materializing; keep the LLVM function signature aligned with the AST.
     auto func_ctype_check = dyn_cast_shared<FunctionType>(node->type);
+    if (!func_ctype_check) {
+        error("unexpected subclass in funcdecl->type", node->location);
+        return;
+    }
     auto get_abi_param_type = [&](const QualType& declared_type) -> QualType {
         if (func_ctype_check && !func_ctype_check->has_prototype) {
             return kr_abi_promote_param_type(declared_type, type_ctx);
@@ -1736,50 +1740,64 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
         }
         return convert_param_type(abi_type);
     };
-    size_t ast_param_count = node->parameters.size();
-    if (ast_param_count == 1) {
-        auto *pd = dyn_cast<ParamDecl>(node->parameters[0].get());
-        if (pd && pd->type->isVoid()) ast_param_count = 0;
-    }
-    if (func_ctype_check && return_aggregate_indirectly(func_ctype_check->ret_type)) {
-        ast_param_count += 1;
-    }
-    bool needs_signature_update =
-        mainFunc && mainFunc->empty() &&
-        func_ctype_check && mainFunc->arg_size() != ast_param_count &&
-        (func_ctype_check->has_prototype || ast_param_count > 0);
-    if (needs_signature_update) {
-        // Prior declaration may have come from empty parens (K&R style) and
-        // later definition carries concrete parameters; rebuild with definition signature.
-        auto* oldFunc = mainFunc;
-        mainFunc = nullptr;
-
-        // Create the new function with the correct signature
+    auto build_llvm_function_type = [&]() -> llvm::FunctionType* {
         std::vector<llvm::Type*> paramTypes;
         for (const auto& param : node->parameters) {
             auto *paramDecl = cast<ParamDecl>(param.get());
             if (paramDecl->type->isVoid()) break;
             paramTypes.push_back(convert_function_param_type(paramDecl->type));
         }
-        auto func_ctype = dyn_cast_shared<FunctionType>(node->type);
-        if (func_ctype == nullptr) { error("unexpected subclass in funcdecl->type", node->location); return; }
-        prepend_indirect_result_parameter(paramTypes, func_ctype->ret_type);
-        llvm::Type* returnType = convert_function_return_type(func_ctype->ret_type);
-        llvm::FunctionType* funcType = llvm::FunctionType::get(returnType, paramTypes, func_ctype->is_variadic);
-        mainFunc = llvm::Function::Create(
-            funcType,
-            desired_llvm_storage,
-            llvm_name,
-            module.get());
-        apply_indirect_result_attributes(mainFunc, 0, func_ctype->ret_type);
+        prepend_indirect_result_parameter(paramTypes, func_ctype_check->ret_type);
+        llvm::Type* returnType =
+            convert_function_return_type(func_ctype_check->ret_type);
+        return llvm::FunctionType::get(
+            returnType,
+            paramTypes,
+            func_ctype_check->is_variadic);
+    };
+    llvm::FunctionType* expected_func_type = build_llvm_function_type();
+    auto create_or_replace_empty_function =
+        [&](llvm::Function* existing,
+            const std::string& name,
+            llvm::GlobalValue::LinkageTypes linkage,
+            const char* context_name) -> llvm::Function* {
+            if (existing &&
+                existing->getFunctionType() == expected_func_type) {
+                return existing;
+            }
+            if (existing && !existing->empty()) {
+                error(std::string(context_name) +
+                          ": existing LLVM function definition has a stale signature",
+                      node->location);
+                return nullptr;
+            }
 
-        // Replace all uses of the old function with the new one, then erase old
-        oldFunc->replaceAllUsesWith(mainFunc);
-        oldFunc->eraseFromParent();
-        // Reclaim the original name (LLVM may have auto-suffixed the new function)
-        mainFunc->setName(llvm_name);
+            auto* replacement = llvm::Function::Create(
+                expected_func_type,
+                linkage,
+                name,
+                module.get());
+            apply_indirect_result_attributes(
+                replacement,
+                0,
+                func_ctype_check->ret_type);
+            if (existing) {
+                existing->replaceAllUsesWith(replacement);
+                existing->eraseFromParent();
+                replacement->setName(name);
+            }
+            return replacement;
+        };
+
+    mainFunc = create_or_replace_empty_function(
+        mainFunc,
+        llvm_name,
+        desired_llvm_storage,
+        "convert_function_declaration()");
+    if (!mainFunc) {
+        return;
     }
-    if (mainFunc) {
+    {
         // Preserve an existing internal definition across later extern
         // redeclarations. Header patterns like `static inline` followed by an
         // `extern` prototype should keep the local definition local.
@@ -1793,29 +1811,6 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
         if (!keep_existing_internal && !keep_existing_odr_definition) {
             mainFunc->setLinkage(desired_llvm_storage);
         }
-    } else {
-        // Create function type with parameters
-        std::vector<llvm::Type*> paramTypes;
-        for (const auto& param : node->parameters) {
-            auto *paramDecl = cast<ParamDecl>(param.get());
-            if (paramDecl->type->isVoid()) {
-                // This should be the  one and only void, as verified by sema
-                break;
-            }
-            // Use the type from the parameter declaration
-            // If type is null (legacy), default to int32
-            llvm::Type* type = convert_function_param_type(paramDecl->type);
-            paramTypes.push_back(type);
-        }
-        auto func_ctype = dyn_cast_shared<FunctionType>(node->type);
-        if (func_ctype == nullptr) { error("unexpected subclass in funcdecl->type", node->location); return; }
-        prepend_indirect_result_parameter(paramTypes, func_ctype->ret_type);
-        llvm::Type* returnType = convert_function_return_type(func_ctype->ret_type); // fall back to i32 if not
-
-        llvm::FunctionType* funcType = llvm::FunctionType::get(returnType, paramTypes, func_ctype->is_variadic);
-        mainFunc = llvm::Function::Create(funcType, desired_llvm_storage,
-            llvm_name, module.get());
-        apply_indirect_result_attributes(mainFunc, 0, func_ctype->ret_type);
     }
 
     if (node->is_inline) {
@@ -1962,20 +1957,19 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
     std::string base_variant_name = get_base_variant_name_for_decl(node);
     if (!base_variant_name.empty() && base_variant_name != llvm_name) {
         base_variant_func = module->getFunction(base_variant_name);
+        base_variant_func = create_or_replace_empty_function(
+            base_variant_func,
+            base_variant_name,
+            mainFunc->getLinkage(),
+            "convert_function_declaration() special-member base variant");
         if (!base_variant_func) {
-            base_variant_func = llvm::Function::Create(
-                mainFunc->getFunctionType(),
-                mainFunc->getLinkage(),
-                base_variant_name,
-                module.get());
+            return;
         }
-        if (base_variant_func) {
-            base_variant_func->setCallingConv(mainFunc->getCallingConv());
-            base_variant_func->setAttributes(mainFunc->getAttributes());
-            base_variant_func->setVisibility(mainFunc->getVisibility());
-            base_variant_func->setUnnamedAddr(mainFunc->getUnnamedAddr());
-            configure_odr_function_linkage(base_variant_func);
-        }
+        base_variant_func->setCallingConv(mainFunc->getCallingConv());
+        base_variant_func->setAttributes(mainFunc->getAttributes());
+        base_variant_func->setVisibility(mainFunc->getVisibility());
+        base_variant_func->setUnnamedAddr(mainFunc->getUnnamedAddr());
+        configure_odr_function_linkage(base_variant_func);
     }
 
     const auto* lambda_invoker_info =
@@ -2291,7 +2285,8 @@ void ASTToLLVM::convert_translation_unit(Decl *decl) {
         for (const auto& specialization :
              ast_ctx->function_template_specializations()) {
             if (!specialization || !specialization->specialization_decl ||
-                specialization->instantiation_failed) {
+                specialization->instantiation_failed ||
+                !specialization->is_instantiated) {
                 continue;
             }
             convert_declaration(specialization->specialization_decl.get());
