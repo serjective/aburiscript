@@ -2518,6 +2518,10 @@ private:
         std::unique_ptr<FuncCall>& call,
         SrcLoc loc) ;
 
+    std::unique_ptr<Expr> try_builtin_operator_new_delete_call(
+        std::unique_ptr<FuncCall>& call,
+        SrcLoc loc) ;
+
     std::unique_ptr<Expr> collect_explicit_template_call_impl(
         std::unique_ptr<Expr> callee,
         std::vector<TemplateArgument> explicit_template_args,

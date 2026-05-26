@@ -430,6 +430,8 @@ enum class BuiltinKind {
     CALLOC,
     REALLOC,
     FREE,
+    OPERATOR_NEW,
+    OPERATOR_DELETE,
 
     // Process control
     ABORT,

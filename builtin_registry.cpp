@@ -543,6 +543,8 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__builtin_calloc", BuiltinKind::CALLOC, 2, 2, false, false});
     register_builtin({"__builtin_realloc", BuiltinKind::REALLOC, 2, 2, false, false});
     register_builtin({"__builtin_free", BuiltinKind::FREE, 1, 1, false, false});
+    register_builtin({"__builtin_operator_new", BuiltinKind::OPERATOR_NEW, 1, -1, false, false});
+    register_builtin({"__builtin_operator_delete", BuiltinKind::OPERATOR_DELETE, 1, -1, false, false});
 
     // Process control
     register_builtin({"__builtin_abort", BuiltinKind::ABORT, 0, 0, false, false});

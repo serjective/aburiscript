@@ -188,6 +188,57 @@ bool builtin_call_preserves_argument_value_category(BuiltinKind kind) {
     }
 }
 
+QualType canonical_operator_builtin_param_type(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    return desugar_type(remove_reference(type, ast_ctx), ast_ctx).without_qualifiers();
+}
+
+bool type_is_builtin_ulong(QualType type, std::shared_ptr<CType> ulong_type,
+                           const ASTContext* ast_ctx) {
+    if (!type || !ulong_type) {
+        return false;
+    }
+    return canonical_operator_builtin_param_type(type, ast_ctx)
+        .equals_unqualified(QualType(std::move(ulong_type)));
+}
+
+bool type_is_void_pointer(QualType type, const ASTContext* ast_ctx) {
+    auto canonical = canonical_operator_builtin_param_type(type, ast_ctx);
+    auto ptr = canonical.as_shared<PointerType>();
+    if (!ptr) {
+        return false;
+    }
+    auto pointee = desugar_type(ptr->pointed_type, ast_ctx).without_qualifiers();
+    return pointee && pointee->isVoid();
+}
+
+bool type_is_align_val_t(QualType type, const ASTContext* ast_ctx) {
+    auto canonical = canonical_operator_builtin_param_type(type, ast_ctx);
+    auto enum_type = canonical.as_shared<EnumType>();
+    if (!enum_type || !enum_type->get_decl()) {
+        return false;
+    }
+    return enum_type->get_decl()->get_tag_name() == "align_val_t";
+}
+
+std::shared_ptr<FunctionType> symbol_function_type(
+    const std::shared_ptr<Symbol>& symbol,
+    const ASTContext* ast_ctx) {
+    if (!symbol) {
+        return nullptr;
+    }
+    auto fn_type = desugar_type(symbol->type, ast_ctx).as_shared<FunctionType>();
+    if (fn_type) {
+        return fn_type;
+    }
+    auto ptr_type = desugar_type(symbol->type, ast_ctx).as_shared<PointerType>();
+    if (!ptr_type) {
+        return nullptr;
+    }
+    return desugar_type(ptr_type->pointed_type, ast_ctx).as_shared<FunctionType>();
+}
+
 Expr* strip_implicit_casts_and_parens(Expr* expr) {
     Expr* current = Collect::strip_implicit_casts(expr);
     while (auto* paren = dyn_cast<ParenExpr>(current)) {
@@ -5601,6 +5652,92 @@ std::unique_ptr<Expr> Collect::try_function_object_call_overload(
     return nullptr;
 }
 
+std::unique_ptr<Expr> Collect::try_builtin_operator_new_delete_call(
+    std::unique_ptr<FuncCall>& call,
+    SrcLoc loc) {
+    auto* var_ref = dyn_cast<VarRef>(call->func.get());
+    if (!var_ref) {
+        return nullptr;
+    }
+
+    const std::string& callee_name = var_ref->get_name();
+    const bool is_operator_new = callee_name == "__builtin_operator_new";
+    const bool is_operator_delete = callee_name == "__builtin_operator_delete";
+    if (!is_operator_new && !is_operator_delete) {
+        return nullptr;
+    }
+
+    if (!lang_opts_.is_cxx_mode()) {
+        report_error(callee_name + " is only available in C++ mode", loc);
+        return collect_make<ErrorExpr>("C++ operator builtin used outside C++", loc);
+    }
+
+    const std::string operator_name =
+        is_operator_new ? "operatornew" : "operatordelete";
+    std::shared_ptr<Symbol> selected_symbol = nullptr;
+    if (auto selection_error = select_cpp_allocation_like_function(
+            operator_name,
+            nullptr,
+            /*force_global_lookup=*/true,
+            call->args,
+            loc,
+            selected_symbol)) {
+        return selection_error;
+    }
+    if (!selected_symbol) {
+        report_error("no viable allocation function selected for " + callee_name, loc);
+        return collect_make<ErrorExpr>("no viable allocation function selected", loc);
+    }
+
+    auto fn_type = symbol_function_type(selected_symbol, ast_ctx_.get());
+    if (!fn_type) {
+        report_error(callee_name + " selects a non-function operator", loc);
+        return collect_make<ErrorExpr>("operator builtin selected non-function", loc);
+    }
+
+    auto result_type =
+        canonical_operator_builtin_param_type(fn_type->ret_type, ast_ctx_.get());
+    const bool returns_void_ptr =
+        type_is_void_pointer(fn_type->ret_type, ast_ctx_.get());
+    const bool returns_void = result_type && result_type->isVoid();
+    const bool first_param_is_size =
+        !fn_type->parameters.empty() &&
+        type_is_builtin_ulong(fn_type->parameters[0], get_builtin_ulong(), ast_ctx_.get());
+    const bool first_param_is_void_ptr =
+        !fn_type->parameters.empty() &&
+        type_is_void_pointer(fn_type->parameters[0], ast_ctx_.get());
+    const bool has_align_param =
+        fn_type->parameters.size() == 2 &&
+        type_is_align_val_t(fn_type->parameters[1], ast_ctx_.get());
+
+    bool is_usual_operator = false;
+    if (is_operator_new) {
+        is_usual_operator =
+            returns_void_ptr &&
+            first_param_is_size &&
+            (fn_type->parameters.size() == 1 ||
+             (fn_type->parameters.size() == 2 && has_align_param));
+    } else {
+        is_usual_operator =
+            returns_void &&
+            first_param_is_void_ptr &&
+            (fn_type->parameters.size() == 1 ||
+             (fn_type->parameters.size() == 2 && has_align_param));
+    }
+
+    if (!is_usual_operator) {
+        report_error(
+            callee_name + " selects non-usual " +
+                (is_operator_new ? "allocation" : "deallocation") +
+                " function",
+            loc);
+        return collect_make<ErrorExpr>("operator builtin selected non-usual function", loc);
+    }
+
+    call->func = make_hidden_overload_callee(std::move(selected_symbol), loc);
+    return nullptr;
+}
+
 std::unique_ptr<Expr> Collect::try_builtin_or_overloaded_varref_call(
     std::unique_ptr<FuncCall>& call,
     SrcLoc loc) {
@@ -5656,6 +5793,13 @@ std::unique_ptr<Expr> Collect::try_builtin_or_overloaded_varref_call(
         }
         auto va_list_arg = std::move(call->args[0]);
         return collect_make<VaEndExpr>(std::move(va_list_arg), loc);
+    }
+    if (callee_name == "__builtin_operator_new" ||
+        callee_name == "__builtin_operator_delete") {
+        if (has_builtin_disqualifying_qualifier) {
+            return nullptr;
+        }
+        return try_builtin_operator_new_delete_call(call, loc);
     }
 
     if (!has_builtin_disqualifying_qualifier) {
