@@ -3499,6 +3499,34 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             return trait_is_convertible_to_target(from_type, to_type);
         };
 
+    auto trait_scalar_assignable_to_target =
+        [&](QualType rhs_type, QualType target_type) -> bool {
+            if (!rhs_type || !target_type) {
+                return false;
+            }
+            QualType rhs_expression_type =
+                materialize_trait_source_type(rhs_type);
+            if (!rhs_expression_type) {
+                return false;
+            }
+            auto rhs_expression_kind =
+                canonical_type_kind(rhs_expression_type, ast_ctx_.get());
+            auto target_kind =
+                canonical_type_kind(target_type, ast_ctx_.get());
+            if (rhs_expression_type->isVoid() ||
+                target_type->isVoid() ||
+                rhs_expression_kind == TypeKind::Function ||
+                target_kind == TypeKind::Function ||
+                target_kind == TypeKind::Array) {
+                return false;
+            }
+            return build_implicit_conversion_sequence(
+                       rhs_expression_type,
+                       target_type,
+                       ExprUseContext::CallArgument)
+                .viable;
+        };
+
     std::function<bool(QualType)> trait_is_standard_layout_type;
     std::function<bool(QualType)> trait_is_trivial_type;
     std::function<bool(QualType)> trait_is_trivially_copyable_type;
@@ -3998,11 +4026,7 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                            selected_method->declared_access,
                            /*allow_protected_access=*/false);
             }
-            return build_implicit_conversion_sequence(
-                       *rhs,
-                       target_type,
-                       ExprUseContext::CallArgument)
-                .viable;
+            return trait_scalar_assignable_to_target(*rhs, target_type);
         }
         case BuiltinKind::IS_TRIVIALLY_ASSIGNABLE:
         case BuiltinKind::IS_NOTHROW_ASSIGNABLE: {
@@ -4080,11 +4104,8 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
                        fn_type->exception_spec ==
                            FunctionExceptionSpecKind::NonThrowing;
             }
-            bool assignable = build_implicit_conversion_sequence(
-                                  *rhs,
-                                  target_type,
-                                  ExprUseContext::CallArgument)
-                                  .viable;
+            bool assignable =
+                trait_scalar_assignable_to_target(*rhs, target_type);
             if (!assignable) {
                 return false;
             }
