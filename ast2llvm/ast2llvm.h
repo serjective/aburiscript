@@ -16,6 +16,7 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <utility>
 
 // Result of get_lvalue(): the address of a value and its semantic type.
 // At address `address` we will find a value of type `type`.
@@ -145,6 +146,41 @@ public:
     };
     std::vector<EhRegionFrame> eh_region_stack;
     bool enforce_noexcept_terminate_on_escape = false;
+
+    class SyntheticFunctionEmissionScope {
+    public:
+        explicit SyntheticFunctionEmissionScope(ASTToLLVM& owner);
+        ~SyntheticFunctionEmissionScope();
+
+        SyntheticFunctionEmissionScope(const SyntheticFunctionEmissionScope&) = delete;
+        SyntheticFunctionEmissionScope& operator=(const SyntheticFunctionEmissionScope&) = delete;
+
+    private:
+        ASTToLLVM& owner;
+        bool had_insert_point = false;
+        llvm::IRBuilder<>::InsertPoint saved_insert_point;
+        llvm::DebugLoc saved_debug_loc;
+        std::unordered_map<const Symbol*, llvm::Value*> saved_symbol_values;
+        llvm::AllocaInst* saved_last_entry_alloca = nullptr;
+        std::unordered_map<const Expr*, llvm::Value*> saved_vla_size_cache;
+        std::shared_ptr<Scope> saved_current_scope;
+        llvm::BasicBlock* saved_endloop = nullptr;
+        llvm::BasicBlock* saved_condloop = nullptr;
+        llvm::SwitchInst* saved_switch_inst = nullptr;
+        llvm::BasicBlock* saved_switch_end = nullptr;
+        llvm::BasicBlock* saved_switch_default = nullptr;
+        std::map<std::string, llvm::BasicBlock*> saved_label_blocks;
+        std::unordered_map<std::string, size_t> saved_label_cleanup_depths;
+        std::unordered_map<std::string, uint32_t> saved_label_offsets;
+        std::unordered_map<std::string, std::vector<size_t>> saved_label_cleanup_counts;
+        std::vector<std::pair<std::string, llvm::Instruction*>> saved_unresolved_gotos;
+        bool saved_materializing_dead_jump_targets = false;
+        std::vector<std::vector<CleanupEntry>> saved_cleanup_stack;
+        size_t saved_break_cleanup_depth = 0;
+        size_t saved_continue_cleanup_depth = 0;
+        std::vector<EhRegionFrame> saved_eh_region_stack;
+        bool saved_enforce_noexcept_terminate_on_escape = false;
+    };
 
     void emit_cleanup_entry(const CleanupEntry& entry);
     void emit_cleanups_for_scope();

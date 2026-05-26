@@ -462,10 +462,7 @@ static llvm::Function* emit_adjusting_thunk(
         return thunk_fn;
     }
 
-    // Thunks are emitted while other lowering may already be inserting IR;
-    // preserve the previous insertion point before creating helper blocks.
-    llvm::BasicBlock* saved_block = lower.builder.GetInsertBlock();
-    auto saved_ip = lower.builder.saveIP();
+    ASTToLLVM::SyntheticFunctionEmissionScope synthetic_scope(lower);
 
     llvm::BasicBlock* entry_bb =
         llvm::BasicBlock::Create(*lower.context, "entry", thunk_fn);
@@ -557,11 +554,6 @@ static llvm::Function* emit_adjusting_thunk(
         lower.builder.CreateRet(ret_value);
     }
 
-    if (saved_block) {
-        lower.builder.restoreIP(saved_ip);
-    } else {
-        lower.builder.ClearInsertionPoint();
-    }
     return thunk_fn;
 }
 

@@ -505,6 +505,88 @@ void ASTToLLVM::dump() {
     module->print(llvm::outs(), nullptr);
 }
 
+ASTToLLVM::SyntheticFunctionEmissionScope::SyntheticFunctionEmissionScope(
+    ASTToLLVM& owner)
+    : owner(owner),
+      had_insert_point(owner.builder.GetInsertBlock() != nullptr),
+      saved_insert_point(owner.builder.saveIP()),
+      saved_debug_loc(owner.builder.getCurrentDebugLocation()),
+      saved_symbol_values(std::move(owner.symbol_values)),
+      saved_last_entry_alloca(owner.last_entry_alloca),
+      saved_vla_size_cache(std::move(owner.vla_size_cache)),
+      saved_current_scope(std::move(owner.current_scope)),
+      saved_endloop(owner.endloop),
+      saved_condloop(owner.condloop),
+      saved_switch_inst(owner.switch_inst),
+      saved_switch_end(owner.switch_end),
+      saved_switch_default(owner.switch_default),
+      saved_label_blocks(std::move(owner.label_blocks)),
+      saved_label_cleanup_depths(std::move(owner.label_cleanup_depths)),
+      saved_label_offsets(std::move(owner.label_offsets)),
+      saved_label_cleanup_counts(std::move(owner.label_cleanup_counts)),
+      saved_unresolved_gotos(std::move(owner.unresolved_gotos)),
+      saved_materializing_dead_jump_targets(owner.materializing_dead_jump_targets),
+      saved_cleanup_stack(std::move(owner.cleanup_stack)),
+      saved_break_cleanup_depth(owner.break_cleanup_depth),
+      saved_continue_cleanup_depth(owner.continue_cleanup_depth),
+      saved_eh_region_stack(std::move(owner.eh_region_stack)),
+      saved_enforce_noexcept_terminate_on_escape(
+          owner.enforce_noexcept_terminate_on_escape) {
+    owner.builder.ClearInsertionPoint();
+    owner.builder.SetCurrentDebugLocation(llvm::DebugLoc());
+    owner.symbol_values.clear();
+    owner.last_entry_alloca = nullptr;
+    owner.vla_size_cache.clear();
+    owner.current_scope.reset();
+    owner.endloop = nullptr;
+    owner.condloop = nullptr;
+    owner.switch_inst = nullptr;
+    owner.switch_end = nullptr;
+    owner.switch_default = nullptr;
+    owner.label_blocks.clear();
+    owner.label_cleanup_depths.clear();
+    owner.label_offsets.clear();
+    owner.label_cleanup_counts.clear();
+    owner.unresolved_gotos.clear();
+    owner.materializing_dead_jump_targets = false;
+    owner.cleanup_stack.clear();
+    owner.break_cleanup_depth = 0;
+    owner.continue_cleanup_depth = 0;
+    owner.eh_region_stack.clear();
+    owner.enforce_noexcept_terminate_on_escape = false;
+}
+
+ASTToLLVM::SyntheticFunctionEmissionScope::~SyntheticFunctionEmissionScope() {
+    if (had_insert_point) {
+        owner.builder.restoreIP(saved_insert_point);
+    } else {
+        owner.builder.ClearInsertionPoint();
+    }
+    owner.builder.SetCurrentDebugLocation(saved_debug_loc);
+    owner.symbol_values = std::move(saved_symbol_values);
+    owner.last_entry_alloca = saved_last_entry_alloca;
+    owner.vla_size_cache = std::move(saved_vla_size_cache);
+    owner.current_scope = std::move(saved_current_scope);
+    owner.endloop = saved_endloop;
+    owner.condloop = saved_condloop;
+    owner.switch_inst = saved_switch_inst;
+    owner.switch_end = saved_switch_end;
+    owner.switch_default = saved_switch_default;
+    owner.label_blocks = std::move(saved_label_blocks);
+    owner.label_cleanup_depths = std::move(saved_label_cleanup_depths);
+    owner.label_offsets = std::move(saved_label_offsets);
+    owner.label_cleanup_counts = std::move(saved_label_cleanup_counts);
+    owner.unresolved_gotos = std::move(saved_unresolved_gotos);
+    owner.materializing_dead_jump_targets =
+        saved_materializing_dead_jump_targets;
+    owner.cleanup_stack = std::move(saved_cleanup_stack);
+    owner.break_cleanup_depth = saved_break_cleanup_depth;
+    owner.continue_cleanup_depth = saved_continue_cleanup_depth;
+    owner.eh_region_stack = std::move(saved_eh_region_stack);
+    owner.enforce_noexcept_terminate_on_escape =
+        saved_enforce_noexcept_terminate_on_escape;
+}
+
 void ASTToLLVM::emit(std::string filename, llvm::CodeGenFileType file_type) {
     std::string triple = module->getTargetTriple();
 

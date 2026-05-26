@@ -736,8 +736,7 @@ void ASTToLLVM::emit_cpp_global_object_dtor_thunk(
         return;
     }
 
-    llvm::BasicBlock* saved_block = builder.GetInsertBlock();
-    auto saved_ip = builder.saveIP();
+    SyntheticFunctionEmissionScope synthetic_scope(*this);
 
     llvm::BasicBlock* entry_bb =
         llvm::BasicBlock::Create(*context, "entry", dtor_thunk);
@@ -751,12 +750,6 @@ void ASTToLLVM::emit_cpp_global_object_dtor_thunk(
         teardown_context,
         CppCtorDtorVariant::Complete);
     builder.CreateRetVoid();
-
-    if (saved_block) {
-        builder.restoreIP(saved_ip);
-    } else {
-        builder.ClearInsertionPoint();
-    }
 }
 
 void ASTToLLVM::emit_cpp_global_object_ctor_thunk(
@@ -793,8 +786,7 @@ void ASTToLLVM::emit_cpp_global_object_ctor_thunk(
         return;
     }
 
-    llvm::BasicBlock* saved_block = builder.GetInsertBlock();
-    auto saved_ip = builder.saveIP();
+    SyntheticFunctionEmissionScope synthetic_scope(*this);
 
     llvm::BasicBlock* entry_bb =
         llvm::BasicBlock::Create(*context, "entry", ctor_thunk);
@@ -807,12 +799,6 @@ void ASTToLLVM::emit_cpp_global_object_ctor_thunk(
         construction_context,
         CppCtorDtorVariant::Complete);
     builder.CreateRetVoid();
-
-    if (saved_block) {
-        builder.restoreIP(saved_ip);
-    } else {
-        builder.ClearInsertionPoint();
-    }
 }
 
 llvm::Function* ASTToLLVM::get_or_create_cpp_deleting_destructor_function(
@@ -877,8 +863,7 @@ llvm::Function* ASTToLLVM::get_or_create_cpp_deleting_destructor_function(
         return deleting_fn;
     }
 
-    llvm::BasicBlock* saved_block = builder.GetInsertBlock();
-    auto saved_ip = builder.saveIP();
+    SyntheticFunctionEmissionScope synthetic_scope(*this);
 
     llvm::BasicBlock* entry_bb =
         llvm::BasicBlock::Create(*context, "entry", deleting_fn);
@@ -911,11 +896,6 @@ llvm::Function* ASTToLLVM::get_or_create_cpp_deleting_destructor_function(
             deallocator_args,
             loc,
             context_name)) {
-        if (saved_block) {
-            builder.restoreIP(saved_ip);
-        } else {
-            builder.ClearInsertionPoint();
-        }
         return nullptr;
     }
 
@@ -927,11 +907,6 @@ llvm::Function* ASTToLLVM::get_or_create_cpp_deleting_destructor_function(
         builder.CreateRet(llvm::Constant::getNullValue(return_type));
     }
 
-    if (saved_block) {
-        builder.restoreIP(saved_ip);
-    } else {
-        builder.ClearInsertionPoint();
-    }
     return deleting_fn;
 }
 
