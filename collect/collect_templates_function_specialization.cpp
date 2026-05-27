@@ -535,11 +535,17 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
     }
 
     std::shared_ptr<FunctionType> build_specialization_function_type() {
-        auto substituted_function_type = collect.substitute_template_type(
-            QualType(pattern->type),
-            function_template->parameters,
-            normalized_arguments,
-            loc);
+        ASTCloneContext prototype_clone_context;
+        prototype_clone_context.ast_ctx = ast_ctx();
+        prototype_clone_context.preserve_dependent_function_exception_specs = true;
+        auto substituted_function_type =
+            collect.substitute_template_type_with_bindings(
+                QualType(pattern->type),
+                function_template->parameters,
+                specialization_bindings,
+                loc,
+                false,
+                &prototype_clone_context);
         substituted_function_type =
             collect.finalize_template_semantic_type_for_storage(
                 substituted_function_type,
@@ -810,11 +816,151 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
         return specialization_symbol;
     }
 
+    bool finalize_specialization_signature(
+        FuncDecl* specialization_decl_ptr,
+        const std::shared_ptr<Symbol>& specialization_symbol_ptr) {
+        if (!specialization_decl_ptr || !specialization_symbol_ptr ||
+            specialization_is_dependent) {
+            return true;
+        }
+
+        std::unordered_map<const Symbol*, std::vector<std::shared_ptr<Symbol>>>
+            pack_param_symbol_remap;
+        auto rewrite_function_template_type =
+            [&](QualType type) -> QualType {
+                return rewrite_function_template_type_for_bindings(
+                    type,
+                    specialization_bindings);
+            };
+        auto rewrite_function_template_arguments =
+            [&](const std::vector<TemplateArgument>& template_arguments)
+                -> std::vector<TemplateArgument> {
+                return rewrite_function_template_arguments_for_bindings(
+                    template_arguments,
+                    specialization_bindings);
+            };
+        auto register_specialization_symbol =
+            [&](const std::shared_ptr<Symbol>& sym) {
+                collect.collect_add_global_symbol(sym);
+            };
+        auto rewrite_specialized_member_expr =
+            [&](MemberExpr* member_expr, std::string* error_out) -> bool {
+                return rebind_member_expr_for_specialized_record(
+                    member_expr,
+                    ast_ctx(),
+                    error_out);
+            };
+
+        auto clone_pass_builder = make_template_binding_clone_pass_builder(
+            ast_ctx(),
+            &collect,
+            function_template->parameters,
+            specialization_bindings,
+            loc,
+            "function template non-type parameter requires a concrete integral value",
+            rewrite_function_template_type,
+            rewrite_function_template_arguments,
+            register_specialization_symbol,
+            rewrite_specialized_member_expr);
+        clone_pass_builder.rewrite_symbol =
+            [&](const std::shared_ptr<Symbol>& sym,
+                ASTCloneContext& clone_ctx) -> std::shared_ptr<Symbol> {
+                if (!sym) {
+                    return nullptr;
+                }
+                if (auto remapped =
+                        lookup_symbol_remap_in_clone_context(sym, clone_ctx)) {
+                    return remapped;
+                }
+                if (sym->kind == SymbolKind::FUNCTION &&
+                    sym->function_definition == pattern) {
+                    return specialization_symbol_ptr;
+                }
+                return sym;
+            };
+        auto clone_pass = clone_pass_builder.build_substitution_pass();
+        ScopedActiveClonePass scoped_active_clone_pass(*this, &clone_pass);
+        QualType specialization_this_type =
+            template_sema_internal::implicit_this_type_for_specialized_function(
+                specialization_decl_ptr);
+        auto resolution_pass =
+            clone_pass_builder.build_dependent_resolution_pass(
+                clone_pass,
+                [&](std::unique_ptr<Expr>& expr, std::string* error_out) -> bool {
+                    return collect.resolve_dependent_expr_after_substitution(
+                        expr,
+                        specialization_this_type,
+                        error_out);
+                });
+        auto rewrite_pack_element_type =
+            [&](QualType type,
+                size_t element_index,
+                std::string* error_out) -> QualType {
+                TemplateArgumentBindings element_bindings;
+                std::string binding_error;
+                if (!build_pack_element_argument_bindings(
+                        function_template->parameters,
+                        specialization_bindings,
+                        element_index,
+                        element_bindings,
+                        &binding_error)) {
+                    if (error_out && error_out->empty()) {
+                        *error_out =
+                            binding_error.empty()
+                                ? "failed to materialize function-template pack element bindings"
+                                : binding_error;
+                    }
+                    return QualType();
+                }
+                return rewrite_function_template_type_for_bindings(
+                    type,
+                    element_bindings);
+            };
+
+        specialization_decl_ptr->parameters.clear();
+        std::vector<const Expr*> default_arguments;
+        std::string clone_error;
+        if (!clone_function_parameters_for_specialization(
+                collect,
+                pattern,
+                function_template->parameters,
+                specialization_bindings,
+                specialization_decl_ptr,
+                clone_pass,
+                resolution_pass,
+                loc,
+                "function template",
+                rewrite_pack_element_type,
+                &pack_param_symbol_remap,
+                default_arguments,
+                &clone_error)) {
+            return fail(
+                clone_error.empty()
+                    ? "internal error: function template parameter clone failed"
+                    : clone_error,
+                pattern->location);
+        }
+        specialization_symbol_ptr->type = QualType(specialization_decl_ptr->type);
+        merge_symbol_cpp_default_arguments(
+            specialization_symbol_ptr.get(),
+            default_arguments,
+            nullptr);
+        return true;
+    }
+
     bool prepare_entry() {
         entry = ast_ctx()->lookup_function_template_specialization(
             function_template,
             normalized_arguments);
         if (entry) {
+            if (!entry->signature_is_finalized &&
+                !finalize_specialization_signature(
+                    entry->specialization_decl.get(),
+                    entry->specialization_symbol)) {
+                entry->instantiation_failed = true;
+                return false;
+            }
+            entry->signature_is_finalized = true;
             return true;
         }
 
@@ -831,6 +977,13 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             normalized_arguments,
             std::move(specialization_decl),
             specialization_symbol);
+        if (!finalize_specialization_signature(
+                entry->specialization_decl.get(),
+                entry->specialization_symbol)) {
+            entry->instantiation_failed = true;
+            return false;
+        }
+        entry->signature_is_finalized = true;
         return true;
     }
 
@@ -1091,6 +1244,10 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                     if (clone_pass_ptr) {
                         element_builder.symbol_remap =
                             clone_pass_ptr->context().symbol_remap;
+                        element_builder.pack_symbol_remap =
+                            clone_pass_ptr->context().pack_symbol_remap;
+                        element_builder.pack_symbol_element_index =
+                            element_index;
                     }
                     element_builder.rewrite_symbol =
                         [&](const std::shared_ptr<Symbol>& sym,
@@ -1192,6 +1349,10 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 if (clone_pass_ptr) {
                     element_builder.symbol_remap =
                         clone_pass_ptr->context().symbol_remap;
+                    element_builder.pack_symbol_remap =
+                        clone_pass_ptr->context().pack_symbol_remap;
+                    element_builder.pack_symbol_element_index =
+                        element_index;
                 }
                 element_builder.rewrite_symbol =
                     [&](const std::shared_ptr<Symbol>& sym,

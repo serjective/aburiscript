@@ -9,6 +9,192 @@
 using namespace collect_internal;
 
 namespace {
+bool type_has_undeduced_auto_placeholder(QualType type) {
+    return type &&
+           auto_type_utils::auto_type_flavors_in(type.get_shared()) != 0;
+}
+
+bool symbol_names_undeduced_auto_variable(const std::shared_ptr<Symbol>& sym) {
+    if (!sym || !sym->variable_definition) {
+        return false;
+    }
+    return type_has_undeduced_auto_placeholder(sym->type) ||
+           type_has_undeduced_auto_placeholder(
+               sym->variable_definition->type);
+}
+
+bool any_expr_references_undeduced_auto_variable(
+    const std::vector<std::unique_ptr<Expr>>& exprs);
+
+bool expr_references_undeduced_auto_variable(const Expr* expr) {
+    if (!expr) {
+        return false;
+    }
+
+    switch (expr->get_kind()) {
+        case StmtKind::VarRef:
+        case StmtKind::QualifiedVarRef:
+            return symbol_names_undeduced_auto_variable(
+                static_cast<const VarRef*>(expr)->symref);
+        case StmtKind::ImplicitCast:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const ImplicitCast*>(expr)->expr.get());
+        case StmtKind::ExplicitCast:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const ExplicitCast*>(expr)->expr.get());
+        case StmtKind::ParenExpr:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const ParenExpr*>(expr)->subexpr.get());
+        case StmtKind::UnaryOperation:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const UnaryOperation*>(expr)->exp.get());
+        case StmtKind::DependentUnaryExpr:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const DependentUnaryExpr*>(expr)->operand.get());
+        case StmtKind::BinaryOperation: {
+            const auto* binary = static_cast<const BinaryOperation*>(expr);
+            return expr_references_undeduced_auto_variable(binary->left.get()) ||
+                   expr_references_undeduced_auto_variable(binary->right.get());
+        }
+        case StmtKind::DependentBinaryExpr: {
+            const auto* binary = static_cast<const DependentBinaryExpr*>(expr);
+            return expr_references_undeduced_auto_variable(binary->left.get()) ||
+                   expr_references_undeduced_auto_variable(binary->right.get());
+        }
+        case StmtKind::CompoundAssignOperation: {
+            const auto* binary =
+                static_cast<const CompoundAssignOperation*>(expr);
+            return expr_references_undeduced_auto_variable(binary->left.get()) ||
+                   expr_references_undeduced_auto_variable(binary->right.get());
+        }
+        case StmtKind::CondExpr: {
+            const auto* cond = static_cast<const CondExpr*>(expr);
+            return expr_references_undeduced_auto_variable(
+                       cond->condition.get()) ||
+                   expr_references_undeduced_auto_variable(
+                       cond->true_expr.get()) ||
+                   expr_references_undeduced_auto_variable(
+                       cond->false_expr.get());
+        }
+        case StmtKind::FuncCall: {
+            const auto* call = static_cast<const FuncCall*>(expr);
+            return expr_references_undeduced_auto_variable(call->func.get()) ||
+                   any_expr_references_undeduced_auto_variable(call->args);
+        }
+        case StmtKind::DependentCallExpr: {
+            const auto* call = static_cast<const DependentCallExpr*>(expr);
+            return expr_references_undeduced_auto_variable(
+                       call->callee.get()) ||
+                   any_expr_references_undeduced_auto_variable(call->args);
+        }
+        case StmtKind::CppMemberCallExpr:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const CppMemberCallExpr*>(expr)
+                    ->lowered_call.get());
+        case StmtKind::MemberExpr:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const MemberExpr*>(expr)->base.get());
+        case StmtKind::UnresolvedMemberExpr:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const UnresolvedMemberExpr*>(expr)->base.get());
+        case StmtKind::ArraySubscriptExpr: {
+            const auto* subscript =
+                static_cast<const ArraySubscriptExpr*>(expr);
+            return expr_references_undeduced_auto_variable(
+                       subscript->array.get()) ||
+                   expr_references_undeduced_auto_variable(
+                       subscript->index.get());
+        }
+        case StmtKind::DependentArraySubscriptExpr: {
+            const auto* subscript =
+                static_cast<const DependentArraySubscriptExpr*>(expr);
+            return expr_references_undeduced_auto_variable(
+                       subscript->array.get()) ||
+                   expr_references_undeduced_auto_variable(
+                       subscript->index.get());
+        }
+        case StmtKind::MemberPointerAccessExpr: {
+            const auto* access =
+                static_cast<const MemberPointerAccessExpr*>(expr);
+            return expr_references_undeduced_auto_variable(
+                       access->base.get()) ||
+                   expr_references_undeduced_auto_variable(
+                       access->member_pointer.get());
+        }
+        case StmtKind::DependentMemberPointerAccessExpr: {
+            const auto* access =
+                static_cast<const DependentMemberPointerAccessExpr*>(expr);
+            return expr_references_undeduced_auto_variable(
+                       access->base.get()) ||
+                   expr_references_undeduced_auto_variable(
+                       access->member_pointer.get());
+        }
+        case StmtKind::CppFunctionStyleCastExpr:
+            return any_expr_references_undeduced_auto_variable(
+                static_cast<const CppFunctionStyleCastExpr*>(expr)->args);
+        case StmtKind::CppConstructExpr:
+            return any_expr_references_undeduced_auto_variable(
+                static_cast<const CppConstructExpr*>(expr)->args);
+        case StmtKind::InitListExpr: {
+            const auto* init_list = static_cast<const InitListExpr*>(expr);
+            for (const auto& element : init_list->elements) {
+                if (expr_references_undeduced_auto_variable(
+                        element.value.get())) {
+                    return true;
+                }
+                for (const auto& designator : element.designators) {
+                    if (expr_references_undeduced_auto_variable(
+                            designator.index.get()) ||
+                        expr_references_undeduced_auto_variable(
+                            designator.range_end.get())) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        case StmtKind::CppNewExpr: {
+            const auto* new_expr = static_cast<const CppNewExpr*>(expr);
+            return any_expr_references_undeduced_auto_variable(
+                       new_expr->placement_args) ||
+                   expr_references_undeduced_auto_variable(
+                       new_expr->initializer.get()) ||
+                   any_expr_references_undeduced_auto_variable(
+                       new_expr->constructor_args);
+        }
+        case StmtKind::CppDeleteExpr:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const CppDeleteExpr*>(expr)->operand.get());
+        case StmtKind::CppNoexceptExpr:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const CppNoexceptExpr*>(expr)->operand.get());
+        case StmtKind::CppPseudoDestructorExpr:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const CppPseudoDestructorExpr*>(expr)->base.get());
+        case StmtKind::CppDynamicCastExpr:
+            return expr_references_undeduced_auto_variable(
+                static_cast<const CppDynamicCastExpr*>(expr)->expr.get());
+        case StmtKind::CppTypeIdExpr: {
+            const auto* typeid_expr = static_cast<const CppTypeIdExpr*>(expr);
+            return !typeid_expr->is_type_operand &&
+                   expr_references_undeduced_auto_variable(
+                       typeid_expr->expr_operand.get());
+        }
+        default:
+            return false;
+    }
+}
+
+bool any_expr_references_undeduced_auto_variable(
+    const std::vector<std::unique_ptr<Expr>>& exprs) {
+    for (const auto& expr : exprs) {
+        if (expr_references_undeduced_auto_variable(expr.get())) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::shared_ptr<Scope> skip_leading_template_parameter_scopes(
     std::shared_ptr<Scope> scope) {
     while (scope &&
@@ -3757,6 +3943,10 @@ bool Collect::resolve_dependent_expr_after_substitution(
 
     if (!rebind_qualified_var_ref_after_substitution(expr)) {
         return false;
+    }
+
+    if (expr_references_undeduced_auto_variable(expr.get())) {
+        return true;
     }
 
     if (auto* this_expr = dyn_cast<CppThisExpr>(expr.get())) {

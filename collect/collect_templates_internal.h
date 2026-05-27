@@ -71,7 +71,11 @@ struct TemplateClonePassBuilder {
     std::function<std::optional<size_t>(const SizeOfPackExpr*, std::string*)>
         lookup_pack_size;
     std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_remap;
+    std::unordered_map<const Symbol*, std::vector<std::shared_ptr<Symbol>>>
+        pack_symbol_remap;
+    std::optional<size_t> pack_symbol_element_index;
     std::unordered_map<const Scope*, std::shared_ptr<Scope>> scope_remap;
+    bool preserve_dependent_function_exception_specs = false;
 
     TemplateSubstitutionPass build_substitution_pass() const;
     TemplateDependentResolutionPass build_dependent_resolution_pass(

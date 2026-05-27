@@ -179,7 +179,11 @@ std::unique_ptr<Expr> clone_substituted_pack_pattern_element(
             {});
     if (clone_context) {
         element_builder.symbol_remap = clone_context->symbol_remap;
+        element_builder.pack_symbol_remap = clone_context->pack_symbol_remap;
+        element_builder.pack_symbol_element_index = element_index;
         element_builder.scope_remap = clone_context->scope_remap;
+        element_builder.preserve_dependent_function_exception_specs =
+            clone_context->preserve_dependent_function_exception_specs;
     }
     auto element_clone_pass = element_builder.build_substitution_pass();
 
@@ -424,7 +428,12 @@ void inherit_clone_context_symbol_remaps(TemplateClonePassBuilder& builder,
         return;
     }
     builder.symbol_remap = clone_context->symbol_remap;
+    builder.pack_symbol_remap = clone_context->pack_symbol_remap;
+    builder.pack_symbol_element_index =
+        clone_context->pack_symbol_element_index;
     builder.scope_remap = clone_context->scope_remap;
+    builder.preserve_dependent_function_exception_specs =
+        clone_context->preserve_dependent_function_exception_specs;
 }
 
 void remap_template_argument_symbols_for_substitution(
@@ -1778,6 +1787,11 @@ QualType Collect::substitute_template_type_with_bindings(
         std::shared_ptr<Expr> substituted_exception_spec_expr =
             func->exception_spec_expr;
         if (func->exception_spec_expr) {
+            bool preserve_dependent_exception_spec =
+                clone_context &&
+                clone_context->preserve_dependent_function_exception_specs &&
+                expression_depends_on_template_parameters(
+                    func->exception_spec_expr.get());
             auto rewrite_bound_template_type =
                 [&](QualType bound_type) -> QualType {
                     return substitute_template_type_with_bindings(
@@ -1839,40 +1853,45 @@ QualType Collect::substitute_template_type_with_bindings(
                         allow_unsubstituted_parameters,
                         clone_context);
                 };
-            clone_pass_builder.expand_pack_expansion =
-                [&](const Expr* pattern_expr,
-                    std::vector<std::unique_ptr<Expr>>& expanded_out,
-                    std::string* error_out) -> bool {
-                    return expand_substituted_pack_expression(
-                        *this,
-                        ast_ctx_.get(),
-                        parameters,
-                        argument_bindings,
-                        clone_context,
-                        loc,
-                        pattern_expr,
-                        expanded_out,
-                        "failed to collect function noexcept pack expansion shape",
-                        "function noexcept pack expansion does not reference a template parameter pack",
-                        "failed to materialize function noexcept pack expansion bindings",
-                        "failed to substitute function noexcept pack expansion pattern",
-                        "function noexcept pack expansion pattern cloning is not supported",
-                        "failed to preserve unexpanded function noexcept pack expansion",
-                        rewrite_noexcept_pack_element_type,
-                        rewrite_noexcept_pack_element_arguments,
-                        [&](std::unique_ptr<Expr>& element_expr,
-                            const TemplateArgumentBindings&,
-                            const TemplateClonePassBuilder&,
-                            const TemplateSubstitutionPass&,
-                            std::string* nested_error_out) -> bool {
-                            return resolve_dependent_expr_after_substitution(
-                                element_expr,
-                                QualType(),
-                                nested_error_out);
-                        },
-                        error_out);
-                };
+            if (!preserve_dependent_exception_spec) {
+                clone_pass_builder.expand_pack_expansion =
+                    [&](const Expr* pattern_expr,
+                        std::vector<std::unique_ptr<Expr>>& expanded_out,
+                        std::string* error_out) -> bool {
+                        return expand_substituted_pack_expression(
+                            *this,
+                            ast_ctx_.get(),
+                            parameters,
+                            argument_bindings,
+                            clone_context,
+                            loc,
+                            pattern_expr,
+                            expanded_out,
+                            "failed to collect function noexcept pack expansion shape",
+                            "function noexcept pack expansion does not reference a template parameter pack",
+                            "failed to materialize function noexcept pack expansion bindings",
+                            "failed to substitute function noexcept pack expansion pattern",
+                            "function noexcept pack expansion pattern cloning is not supported",
+                            "failed to preserve unexpanded function noexcept pack expansion",
+                            rewrite_noexcept_pack_element_type,
+                            rewrite_noexcept_pack_element_arguments,
+                            [&](std::unique_ptr<Expr>& element_expr,
+                                const TemplateArgumentBindings&,
+                                const TemplateClonePassBuilder&,
+                                const TemplateSubstitutionPass&,
+                                std::string* nested_error_out) -> bool {
+                                return resolve_dependent_expr_after_substitution(
+                                    element_expr,
+                                    QualType(),
+                                    nested_error_out);
+                            },
+                            error_out);
+                    };
+            }
             auto clone_pass = clone_pass_builder.build_substitution_pass();
+            if (preserve_dependent_exception_spec) {
+                clone_pass.context().preserve_unexpanded_pack_expansions = true;
+            }
             std::string clone_error;
             auto cloned_exception_expr =
                 clone_pass.clone_expr(func->exception_spec_expr.get(), &clone_error);
@@ -1884,61 +1903,69 @@ QualType Collect::substitute_template_type_with_bindings(
                     loc);
                 return type;
             }
-            std::string resolve_error;
-            bool needs_dependent_resolution =
-                expression_depends_on_template_parameters(
-                    cloned_exception_expr.get());
-            if (needs_dependent_resolution &&
-                !resolve_dependent_expr_after_substitution(
-                    cloned_exception_expr,
-                    QualType(),
-                    &resolve_error)) {
-                report_error(
-                    resolve_error.empty()
-                        ? "failed to resolve function noexcept expression after substitution"
-                        : resolve_error,
-                    loc);
-                return type;
-            }
-            changed = true;
-            substituted_exception_spec_expr =
-                std::shared_ptr<Expr>(cloned_exception_expr.release());
-            bool known_exception_spec = false;
-            bool is_non_throwing = false;
-            bool expression_is_dependent =
-                expression_is_value_dependent_for_constant_evaluation(
-                    substituted_exception_spec_expr.get(),
-                    true);
-            if (!expression_is_dependent) {
-                ConstEvalResult eval = evaluate_constant_expression_demand(
-                    substituted_exception_spec_expr.get(),
-                    ConstEvalMode::cpp_core_constant_expression(),
-                    loc);
-                if (eval.status == ConstEvalStatus::Constant &&
-                    eval.value.has_value()) {
-                    switch (eval.value->kind) {
-                        case ConstValueKind::Boolean:
-                            is_non_throwing = eval.value->bool_value;
-                            known_exception_spec = true;
-                            break;
-                        case ConstValueKind::Integer:
-                            is_non_throwing =
-                                eval.value->int_value.to_unsigned_u64() != 0;
-                            known_exception_spec = true;
-                            break;
-                        default:
-                            break;
-                    }
-                }
-            }
-            if (known_exception_spec) {
-                substituted_exception_spec = is_non_throwing
-                    ? FunctionExceptionSpecKind::NonThrowing
-                    : FunctionExceptionSpecKind::PotentiallyThrowing;
-                substituted_exception_spec_expr = nullptr;
-            } else {
+            if (preserve_dependent_exception_spec) {
+                changed = true;
                 substituted_exception_spec =
                     FunctionExceptionSpecKind::Dependent;
+                substituted_exception_spec_expr =
+                    std::shared_ptr<Expr>(cloned_exception_expr.release());
+            } else {
+                std::string resolve_error;
+                bool needs_dependent_resolution =
+                    expression_depends_on_template_parameters(
+                        cloned_exception_expr.get());
+                if (needs_dependent_resolution &&
+                    !resolve_dependent_expr_after_substitution(
+                        cloned_exception_expr,
+                        QualType(),
+                        &resolve_error)) {
+                    report_error(
+                        resolve_error.empty()
+                            ? "failed to resolve function noexcept expression after substitution"
+                            : resolve_error,
+                        loc);
+                    return type;
+                }
+                changed = true;
+                substituted_exception_spec_expr =
+                    std::shared_ptr<Expr>(cloned_exception_expr.release());
+                bool known_exception_spec = false;
+                bool is_non_throwing = false;
+                bool expression_is_dependent =
+                    expression_is_value_dependent_for_constant_evaluation(
+                        substituted_exception_spec_expr.get(),
+                        true);
+                if (!expression_is_dependent) {
+                    ConstEvalResult eval = evaluate_constant_expression_demand(
+                        substituted_exception_spec_expr.get(),
+                        ConstEvalMode::cpp_core_constant_expression(),
+                        loc);
+                    if (eval.status == ConstEvalStatus::Constant &&
+                        eval.value.has_value()) {
+                        switch (eval.value->kind) {
+                            case ConstValueKind::Boolean:
+                                is_non_throwing = eval.value->bool_value;
+                                known_exception_spec = true;
+                                break;
+                            case ConstValueKind::Integer:
+                                is_non_throwing =
+                                    eval.value->int_value.to_unsigned_u64() != 0;
+                                known_exception_spec = true;
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                }
+                if (known_exception_spec) {
+                    substituted_exception_spec = is_non_throwing
+                        ? FunctionExceptionSpecKind::NonThrowing
+                        : FunctionExceptionSpecKind::PotentiallyThrowing;
+                    substituted_exception_spec_expr = nullptr;
+                } else {
+                    substituted_exception_spec =
+                        FunctionExceptionSpecKind::Dependent;
+                }
             }
         }
         if (!changed) {

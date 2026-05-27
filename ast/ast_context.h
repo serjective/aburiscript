@@ -304,6 +304,7 @@ struct FunctionTemplateSpecializationEntry {
     bool is_instantiating = false;
     bool is_instantiated = false;
     bool instantiation_failed = false;
+    bool signature_is_finalized = false;
 
     void note_first_required_loc(SrcLoc loc) {
         if (!loc.isInvalid() && first_required_loc.isInvalid()) {

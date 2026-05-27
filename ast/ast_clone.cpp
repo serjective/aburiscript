@@ -705,6 +705,16 @@ std::shared_ptr<Symbol> remap_symbol(const std::shared_ptr<Symbol>& sym,
     if (it != ctx.symbol_remap.end()) {
         return it->second;
     }
+    if (ctx.pack_symbol_element_index.has_value()) {
+        auto pack_it = ctx.pack_symbol_remap.find(sym.get());
+        if (pack_it != ctx.pack_symbol_remap.end()) {
+            size_t element_index = *ctx.pack_symbol_element_index;
+            if (element_index < pack_it->second.size()) {
+                return pack_it->second[element_index];
+            }
+            return nullptr;
+        }
+    }
     if (ctx.rewrite_symbol) {
         return ctx.rewrite_symbol(sym);
     }

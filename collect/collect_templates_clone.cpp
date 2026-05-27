@@ -120,11 +120,17 @@ void TemplateDependentResolutionPass::sync_from_substitution_pass(
     ctx.expand_pack_expansion = substitution_pass.context().expand_pack_expansion;
     ctx.lookup_pack_size = substitution_pass.context().lookup_pack_size;
     ctx.symbol_remap = substitution_pass.context().symbol_remap;
+    ctx.pack_symbol_remap = substitution_pass.context().pack_symbol_remap;
+    ctx.pack_symbol_element_index =
+        substitution_pass.context().pack_symbol_element_index;
     ctx.scope_remap = substitution_pass.context().scope_remap;
     ctx.record_type_remap = substitution_pass.context().record_type_remap;
     ctx.template_parameter_remap =
         substitution_pass.context().template_parameter_remap;
     ctx.template_decl_remap = substitution_pass.context().template_decl_remap;
+    ctx.preserve_dependent_function_exception_specs =
+        substitution_pass.context()
+            .preserve_dependent_function_exception_specs;
 }
 
 bool TemplateDependentResolutionPass::resolve_expr_in_place(
@@ -156,7 +162,11 @@ TemplateSubstitutionPass TemplateClonePassBuilder::build_substitution_pass() con
     pass.ctx.expand_pack_expansion = expand_pack_expansion;
     pass.ctx.lookup_pack_size = lookup_pack_size;
     pass.ctx.symbol_remap = symbol_remap;
+    pass.ctx.pack_symbol_remap = pack_symbol_remap;
+    pass.ctx.pack_symbol_element_index = pack_symbol_element_index;
     pass.ctx.scope_remap = scope_remap;
+    pass.ctx.preserve_dependent_function_exception_specs =
+        preserve_dependent_function_exception_specs;
     pass.rewrite_symbol_callback = rewrite_symbol;
     pass.refresh_callbacks();
     return pass;
@@ -176,7 +186,11 @@ TemplateClonePassBuilder::build_dependent_resolution_pass(
     pass.ctx.expand_pack_expansion = expand_pack_expansion;
     pass.ctx.lookup_pack_size = lookup_pack_size;
     pass.ctx.symbol_remap = symbol_remap;
+    pass.ctx.pack_symbol_remap = pack_symbol_remap;
+    pass.ctx.pack_symbol_element_index = pack_symbol_element_index;
     pass.ctx.scope_remap = scope_remap;
+    pass.ctx.preserve_dependent_function_exception_specs =
+        preserve_dependent_function_exception_specs;
     return pass;
 }
 
@@ -198,11 +212,17 @@ TemplateClonePassBuilder::build_dependent_resolution_pass(
     pass.ctx.expand_pack_expansion = substitution_pass.context().expand_pack_expansion;
     pass.ctx.lookup_pack_size = substitution_pass.context().lookup_pack_size;
     pass.ctx.symbol_remap = substitution_pass.context().symbol_remap;
+    pass.ctx.pack_symbol_remap = substitution_pass.context().pack_symbol_remap;
+    pass.ctx.pack_symbol_element_index =
+        substitution_pass.context().pack_symbol_element_index;
     pass.ctx.scope_remap = substitution_pass.context().scope_remap;
     pass.ctx.record_type_remap = substitution_pass.context().record_type_remap;
     pass.ctx.template_parameter_remap =
         substitution_pass.context().template_parameter_remap;
     pass.ctx.template_decl_remap = substitution_pass.context().template_decl_remap;
+    pass.ctx.preserve_dependent_function_exception_specs =
+        substitution_pass.context()
+            .preserve_dependent_function_exception_specs;
     return pass;
 }
 
@@ -1125,7 +1145,12 @@ TemplateClonePassBuilder make_nested_template_clone_pass_builder(
             parameter_rebinds);
     };
     builder.symbol_remap = outer_pass.context().symbol_remap;
+    builder.pack_symbol_remap = outer_pass.context().pack_symbol_remap;
+    builder.pack_symbol_element_index =
+        outer_pass.context().pack_symbol_element_index;
     builder.scope_remap = outer_pass.context().scope_remap;
+    builder.preserve_dependent_function_exception_specs =
+        outer_pass.context().preserve_dependent_function_exception_specs;
     for (const auto& [pattern_symbol, remapped_symbol] : extra_symbol_remap) {
         builder.symbol_remap[pattern_symbol] = remapped_symbol;
     }
@@ -1783,6 +1808,10 @@ bool clone_function_parameters_for_specialization(
         }
     }
 
+    if (pack_param_symbol_remap_out) {
+        substitution_pass.context().pack_symbol_remap =
+            *pack_param_symbol_remap_out;
+    }
     resolution_pass.sync_from_substitution_pass(substitution_pass);
 
     std::unordered_map<std::string, std::shared_ptr<Symbol>>

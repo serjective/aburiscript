@@ -15,6 +15,8 @@ struct ASTCloneContext {
     ASTContext* ast_ctx = nullptr;
     bool publish_type_resolution_to_persistent_store = false;
     bool preserve_unexpanded_pack_expansions = false;
+    bool preserve_dependent_function_exception_specs = false;
+    std::optional<size_t> pack_symbol_element_index;
     std::function<QualType(QualType)> rewrite_type;
     std::function<std::vector<TemplateArgument>(
         const std::vector<TemplateArgument>&,
@@ -35,6 +37,8 @@ struct ASTCloneContext {
     std::function<std::optional<size_t>(const SizeOfPackExpr*, std::string*)>
         lookup_pack_size;
     std::unordered_map<const Symbol*, std::shared_ptr<Symbol>> symbol_remap;
+    std::unordered_map<const Symbol*, std::vector<std::shared_ptr<Symbol>>>
+        pack_symbol_remap;
     std::unordered_map<const Scope*, std::shared_ptr<Scope>> scope_remap;
     std::unordered_map<const ObjectDecl*, QualType> record_type_remap;
     std::unordered_map<const TemplateParameterDecl*, TemplateParameterDecl*>
