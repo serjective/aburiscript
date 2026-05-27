@@ -123,15 +123,118 @@ QualType specialized_ctor_owner_type(const CppConstructorDecl* ctor_decl) {
     return this_ptr_type->pointed_type;
 }
 
-QualType lookup_ctor_initializer_target_type(const CppConstructorDecl* ctor_decl,
-                                             const CppCtorInitializer& initializer) {
+bool is_concrete_specialized_type(QualType type) {
+    return type && !type_depends_on_template_parameters(type);
+}
+
+std::string ctor_initializer_member_name(const CppCtorInitializer& initializer) {
+    if (!initializer.member_name.empty()) {
+        return initializer.member_name;
+    }
+    if (auto* member_expr = dyn_cast<MemberExpr>(initializer.member_expr.get())) {
+        return member_expr->get_member_name();
+    }
+    return "";
+}
+
+const ObjectType::Field* find_ctor_initializer_field(
+    const RecordSemanticState* owner_state,
+    const std::string& member_name) {
+    if (!owner_state || member_name.empty()) {
+        return nullptr;
+    }
+    for (const auto& field : owner_state->fields) {
+        if (field.is_base_subobject || field.is_virtual_base_storage) {
+            continue;
+        }
+        if (field.name == member_name) {
+            return &field;
+        }
+    }
+    return nullptr;
+}
+
+size_t record_constructor_count_for_type(QualType type) {
+    auto object_type = desugar_type(type).as_shared<ObjectType>();
+    auto* object_decl =
+        object_type ? dyn_cast<ObjectDecl>(object_type->get_decl()) : nullptr;
+    const RecordSemanticState* state =
+        object_decl ? record_semantics_cache_lookup(object_decl) : nullptr;
+    return state ? state->constructors.size() : 0;
+}
+
+QualType lookup_ctor_initializer_member_target_type(
+    Collect& collect,
+    const CppConstructorDecl* ctor_decl,
+    CppCtorInitializer& initializer,
+    std::string* error_out) {
+    QualType owner_type = specialized_ctor_owner_type(ctor_decl);
+    const RecordSemanticState* owner_state =
+        collect.ensure_record_semantics_available(owner_type, initializer.location);
+
+    auto* member_expr = dyn_cast<MemberExpr>(initializer.member_expr.get());
+    if (member_expr &&
+        !rebind_member_expr_for_specialized_record(
+            member_expr,
+            nullptr,
+            error_out,
+            owner_type)) {
+        return QualType();
+    }
+
+    auto use_candidate_target = [&](QualType candidate) -> QualType {
+        if (!candidate || record_constructor_count_for_type(candidate) == 0) {
+            return QualType();
+        }
+        initializer.target_type = candidate;
+        initializer.resolved_target_type = candidate;
+        if (member_expr) {
+            member_expr->member_type = candidate;
+            member_expr->declared_member_type = candidate;
+        }
+        return candidate;
+    };
+    if (auto candidate = use_candidate_target(initializer.resolved_target_type)) {
+        return candidate;
+    }
+    if (auto candidate = use_candidate_target(initializer.target_type)) {
+        return candidate;
+    }
+
+    const std::string member_name = ctor_initializer_member_name(initializer);
+    if (const auto* field = find_ctor_initializer_field(owner_state, member_name)) {
+        initializer.target_type = field->type;
+        initializer.resolved_target_type = field->type;
+        if (member_expr) {
+            member_expr->member_type = field->type;
+            member_expr->declared_member_type = field->type;
+        }
+        return field->type;
+    }
+
+    if (is_concrete_specialized_type(initializer.resolved_target_type)) {
+        return initializer.resolved_target_type;
+    }
+    if (is_concrete_specialized_type(initializer.target_type)) {
+        return initializer.target_type;
+    }
+    if (member_expr) {
+        return member_expr->member_type;
+    }
+    return QualType();
+}
+
+QualType lookup_ctor_initializer_target_type(Collect& collect,
+                                             const CppConstructorDecl* ctor_decl,
+                                             CppCtorInitializer& initializer,
+                                             std::string* error_out) {
     if (!ctor_decl) {
         return QualType();
     }
 
     if ((initializer.is_delegating_initializer ||
          initializer.is_base_initializer) &&
-        initializer.resolved_target_type) {
+        is_concrete_specialized_type(initializer.resolved_target_type)) {
         return initializer.resolved_target_type;
     }
 
@@ -140,8 +243,11 @@ QualType lookup_ctor_initializer_target_type(const CppConstructorDecl* ctor_decl
     }
 
     if (!initializer.is_base_initializer) {
-        auto* member_expr = dyn_cast<MemberExpr>(initializer.member_expr.get());
-        return member_expr ? member_expr->member_type : QualType();
+        return lookup_ctor_initializer_member_target_type(
+            collect,
+            ctor_decl,
+            initializer,
+            error_out);
     }
 
     QualType owner_type = specialized_ctor_owner_type(ctor_decl);
@@ -330,9 +436,29 @@ bool rebuild_specialized_ctor_initializer_expression(
     strip_redundant_specialization_casts(initializer.member_expr);
     strip_redundant_specialization_casts(initializer.init_expr);
 
+    if (!collect.resolve_dependent_expr_after_substitution(
+            initializer.init_expr,
+            implicit_this_type_for_specialized_function(ctor_decl),
+            error_out)) {
+        if (error_out && error_out->empty()) {
+            *error_out =
+                initializer.is_base_initializer
+                    ? "failed to resolve constructor base initializer expression after template substitution"
+                    : "failed to resolve constructor member initializer expression after template substitution";
+        }
+        return false;
+    }
+    collect.realize_deferred_expr_type_after_substitution(
+        initializer.init_expr.get(),
+        true);
+
     auto* init_list = dyn_cast<InitListExpr>(initializer.init_expr.get());
 
-    QualType target_type = lookup_ctor_initializer_target_type(ctor_decl, initializer);
+    QualType target_type = lookup_ctor_initializer_target_type(
+        collect,
+        ctor_decl,
+        initializer,
+        error_out);
     if (!target_type) {
         if (error_out && error_out->empty()) {
             *error_out =

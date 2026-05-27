@@ -1686,6 +1686,10 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
             return;
         }
     }
+    if (lang_opts.is_cxx_mode() &&
+        type_depends_on_template_parameters(QualType(node->type), ast_ctx.get())) {
+        return;
+    }
     const bool uses_gnu_inline_semantics = lang_opts.uses_gnu_inline_semantics();
     const bool is_inline_equivalent =
         function_decl_is_inline_equivalent(*node);

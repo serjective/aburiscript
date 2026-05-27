@@ -672,6 +672,260 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             type_loc);
     }
 
+    QualType rebind_specialized_nested_record_type(QualType type) const {
+        auto object_type = desugar_type(type, ast_ctx()).as_shared<ObjectType>();
+        auto* object_decl =
+            object_type ? dyn_cast<ObjectDecl>(object_type->get_decl()) : nullptr;
+        if (!object_decl || object_decl->tag.empty()) {
+            return type;
+        }
+
+        for (const auto& nested_type : nested_types) {
+            if (nested_type.name == object_decl->tag && nested_type.type) {
+                return nested_type.type.with_qualifiers(type.get_qualifiers());
+            }
+        }
+        return type;
+    }
+
+    bool finalize_specialized_record_semantics_for_type(
+        QualType type,
+        SrcLoc loc,
+        std::unordered_set<const ObjectDecl*>& active_records,
+        std::string* error_out) {
+        auto object_type = desugar_type(type, ast_ctx()).as_shared<ObjectType>();
+        auto* object_decl =
+            object_type ? dyn_cast<ObjectDecl>(object_type->get_decl()) : nullptr;
+        if (!object_decl) {
+            return true;
+        }
+        if (!active_records.insert(object_decl).second) {
+            return true;
+        }
+        struct ActiveRecordGuard {
+            std::unordered_set<const ObjectDecl*>& active_records;
+            const ObjectDecl* object_decl = nullptr;
+            ~ActiveRecordGuard() { active_records.erase(object_decl); }
+        } guard{active_records, object_decl};
+
+        const RecordSemanticState* cached_state =
+            collect.query_lookup_record_semantics(object_decl);
+        if (!cached_state) {
+            cached_state = record_semantics_cache_lookup(object_decl, ast_ctx());
+        }
+        if (!cached_state) {
+            cached_state = record_semantics_cache_lookup(object_decl);
+        }
+        if (!cached_state) {
+            return true;
+        }
+        RecordSemanticState state = *cached_state;
+
+        auto finalize_semantic_type = [&](QualType& semantic_type,
+                                          SrcLoc type_loc) -> bool {
+            if (!semantic_type) {
+                return true;
+            }
+            semantic_type = clone_pass.rewrite_type(semantic_type);
+            auto storage_type =
+                finalize_member_storage_type(semantic_type, type_loc);
+            if (!storage_type) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "failed to finalize nested class template record semantic type after substitution";
+                }
+                return false;
+            }
+            semantic_type = storage_type;
+            return finalize_specialized_record_semantics_for_type(
+                semantic_type,
+                type_loc,
+                active_records,
+                error_out);
+        };
+
+        for (auto& base : state.bases) {
+            if (!finalize_semantic_type(base.type, loc)) {
+                return false;
+            }
+        }
+        for (auto& virtual_base : state.virtual_bases) {
+            if (!finalize_semantic_type(virtual_base.type, loc)) {
+                return false;
+            }
+        }
+        for (auto& field : state.fields) {
+            SrcLoc field_loc =
+                field.decl ? field.decl->location : loc;
+            if (!finalize_semantic_type(field.type, field_loc)) {
+                return false;
+            }
+        }
+        for (auto& static_member : state.static_data_members) {
+            SrcLoc member_loc =
+                static_member.decl ? static_member.decl->location : loc;
+            if (!finalize_semantic_type(static_member.type, member_loc)) {
+                return false;
+            }
+        }
+        for (auto& nested_type : state.nested_types) {
+            if (!finalize_semantic_type(nested_type.type, loc)) {
+                return false;
+            }
+        }
+        for (auto& method : state.methods) {
+            if (!finalize_semantic_type(method.type, loc) ||
+                !finalize_semantic_type(method.conversion_target_type, loc)) {
+                return false;
+            }
+            if (method.symbol) {
+                method.symbol->type = method.type;
+            }
+        }
+        for (auto& constructor : state.constructors) {
+            if (!finalize_semantic_type(constructor.type, loc)) {
+                return false;
+            }
+            if (constructor.symbol) {
+                constructor.symbol->type = constructor.type;
+            }
+        }
+        for (auto& destructor : state.destructors) {
+            if (!finalize_semantic_type(destructor.type, loc)) {
+                return false;
+            }
+            if (destructor.symbol) {
+                destructor.symbol->type = destructor.type;
+            }
+        }
+        for (auto& friend_function : state.friend_functions) {
+            if (!finalize_semantic_type(friend_function.type, loc)) {
+                return false;
+            }
+            if (friend_function.symbol) {
+                friend_function.symbol->type = friend_function.type;
+            }
+        }
+        for (auto& friend_type : state.friend_types) {
+            if (!finalize_semantic_type(friend_type.type, loc)) {
+                return false;
+            }
+        }
+
+        if (state.bases.empty() && state.virtual_bases.empty()) {
+            RecordSemanticState layout = compute_record_semantics(
+                std::move(state.fields),
+                object_type->is_union,
+                object_type->is_packed,
+                object_type->requested_alignment,
+                object_type->pack_alignment,
+                state.is_incomplete,
+                ast_ctx() && ast_ctx()->abi_policy
+                    ? ast_ctx()->abi_policy.get()
+                    : nullptr);
+            state.fields = std::move(layout.fields);
+            state.size_bits = layout.size_bits;
+            state.alignment = layout.alignment;
+            state.non_virtual_size_bits = layout.non_virtual_size_bits;
+            state.non_virtual_alignment = layout.non_virtual_alignment;
+            state.has_flexible_array_member = layout.has_flexible_array_member;
+        }
+
+        collect.query_publish_record_semantics(object_decl, std::move(state));
+        return true;
+    }
+
+    bool finalize_cloned_record_member_storage_types(
+        CppRecordDecl* record,
+        std::string* error_out) {
+        if (!record) {
+            return true;
+        }
+
+        std::unordered_set<const ObjectDecl*> active_records;
+        auto finalize_decl = [&](auto&& self,
+                                 Decl* decl) -> bool {
+            if (!decl) {
+                return true;
+            }
+
+            if (auto* field = dyn_cast<FieldDecl>(decl)) {
+                auto storage_type =
+                    finalize_member_storage_type(field->type, field->location);
+                if (!storage_type) {
+                    if (error_out && error_out->empty()) {
+                        *error_out =
+                            "failed to finalize nested class template field type after substitution";
+                    }
+                    return false;
+                }
+                field->type = storage_type;
+                return finalize_specialized_record_semantics_for_type(
+                    field->type,
+                    field->location,
+                    active_records,
+                    error_out);
+            }
+
+            if (auto* typedef_decl = dyn_cast<TypedefDecl>(decl)) {
+                auto storage_type = finalize_member_storage_type(
+                    typedef_decl->type,
+                    typedef_decl->location);
+                if (!storage_type) {
+                    if (error_out && error_out->empty()) {
+                        *error_out =
+                            "failed to finalize nested class template typedef after substitution";
+                    }
+                    return false;
+                }
+                typedef_decl->type = storage_type;
+                if (typedef_decl->sym) {
+                    typedef_decl->sym->type = storage_type;
+                }
+                return true;
+            }
+
+            if (auto* variable = dyn_cast<VariableDecl>(decl)) {
+                auto storage_type = finalize_member_storage_type(
+                    variable->type,
+                    variable->location);
+                if (!storage_type) {
+                    if (error_out && error_out->empty()) {
+                        *error_out =
+                            "failed to finalize nested class template static member type after substitution";
+                    }
+                    return false;
+                }
+                variable->type = storage_type;
+                variable->original_type = storage_type;
+                if (variable->sym) {
+                    variable->sym->type = storage_type;
+                }
+                return true;
+            }
+
+            if (auto* nested_record = dyn_cast<CppRecordDecl>(decl)) {
+                nested_record->provisional_semantic_owner = nullptr;
+                for (auto& member : nested_record->members) {
+                    if (!self(self, member.get())) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            return true;
+        };
+
+        record->provisional_semantic_owner = nullptr;
+        for (auto& member : record->members) {
+            if (!finalize_decl(finalize_decl, member.get())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     std::shared_ptr<FunctionType> finalize_function_storage_type(
         QualType type,
         SrcLoc type_loc) {
@@ -2202,6 +2456,18 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 nested_record->location);
         }
 
+        const ObjectDecl* cloned_provisional_semantic_owner =
+            cloned_record->provisional_semantic_owner;
+        if (!finalize_cloned_record_member_storage_types(
+                cloned_record,
+                &clone_error)) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to finalize class template nested record member types after substitution"
+                    : clone_error,
+                nested_record->location);
+        }
+
         bool is_union_record = cloned_record->record_kind == CppRecordKind::Union;
         auto record_type = std::make_shared<ObjectType>(
             cloned_record->name,
@@ -2271,6 +2537,17 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         collect.collect_record_prepare_deferred_defaulted_method_bodies(ctx);
         collect.collect_record_infer_constexpr_special_members(ctx);
         collect.collect_record_publish_semantics(ctx);
+        cloned_record->provisional_semantic_owner = semantic_decl.get();
+        if (nested_record->provisional_semantic_owner) {
+            clone_pass.context()
+                .record_type_remap[nested_record->provisional_semantic_owner] =
+                QualType(record_type);
+        }
+        if (cloned_provisional_semantic_owner) {
+            clone_pass.context()
+                .record_type_remap[cloned_provisional_semantic_owner] =
+                QualType(record_type);
+        }
 
         if (ast_ctx() && ast_ctx()->has_attrs(cloned_record->node_id)) {
             std::vector<ParsedAttribute> copied_attrs(
@@ -2313,6 +2590,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         substituted_type = finalize_member_storage_type(
             substituted_type,
             field_decl->location);
+        substituted_type = rebind_specialized_nested_record_type(substituted_type);
         if (!substituted_type) {
             return fail_instantiation(
                 "failed to resolve class template field type after substitution",
@@ -2381,6 +2659,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         substituted_type = finalize_member_storage_type(
             substituted_type,
             field_decl->location);
+        substituted_type = rebind_specialized_nested_record_type(substituted_type);
         if (!substituted_type) {
             return fail_instantiation(
                 "failed to finalize class template field type after substitution",
