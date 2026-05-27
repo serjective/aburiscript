@@ -3726,7 +3726,8 @@ std::unique_ptr<Expr> Collect::materialize_concrete_qualified_lookup_expression(
 bool Collect::resolve_dependent_expr_after_substitution(
     std::unique_ptr<Expr>& expr,
     QualType implicit_this_type,
-    std::string* error_out) {
+    std::string* error_out,
+    PostSubstitutionExprUse expr_use) {
     auto implicit_cast_kind_can_be_stripped_after_substitution =
         [](ImplicitCastTypes kind) {
             switch (kind) {
@@ -3971,7 +3972,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
             !resolve_dependent_expr_after_substitution(
                 implicit_cast->expr,
                 implicit_this_type,
-                error_out)) {
+                error_out,
+                expr_use)) {
             return false;
         }
         if (implicit_cast->ctype &&
@@ -4506,7 +4508,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
             owned_member->get_member_name(),
             owned_member->isArrow != 0,
             owned_member->location,
-            /*allow_overloaded_method_set=*/false,
+            /*allow_overloaded_method_set=*/
+                expr_use == PostSubstitutionExprUse::CallCallee,
             owned_member->suppress_virtual_dispatch != 0);
         if (!rewritten) {
             if (error_out && error_out->empty()) {
@@ -4523,7 +4526,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
             !resolve_dependent_expr_after_substitution(
                 paren->subexpr,
                 implicit_this_type,
-                error_out)) {
+                error_out,
+                expr_use)) {
             return false;
         }
         strip_stale_dependent_implicit_casts(paren->subexpr);
@@ -5158,7 +5162,9 @@ bool Collect::resolve_dependent_expr_after_substitution(
         std::vector<TemplateArgument> explicit_template_args;
         auto rewritten = materialize_unresolved_member(
             std::move(owned_member),
-            /*allow_overloaded_method_set=*/has_explicit_template_args);
+            /*allow_overloaded_method_set=*/
+                has_explicit_template_args ||
+                expr_use == PostSubstitutionExprUse::CallCallee);
         if (!rewritten) {
             if (error_out && error_out->empty()) {
                 *error_out =
@@ -5210,7 +5216,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
             lexical_lookup_context);
         auto rewritten = materialize_unresolved_lookup(
             std::move(owned_lookup),
-            /*looks_like_call=*/false);
+            /*looks_like_call=*/
+                expr_use == PostSubstitutionExprUse::CallCallee);
         if (!rewritten) {
             if (error_out && error_out->empty()) {
                 *error_out =
@@ -5422,7 +5429,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
             !resolve_dependent_expr_after_substitution(
                 owned_call->func,
                 implicit_this_type,
-                error_out)) {
+                error_out,
+                PostSubstitutionExprUse::CallCallee)) {
             return false;
         }
         if (!resolve_call_arguments_after_substitution(owned_call->args)) {
@@ -5546,7 +5554,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
             !resolve_dependent_expr_after_substitution(
                 owned_call->callee,
                 implicit_this_type,
-                error_out)) {
+                error_out,
+                PostSubstitutionExprUse::CallCallee)) {
             return false;
         }
         if (!resolve_call_arguments_after_substitution(owned_call->args)) {

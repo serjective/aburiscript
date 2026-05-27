@@ -81,6 +81,11 @@ enum class TemplateDependencyCheckMode : uint8_t {
     AfterTemplateSubstitution,
 };
 
+enum class PostSubstitutionExprUse : uint8_t {
+    Value,
+    CallCallee,
+};
+
 // Parser-facing semantic action surface.
 // This owns semantic lifecycle state and is the single AST node construction
 // entrypoint for parser reductions.
@@ -288,7 +293,8 @@ public:
     bool resolve_dependent_expr_after_substitution(
         std::unique_ptr<Expr>& expr,
         QualType implicit_this_type,
-        std::string* error_out) ;
+        std::string* error_out,
+        PostSubstitutionExprUse expr_use = PostSubstitutionExprUse::Value) ;
 
     DependentLookupQualifier normalize_dependent_lookup_qualifier_after_substitution(
         const DependentLookupQualifier& qualifier,
