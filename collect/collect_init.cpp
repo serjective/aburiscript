@@ -1328,7 +1328,9 @@ std::unique_ptr<Expr> Collect::process_initializer_for_type(std::unique_ptr<Expr
             return init;
         }
         if (expression_depends_on_template_parameters(init_list) ||
-            type_depends_on_template_parameters(declared_type, ast_ctx_.get())) {
+            collect_internal::initializer_target_type_requires_deferred_semantics(
+                declared_type,
+                ast_ctx_.get())) {
             return init;
         }
         auto owned = std::unique_ptr<InitListExpr>(static_cast<InitListExpr*>(init.release()));

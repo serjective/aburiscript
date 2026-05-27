@@ -75,6 +75,73 @@ bool init_list_has_lowered_semantics_for_type(const InitListExpr* init_list,
         .equals_unqualified(desugar_type(target_type, ast_ctx));
 }
 
+bool initializer_target_type_requires_deferred_semantics(
+    QualType target_type,
+    const ASTContext* ast_ctx = nullptr) {
+    if (!type_depends_on_template_parameters(target_type, ast_ctx)) {
+        return false;
+    }
+
+    auto object_type = desugar_type(target_type, ast_ctx).as_shared<ObjectType>();
+    if (!object_type || object_type->is_class_template_specialization()) {
+        return true;
+    }
+
+    auto* record_decl = dyn_cast<ObjectDecl>(object_type->get_decl());
+    const RecordSemanticState* state =
+        record_decl ? record_semantics_cache_lookup(record_decl, ast_ctx) : nullptr;
+    if (!state) {
+        return true;
+    }
+
+    auto semantic_type_depends = [ast_ctx](QualType type) {
+        return type_depends_on_template_parameters(type, ast_ctx);
+    };
+    for (const auto& base : state->bases) {
+        if (semantic_type_depends(base.type)) {
+            return true;
+        }
+    }
+    for (const auto& virtual_base : state->virtual_bases) {
+        if (semantic_type_depends(virtual_base.type)) {
+            return true;
+        }
+    }
+    for (const auto& field : state->fields) {
+        if (semantic_type_depends(field.type)) {
+            return true;
+        }
+    }
+    for (const auto& ctor : state->constructors) {
+        auto ctor_type = desugar_type(ctor.type, ast_ctx).as_shared<FunctionType>();
+        if (!ctor_type) {
+            if (semantic_type_depends(ctor.type)) {
+                return true;
+            }
+            continue;
+        }
+
+        CppConstructorUserParamInfo param_info =
+            cpp_compute_constructor_user_param_info(ctor);
+        for (size_t param_idx = param_info.user_param_start;
+             param_idx < ctor_type->parameters.size();
+             ++param_idx) {
+            auto param_object_type =
+                remove_reference(
+                    desugar_type(ctor_type->parameters[param_idx], ast_ctx))
+                    .as_shared<ObjectType>();
+            if (param_object_type &&
+                param_object_type->get_decl() == object_type->get_decl()) {
+                continue;
+            }
+            if (semantic_type_depends(ctor_type->parameters[param_idx])) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 std::string describe_consteval_failure(const ConstEvalResult& result) {
     if (!result.message.empty()) {
         return result.message;

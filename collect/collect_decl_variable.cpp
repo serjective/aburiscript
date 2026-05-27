@@ -7,86 +7,18 @@ using namespace collect_decl_internal;
 
 namespace {
 
-bool initializer_target_type_depends_on_template_parameters(
-    QualType target_type,
-    const ASTContext* ast_ctx = nullptr);
-
 bool should_defer_template_dependent_initializer_semantics(
     const Collect& collect,
     QualType target_type,
-    const Expr* init) {
+    const Expr* init,
+    const ASTContext* ast_ctx = nullptr) {
     if (!init) {
         return false;
     }
     return collect.expression_depends_on_template_parameters(init) ||
-           initializer_target_type_depends_on_template_parameters(target_type);
-}
-
-bool initializer_target_type_depends_on_template_parameters(
-    QualType target_type,
-    const ASTContext* ast_ctx) {
-    if (!type_depends_on_template_parameters(target_type, ast_ctx)) {
-        return false;
-    }
-
-    auto object_type = desugar_type(target_type, ast_ctx).as_shared<ObjectType>();
-    if (!object_type || object_type->is_class_template_specialization()) {
-        return true;
-    }
-
-    auto* record_decl = dyn_cast<ObjectDecl>(object_type->get_decl());
-    const RecordSemanticState* state =
-        record_decl ? record_semantics_cache_lookup(record_decl, ast_ctx) : nullptr;
-    if (!state) {
-        return true;
-    }
-
-    auto semantic_type_depends = [ast_ctx](QualType type) {
-        return type_depends_on_template_parameters(type, ast_ctx);
-    };
-    for (const auto& base : state->bases) {
-        if (semantic_type_depends(base.type)) {
-            return true;
-        }
-    }
-    for (const auto& virtual_base : state->virtual_bases) {
-        if (semantic_type_depends(virtual_base.type)) {
-            return true;
-        }
-    }
-    for (const auto& field : state->fields) {
-        if (semantic_type_depends(field.type)) {
-            return true;
-        }
-    }
-    for (const auto& ctor : state->constructors) {
-        auto ctor_type = desugar_type(ctor.type, ast_ctx).as_shared<FunctionType>();
-        if (!ctor_type) {
-            if (semantic_type_depends(ctor.type)) {
-                return true;
-            }
-            continue;
-        }
-
-        CppConstructorUserParamInfo param_info =
-            cpp_compute_constructor_user_param_info(ctor);
-        for (size_t param_idx = param_info.user_param_start;
-             param_idx < ctor_type->parameters.size();
-             ++param_idx) {
-            auto param_object_type =
-                remove_reference(
-                    desugar_type(ctor_type->parameters[param_idx], ast_ctx))
-                    .as_shared<ObjectType>();
-            if (param_object_type &&
-                param_object_type->get_decl() == object_type->get_decl()) {
-                continue;
-            }
-            if (semantic_type_depends(ctor_type->parameters[param_idx])) {
-                return true;
-            }
-        }
-    }
-    return false;
+           collect_internal::initializer_target_type_requires_deferred_semantics(
+               target_type,
+               ast_ctx);
 }
 
 bool any_initializer_argument_depends_on_template_parameters(
@@ -586,7 +518,8 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         should_defer_template_dependent_initializer_semantics(
             *this,
             declared_type,
-            init.get());
+            init.get(),
+            ast_ctx_.get());
     bool same_type_prvalue_initializer =
         is_same_type_object_prvalue_initializer(
             *this,
@@ -876,7 +809,10 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
     SrcLoc loc) {
     if (isa<InitListExpr>(init.get()) &&
         should_defer_template_dependent_initializer_semantics(
-            *this, member_type, init.get())) {
+            *this,
+            member_type,
+            init.get(),
+            ast_ctx_.get())) {
         return init;
     }
     return process_initializer_for_type(std::move(init), member_type, loc);
@@ -910,7 +846,7 @@ std::unique_ptr<Expr> Collect::collect_class_object_initializer_expression(
         };
 
     bool object_type_is_dependent =
-        initializer_target_type_depends_on_template_parameters(
+        collect_internal::initializer_target_type_requires_deferred_semantics(
             object_type,
             ast_ctx_.get());
     bool has_dependent_argument =
@@ -1092,7 +1028,7 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
     }
 
     bool member_type_is_dependent =
-        initializer_target_type_depends_on_template_parameters(
+        collect_internal::initializer_target_type_requires_deferred_semantics(
             member_type,
             ast_ctx_.get());
 
