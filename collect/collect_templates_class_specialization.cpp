@@ -2656,6 +2656,16 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 .record_type_remap[cloned_provisional_semantic_owner] =
                 QualType(record_type);
         }
+        if (!template_sema_internal::finalize_specialized_record_member_bodies(
+                collect,
+                cloned_record,
+                &clone_error)) {
+            return fail_instantiation(
+                clone_error.empty()
+                    ? "failed to finalize class template nested record member bodies after substitution"
+                    : clone_error,
+                nested_record->location);
+        }
 
         if (ast_ctx() && ast_ctx()->has_attrs(cloned_record->node_id)) {
             std::vector<ParsedAttribute> copied_attrs(

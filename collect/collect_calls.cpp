@@ -3951,12 +3951,16 @@ bool Collect::resolve_dependent_expr_after_substitution(
 
     if (auto* this_expr = dyn_cast<CppThisExpr>(expr.get())) {
         if (implicit_this_type &&
-            (type_depends_on_template_parameters(
+            (!this_expr->this_type ||
+             type_depends_on_template_parameters(
                  this_expr->this_type,
                  ast_ctx_.get()) ||
-             (this_expr->this_type &&
-              contains_deferred_semantic_type(
-                  this_expr->this_type.get_shared())))) {
+             contains_deferred_semantic_type(
+                 this_expr->this_type.get_shared()) ||
+             !types_equivalent_after_template_argument_canonicalization(
+                 this_expr->this_type,
+                 implicit_this_type,
+                 ast_ctx_.get()))) {
             this_expr->this_type = implicit_this_type;
         }
         return true;
@@ -4490,7 +4494,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
             (member->member_type &&
              contains_deferred_semantic_type(
                  member->member_type.get_shared()));
-        if (base_still_dependent || !member_type_still_dependent) {
+        if (base_still_dependent ||
+            (member->member_type && !member_type_still_dependent)) {
             return true;
         }
 

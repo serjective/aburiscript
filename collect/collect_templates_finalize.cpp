@@ -628,57 +628,6 @@ bool finalize_specialized_control_condition_declaration(
         error_out);
 }
 
-bool finalize_specialized_local_record_function_body(Collect& collect,
-                                                     FuncDecl* function_decl,
-                                                     std::string* error_out) {
-    if (!function_decl || !function_decl->body) {
-        return true;
-    }
-
-    return collect.with_function_definition_state(
-        function_decl,
-        [&]() {
-            if (auto* ctor_decl = dyn_cast<CppConstructorDecl>(function_decl)) {
-                if (!finalize_specialized_ctor_initializers(
-                        collect,
-                        ctor_decl,
-                        error_out)) {
-                    return false;
-                }
-            }
-            return finalize_specialized_stmt_semantics(
-                collect,
-                function_decl->body,
-                QualType(function_decl->type),
-                error_out);
-        },
-        function_decl->friend_access_type);
-}
-
-bool finalize_specialized_local_record_member_bodies(Collect& collect,
-                                                     CppRecordDecl* record,
-                                                     std::string* error_out) {
-    if (!record) {
-        return true;
-    }
-
-    for (auto& member : record->members) {
-        if (!member) {
-            continue;
-        }
-        if (auto* function_decl = dyn_cast<FuncDecl>(member.get())) {
-            if (!finalize_specialized_local_record_function_body(
-                    collect,
-                    function_decl,
-                    error_out)) {
-                return false;
-            }
-            continue;
-        }
-    }
-    return true;
-}
-
 bool record_semantic_owner_is_complete(const CppRecordDecl* record) {
     if (!record || !record->provisional_semantic_owner) {
         return false;
@@ -729,7 +678,7 @@ bool finalize_specialized_local_record_decl(
     }
 
     record->provisional_semantic_owner = semantic_object;
-    if (!finalize_specialized_local_record_member_bodies(
+    if (!finalize_specialized_record_member_bodies(
             collect,
             record,
             error_out)) {
@@ -744,6 +693,65 @@ bool finalize_specialized_local_record_decl(
 }
 
 } // namespace
+
+bool finalize_specialized_record_function_body(Collect& collect,
+                                               FuncDecl* function_decl,
+                                               std::string* error_out) {
+    if (!function_decl || !function_decl->body) {
+        return true;
+    }
+
+    return collect.with_function_definition_state(
+        function_decl,
+        [&]() {
+            if (auto* ctor_decl = dyn_cast<CppConstructorDecl>(function_decl)) {
+                if (!finalize_specialized_ctor_initializers(
+                        collect,
+                        ctor_decl,
+                        error_out)) {
+                    return false;
+                }
+            }
+            return finalize_specialized_stmt_semantics(
+                collect,
+                function_decl->body,
+                QualType(function_decl->type),
+                error_out);
+        },
+        function_decl->friend_access_type);
+}
+
+bool finalize_specialized_record_member_bodies(Collect& collect,
+                                               CppRecordDecl* record,
+                                               std::string* error_out) {
+    if (!record) {
+        return true;
+    }
+
+    for (auto& member : record->members) {
+        if (!member) {
+            continue;
+        }
+        if (auto* function_decl = dyn_cast<FuncDecl>(member.get())) {
+            if (!finalize_specialized_record_function_body(
+                    collect,
+                    function_decl,
+                    error_out)) {
+                return false;
+            }
+            continue;
+        }
+        if (auto* nested_record = dyn_cast<CppRecordDecl>(member.get())) {
+            if (!finalize_specialized_record_member_bodies(
+                    collect,
+                    nested_record,
+                    error_out)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 QualType implicit_this_type_for_specialized_function(const FuncDecl* decl) {
     if (!decl || !decl->type) {

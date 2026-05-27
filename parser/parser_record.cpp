@@ -1224,6 +1224,26 @@ const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
 
     auto record_type = semantic_decl->get_record_type();
     record_type->set_decl(semantic_decl);
+    auto ensure_namespace_qualifier_prefix =
+        [&](std::string& qualifier_prefix) {
+        auto scope = collect_->collect_current_scope();
+        while (scope && scope->cxx_namespace_path.empty()) {
+            scope = scope->parent;
+        }
+        qualified_name_utils::ensure_namespace_qualifier_prefix_for_scope(
+            scope, qualifier_prefix);
+    };
+    auto append_decl_attrs_to_symbol =
+        [&](const Decl* decl, const std::shared_ptr<Symbol>& sym) {
+        if (!ast_ctx || !decl || !sym) {
+            return;
+        }
+        const auto& attrs = ast_ctx->get_attrs(decl->node_id).attrs;
+        sym->sym_attrs.attrs.insert(
+            sym->sym_attrs.attrs.end(),
+            attrs.begin(),
+            attrs.end());
+    };
 
     RecordSemanticState state;
     state.is_incomplete = !record.is_definition;
@@ -1386,6 +1406,114 @@ const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
                 nested_template.decl = class_template;
                 state.nested_templates.push_back(std::move(nested_template));
             }
+            continue;
+        }
+        if (const auto* method_template =
+                dyn_cast<FunctionTemplateDecl>(member.get())) {
+            auto* templated_function = method_template->function_decl();
+            auto* templated_method =
+                dyn_cast<CppMethodDecl>(templated_function);
+            auto* templated_ctor =
+                dyn_cast<CppConstructorDecl>(templated_function);
+            if (!templated_method && !templated_ctor) {
+                continue;
+            }
+
+            std::string method_prefix;
+            if (auto* qualifier_prefix =
+                    get_func_decl_cxx_qualifier_prefix(templated_function)) {
+                method_prefix = *qualifier_prefix;
+            }
+            if (method_prefix.empty()) {
+                method_prefix = record.name;
+            }
+            ensure_namespace_qualifier_prefix(method_prefix);
+            if (!method_prefix.empty()) {
+                set_func_decl_cxx_qualifier_prefix(
+                    templated_function,
+                    method_prefix);
+            }
+            set_func_decl_owner_record_type(
+                templated_function,
+                QualType(record_type));
+
+            RecordSemanticState::MethodTemplate method_template_state;
+            method_template_state.name = templated_function->name;
+            method_template_state.declared_access = current_access;
+            method_template_state.is_static =
+                templated_method &&
+                templated_method->storage_class == StorageClass::STATIC;
+            method_template_state.decl = method_template;
+            state.method_templates.push_back(std::move(method_template_state));
+            if (templated_ctor) {
+                state.definition_data.has_user_declared_constructor = true;
+            }
+            continue;
+        }
+        if (const auto* method_decl = dyn_cast<CppMethodDecl>(member.get())) {
+            std::string method_prefix;
+            if (auto* qualifier_prefix =
+                    get_func_decl_cxx_qualifier_prefix(method_decl)) {
+                method_prefix = *qualifier_prefix;
+            }
+            if (method_prefix.empty()) {
+                method_prefix = record.name;
+            }
+            ensure_namespace_qualifier_prefix(method_prefix);
+            if (!method_prefix.empty()) {
+                set_func_decl_cxx_qualifier_prefix(method_decl, method_prefix);
+            }
+            set_func_decl_owner_record_type(method_decl, QualType(record_type));
+            auto method_sym = collect_->collect_declare_function_symbol(
+                method_decl->name,
+                method_decl->type,
+                method_decl->storage_class,
+                method_decl->is_constexpr,
+                method_decl->is_consteval,
+                method_decl->is_inline,
+                function_decl_defines_entity(method_decl),
+                method_decl->location,
+                method_decl->get_language_linkage(),
+                true,
+                method_decl->is_deleted,
+                method_decl->is_defaulted,
+                QualType(record_type),
+                method_prefix,
+                method_decl->trailing_requires_clause.get());
+            if (method_sym) {
+                set_symbol_owner_record_type(method_sym.get(), QualType(record_type));
+                if (!method_prefix.empty()) {
+                    set_symbol_cxx_qualifier_prefix(method_sym.get(), method_prefix);
+                }
+                if (function_decl_defines_entity(method_decl)) {
+                    method_sym->function_definition =
+                        const_cast<CppMethodDecl*>(method_decl);
+                }
+                method_sym->function_trailing_requires_clause =
+                    method_decl->trailing_requires_clause.get();
+                append_decl_attrs_to_symbol(method_decl, method_sym);
+            }
+
+            RecordSemanticState::Method method;
+            method.name = method_decl->name;
+            method.type = QualType(method_decl->type);
+            method.declared_access = current_access;
+            method.is_static =
+                method_decl->storage_class == StorageClass::STATIC;
+            method.is_deleted = method_decl->is_deleted;
+            method.is_defaulted = method_decl->is_defaulted;
+            method.is_constexpr = method_decl->is_constexpr;
+            method.is_consteval = method_decl->is_consteval;
+            method.is_explicit = method_decl->is_explicit_conversion;
+            method.is_virtual = method_decl->is_virtual;
+            method.is_override = method_decl->is_override;
+            method.is_final = method_decl->is_final;
+            method.is_pure = method_decl->is_pure;
+            method.is_conversion_function = method_decl->is_conversion_function;
+            method.conversion_target_type = method_decl->conversion_target_type;
+            method.decl = method_decl;
+            method.symbol = std::move(method_sym);
+            state.methods.push_back(std::move(method));
             continue;
         }
         if (const auto* friend_decl = dyn_cast<FriendDecl>(member.get())) {

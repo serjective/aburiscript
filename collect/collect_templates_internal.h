@@ -412,6 +412,10 @@ bool finalize_specialized_stmt_semantics(Collect& collect,
                                          QualType expected_return_type,
                                          std::string* error_out);
 
+bool finalize_specialized_record_member_bodies(Collect& collect,
+                                               CppRecordDecl* record,
+                                               std::string* error_out);
+
 bool finalize_specialized_ctor_initializers(Collect& collect,
                                             CppConstructorDecl* ctor_decl,
                                             std::string* error_out);
