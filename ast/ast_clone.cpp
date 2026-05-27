@@ -2911,6 +2911,38 @@ ObjectDecl* clone_cpp_record_provisional_semantic_owner(
     return retained_owner;
 }
 
+bool seed_nested_cpp_record_provisional_owner_remaps(
+    const CppRecordDecl* record_decl,
+    ASTCloneContext& ctx,
+    std::string* error_out) {
+    if (!record_decl) {
+        return true;
+    }
+
+    for (const auto& member : record_decl->members) {
+        const auto* nested_record = dyn_cast<CppRecordDecl>(member.get());
+        if (!nested_record) {
+            continue;
+        }
+        if (!seed_nested_cpp_record_provisional_owner_remaps(
+                nested_record,
+                ctx,
+                error_out)) {
+            return false;
+        }
+        if (!nested_record->provisional_semantic_owner) {
+            continue;
+        }
+        if (!clone_cpp_record_provisional_semantic_owner(
+                nested_record->provisional_semantic_owner,
+                ctx,
+                error_out)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool clone_cpp_explicit_specifier(const CppExplicitSpecifier& source,
                                   CppExplicitSpecifier& destination,
                                   ASTCloneContext& ctx,
@@ -3535,6 +3567,12 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
             const auto* record_decl = static_cast<const CppRecordDecl*>(decl);
             ObjectDecl* cloned_provisional_semantic_owner = nullptr;
             if (record_decl->provisional_semantic_owner) {
+                if (!seed_nested_cpp_record_provisional_owner_remaps(
+                        record_decl,
+                        ctx,
+                        error_out)) {
+                    return nullptr;
+                }
                 cloned_provisional_semantic_owner =
                     clone_cpp_record_provisional_semantic_owner(
                         record_decl->provisional_semantic_owner,

@@ -920,7 +920,19 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
 
             if (auto* nested_record = dyn_cast<CppRecordDecl>(decl)) {
-                nested_record->provisional_semantic_owner = nullptr;
+                if (nested_record->provisional_semantic_owner &&
+                    nested_record->provisional_semantic_owner->get_record_type()) {
+                    if (!finalize_specialized_record_semantics_for_type(
+                            QualType(
+                                nested_record
+                                    ->provisional_semantic_owner
+                                    ->get_record_type()),
+                            nested_record->location,
+                            active_records,
+                            error_out)) {
+                        return false;
+                    }
+                }
                 for (auto& member : nested_record->members) {
                     if (!self(self, member.get())) {
                         return false;
