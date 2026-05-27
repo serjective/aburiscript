@@ -76,6 +76,11 @@ enum class OverloadCandidateProvenance : uint8_t {
     ConversionFunction
 };
 
+enum class TemplateDependencyCheckMode : uint8_t {
+    Normal,
+    AfterTemplateSubstitution,
+};
+
 // Parser-facing semantic action surface.
 // This owns semantic lifecycle state and is the single AST node construction
 // entrypoint for parser reductions.
@@ -749,7 +754,9 @@ public:
 
     std::unique_ptr<Expr> collect_unary_operation(UnaryOpTypes uop,
                                                   std::unique_ptr<Expr> expr,
-                                                  SrcLoc loc) ;
+                                                  SrcLoc loc,
+                                                  TemplateDependencyCheckMode dependency_mode =
+                                                      TemplateDependencyCheckMode::Normal) ;
 
     std::unique_ptr<Expr> collect_function_call(std::unique_ptr<Expr> callee,
                                                 std::vector<std::unique_ptr<Expr>> args,
@@ -798,7 +805,9 @@ public:
                                                     SrcLoc loc,
                                                     bool allow_overloaded_method_set = false,
                                                     bool suppress_virtual_dispatch = false,
-                                                    bool requires_template_keyword = false) ;
+                                                    bool requires_template_keyword = false,
+                                                    TemplateDependencyCheckMode dependency_mode =
+                                                        TemplateDependencyCheckMode::Normal) ;
 
     std::unique_ptr<Expr> collect_cpp_pseudo_destructor_expression(
         std::unique_ptr<Expr> base,

@@ -6658,7 +6658,11 @@ std::unique_ptr<Expr> Collect::collect_cpp_noexcept_expression(
 }
 
 
-std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::unique_ptr<Expr> expr, SrcLoc loc) {
+std::unique_ptr<Expr> Collect::collect_unary_operation(
+    UnaryOpTypes uop,
+    std::unique_ptr<Expr> expr,
+    SrcLoc loc,
+    TemplateDependencyCheckMode dependency_mode) {
 
     if (lang_opts_.is_cxx_mode() &&
         expr &&
@@ -6795,9 +6799,21 @@ std::unique_ptr<Expr> Collect::collect_unary_operation(UnaryOpTypes uop, std::un
         return node;
     }
 
-    if (lang_opts_.is_cxx_mode() &&
-        (type_depends_on_template_parameters(exp_type, ast_ctx_.get()) ||
-         expression_depends_on_template_parameters(node->exp.get()))) {
+    bool operand_is_dependent = false;
+    if (lang_opts_.is_cxx_mode()) {
+        if (dependency_mode ==
+            TemplateDependencyCheckMode::AfterTemplateSubstitution) {
+            operand_is_dependent =
+                cpp_expr_still_dependent_after_substitution(
+                    node->exp.get(),
+                    ast_ctx_.get());
+        } else {
+            operand_is_dependent =
+                type_depends_on_template_parameters(exp_type, ast_ctx_.get()) ||
+                expression_depends_on_template_parameters(node->exp.get());
+        }
+    }
+    if (lang_opts_.is_cxx_mode() && operand_is_dependent) {
         QualType dependent_result_type =
             known_dependent_unary_result_type(uop, exp_type, ast_ctx_.get());
         if (!dependent_result_type) {

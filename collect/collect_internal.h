@@ -1653,6 +1653,221 @@ CppMemberLookupBaseAnalysis analyze_cpp_member_lookup_base(
         get_active_side_table_ast_context());
 }
 
+QualType cpp_member_lookup_object_type_after_substitution(
+    QualType base_type,
+    bool is_arrow,
+    const ASTContext* ast_ctx) {
+    QualType object_type =
+        desugar_type(remove_reference(base_type, ast_ctx), ast_ctx);
+    if (is_arrow) {
+        auto ptr_type = object_type.as_shared<PointerType>();
+        object_type = ptr_type
+            ? desugar_type(remove_reference(ptr_type->pointed_type, ast_ctx), ast_ctx)
+            : QualType(nullptr);
+    }
+    return object_type;
+}
+
+bool cpp_expr_still_dependent_after_substitution(
+    const Expr* expr,
+    const ASTContext* ast_ctx);
+
+bool cpp_type_still_dependent_after_substitution(
+    QualType type,
+    const ASTContext* ast_ctx) {
+    while (type) {
+        type = desugar_type(remove_reference(type, ast_ctx), ast_ctx);
+        auto raw = type.get_shared();
+        if (!raw) {
+            return true;
+        }
+        if (isa<TemplateTypeParmType>(raw.get())) {
+            return true;
+        }
+        if (auto auto_type = dyn_cast_shared<AutoType>(raw)) {
+            return auto_type->flavor == AutoTypeFlavor::TemplateNonType ||
+                   auto_type->flavor ==
+                       AutoTypeFlavor::DecltypeAutoTemplateNonType;
+        }
+        if (auto typeof_type = dyn_cast_shared<TypeofExprType>(raw)) {
+            if (!typeof_type->expr) {
+                return true;
+            }
+            type = typeof_type->expr->get_type();
+            continue;
+        }
+        if (auto decltype_type = dyn_cast_shared<DecltypeExprType>(raw)) {
+            if (!decltype_type->expr) {
+                return true;
+            }
+            type = decltype_type->expr->get_type();
+            continue;
+        }
+        if (auto transform = dyn_cast_shared<BuiltinTypeTransformType>(raw)) {
+            type = transform->operand_type;
+            continue;
+        }
+        if (auto pack_element =
+                dyn_cast_shared<BuiltinTypePackElementType>(raw)) {
+            for (const auto& argument : pack_element->arguments) {
+                if (template_argument_depends_on_template_parameters(
+                        argument,
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (auto specialization =
+                dyn_cast_shared<TemplateSpecializationType>(raw)) {
+            return specialization->depends_on_template_parameters(ast_ctx);
+        }
+        if (auto dependent_name = dyn_cast_shared<DependentNameType>(raw)) {
+            QualType resolved_type =
+                lookup_dependent_name_resolved_type(
+                    dependent_name.get(),
+                    ast_ctx);
+            if (!resolved_type) {
+                return true;
+            }
+            type = resolved_type;
+            continue;
+        }
+        if (auto object_type = dyn_cast_shared<ObjectType>(raw)) {
+            if (!object_type->is_class_template_specialization()) {
+                return false;
+            }
+            for (const auto& argument :
+                 object_type->get_template_specialization_arguments()) {
+                if (template_argument_depends_on_template_parameters(
+                        argument,
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (auto ptr_type = dyn_cast_shared<PointerType>(raw)) {
+            type = ptr_type->pointed_type;
+            continue;
+        }
+        if (auto ref_type = dyn_cast_shared<ReferenceType>(raw)) {
+            type = ref_type->referred_type;
+            continue;
+        }
+        if (auto member_ptr_type = dyn_cast_shared<MemberPointerType>(raw)) {
+            return cpp_type_still_dependent_after_substitution(
+                       member_ptr_type->class_type,
+                       ast_ctx) ||
+                   cpp_type_still_dependent_after_substitution(
+                       member_ptr_type->member_type,
+                       ast_ctx);
+        }
+        if (auto block_ptr_type = dyn_cast_shared<BlockPointerType>(raw)) {
+            type = block_ptr_type->pointed_type;
+            continue;
+        }
+        if (auto array_type = dyn_cast_shared<ArrayType>(raw)) {
+            if (array_type->size_kind == ArraySizeKind::Variable &&
+                array_type->size_expr &&
+                cpp_expr_still_dependent_after_substitution(
+                    array_type->size_expr.get(),
+                    ast_ctx)) {
+                return true;
+            }
+            type = array_type->element_type;
+            continue;
+        }
+        if (auto function_type = dyn_cast_shared<FunctionType>(raw)) {
+            if (cpp_type_still_dependent_after_substitution(
+                    function_type->ret_type,
+                    ast_ctx)) {
+                return true;
+            }
+            for (const auto& parameter_type : function_type->parameters) {
+                if (cpp_type_still_dependent_after_substitution(
+                        parameter_type,
+                        ast_ctx)) {
+                    return true;
+                }
+            }
+            if (function_type->exception_spec ==
+                    FunctionExceptionSpecKind::Dependent ||
+                (function_type->exception_spec_expr &&
+                 cpp_expr_still_dependent_after_substitution(
+                     function_type->exception_spec_expr.get(),
+                     ast_ctx))) {
+                return true;
+            }
+            return false;
+        }
+        if (auto vector_type = dyn_cast_shared<VectorType>(raw)) {
+            type = vector_type->element_type;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool cpp_member_lookup_base_still_dependent_after_substitution(
+    QualType base_type,
+    bool is_arrow,
+    const ASTContext* ast_ctx) {
+    QualType object_type =
+        cpp_member_lookup_object_type_after_substitution(
+            base_type,
+            is_arrow,
+            ast_ctx);
+    return cpp_type_still_dependent_after_substitution(
+        object_type,
+        ast_ctx);
+}
+
+const Expr* strip_cpp_dependency_wrappers_after_substitution(
+    const Expr* expr) {
+    const Expr* current = expr;
+    while (current) {
+        if (auto* cast = dyn_cast<ImplicitCast>(const_cast<Expr*>(current))) {
+            current = cast->expr.get();
+            continue;
+        }
+        if (auto* paren = dyn_cast<ParenExpr>(const_cast<Expr*>(current))) {
+            current = paren->subexpr.get();
+            continue;
+        }
+        break;
+    }
+    return current;
+}
+
+bool cpp_expr_still_dependent_after_substitution(
+    const Expr* expr,
+    const ASTContext* ast_ctx) {
+    const Expr* stripped =
+        strip_cpp_dependency_wrappers_after_substitution(expr);
+    if (!stripped) {
+        return true;
+    }
+    switch (stripped->get_kind()) {
+        case StmtKind::UnresolvedLookupExpr:
+        case StmtKind::UnresolvedMemberExpr:
+        case StmtKind::DependentCallExpr:
+        case StmtKind::DependentArraySubscriptExpr:
+        case StmtKind::DependentUnaryExpr:
+        case StmtKind::DependentBinaryExpr:
+        case StmtKind::DependentMemberPointerAccessExpr:
+        case StmtKind::PackExpansionExpr:
+        case StmtKind::FoldExpr:
+            return true;
+        default:
+            break;
+    }
+    return cpp_type_still_dependent_after_substitution(
+        const_cast<Expr*>(stripped)->get_type(),
+        ast_ctx);
+}
+
 bool classify_constructor_symbol_call(const std::shared_ptr<Symbol>& sym,
                                       std::shared_ptr<ObjectType>& owner_type_out,
                                       const ASTContext* ast_ctx) {

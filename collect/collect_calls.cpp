@@ -4767,15 +4767,18 @@ bool Collect::resolve_dependent_expr_after_substitution(
                     }
                 }
             }
-            return analyze_cpp_member_lookup_base(
-                       unresolved_member->base
-                           ? unresolved_member->base->get_type()
-                           : QualType(nullptr),
-                       unresolved_member->isArrow != 0,
-                       implicit_this_type,
-                       ast_ctx_.get(),
-                       session_.current_cpp_record_lookup_type_)
-                .is_dependent;
+            if (unresolved_member->base &&
+                cpp_expr_still_dependent_after_substitution(
+                    unresolved_member->base.get(),
+                    ast_ctx_.get())) {
+                return true;
+            }
+            return cpp_member_lookup_base_still_dependent_after_substitution(
+                unresolved_member->base
+                    ? unresolved_member->base->get_type()
+                    : QualType(nullptr),
+                unresolved_member->isArrow != 0,
+                ast_ctx_.get());
         };
 
     auto prepare_unresolved_member_base_after_substitution =
@@ -4851,7 +4854,9 @@ bool Collect::resolve_dependent_expr_after_substitution(
                 owned_member->isArrow != 0,
                 owned_member->location,
                 allow_overloaded_method_set,
-                owned_member->suppress_virtual_dispatch != 0);
+                owned_member->suppress_virtual_dispatch != 0,
+                owned_member->requires_template_keyword != 0,
+                TemplateDependencyCheckMode::AfterTemplateSubstitution);
         };
 
     auto materialize_unresolved_lookup =
@@ -5048,11 +5053,9 @@ bool Collect::resolve_dependent_expr_after_substitution(
         strip_stale_dependent_implicit_casts(dependent_unary->operand);
         materialize_constant_after_substitution(dependent_unary->operand);
         if (!dependent_unary->operand ||
-            type_depends_on_template_parameters(
-                dependent_unary->operand->get_type(),
-                ast_ctx_.get()) ||
-            expression_depends_on_template_parameters(
-                dependent_unary->operand.get())) {
+            cpp_expr_still_dependent_after_substitution(
+                dependent_unary->operand.get(),
+                ast_ctx_.get())) {
             return true;
         }
         auto owned_unary = std::unique_ptr<DependentUnaryExpr>(
@@ -5060,7 +5063,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
         auto rewritten = collect_unary_operation(
             owned_unary->uop,
             std::move(owned_unary->operand),
-            owned_unary->location);
+            owned_unary->location,
+            TemplateDependencyCheckMode::AfterTemplateSubstitution);
         if (!rewritten) {
             if (error_out && error_out->empty()) {
                 *error_out =
@@ -5360,9 +5364,8 @@ bool Collect::resolve_dependent_expr_after_substitution(
             if (!arg) {
                 continue;
             }
-            if (expression_depends_on_template_parameters(arg.get()) ||
-                type_depends_on_template_parameters(
-                    arg->get_type(),
+            if (cpp_expr_still_dependent_after_substitution(
+                    arg.get(),
                     ast_ctx_.get())) {
                 arguments_still_dependent = true;
                 break;
@@ -5403,12 +5406,19 @@ bool Collect::resolve_dependent_expr_after_substitution(
         auto* callee_ref =
             dyn_cast<VarRef>(
                 strip_implicit_casts_and_parens(owned_call->callee.get()));
+        bool callee_still_dependent =
+            owned_call->callee &&
+            cpp_expr_still_dependent_after_substitution(
+                owned_call->callee.get(),
+                ast_ctx_.get());
         bool force_concrete_function_ref_call =
             callee_ref &&
             callee_ref->symref &&
             callee_ref->symref->kind == SymbolKind::FUNCTION &&
             !arguments_still_dependent;
-        auto rewritten = force_concrete_function_ref_call
+        bool force_concrete_call =
+            !callee_still_dependent && !arguments_still_dependent;
+        auto rewritten = (force_concrete_function_ref_call || force_concrete_call)
             ? collect_concrete_call_after_substitution(
                   std::move(owned_call->callee),
                   std::move(owned_call->args),

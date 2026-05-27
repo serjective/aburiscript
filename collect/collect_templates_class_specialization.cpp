@@ -778,6 +778,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 !finalize_semantic_type(method.conversion_target_type, loc)) {
                 return false;
             }
+            method.type = rebind_member_function_type_to_owner(
+                method.type,
+                QualType(object_type),
+                !method.is_static,
+                loc);
             if (method.symbol) {
                 method.symbol->type = method.type;
             }
@@ -786,6 +791,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             if (!finalize_semantic_type(constructor.type, loc)) {
                 return false;
             }
+            constructor.type = rebind_member_function_type_to_owner(
+                constructor.type,
+                QualType(object_type),
+                true,
+                loc);
             if (constructor.symbol) {
                 constructor.symbol->type = constructor.type;
             }
@@ -794,6 +804,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             if (!finalize_semantic_type(destructor.type, loc)) {
                 return false;
             }
+            destructor.type = rebind_member_function_type_to_owner(
+                destructor.type,
+                QualType(object_type),
+                true,
+                loc);
             if (destructor.symbol) {
                 destructor.symbol->type = destructor.type;
             }
@@ -931,6 +946,87 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         SrcLoc type_loc) {
         auto storage_type = finalize_member_storage_type(type, type_loc);
         return storage_type.as_shared<FunctionType>();
+    }
+
+    QualType rebind_member_function_type_to_owner(QualType function_type,
+                                                  QualType target_owner_type,
+                                                  bool has_implicit_object,
+                                                  SrcLoc type_loc) {
+        if (!function_type || !target_owner_type || !has_implicit_object) {
+            return function_type;
+        }
+        auto canonical_function =
+            desugar_type(function_type, ast_ctx()).as_shared<FunctionType>();
+        if (!canonical_function || canonical_function->parameters.empty()) {
+            return function_type;
+        }
+
+        QualType implicit_object_type = canonical_function->parameters.front();
+        auto implicit_object_ptr =
+            desugar_type(
+                remove_reference(implicit_object_type, ast_ctx()),
+                ast_ctx())
+                .as_shared<PointerType>();
+        QualType implicit_owner_type =
+            implicit_object_ptr ? implicit_object_ptr->pointed_type
+                                : implicit_object_type;
+        auto implicit_owner_record =
+            desugar_type(
+                remove_reference(implicit_owner_type, ast_ctx()),
+                ast_ctx())
+                .as_shared<ObjectType>();
+        auto target_owner_record =
+            desugar_type(
+                remove_reference(target_owner_type, ast_ctx()),
+                ast_ctx())
+                .as_shared<ObjectType>();
+        auto* implicit_owner_decl = implicit_owner_record
+            ? dyn_cast<ObjectDecl>(implicit_owner_record->get_decl())
+            : nullptr;
+        auto* target_owner_decl = target_owner_record
+            ? dyn_cast<ObjectDecl>(target_owner_record->get_decl())
+            : nullptr;
+        if (!implicit_owner_decl || !target_owner_decl ||
+            implicit_owner_decl == target_owner_decl) {
+            return function_type;
+        }
+
+        QualType rewritten_type = replace_record_decl_in_type(
+            function_type,
+            implicit_owner_decl,
+            target_owner_type,
+            ast_ctx());
+        auto storage_type = finalize_member_storage_type(rewritten_type, type_loc);
+        return storage_type ? storage_type : function_type;
+    }
+
+    std::shared_ptr<FunctionType> rebind_cloned_member_decl_to_owner(
+        FuncDecl* cloned_decl,
+        const FuncDecl* pattern_decl,
+        std::shared_ptr<FunctionType> function_type,
+        bool has_implicit_object) {
+        if (!cloned_decl || !function_type) {
+            return function_type;
+        }
+        if (auto pattern_owner_type = get_func_decl_owner_record_type(pattern_decl)) {
+            set_func_decl_owner_record_type(cloned_decl, pattern_owner_type);
+        }
+        rebind_specialized_function_owner(cloned_decl, owner_type, ast_ctx());
+        auto rebound_type =
+            desugar_type(QualType(cloned_decl->type), ast_ctx())
+                .as_shared<FunctionType>();
+        if (!rebound_type && has_implicit_object) {
+            QualType rebound_storage = rebind_member_function_type_to_owner(
+                QualType(function_type),
+                owner_type,
+                has_implicit_object,
+                cloned_decl->location);
+            rebound_type = rebound_storage.as_shared<FunctionType>();
+            if (rebound_type) {
+                cloned_decl->type = rebound_type;
+            }
+        }
+        return rebound_type ? rebound_type : function_type;
     }
 
     bool substitute_member_explicit_specifier(
@@ -4145,6 +4241,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->has_deferred_defaulted_body =
             method_decl->has_deferred_defaulted_body;
         cloned_decl->set_language_linkage(method_decl->get_language_linkage());
+        canonical_type = rebind_cloned_member_decl_to_owner(
+            cloned_decl.get(),
+            method_decl,
+            canonical_type,
+            method_decl->storage_class != StorageClass::STATIC);
         if (method_decl->trailing_requires_clause) {
             std::string clone_error;
             cloned_decl->trailing_requires_clause =
@@ -4291,6 +4392,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_constexpr = ctor_decl->is_constexpr;
         cloned_decl->is_consteval = ctor_decl->is_consteval;
         cloned_decl->set_language_linkage(ctor_decl->get_language_linkage());
+        canonical_type = rebind_cloned_member_decl_to_owner(
+            cloned_decl.get(),
+            ctor_decl,
+            canonical_type,
+            true);
         cloned_decl->is_explicit = ctor_decl->is_explicit;
         bool cloned_ctor_is_explicit = cloned_decl->is_explicit;
         if (!substitute_member_explicit_specifier(
@@ -4412,6 +4518,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         cloned_decl->is_constexpr = dtor_decl->is_constexpr;
         cloned_decl->is_consteval = dtor_decl->is_consteval;
         cloned_decl->set_language_linkage(dtor_decl->get_language_linkage());
+        canonical_type = rebind_cloned_member_decl_to_owner(
+            cloned_decl.get(),
+            dtor_decl,
+            canonical_type,
+            true);
         cloned_decl->is_deleted = dtor_decl->is_deleted;
         cloned_decl->is_defaulted = dtor_decl->is_defaulted;
         cloned_decl->is_defaulted_on_first_declaration =

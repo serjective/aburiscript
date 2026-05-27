@@ -598,7 +598,8 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
     SrcLoc loc,
     bool allow_overloaded_method_set,
     bool suppress_virtual_dispatch,
-    bool requires_template_keyword) {
+    bool requires_template_keyword,
+    TemplateDependencyCheckMode dependency_mode) {
 
     const std::string* interned_member_name =
         ast_ctx_ ? ast_ctx_->intern_identifier(member_name) : nullptr;
@@ -759,10 +760,31 @@ std::unique_ptr<Expr> Collect::collect_member_expression(
                   ast_ctx_.get(),
                   session_.current_cpp_record_lookup_type_)
             : CppMemberLookupBaseAnalysis{};
-    bool dependent_base_expr =
-        lang_opts_.is_cxx_mode() &&
-        expression_depends_on_template_parameters(member->base.get());
-    bool dependent_base_type = dependent_base_analysis.is_dependent;
+    bool resolve_after_template_substitution =
+        dependency_mode == TemplateDependencyCheckMode::AfterTemplateSubstitution;
+    bool dependent_base_expr = false;
+    bool dependent_base_type = false;
+    if (lang_opts_.is_cxx_mode()) {
+        if (resolve_after_template_substitution) {
+            dependent_base_expr =
+                cpp_expr_still_dependent_after_substitution(
+                    member->base.get(),
+                    ast_ctx_.get());
+            dependent_base_type =
+                cpp_member_lookup_base_still_dependent_after_substitution(
+                    base_type,
+                    is_arrow,
+                    ast_ctx_.get());
+            if (base_type &&
+                contains_deferred_semantic_type(base_type.get_shared())) {
+                dependent_base_type = true;
+            }
+        } else {
+            dependent_base_expr =
+                expression_depends_on_template_parameters(member->base.get());
+            dependent_base_type = dependent_base_analysis.is_dependent;
+        }
+    }
     auto dependent_record_type = dependent_base_analysis.object_record_type;
     const ObjectDecl* current_record_decl =
         current_access_context_record_decl(

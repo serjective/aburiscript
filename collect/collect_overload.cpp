@@ -1,5 +1,6 @@
 #include "collect.h"
 #include "collect_internal.h"
+#include "collect_templates_internal.h"
 #include "../ast/expr_clone.h"
 #include "../ast/special_members.h"
 #include "lookup_engine.h"
@@ -29,6 +30,51 @@ bool refactor_metrics_enabled() {
         return env && env[0] != '\0' && env[0] != '0';
     }();
     return enabled;
+}
+
+void repair_member_candidate_symbol_owner_type(
+    const RecordSemanticState::Method& method,
+    const ObjectDecl* owner_record_decl,
+    const ASTContext* ast_ctx) {
+    if (method.is_static || !method.symbol || !owner_record_decl || !ast_ctx) {
+        return;
+    }
+    auto owner_type = owner_record_decl->get_record_type();
+    if (!owner_type) {
+        return;
+    }
+    auto function_type =
+        desugar_type(method.symbol->type, ast_ctx).as_shared<FunctionType>();
+    if (!function_type || function_type->parameters.empty()) {
+        return;
+    }
+    auto this_ptr =
+        desugar_type(
+            remove_reference(function_type->parameters.front(), ast_ctx),
+            ast_ctx)
+            .as_shared<PointerType>();
+    auto this_record = this_ptr
+        ? desugar_type(
+              remove_reference(this_ptr->pointed_type, ast_ctx),
+              ast_ctx)
+              .as_shared<ObjectType>()
+        : nullptr;
+    auto* this_decl = this_record
+        ? canonical_record_decl(dyn_cast<ObjectDecl>(this_record->get_decl()))
+        : nullptr;
+    auto* canonical_owner = canonical_record_decl(owner_record_decl);
+    if (!this_decl || !canonical_owner || this_decl == canonical_owner) {
+        return;
+    }
+
+    QualType rewritten_type = template_sema_internal::replace_record_decl_in_type(
+        method.symbol->type,
+        this_decl,
+        QualType(owner_type),
+        ast_ctx);
+    if (rewritten_type) {
+        method.symbol->type = desugar_type(rewritten_type, ast_ctx);
+    }
 }
 
 OverloadMetrics& overload_metrics() {
@@ -815,6 +861,10 @@ std::unique_ptr<Expr> Collect::append_member_overload_candidates(
             return collect_make<ErrorExpr>(
                 "unresolved member function symbol", loc);
         }
+        repair_member_candidate_symbol_owner_type(
+            *method,
+            method_match.owner_record_decl,
+            ast_ctx_.get());
 
         OverloadCallCandidate call_candidate;
         call_candidate.symbol = method->symbol;
