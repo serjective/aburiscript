@@ -444,7 +444,9 @@ private:
                                          std::shared_ptr<Symbol> predecl_sym = nullptr,
                                          TemplateParameterList*
                                              abbreviated_template_parameters_out = nullptr);
-    void parse_kr_declaration_list(DeclarationParser *decl_parser, FuncDecl *func_decl);
+    void parse_kr_declaration_list(DeclarationParser *decl_parser,
+                                   FuncDecl *func_decl,
+                                   QualType visible_prototype_type);
     std::unique_ptr<Decl> parse_translation_unit();
 
     std::optional<std::vector<std::unique_ptr<Decl>>> try_parse_extern_linkage_declaration();

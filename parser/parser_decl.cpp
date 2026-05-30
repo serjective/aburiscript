@@ -358,6 +358,27 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
                 decl->parameters.push_back(std::move(param_decl));
             }
         };
+    auto adopt_prior_prototype_for_c_declaration =
+        [&](FuncDecl* decl) {
+            if (!decl || is_cxx_mode_active() || !predecl_sym ||
+                predecl_sym->kind != SymbolKind::FUNCTION) {
+                return;
+            }
+            auto current_fn =
+                desugar_type(QualType(decl->type)).as_shared<FunctionType>();
+            auto prior_fn =
+                desugar_type(predecl_sym->type).as_shared<FunctionType>();
+            if (!current_fn || !prior_fn ||
+                current_fn->has_prototype ||
+                !prior_fn->has_prototype ||
+                prior_fn->is_variadic) {
+                return;
+            }
+            if (!predecl_sym->type.equals_unqualified(QualType(decl->type))) {
+                return;
+            }
+            decl->type = predecl_sym->type.get_shared();
+        };
     if (predecl_sym &&
         predecl_sym->kind == SymbolKind::FUNCTION &&
         decl_parser->is_inline) {
@@ -380,13 +401,6 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
             error_custloc(
                 "conversion function cannot have parameters",
                 loc);
-        }
-    }
-    if (predecl_sym && predecl_sym->kind == SymbolKind::FUNCTION) {
-        // Keep predecl symbols structurally tied to the current function type
-        // so recursive calls observe deduced return-type updates.
-        if (!in_class_member_context) {
-            predecl_sym->type = QualType(fin_funcdecl->type);
         }
     }
     if (is_cxx_mode_active()) {
@@ -418,7 +432,10 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     auto new_scope = entered_scope.scope;
     if (decl_parser->is_kr_style) {
         // K&R old-style function definition: parse declaration-list between ) and {
-        parse_kr_declaration_list(decl_parser, fin_funcdecl.get());
+        parse_kr_declaration_list(
+            decl_parser,
+            fin_funcdecl.get(),
+            predecl_original_type);
     } else {
         bool seenVoid = false;
         for (auto &i: decl_parser->func_args) {
@@ -524,10 +541,15 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     if (gentle_check(TokenType::SEMICOLON) || gentle_check(TokenType::COMMA)) {
         // it's a prototype declaration — don't consume ';' or ','
         // so the caller's multi-declarator loop can handle them uniformly
+        adopt_prior_prototype_for_c_declaration(fin_funcdecl.get());
         synthesize_parameter_decls_from_function_type(fin_funcdecl.get());
         collect_->collect_leave_scope();
         fin_funcdecl->body = nullptr;
         return std::move(fin_funcdecl);
+    }
+    if (predecl_sym && predecl_sym->kind == SymbolKind::FUNCTION &&
+        !in_class_member_context) {
+        predecl_sym->type = QualType(fin_funcdecl->type);
     }
     auto prev_func_type = func_type;
     auto prev_decl_language_linkage = current_language_linkage_;
@@ -663,7 +685,9 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     return std::move(fin_funcdecl);
 }
 
-void Parser::parse_kr_declaration_list(DeclarationParser *decl_parser, FuncDecl *func_decl) {
+void Parser::parse_kr_declaration_list(DeclarationParser *decl_parser,
+                                       FuncDecl *func_decl,
+                                       QualType visible_prototype_type) {
     // Parse declaration-list between ) and { for K&R old-style definitions.
     // e.g.:  int add(a, b) int a; int b; { ... }
     //        int add(a, b) int a, b; { ... }
@@ -736,14 +760,26 @@ void Parser::parse_kr_declaration_list(DeclarationParser *decl_parser, FuncDecl 
     auto *func_ty = dyn_cast<FunctionType>(decl_parser->result_type.get());
     std::vector<QualType> visible_proto_params;
     bool use_visible_prototype = false;
-    if (auto visible_sym = collect_->collect_lookup_variable_symbol(decl_parser->name, true)) {
-        if (visible_sym->kind == SymbolKind::FUNCTION) {
-            auto visible_fn = visible_sym->type.as_shared<FunctionType>();
-            if (visible_fn && visible_fn->has_prototype && !visible_fn->is_variadic &&
-                visible_fn->parameters.size() == kr_names.size()) {
-                visible_proto_params = visible_fn->parameters;
-                use_visible_prototype = true;
+    auto capture_visible_prototype =
+        [&](QualType candidate_type) -> bool {
+            auto visible_fn =
+                desugar_type(candidate_type).as_shared<FunctionType>();
+            if (!visible_fn || !visible_fn->has_prototype ||
+                visible_fn->is_variadic ||
+                visible_fn->parameters.size() != kr_names.size()) {
+                return false;
             }
+            visible_proto_params = visible_fn->parameters;
+            return true;
+        };
+    use_visible_prototype =
+        capture_visible_prototype(visible_prototype_type);
+    if (!use_visible_prototype) {
+        auto visible_sym =
+            collect_->collect_lookup_variable_symbol(decl_parser->name, true);
+        if (visible_sym && visible_sym->kind == SymbolKind::FUNCTION) {
+            use_visible_prototype =
+                capture_visible_prototype(visible_sym->type);
         }
     }
     std::vector<QualType> param_types;

@@ -126,6 +126,25 @@ bool function_binds_into_ordinary_scope(
            scope_flags_contains(decl_scope->flags, ScopeFlags::RecordScope);
 }
 
+QualType composite_c_function_redeclaration_type(QualType existing_type,
+                                                 QualType new_type,
+                                                 const ASTContext* ast_ctx) {
+    auto existing_fn =
+        desugar_type(existing_type, ast_ctx).as_shared<FunctionType>();
+    auto new_fn = desugar_type(new_type, ast_ctx).as_shared<FunctionType>();
+    if (!existing_fn || !new_fn ||
+        existing_fn->has_prototype == new_fn->has_prototype) {
+        return QualType();
+    }
+    if (existing_fn->has_prototype && !existing_fn->is_variadic) {
+        return existing_type;
+    }
+    if (new_fn->has_prototype && !new_fn->is_variadic) {
+        return new_type;
+    }
+    return QualType();
+}
+
 } // namespace
 
 std::shared_ptr<Symbol> Collect::collect_declare_variable_symbol(std::shared_ptr<Scope> scope, std::shared_ptr<GlobalIdentTracker> global_scope, const std::string& name, QualType type, StorageClass storage_class, bool is_constexpr, bool is_inline, SrcLoc loc, LanguageLinkage language_linkage, bool skip_template_parameter_scopes) {
@@ -642,6 +661,15 @@ std::shared_ptr<Symbol> Collect::collect_declare_function_symbol(std::shared_ptr
                     bind_symbol_in_scope(scope, name, existing);
                 }
                 return existing;
+            }
+            if (!is_cxx_mode) {
+                auto composite_type = composite_c_function_redeclaration_type(
+                    existing->type,
+                    type,
+                    ast_ctx_.get());
+                if (composite_type) {
+                    existing->type = composite_type;
+                }
             }
             report_linkage_conflict_if_any(existing);
             if (existing->is_consteval != is_consteval) {
