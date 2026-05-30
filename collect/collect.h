@@ -2008,6 +2008,22 @@ private:
         std::string* error_out = nullptr,
         bool allow_unsubstituted_default_parameters = false) ;
 
+    bool refresh_defaulted_template_argument_bindings(
+        const TemplateDecl* template_decl,
+        TemplateArgumentBindings& bindings_out,
+        SrcLoc loc,
+        std::string* error_out = nullptr,
+        bool allow_unsubstituted_default_parameters = false) ;
+
+    bool finalize_substituted_default_template_argument(
+        const TemplateDecl* template_decl,
+        const TemplateParameterDecl* parameter,
+        const TemplateArgumentBindings& active_bindings,
+        TemplateArgument& rewritten_default,
+        SrcLoc loc,
+        std::string* error_out,
+        bool allow_unsubstituted_default_parameters) ;
+
     bool bind_template_arguments_for_specialization(
         const TemplateDecl* template_decl,
         const std::vector<TemplateArgument>& arguments,

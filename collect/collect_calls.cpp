@@ -834,6 +834,12 @@ bool function_template_specialization_requires_definition_now(
     if (!pattern) {
         return false;
     }
+    // A selected constructor specialization is an immediate construction
+    // target, not just a callable declaration; materialize the body at the
+    // selection point so codegen never emits a dangling ctor symbol.
+    if (isa<CppConstructorDecl>(pattern)) {
+        return true;
+    }
     if (pattern->is_constexpr || pattern->is_consteval) {
         return true;
     }
@@ -1748,11 +1754,25 @@ Collect::try_collect_typed_dependent_function_template_call(
                     loc)) {
                 return false;
             }
-            QualType substituted_type = substitute_template_type(
+            TemplateArgumentBindings specialization_bindings;
+            std::string binding_error;
+            if (!bind_template_arguments_to_parameters(
+                    function_template->parameters,
+                    specialization_arguments,
+                    specialization_bindings,
+                    &binding_error)) {
+                return false;
+            }
+            // Typed dependent calls may appear inside member templates whose
+            // function type still mentions enclosing class parameters. Preserve
+            // those outer dependencies while substituting this function
+            // template's own arguments.
+            QualType substituted_type = substitute_template_type_with_bindings(
                 QualType(pattern->type),
                 function_template->parameters,
-                specialization_arguments,
-                loc);
+                specialization_bindings,
+                loc,
+                /*allow_unsubstituted_parameters=*/true);
             if (contains_deferred_semantic_type(substituted_type.get_shared())) {
                 QualType realized_type =
                     try_realize_deferred_semantic_type(substituted_type);

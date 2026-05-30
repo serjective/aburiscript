@@ -458,7 +458,6 @@ Collect::instantiate_constructor_template_candidates(
     if (record_state.method_templates.empty()) {
         return template_constructors;
     }
-
     std::vector<Expr*> deduction_args;
     deduction_args.reserve(ctor_args.size() + 1);
     deduction_args.push_back(nullptr);

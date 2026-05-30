@@ -3484,6 +3484,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_partial.get(),
             cloned_partial.get());
         cloned_partial->set_pattern_template_decl(partial_decl);
+        clone_pass.context().template_decl_remap[partial_decl] =
+            cloned_partial.get();
 
         if (!clone_template_parameter_defaults(
                 partial_decl,
@@ -3566,6 +3568,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_template_decl.get(),
             cloned_template_decl.get());
         cloned_template_decl->set_pattern_template_decl(class_template_decl);
+        clone_pass.context().template_decl_remap[class_template_decl] =
+            cloned_template_decl.get();
 
         if (!clone_template_parameter_defaults(
                 class_template_decl,
@@ -3658,6 +3662,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_template_decl.get(),
             cloned_template_decl.get());
         cloned_template_decl->set_pattern_template_decl(alias_template_decl);
+        clone_pass.context().template_decl_remap[alias_template_decl] =
+            cloned_template_decl.get();
 
         std::unordered_map<const TemplateParameterDecl*, const TemplateParameterDecl*>
             parameter_rebinds;
@@ -3879,6 +3885,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_template_decl.get(),
             cloned_template_decl.get());
         cloned_template_decl->set_pattern_template_decl(method_template_decl);
+        clone_pass.context().template_decl_remap[method_template_decl] =
+            cloned_template_decl.get();
 
         PendingMethodTemplateClone pending_method_template;
         pending_method_template.pattern_template = method_template_decl;
@@ -3997,6 +4005,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             cloned_template_decl.get(),
             cloned_template_decl.get());
         cloned_template_decl->set_pattern_template_decl(function_template_decl);
+        clone_pass.context().template_decl_remap[function_template_decl] =
+            cloned_template_decl.get();
 
         PendingMethodTemplateClone pending_friend_template;
         pending_friend_template.pattern_template = function_template_decl;

@@ -634,12 +634,140 @@ bool variable_decl_has_unresolved_template_owner(ASTToLLVM& lower,
     return auto_type_utils::auto_type_flavors_in(owner_type.get_shared()) != 0;
 }
 
+bool expr_has_unresolved_template_codegen_state(const Expr* expr,
+                                                const ASTContext* ast_ctx) {
+    if (!expr) {
+        return false;
+    }
+    QualType expr_type = const_cast<Expr*>(expr)->get_type();
+    if ((expr_type && type_depends_on_template_parameters(expr_type, ast_ctx)) ||
+        auto_type_utils::auto_type_flavors_in(expr_type.get_shared()) != 0) {
+        return true;
+    }
+    switch (expr->get_kind()) {
+        case StmtKind::DependentCallExpr:
+        case StmtKind::DependentArraySubscriptExpr:
+        case StmtKind::DependentUnaryExpr:
+        case StmtKind::DependentBinaryExpr:
+        case StmtKind::DependentMemberPointerAccessExpr:
+        case StmtKind::FoldExpr:
+            return true;
+        case StmtKind::ParenExpr:
+            return expr_has_unresolved_template_codegen_state(
+                static_cast<const ParenExpr*>(expr)->subexpr.get(),
+                ast_ctx);
+        case StmtKind::ImplicitCast:
+            return expr_has_unresolved_template_codegen_state(
+                static_cast<const ImplicitCast*>(expr)->expr.get(),
+                ast_ctx);
+        case StmtKind::ExplicitCast:
+            return type_depends_on_template_parameters(
+                       static_cast<const ExplicitCast*>(expr)->ctype,
+                       ast_ctx) ||
+                   expr_has_unresolved_template_codegen_state(
+                       static_cast<const ExplicitCast*>(expr)->expr.get(),
+                       ast_ctx);
+        case StmtKind::UnaryOperation:
+            return expr_has_unresolved_template_codegen_state(
+                static_cast<const UnaryOperation*>(expr)->exp.get(),
+                ast_ctx);
+        case StmtKind::BinaryOperation: {
+            const auto* binary = static_cast<const BinaryOperation*>(expr);
+            return expr_has_unresolved_template_codegen_state(
+                       binary->left.get(),
+                       ast_ctx) ||
+                   expr_has_unresolved_template_codegen_state(
+                       binary->right.get(),
+                       ast_ctx);
+        }
+        case StmtKind::CondExpr: {
+            const auto* cond = static_cast<const CondExpr*>(expr);
+            return expr_has_unresolved_template_codegen_state(
+                       cond->condition.get(),
+                       ast_ctx) ||
+                   expr_has_unresolved_template_codegen_state(
+                       cond->true_expr.get(),
+                       ast_ctx) ||
+                   expr_has_unresolved_template_codegen_state(
+                       cond->false_expr.get(),
+                       ast_ctx);
+        }
+        case StmtKind::FuncCall: {
+            const auto* call = static_cast<const FuncCall*>(expr);
+            if (expr_has_unresolved_template_codegen_state(
+                    call->func.get(),
+                    ast_ctx)) {
+                return true;
+            }
+            for (const auto& arg : call->args) {
+                if (expr_has_unresolved_template_codegen_state(arg.get(), ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case StmtKind::CppMemberCallExpr:
+            return expr_has_unresolved_template_codegen_state(
+                static_cast<const CppMemberCallExpr*>(expr)->lowered_call.get(),
+                ast_ctx);
+        case StmtKind::CppConstructExpr: {
+            const auto* construct = static_cast<const CppConstructExpr*>(expr);
+            if (type_depends_on_template_parameters(construct->ctype, ast_ctx)) {
+                return true;
+            }
+            for (const auto& arg : construct->args) {
+                if (expr_has_unresolved_template_codegen_state(arg.get(), ast_ctx)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case StmtKind::CppValueInitExpr:
+            return type_depends_on_template_parameters(
+                static_cast<const CppValueInitExpr*>(expr)->ctype,
+                ast_ctx);
+        case StmtKind::MemberExpr:
+            return expr_has_unresolved_template_codegen_state(
+                static_cast<const MemberExpr*>(expr)->base.get(),
+                ast_ctx);
+        case StmtKind::ArraySubscriptExpr: {
+            const auto* subscript = static_cast<const ArraySubscriptExpr*>(expr);
+            return expr_has_unresolved_template_codegen_state(
+                       subscript->array.get(),
+                       ast_ctx) ||
+                   expr_has_unresolved_template_codegen_state(
+                       subscript->index.get(),
+                       ast_ctx);
+        }
+        default:
+            return false;
+    }
+}
+
+bool variable_decl_has_unresolved_template_context(ASTToLLVM& lower,
+                                                   const VariableDecl* var_decl) {
+    if (!var_decl) {
+        return false;
+    }
+    if (variable_decl_has_unresolved_template_owner(lower, var_decl)) {
+        return true;
+    }
+    if (type_depends_on_template_parameters(var_decl->type, lower.ast_ctx.get()) ||
+        auto_type_utils::auto_type_flavors_in(var_decl->type.get_shared()) != 0) {
+        return true;
+    }
+    return var_decl->init &&
+           expr_has_unresolved_template_codegen_state(
+               var_decl->init.get(),
+               lower.ast_ctx.get());
+}
+
 bool variable_decl_is_definition_bearing(ASTToLLVM& lower,
                                          const VariableDecl* var_decl) {
     if (!var_decl) {
         return false;
     }
-    if (variable_decl_has_unresolved_template_owner(lower, var_decl)) {
+    if (variable_decl_has_unresolved_template_context(lower, var_decl)) {
         return false;
     }
     if (variable_decl_is_static_data_member(lower, var_decl)) {
@@ -740,7 +868,7 @@ void ASTToLLVM::deal_global_variable_declaration(Decl *decl) {
         error("deal_global_variable_declaration(): Invalid declaration linkage", decl->location);
         return;
     }
-    if (variable_decl_has_unresolved_template_owner(*this, varDecl)) {
+    if (variable_decl_has_unresolved_template_context(*this, varDecl)) {
         return;
     }
     std::string mangled = mangleCIdentifier(sym->uid);

@@ -241,6 +241,18 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                     (binding_error.empty() ? std::string() : ": " + binding_error),
                 loc);
         }
+        if (!collect.refresh_defaulted_template_argument_bindings(
+                function_template,
+                specialization_bindings,
+                loc,
+                &binding_error,
+                /*allow_unsubstituted_default_parameters=*/true)) {
+            return fail(
+                "function template '" + pattern->name +
+                    "' default template arguments could not be rewritten" +
+                    (binding_error.empty() ? std::string() : ": " + binding_error),
+                loc);
+        }
 
         for (const auto& argument : arguments) {
             if (!template_argument_has_known_payload(argument)) {
@@ -1524,6 +1536,17 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                     ? "function template body cloning is not supported"
                     : clone_error,
                 pattern->body ? pattern->body->location : pattern->location);
+        }
+        if (!specialization_decl_ptr->body) {
+            if (auto* specialization_ctor =
+                    dyn_cast<CppConstructorDecl>(specialization_decl_ptr);
+                specialization_ctor &&
+                !specialization_ctor->ctor_initializers.empty()) {
+                specialization_decl_ptr->body =
+                    collect.collect_make<CompoundStmt>(
+                        std::vector<std::unique_ptr<Stmt>>{},
+                        pattern->location);
+            }
         }
         specialization_symbol_ptr->type = QualType(specialization_decl_ptr->type);
         specialization_symbol_ptr->is_defined =

@@ -324,6 +324,12 @@ bool bind_deduced_template_argument_value(
         return false;
     }
 
+    TemplateArgument deduced_argument = argument;
+    // A deduced argument may contain nested defaults from the argument type
+    // itself, but this binding was not supplied by the function template's
+    // own default argument.
+    deduced_argument.is_defaulted = false;
+
     auto& existing = deduced_arguments[*parameter_index];
     if (parameter->is_parameter_pack) {
         if (existing.is_unbound()) {
@@ -331,17 +337,17 @@ bool bind_deduced_template_argument_value(
         } else if (!existing.is_pack()) {
             return false;
         }
-        existing.arguments.push_back(argument);
+        existing.arguments.push_back(std::move(deduced_argument));
         return true;
     }
 
     if (existing.is_unbound()) {
-        existing = TemplateArgumentBinding::single(argument);
+        existing = TemplateArgumentBinding::single(std::move(deduced_argument));
         return true;
     }
 
     const auto* existing_single = existing.single_argument();
-    return existing_single && existing_single->equals(argument);
+    return existing_single && existing_single->equals(deduced_argument);
 }
 
 const Expr* strip_array_bound_deduction_expr(const Expr* expr) {
@@ -1756,6 +1762,11 @@ bool Collect::deduce_function_template_call_arguments(
     if (!pattern) {
         return false;
     }
+    // Member-template defaults can mention enclosing class template
+    // parameters that are intentionally outside the function template's own
+    // parameter list. Preserve those outer dependencies during call deduction.
+    bool allow_unsubstituted_member_defaults =
+        static_cast<bool>(get_func_decl_owner_record_type(pattern));
 
     TemplateArgumentBindings deduced_arguments(
         function_template->parameters.size());
@@ -1784,7 +1795,8 @@ bool Collect::deduce_function_template_call_arguments(
                     function_template,
                     completed_bindings,
                     pattern->location,
-                    &default_error)) {
+                    &default_error,
+                    allow_unsubstituted_member_defaults)) {
                 bool all_bound = true;
                 for (const auto& binding : completed_bindings) {
                     if (binding.is_unbound()) {
@@ -1852,12 +1864,13 @@ bool Collect::deduce_function_template_call_arguments(
             argument_type = strip_top_level_qualifiers(argument_type);
         }
 
-        return deduce_function_template_argument_types(
+        bool deduced = deduce_function_template_argument_types(
             pattern_type,
             argument_type,
             function_template->parameters,
             deduced_arguments,
             argument_category == ValueCategory::LValue);
+        return deduced;
     };
 
     if (!pack_param_index.has_value()) {
@@ -1915,7 +1928,8 @@ bool Collect::deduce_function_template_call_arguments(
             function_template,
             deduced_arguments,
             pattern->location,
-            &default_error)) {
+            &default_error,
+            allow_unsubstituted_member_defaults)) {
         deduced_arguments_out.clear();
         return false;
     }

@@ -3,6 +3,7 @@
 #include "../abi/darwin_blocks.h"
 #include "../abi/mangle.h"
 #include "../constexpr/consteval_compat.h"
+#include "../helpers/auto_type_utils.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -32,6 +33,21 @@ QualType kr_abi_promote_param_type(const QualType& qt, const std::shared_ptr<Typ
         default:
             return qt;
     }
+}
+
+bool function_type_contains_undeduced_cxx_auto(const FunctionType* fn_type) {
+    if (!fn_type) {
+        return false;
+    }
+    if (auto_type_utils::has_cxx_auto_type(fn_type->ret_type.get_shared())) {
+        return true;
+    }
+    for (const auto& param_type : fn_type->parameters) {
+        if (auto_type_utils::has_cxx_auto_type(param_type.get_shared())) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string get_itanium_builtin_type_code(BuiltinTypes kind) {
@@ -1673,15 +1689,18 @@ void ASTToLLVM::emit_cpp_lambda_invoker_body(
 void ASTToLLVM::convert_function_declaration(Decl *decl) {
     auto *node = dyn_cast<FuncDecl>(decl);
     if (!node) { error("convert_function_declaration(): unexpected subclass", decl->location); return; }
-    auto unresolved_deferred_defaulted_type =
-        dyn_cast_shared<FunctionType>(node->type);
+    auto func_ctype_check = dyn_cast_shared<FunctionType>(node->type);
+    if (!func_ctype_check) {
+        error("unexpected subclass in funcdecl->type", node->location);
+        return;
+    }
     if (lang_opts.is_cxx_mode() &&
         node->is_defaulted &&
         node->has_deferred_defaulted_body &&
         node->body == nullptr &&
-        unresolved_deferred_defaulted_type) {
+        func_ctype_check) {
         QualType return_type =
-            desugar_type(unresolved_deferred_defaulted_type->ret_type, ast_ctx.get());
+            desugar_type(func_ctype_check->ret_type, ast_ctx.get());
         if (return_type && return_type->kind == TypeKind::Auto) {
             return;
         }
@@ -1718,13 +1737,21 @@ void ASTToLLVM::convert_function_declaration(Decl *decl) {
 
     std::string llvm_name = get_function_llvm_name(*node);
     auto mainFunc = module->getFunction(llvm_name);
-    // Empty declarations can be created before template bodies finish
-    // materializing; keep the LLVM function signature aligned with the AST.
-    auto func_ctype_check = dyn_cast_shared<FunctionType>(node->type);
-    if (!func_ctype_check) {
-        error("unexpected subclass in funcdecl->type", node->location);
+    if (lang_opts.is_cxx_mode() &&
+        function_type_contains_undeduced_cxx_auto(func_ctype_check.get())) {
+        bool function_is_unreferenced =
+            mainFunc == nullptr ||
+            (mainFunc->empty() && mainFunc->use_empty());
+        if (function_is_unreferenced &&
+            (node->body == nullptr || is_inline_equivalent)) {
+            return;
+        }
+        error("convert_function_declaration(): unresolved C++ auto placeholder in function type",
+              node->location);
         return;
     }
+    // Empty declarations can be created before template bodies finish
+    // materializing; keep the LLVM function signature aligned with the AST.
     auto get_abi_param_type = [&](const QualType& declared_type) -> QualType {
         if (func_ctype_check && !func_ctype_check->has_prototype) {
             return kr_abi_promote_param_type(declared_type, type_ctx);

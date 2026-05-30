@@ -339,6 +339,7 @@ struct TemplateArgument {
     QualType dependent_template_qualifier_type = nullptr;
     std::string dependent_template_member_name;
     bool is_dependent = false;
+    bool is_defaulted = false;
     bool expands_parameter_pack = false;
     std::string template_name;
     std::string value_spelling;

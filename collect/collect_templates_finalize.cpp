@@ -757,8 +757,18 @@ QualType implicit_this_type_for_specialized_function(const FuncDecl* decl) {
     if (!decl || !decl->type) {
         return QualType();
     }
-    if (auto* method = dyn_cast<CppMethodDecl>(decl);
+    if (auto* method = dyn_cast<CppMethodDecl>(const_cast<FuncDecl*>(decl));
         method && method->storage_class == StorageClass::STATIC) {
+        return QualType();
+    }
+    // Only C++ non-static member functions encode an implicit object
+    // parameter. Free functions also have a first parameter, but it is never
+    // `this`.
+    bool has_implicit_object_parameter =
+        isa<CppConstructorDecl>(const_cast<FuncDecl*>(decl)) ||
+        isa<CppDestructorDecl>(const_cast<FuncDecl*>(decl)) ||
+        isa<CppMethodDecl>(const_cast<FuncDecl*>(decl));
+    if (!has_implicit_object_parameter) {
         return QualType();
     }
     auto function_type =

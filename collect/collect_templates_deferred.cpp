@@ -1,5 +1,6 @@
 #include "collect.h"
 #include "collect_internal.h"
+#include "../ast/ast_clone.h"
 #include "../ast/expr_clone.h"
 #include "../helpers/auto_type_utils.h"
 
@@ -2094,9 +2095,91 @@ void Collect::rewrite_deferred_template_arguments_in_place(
                 continue;
             }
 
+            ASTCloneContext clone_ctx;
+            clone_ctx.ast_ctx = ast_ctx_.get();
+            clone_ctx.rewrite_type =
+                [this, loc, mode](QualType type) -> QualType {
+                auto rewritten =
+                    resolve_deferred_semantic_type_impl(type, loc, mode);
+                return rewritten ? rewritten : type;
+            };
+            clone_ctx.rewrite_template_arguments =
+                [this, loc, mode](
+                    const std::vector<TemplateArgument>& template_arguments,
+                    ASTCloneContext&,
+                    std::string*) -> std::vector<TemplateArgument> {
+                auto rewritten = template_arguments;
+                rewrite_deferred_template_arguments_in_place(
+                    rewritten,
+                    loc,
+                    mode);
+                return rewritten;
+            };
+            clone_ctx.rewrite_symbol =
+                [this, loc, mode, &clone_ctx](
+                    const std::shared_ptr<Symbol>& sym)
+                    -> std::shared_ptr<Symbol> {
+                if (!sym) {
+                    return nullptr;
+                }
+                auto remap_it = clone_ctx.symbol_remap.find(sym.get());
+                if (remap_it != clone_ctx.symbol_remap.end()) {
+                    return remap_it->second;
+                }
+
+                const auto* specialization_info =
+                    get_symbol_variable_template_specialization(sym.get());
+                if (!specialization_info ||
+                    !specialization_info->primary_template) {
+                    return sym;
+                }
+
+                auto rewritten_arguments = specialization_info->arguments;
+                rewrite_deferred_template_arguments_in_place(
+                    rewritten_arguments,
+                    loc,
+                    mode);
+                for (auto& rewritten_argument : rewritten_arguments) {
+                    if (rewritten_argument.kind != TemplateArgumentKind::Type) {
+                        continue;
+                    }
+                    auto canonical_argument_type =
+                        desugar_type(rewritten_argument.type, ast_ctx_.get());
+                    if (canonical_argument_type) {
+                        rewritten_argument.type = canonical_argument_type;
+                    }
+                    rewritten_argument.is_dependent =
+                        template_argument_depends_on_template_parameters(
+                            rewritten_argument,
+                            ast_ctx_.get());
+                }
+                if (mode == DeferredTypeResolutionMode::TryRealize &&
+                    template_arguments_contain_dependency(
+                        rewritten_arguments,
+                        ast_ctx_.get())) {
+                    return sym;
+                }
+
+                std::shared_ptr<Symbol> specialization_symbol = nullptr;
+                auto* specialization_decl =
+                    instantiate_variable_template_specialization_for_clone(
+                        specialization_info->primary_template,
+                        rewritten_arguments,
+                        loc,
+                        &specialization_symbol);
+                if (!specialization_decl || !specialization_symbol) {
+                    return sym;
+                }
+
+                clone_ctx.symbol_remap[sym.get()] = specialization_symbol;
+                return specialization_symbol;
+            };
+
             std::string clone_error;
-            auto cloned_expr =
-                clone_expr_tree(argument.value_expr.get(), ast_ctx_.get(), &clone_error);
+            auto cloned_expr = clone_expr_with_substitution(
+                argument.value_expr.get(),
+                clone_ctx,
+                &clone_error);
             if (!cloned_expr) {
                 continue;
             }

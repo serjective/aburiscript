@@ -3273,7 +3273,10 @@ bool complete_template_argument_bindings_with_defaults(
                 error_out)) {
             return false;
         }
-        bindings_out[idx] = TemplateArgumentBinding::single(*default_argument);
+        auto default_copy = *default_argument;
+        default_copy.is_defaulted = true;
+        bindings_out[idx] = TemplateArgumentBinding::single(
+            std::move(default_copy));
     }
 
     return true;

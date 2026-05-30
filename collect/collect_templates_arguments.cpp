@@ -1509,6 +1509,70 @@ bool Collect::template_value_argument_requires_dependent_normalization(
             expression_depends_on_template_parameters(argument.value_expr.get()));
 }
 
+bool Collect::finalize_substituted_default_template_argument(
+    const TemplateDecl* template_decl,
+    const TemplateParameterDecl* parameter,
+    const TemplateArgumentBindings& active_bindings,
+    TemplateArgument& rewritten_default,
+    SrcLoc loc,
+    std::string* error_out,
+    bool allow_unsubstituted_default_parameters) {
+    rewritten_default.is_defaulted = true;
+    switch (rewritten_default.kind) {
+        case TemplateArgumentKind::Type:
+            rewritten_default.type =
+                finalize_deferred_semantic_type(
+                    rewritten_default.type,
+                    loc);
+            break;
+        case TemplateArgumentKind::Value:
+            rewritten_default.value_type =
+                finalize_deferred_semantic_type(
+                    rewritten_default.value_type,
+                    loc);
+            if (auto* non_type_parameter =
+                    dyn_cast<TemplateNonTypeParmDecl>(
+                        const_cast<TemplateParameterDecl*>(parameter))) {
+                QualType expected_type =
+                    substitute_template_type_with_bindings(
+                        non_type_parameter->type,
+                        template_decl->parameters,
+                        active_bindings,
+                        loc);
+                expected_type =
+                    finalize_deferred_semantic_type(expected_type, loc);
+                if (template_value_argument_requires_dependent_normalization(
+                        rewritten_default,
+                        expected_type)) {
+                    if (!mark_template_value_argument_dependent(
+                            rewritten_default,
+                            expected_type,
+                            error_out)) {
+                        return false;
+                    }
+                } else {
+                    std::string normalize_error;
+                    if (!template_sema_internal::
+                            normalize_concrete_template_value_argument(
+                            rewritten_default,
+                            expected_type,
+                            &normalize_error)) {
+                        set_template_default_completion_error(
+                            error_out,
+                            normalize_error.empty()
+                                ? "failed to normalize default template value argument"
+                                : normalize_error);
+                        return false;
+                    }
+                }
+            }
+            break;
+        case TemplateArgumentKind::Template:
+            break;
+    }
+    return true;
+}
+
 bool Collect::complete_template_argument_bindings_with_substituted_defaults(
     const TemplateDecl* template_decl,
     TemplateArgumentBindings& bindings_out,
@@ -1571,56 +1635,96 @@ bool Collect::complete_template_argument_bindings_with_substituted_defaults(
         }
 
         TemplateArgument rewritten_default = std::move(rewritten_defaults.front());
-        switch (rewritten_default.kind) {
-            case TemplateArgumentKind::Type:
-                rewritten_default.type =
-                    finalize_deferred_semantic_type(rewritten_default.type, loc);
-                break;
-            case TemplateArgumentKind::Value:
-                rewritten_default.value_type =
-                    finalize_deferred_semantic_type(
-                        rewritten_default.value_type,
-                        loc);
-                if (auto* non_type_parameter = dyn_cast<TemplateNonTypeParmDecl>(
-                        parameter)) {
-                    QualType expected_type =
-                        substitute_template_type_with_bindings(
-                            non_type_parameter->type,
-                            template_decl->parameters,
-                            bindings_out,
-                            loc);
-                    expected_type =
-                        finalize_deferred_semantic_type(expected_type, loc);
-                    if (template_value_argument_requires_dependent_normalization(
-                            rewritten_default,
-                            expected_type)) {
-                        if (!mark_template_value_argument_dependent(
-                                rewritten_default,
-                                expected_type,
-                                error_out)) {
-                            return false;
-                        }
-                    } else {
-                        std::string normalize_error;
-                        if (!template_sema_internal::
-                                normalize_concrete_template_value_argument(
-                                rewritten_default,
-                                expected_type,
-                                &normalize_error)) {
-                            set_template_default_completion_error(
-                                error_out,
-                                normalize_error.empty()
-                                    ? "failed to normalize default template value argument"
-                                    : normalize_error);
-                            return false;
-                        }
-                    }
-                }
-                break;
-            case TemplateArgumentKind::Template:
-                break;
+        if (!finalize_substituted_default_template_argument(
+                template_decl,
+                parameter,
+                bindings_out,
+                rewritten_default,
+                loc,
+                error_out,
+                allow_unsubstituted_default_parameters)) {
+            return false;
         }
 
+        bindings_out[idx] = TemplateArgumentBinding::single(
+            std::move(rewritten_default));
+    }
+
+    return true;
+}
+
+bool Collect::refresh_defaulted_template_argument_bindings(
+    const TemplateDecl* template_decl,
+    TemplateArgumentBindings& bindings_out,
+    SrcLoc loc,
+    std::string* error_out,
+    bool allow_unsubstituted_default_parameters) {
+    if (!template_decl) {
+        set_template_default_completion_error(
+            error_out,
+            "internal error: null template declaration");
+        return false;
+    }
+    if (bindings_out.size() != template_decl->parameters.size()) {
+        set_template_default_completion_error(
+            error_out,
+            "internal error: template binding count does not match parameter count");
+        return false;
+    }
+
+    const auto* merged_defaults = get_template_decl_default_arguments(template_decl);
+    for (size_t idx = 0; idx < template_decl->parameters.size(); ++idx) {
+        const auto* parameter = template_decl->parameters[idx].get();
+        const TemplateArgument* current_argument =
+            bindings_out[idx].single_argument();
+        if (!parameter || !current_argument || !current_argument->is_defaulted) {
+            continue;
+        }
+
+        const TemplateArgument* default_argument =
+            (merged_defaults && idx < merged_defaults->size() &&
+             (*merged_defaults)[idx].has_value())
+                ? &(*merged_defaults)[idx].value()
+                : nullptr;
+        if (!default_argument) {
+            // The default marker can survive inside a deduced class-template
+            // argument. If this parameter has no default of its own, the
+            // current binding is concrete rather than refreshable.
+            TemplateArgument non_defaulted_argument = *current_argument;
+            non_defaulted_argument.is_defaulted = false;
+            bindings_out[idx] = TemplateArgumentBinding::single(
+                std::move(non_defaulted_argument));
+            continue;
+        }
+
+        TemplateArgumentBinding saved_binding = std::move(bindings_out[idx]);
+        bindings_out[idx] = TemplateArgumentBinding{};
+        auto rewritten_defaults =
+            substitute_template_arguments_with_bindings(
+                {*default_argument},
+                template_decl->parameters,
+                bindings_out,
+                loc,
+                allow_unsubstituted_default_parameters);
+        bindings_out[idx] = std::move(saved_binding);
+        if (rewritten_defaults.size() != 1) {
+            set_template_default_completion_error(
+                error_out,
+                "internal error: failed to rewrite default template argument");
+            return false;
+        }
+
+        TemplateArgument rewritten_default = std::move(rewritten_defaults.front());
+        if (!finalize_substituted_default_template_argument(
+                template_decl,
+                parameter,
+                bindings_out,
+                rewritten_default,
+                loc,
+                error_out,
+                allow_unsubstituted_default_parameters)) {
+            return false;
+        }
         bindings_out[idx] = TemplateArgumentBinding::single(
             std::move(rewritten_default));
     }

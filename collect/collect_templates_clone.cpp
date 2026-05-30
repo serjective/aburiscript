@@ -165,6 +165,9 @@ TemplateSubstitutionPass TemplateClonePassBuilder::build_substitution_pass() con
     pass.ctx.pack_symbol_remap = pack_symbol_remap;
     pass.ctx.pack_symbol_element_index = pack_symbol_element_index;
     pass.ctx.scope_remap = scope_remap;
+    pass.ctx.record_type_remap = record_type_remap;
+    pass.ctx.template_parameter_remap = template_parameter_remap;
+    pass.ctx.template_decl_remap = template_decl_remap;
     pass.ctx.preserve_dependent_function_exception_specs =
         preserve_dependent_function_exception_specs;
     pass.rewrite_symbol_callback = rewrite_symbol;
@@ -189,6 +192,9 @@ TemplateClonePassBuilder::build_dependent_resolution_pass(
     pass.ctx.pack_symbol_remap = pack_symbol_remap;
     pass.ctx.pack_symbol_element_index = pack_symbol_element_index;
     pass.ctx.scope_remap = scope_remap;
+    pass.ctx.record_type_remap = record_type_remap;
+    pass.ctx.template_parameter_remap = template_parameter_remap;
+    pass.ctx.template_decl_remap = template_decl_remap;
     pass.ctx.preserve_dependent_function_exception_specs =
         preserve_dependent_function_exception_specs;
     return pass;
@@ -594,6 +600,18 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
                 ? rewrite_template_arguments_fn(specialization_info->arguments)
                 : specialization_info->arguments;
         for (auto& argument : rewritten_arguments) {
+            if (argument.kind != TemplateArgumentKind::Type) {
+                continue;
+            }
+            auto canonical_type = desugar_type(argument.type, clone_ctx.ast_ctx);
+            if (canonical_type) {
+                argument.type = canonical_type;
+            }
+            argument.is_dependent = template_argument_depends_on_template_parameters(
+                argument,
+                clone_ctx.ast_ctx);
+        }
+        for (auto& argument : rewritten_arguments) {
             remap_template_argument_symbol_references(argument, clone_ctx);
         }
         std::shared_ptr<Symbol> specialization_symbol = nullptr;
@@ -826,6 +844,29 @@ QualType remap_template_parameter_types_in_type(
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
         const Decl* remapped_primary = specialization->primary_template;
         bool primary_changed = false;
+        const TemplateDecl* primary_template_decl = nullptr;
+        if (remapped_primary) {
+            switch (remapped_primary->get_kind()) {
+                case DeclKind::AliasTemplateDecl:
+                case DeclKind::FunctionTemplateDecl:
+                case DeclKind::VariableTemplateDecl:
+                case DeclKind::ClassTemplateDecl:
+                case DeclKind::VariableTemplatePartialSpecializationDecl:
+                case DeclKind::ClassTemplatePartialSpecializationDecl:
+                    primary_template_decl =
+                        static_cast<const TemplateDecl*>(remapped_primary);
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (clone_ctx && primary_template_decl) {
+            auto it = clone_ctx->template_decl_remap.find(primary_template_decl);
+            if (it != clone_ctx->template_decl_remap.end() && it->second) {
+                remapped_primary = it->second;
+                primary_changed = true;
+            }
+        }
         if (auto* template_parameter = dyn_cast<TemplateTemplateParmDecl>(
                 const_cast<Decl*>(specialization->primary_template))) {
             auto it = parameter_rebinds.find(template_parameter);
@@ -1149,6 +1190,10 @@ TemplateClonePassBuilder make_nested_template_clone_pass_builder(
     builder.pack_symbol_element_index =
         outer_pass.context().pack_symbol_element_index;
     builder.scope_remap = outer_pass.context().scope_remap;
+    builder.record_type_remap = outer_pass.context().record_type_remap;
+    builder.template_parameter_remap =
+        outer_pass.context().template_parameter_remap;
+    builder.template_decl_remap = outer_pass.context().template_decl_remap;
     builder.preserve_dependent_function_exception_specs =
         outer_pass.context().preserve_dependent_function_exception_specs;
     for (const auto& [pattern_symbol, remapped_symbol] : extra_symbol_remap) {

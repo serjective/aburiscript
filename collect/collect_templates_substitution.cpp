@@ -1390,6 +1390,28 @@ QualType Collect::substitute_template_type_with_bindings(
     if (auto specialization = dyn_cast_shared<TemplateSpecializationType>(raw)) {
         const Decl* rewritten_primary = specialization->primary_template;
         std::string rewritten_name = specialization->template_name;
+        const TemplateDecl* primary_template_decl = nullptr;
+        if (rewritten_primary) {
+            switch (rewritten_primary->get_kind()) {
+                case DeclKind::AliasTemplateDecl:
+                case DeclKind::FunctionTemplateDecl:
+                case DeclKind::VariableTemplateDecl:
+                case DeclKind::ClassTemplateDecl:
+                case DeclKind::VariableTemplatePartialSpecializationDecl:
+                case DeclKind::ClassTemplatePartialSpecializationDecl:
+                    primary_template_decl =
+                        static_cast<const TemplateDecl*>(rewritten_primary);
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (clone_context && primary_template_decl) {
+            auto it = clone_context->template_decl_remap.find(primary_template_decl);
+            if (it != clone_context->template_decl_remap.end() && it->second) {
+                rewritten_primary = it->second;
+            }
+        }
         if (auto* template_parameter = dyn_cast<TemplateTemplateParmDecl>(
                 const_cast<Decl*>(specialization->primary_template))) {
             auto parameter_index = find_template_parameter_index_by_decl(
@@ -1430,6 +1452,59 @@ QualType Collect::substitute_template_type_with_bindings(
             loc,
             allow_unsubstituted_parameters,
             clone_context);
+        if (const auto* rewritten_template =
+                get_template_decl_lookup_identity(rewritten_primary)) {
+            const auto* merged_defaults =
+                get_template_decl_default_arguments(rewritten_template);
+            for (size_t idx = 0;
+                 merged_defaults && idx < substituted_arguments.size() &&
+                 idx < rewritten_template->parameters.size();
+                 ++idx) {
+                if (!substituted_arguments[idx].is_defaulted ||
+                    idx >= merged_defaults->size() ||
+                    !(*merged_defaults)[idx].has_value()) {
+                    continue;
+                }
+
+                std::vector<TemplateArgument> prefix_arguments(
+                    substituted_arguments.begin(),
+                    substituted_arguments.begin() +
+                        static_cast<std::ptrdiff_t>(idx));
+                TemplateArgumentBindings default_bindings;
+                std::string default_error;
+                if (!bind_explicit_template_arguments_prefix_to_parameters(
+                        rewritten_template->parameters,
+                        prefix_arguments,
+                        default_bindings,
+                        &default_error)) {
+                    continue;
+                }
+                // This is an opportunistic re-evaluation of an already
+                // accepted default argument. Member-template defaults can still
+                // mention enclosing class parameters that are not in this
+                // parameter list, so keep unresolved outer references quiet and
+                // only commit the recomputed argument if completion succeeds.
+                if (!complete_template_argument_bindings_with_substituted_defaults(
+                        rewritten_template,
+                        default_bindings,
+                        loc,
+                        &default_error,
+                        /*allow_unsubstituted_default_parameters=*/true)) {
+                    continue;
+                }
+                if (idx >= default_bindings.size()) {
+                    continue;
+                }
+                const auto* recomputed_default =
+                    default_bindings[idx].single_argument();
+                if (!recomputed_default) {
+                    continue;
+                }
+                auto rewritten_default = *recomputed_default;
+                rewritten_default.is_defaulted = true;
+                substituted_arguments[idx] = std::move(rewritten_default);
+            }
+        }
         bool dependent = template_specialization_components_are_dependent(
             rewritten_primary,
             substituted_arguments,
