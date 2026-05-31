@@ -147,6 +147,18 @@ void bump_tentative_state_restores() {
     }
     ++parser_tentative_metrics().tentative_state_restores;
 }
+
+void bump_annotation_cache_hit() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserAnnotationCacheHits);
+    }
+}
+
+void bump_annotation_cache_miss() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserAnnotationCacheMisses);
+    }
+}
 } // namespace
 
 size_t Parser::begin_tentative_context(TentativeMode mode) {
@@ -244,52 +256,315 @@ tentative_syntax_probe::Config Parser::syntax_probe_config() const {
                 lang_opts, *type_ctx->target)};
 }
 
+bool Parser::can_use_annotation_cache() const {
+    return !tok_mgnt.has_split_tokens();
+}
+
 tentative_syntax_probe::Result Parser::probe_type_name_syntax() {
+    auto cfg = syntax_probe_config();
+    uint32_t key = ParserAnnotationCache::make_config_key(cfg);
+    size_t token_idx = tok_mgnt.get_token_idx();
+    bool use_cache = can_use_annotation_cache();
+    if (use_cache) {
+        if (auto cached = annotation_cache_.lookup_result(
+                token_idx,
+                ParserAnnotationCache::ResultKind::TypeName,
+                key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
     TokenStreamCheckpoint checkpoint(tok_mgnt);
-    return tentative_syntax_probe::probe_type_name(tok_mgnt, syntax_probe_config());
+    auto result = tentative_syntax_probe::probe_type_name(tok_mgnt, cfg);
+    if (use_cache) {
+        annotation_cache_.store_result(
+            token_idx,
+            ParserAnnotationCache::ResultKind::TypeName,
+            key,
+            result);
+    }
+    return result;
 }
 
 tentative_syntax_probe::Result Parser::probe_declarator_syntax() {
+    auto cfg = syntax_probe_config();
+    uint32_t key = ParserAnnotationCache::make_config_key(cfg);
+    size_t token_idx = tok_mgnt.get_token_idx();
+    bool use_cache = can_use_annotation_cache();
+    if (use_cache) {
+        if (auto cached = annotation_cache_.lookup_result(
+                token_idx,
+                ParserAnnotationCache::ResultKind::Declarator,
+                key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
     TokenStreamCheckpoint checkpoint(tok_mgnt);
-    return tentative_syntax_probe::probe_declarator(tok_mgnt, syntax_probe_config());
+    auto result = tentative_syntax_probe::probe_declarator(tok_mgnt, cfg);
+    if (use_cache) {
+        annotation_cache_.store_result(
+            token_idx,
+            ParserAnnotationCache::ResultKind::Declarator,
+            key,
+            result);
+    }
+    return result;
 }
 
 tentative_syntax_probe::Result
 Parser::probe_cxx_constrained_placeholder_type_specifier_syntax() {
+    auto cfg = syntax_probe_config();
+    uint32_t key = ParserAnnotationCache::make_config_key(cfg);
+    size_t token_idx = tok_mgnt.get_token_idx();
+    bool use_cache = can_use_annotation_cache();
+    if (use_cache) {
+        if (auto cached = annotation_cache_.lookup_result(
+                token_idx,
+                ParserAnnotationCache::ResultKind::CxxConstrainedPlaceholder,
+                key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
     TokenStreamCheckpoint checkpoint(tok_mgnt);
-    return tentative_syntax_probe::probe_cxx_constrained_placeholder_type_specifier(
+    auto result =
+        tentative_syntax_probe::probe_cxx_constrained_placeholder_type_specifier(
         tok_mgnt,
-        syntax_probe_config());
+        cfg);
+    if (use_cache) {
+        annotation_cache_.store_result(
+            token_idx,
+            ParserAnnotationCache::ResultKind::CxxConstrainedPlaceholder,
+            key,
+            result);
+    }
+    return result;
 }
 
 tentative_syntax_probe::Result Parser::probe_cpp_qualified_id_start_syntax() {
+    auto cfg = syntax_probe_config();
+    uint32_t key = ParserAnnotationCache::make_config_key(cfg);
+    size_t token_idx = tok_mgnt.get_token_idx();
+    bool use_cache = can_use_annotation_cache();
+    if (use_cache) {
+        if (auto cached = annotation_cache_.lookup_result(
+                token_idx,
+                ParserAnnotationCache::ResultKind::CppQualifiedIdStart,
+                key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
     TokenStreamCheckpoint checkpoint(tok_mgnt);
-    return tentative_syntax_probe::probe_cpp_qualified_id_start(
+    auto result = tentative_syntax_probe::probe_cpp_qualified_id_start(
         tok_mgnt,
-        syntax_probe_config());
+        cfg);
+    if (use_cache) {
+        annotation_cache_.store_result(
+            token_idx,
+            ParserAnnotationCache::ResultKind::CppQualifiedIdStart,
+            key,
+            result);
+    }
+    return result;
 }
 
 tentative_syntax_probe::Result Parser::probe_cpp_qualified_declarator_syntax() {
+    auto cfg = syntax_probe_config();
+    uint32_t key = ParserAnnotationCache::make_config_key(cfg);
+    size_t token_idx = tok_mgnt.get_token_idx();
+    bool use_cache = can_use_annotation_cache();
+    if (use_cache) {
+        if (auto cached = annotation_cache_.lookup_result(
+                token_idx,
+                ParserAnnotationCache::ResultKind::CppQualifiedDeclarator,
+                key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
     TokenStreamCheckpoint checkpoint(tok_mgnt);
-    return tentative_syntax_probe::probe_cpp_qualified_declarator(
+    auto result = tentative_syntax_probe::probe_cpp_qualified_declarator(
         tok_mgnt,
-        syntax_probe_config());
+        cfg);
+    if (use_cache) {
+        annotation_cache_.store_result(
+            token_idx,
+            ParserAnnotationCache::ResultKind::CppQualifiedDeclarator,
+            key,
+            result);
+    }
+    return result;
 }
 
 tentative_syntax_probe::Result
 Parser::probe_cpp_template_name_argument_prefix_syntax() {
+    auto cfg = syntax_probe_config();
+    uint32_t key = ParserAnnotationCache::make_config_key(cfg);
+    size_t token_idx = tok_mgnt.get_token_idx();
+    bool use_cache = can_use_annotation_cache();
+    if (use_cache) {
+        if (auto cached = annotation_cache_.lookup_result(
+                token_idx,
+                ParserAnnotationCache::ResultKind::CppTemplateNameArgumentPrefix,
+                key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
     TokenStreamCheckpoint checkpoint(tok_mgnt);
-    return tentative_syntax_probe::probe_cpp_template_name_argument_prefix(
+    auto result = tentative_syntax_probe::probe_cpp_template_name_argument_prefix(
         tok_mgnt,
-        syntax_probe_config());
+        cfg);
+    if (use_cache) {
+        annotation_cache_.store_result(
+            token_idx,
+            ParserAnnotationCache::ResultKind::CppTemplateNameArgumentPrefix,
+            key,
+            result);
+    }
+    return result;
+}
+
+tentative_syntax_probe::Result Parser::probe_parenthesized_type_name_syntax() {
+    auto cfg = syntax_probe_config();
+    uint32_t key = ParserAnnotationCache::make_config_key(cfg);
+    size_t token_idx = tok_mgnt.get_token_idx();
+    bool use_cache = can_use_annotation_cache();
+    if (use_cache) {
+        if (auto cached = annotation_cache_.lookup_result(
+                token_idx,
+                ParserAnnotationCache::ResultKind::ParenthesizedTypeName,
+                key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    tentative_syntax_probe::Result result =
+        tentative_syntax_probe::Result::NoMatch;
+    if (tok_mgnt.gentle_check_and_consume(TokenType::LEFT_PAREN) &&
+        current_token().type != TokenType::EXTENSION_KW) {
+        result = tentative_syntax_probe::probe_type_name(tok_mgnt, cfg);
+    }
+    if (use_cache) {
+        annotation_cache_.store_result(
+            token_idx,
+            ParserAnnotationCache::ResultKind::ParenthesizedTypeName,
+            key,
+            result);
+    }
+    return result;
+}
+
+tentative_syntax_probe::TemplateArgumentListScan
+Parser::scan_template_argument_list_scope_follow_syntax() {
+    auto cfg = syntax_probe_config();
+    uint32_t key = ParserAnnotationCache::make_config_key(cfg);
+    size_t token_idx = tok_mgnt.get_token_idx();
+    bool use_cache = can_use_annotation_cache();
+    if (use_cache) {
+        if (auto cached =
+                annotation_cache_.lookup_template_argument_list_scan(
+                    token_idx,
+                    key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    auto scan =
+        tentative_syntax_probe::scan_template_argument_list_scope_follow(
+            tok_mgnt,
+            cfg);
+    if (use_cache) {
+        annotation_cache_.store_template_argument_list_scan(
+            token_idx,
+            key,
+            scan);
+    }
+    return scan;
 }
 
 tentative_syntax_probe::TemplateArgumentListScopeFollow
 Parser::classify_template_argument_list_scope_follow_syntax() {
+    return scan_template_argument_list_scope_follow_syntax().scope_follow;
+}
+
+tentative_syntax_probe::CxxTypeConstructionScan
+Parser::scan_cpp_type_construction_candidate_syntax() {
+    auto cfg = syntax_probe_config();
+    uint32_t key = ParserAnnotationCache::make_config_key(cfg);
+    size_t token_idx = tok_mgnt.get_token_idx();
+    bool use_cache = can_use_annotation_cache();
+    if (use_cache) {
+        if (auto cached =
+                annotation_cache_.lookup_type_construction_scan(
+                    token_idx,
+                    key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
     TokenStreamCheckpoint checkpoint(tok_mgnt);
-    return tentative_syntax_probe::classify_template_argument_list_scope_follow(
+    auto scan = tentative_syntax_probe::scan_cpp_type_construction_candidate(
         tok_mgnt,
-        syntax_probe_config());
+        cfg);
+    if (use_cache) {
+        annotation_cache_.store_type_construction_scan(
+            token_idx,
+            key,
+            scan);
+    }
+    return scan;
+}
+
+tentative_syntax_probe::CxxParameterClauseShape
+Parser::scan_cxx_parameter_clause_shape_syntax() {
+    auto cfg = syntax_probe_config();
+    uint32_t key = ParserAnnotationCache::make_config_key(cfg);
+    size_t token_idx = tok_mgnt.get_token_idx();
+    bool use_cache = can_use_annotation_cache();
+    if (use_cache) {
+        if (auto cached = annotation_cache_.lookup_parameter_clause_shape(
+                token_idx,
+                key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    auto shape = tentative_syntax_probe::scan_cxx_parameter_clause_shape(
+        tok_mgnt,
+        cfg);
+    if (use_cache) {
+        annotation_cache_.store_parameter_clause_shape(
+            token_idx,
+            key,
+            shape);
+    }
+    return shape;
 }
 
 Parser::TentativeParsingAction::TentativeParsingAction(

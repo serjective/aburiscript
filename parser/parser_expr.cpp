@@ -549,113 +549,11 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
     }
 
     SrcLoc loc = current_token().loc;
-    auto qualified_id_brace_scan = [&]() {
-        struct Result {
-            bool is_qualified = false;
-            bool followed_by_left_brace = false;
-            bool followed_by_left_paren = false;
-        } result;
-
-        auto skip_template_argument_list_at = [&](size_t& at) -> bool {
-            if (peek_token_shortcut(at).type != TokenType::LESS_THAN) {
-                return true;
-            }
-
-            std::vector<TokenType> close_stack;
-            close_stack.push_back(TokenType::GREATER_THAN);
-            ++at;
-            while (!close_stack.empty()) {
-                TokenType tok = peek_token_shortcut(at).type;
-                if (tok == TokenType::Eof) {
-                    return false;
-                }
-
-                TokenType expected_close = close_stack.back();
-                if (expected_close == TokenType::GREATER_THAN) {
-                    if (tok == TokenType::GREATER_THAN) {
-                        close_stack.pop_back();
-                        ++at;
-                        continue;
-                    }
-                    if (tok == TokenType::RIGHT_SHIFT) {
-                        close_stack.pop_back();
-                        if (!close_stack.empty() &&
-                            close_stack.back() == TokenType::GREATER_THAN) {
-                            close_stack.pop_back();
-                        }
-                        ++at;
-                        continue;
-                    }
-                    if (tok == TokenType::LESS_THAN) {
-                        close_stack.push_back(TokenType::GREATER_THAN);
-                        ++at;
-                        continue;
-                    }
-                } else if (tok == expected_close) {
-                    close_stack.pop_back();
-                    ++at;
-                    continue;
-                }
-
-                if (tok == TokenType::LEFT_PAREN) {
-                    close_stack.push_back(TokenType::RIGHT_PAREN);
-                } else if (tok == TokenType::LEFT_BRACKET) {
-                    close_stack.push_back(TokenType::RIGHT_BRACKET);
-                } else if (tok == TokenType::LEFT_BRACE) {
-                    close_stack.push_back(TokenType::RIGHT_BRACE);
-                }
-                ++at;
-            }
-            return true;
-        };
-
-        size_t offset = 0;
-        auto consume_scope_at = [&](size_t& at) -> bool {
-            Token tok = peek_token_shortcut(at);
-            if (tok.type == TokenType::SCOPE_RESOLUTION) {
-                ++at;
-                return true;
-            }
-            if (tok.type == TokenType::COLON &&
-                peek_token_shortcut(at + 1).type == TokenType::COLON) {
-                at += 2;
-                return true;
-            }
-            return false;
-        };
-
-        bool saw_scope = consume_scope_at(offset);
-        if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER) {
-            return result;
-        }
-        ++offset;
-        if (!skip_template_argument_list_at(offset)) {
-            return result;
-        }
-        while (consume_scope_at(offset)) {
-            saw_scope = true;
-            if (peek_token_shortcut(offset).type == TokenType::TEMPLATE) {
-                ++offset;
-            }
-            if (peek_token_shortcut(offset).type != TokenType::IDENTIFIER) {
-                return result;
-            }
-            ++offset;
-            if (!skip_template_argument_list_at(offset)) {
-                return result;
-            }
-        }
-        result.is_qualified = saw_scope;
-        TokenType following_token = peek_token_shortcut(offset).type;
-        result.followed_by_left_brace = following_token == TokenType::LEFT_BRACE;
-        result.followed_by_left_paren = following_token == TokenType::LEFT_PAREN;
-        return result;
-    };
     // Keep non-construction qualified-ids on the existing qualified-id expression
     // path. Tentative declaration parsing can diagnose or attach semantic
     // state even when reverted, so only probe qualified type construction
     // forms such as `N::T{}` and `N::T(...)`.
-    auto qualified_scan = qualified_id_brace_scan();
+    auto qualified_scan = scan_cpp_type_construction_candidate_syntax();
     if (qualified_scan.is_qualified &&
         !qualified_scan.followed_by_left_brace &&
         !qualified_scan.followed_by_left_paren) {
@@ -2684,7 +2582,9 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
     std::unique_ptr<Expr> expr = nullptr;
     Token start_tok = current_token();
 
-    if (gentle_check(TokenType::LEFT_PAREN)) {
+    if (gentle_check(TokenType::LEFT_PAREN) &&
+        probe_parenthesized_type_name_syntax() !=
+            tentative_syntax_probe::Result::NoMatch) {
         TentativeParsingAction tentative(*this);
         try {
             advance(); // consume '('
@@ -3156,7 +3056,9 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
         }
 
         // Check if we have sizeof(type-name) rather than sizeof unary-expression.
-        if (gentle_check(TokenType::LEFT_PAREN)) {
+        if (gentle_check(TokenType::LEFT_PAREN) &&
+            probe_parenthesized_type_name_syntax() !=
+                tentative_syntax_probe::Result::NoMatch) {
             {
                 TentativeParsingAction tentative(*this);
                 try {
@@ -3290,7 +3192,9 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
 }
 std::unique_ptr<Expr> Parser::parse_cast_expression() {
     Token t = current_token();
-    if (gentle_check(TokenType::LEFT_PAREN)) {
+    if (gentle_check(TokenType::LEFT_PAREN) &&
+        probe_parenthesized_type_name_syntax() !=
+            tentative_syntax_probe::Result::NoMatch) {
         TentativeParsingAction tentative(*this);
         try {
             advance(); // consume '('

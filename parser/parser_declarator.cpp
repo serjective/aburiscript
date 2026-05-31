@@ -1567,24 +1567,44 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                 if (pars->is_cxx_mode_active() &&
                     !in_function_parameter &&
                     !name.empty()) {
+                    auto clause_shape =
+                        pars->scan_cxx_parameter_clause_shape_syntax();
+                    bool starts_with_parameter_attribute =
+                        is_gnu_attribute_token(mgnt->current_token()) ||
+                        (mgnt->current_token().type == TokenType::LEFT_BRACKET &&
+                         mgnt->peek_token().type == TokenType::LEFT_BRACKET);
                     bool looks_like_parameter_clause =
-                        mgnt->gentle_check(TokenType::RIGHT_PAREN) ||
-                        mgnt->gentle_check(TokenType::ELLIPSIS) ||
-                        pars->isTokenDeclarationSpec(mgnt->current_token());
-                    TokenType parameter_start_type = mgnt->current_token().type;
-                    if (looks_like_parameter_clause &&
-                        !mgnt->gentle_check(TokenType::RIGHT_PAREN) &&
-                        !mgnt->gentle_check(TokenType::ELLIPSIS) &&
-                        (parameter_start_type == TokenType::IDENTIFIER ||
-                         parameter_start_type == TokenType::SCOPE_RESOLUTION ||
-                         (parameter_start_type == TokenType::COLON &&
-                          mgnt->peek_token().type == TokenType::COLON)) &&
-                        pars->probe_type_name_syntax() ==
-                            tentative_syntax_probe::Result::NoMatch) {
-                        looks_like_parameter_clause = false;
+                        clause_shape ==
+                            tentative_syntax_probe::CxxParameterClauseShape::
+                                Empty ||
+                        clause_shape ==
+                            tentative_syntax_probe::CxxParameterClauseShape::
+                                Ellipsis ||
+                        clause_shape ==
+                            tentative_syntax_probe::CxxParameterClauseShape::
+                                PotentialParameter;
+                    if (clause_shape ==
+                        tentative_syntax_probe::CxxParameterClauseShape::
+                            Inconclusive) {
+                        looks_like_parameter_clause =
+                            pars->isTokenDeclarationSpec(mgnt->current_token());
+                        TokenType parameter_start_type =
+                            mgnt->current_token().type;
+                        if (looks_like_parameter_clause &&
+                            !mgnt->gentle_check(TokenType::RIGHT_PAREN) &&
+                            !mgnt->gentle_check(TokenType::ELLIPSIS) &&
+                            (parameter_start_type == TokenType::IDENTIFIER ||
+                             parameter_start_type == TokenType::SCOPE_RESOLUTION ||
+                             (parameter_start_type == TokenType::COLON &&
+                              mgnt->peek_token().type == TokenType::COLON)) &&
+                            pars->probe_type_name_syntax() ==
+                                tentative_syntax_probe::Result::NoMatch) {
+                            looks_like_parameter_clause = false;
+                        }
                     }
                     if (!looks_like_parameter_clause ||
-                        (!cxx_parameter_clause_parses() &&
+                        (!starts_with_parameter_attribute &&
+                         !cxx_parameter_clause_parses() &&
                          cxx_direct_initializer_clause_parses())) {
                         finish_as_direct_initializer_suffix();
                         break;

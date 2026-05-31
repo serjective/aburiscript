@@ -30,6 +30,28 @@ enum class TemplateArgumentListScopeFollow : uint8_t {
     Inconclusive
 };
 
+struct TemplateArgumentListScan {
+    TemplateArgumentListScopeFollow scope_follow =
+        TemplateArgumentListScopeFollow::NoList;
+    size_t end_offset = 0;
+    bool complete = false;
+};
+
+struct CxxTypeConstructionScan {
+    bool complete = false;
+    bool is_qualified = false;
+    bool followed_by_left_brace = false;
+    bool followed_by_left_paren = false;
+};
+
+enum class CxxParameterClauseShape : uint8_t {
+    NoMatch,
+    Empty,
+    Ellipsis,
+    PotentialParameter,
+    Inconclusive
+};
+
 struct Config {
     bool cxx_mode = false;
     bool blocks_enabled = false;
@@ -388,18 +410,128 @@ public:
         return Result::NoMatch;
     }
 
-    TemplateArgumentListScopeFollow
-    classify_template_argument_list_scope_follow() const {
+    TemplateArgumentListScan scan_template_argument_list_scope_follow() const {
+        TemplateArgumentListScan scan;
         size_t offset = 0;
         if (token_at(offset).type != TokenType::LESS_THAN) {
-            return TemplateArgumentListScopeFollow::NoList;
+            scan.scope_follow = TemplateArgumentListScopeFollow::NoList;
+            return scan;
         }
         if (!skip_template_argument_list_at(offset)) {
-            return TemplateArgumentListScopeFollow::Inconclusive;
+            scan.scope_follow = TemplateArgumentListScopeFollow::Inconclusive;
+            return scan;
         }
-        return is_scope_resolution_at(offset)
+        scan.complete = true;
+        scan.end_offset = offset;
+        scan.scope_follow = is_scope_resolution_at(offset)
             ? TemplateArgumentListScopeFollow::FollowedByScope
             : TemplateArgumentListScopeFollow::NotFollowedByScope;
+        return scan;
+    }
+
+    TemplateArgumentListScopeFollow
+    classify_template_argument_list_scope_follow() const {
+        return scan_template_argument_list_scope_follow().scope_follow;
+    }
+
+    CxxTypeConstructionScan scan_cpp_type_construction_candidate() const {
+        CxxTypeConstructionScan scan;
+        if (!cfg_.cxx_mode) {
+            return scan;
+        }
+
+        size_t offset = 0;
+        bool saw_scope = consume_scope_resolution_at(offset);
+        if (token_at(offset).type != TokenType::IDENTIFIER) {
+            return scan;
+        }
+        ++offset;
+        if (!skip_template_argument_list_at(offset)) {
+            return scan;
+        }
+        while (consume_scope_resolution_at(offset)) {
+            saw_scope = true;
+            if (token_at(offset).type == TokenType::TEMPLATE) {
+                ++offset;
+            }
+            if (token_at(offset).type != TokenType::IDENTIFIER) {
+                return scan;
+            }
+            ++offset;
+            if (!skip_template_argument_list_at(offset)) {
+                return scan;
+            }
+        }
+
+        scan.complete = true;
+        scan.is_qualified = saw_scope;
+        TokenType following_token = token_at(offset).type;
+        scan.followed_by_left_brace = following_token == TokenType::LEFT_BRACE;
+        scan.followed_by_left_paren = following_token == TokenType::LEFT_PAREN;
+        return scan;
+    }
+
+    CxxParameterClauseShape scan_cxx_parameter_clause_shape() const {
+        if (!cfg_.cxx_mode) {
+            return CxxParameterClauseShape::NoMatch;
+        }
+        if (token_at(0).type == TokenType::LEFT_BRACKET &&
+            token_at(1).type == TokenType::LEFT_BRACKET) {
+            return CxxParameterClauseShape::PotentialParameter;
+        }
+        switch (token_at(0).type) {
+            case TokenType::RIGHT_PAREN:
+                return CxxParameterClauseShape::Empty;
+            case TokenType::ELLIPSIS:
+                return CxxParameterClauseShape::Ellipsis;
+            case TokenType::IDENTIFIER:
+            case TokenType::SCOPE_RESOLUTION:
+            case TokenType::COLON:
+                return CxxParameterClauseShape::Inconclusive;
+            case TokenType::ATTRIBUTE_KW:
+            case TokenType::CONST:
+            case TokenType::VOLATILE:
+            case TokenType::RESTRICT:
+            case TokenType::ATOMIC:
+            case TokenType::INLINE:
+            case TokenType::STATIC:
+            case TokenType::EXTERN:
+            case TokenType::AUTO:
+            case TokenType::REGISTER:
+            case TokenType::TYPEDEF:
+            case TokenType::NORETURN_KW:
+            case TokenType::ALIGNAS:
+            case TokenType::THREAD_LOCAL:
+            case TokenType::TYPEOF_KW:
+            case TokenType::DECLTYPE_KW:
+            case TokenType::INT128:
+            case TokenType::UINT128_T:
+            case TokenType::AUTO_TYPE:
+            case TokenType::COMPLEX:
+            case TokenType::FLOAT16:
+            case TokenType::VOID:
+            case TokenType::CHAR:
+            case TokenType::SHORT:
+            case TokenType::INT:
+            case TokenType::LONG:
+            case TokenType::FLOAT:
+            case TokenType::DOUBLE:
+            case TokenType::SIGNED:
+            case TokenType::UNSIGNED:
+            case TokenType::BOOL:
+            case TokenType::WCHAR_T:
+            case TokenType::CHAR16_T:
+            case TokenType::CHAR32_T:
+            case TokenType::STRUCT:
+            case TokenType::UNION:
+            case TokenType::ENUM:
+            case TokenType::CLASS:
+            case TokenType::TYPENAME:
+            case TokenType::TEMPLATE:
+                return CxxParameterClauseShape::PotentialParameter;
+            default:
+                return CxxParameterClauseShape::NoMatch;
+        }
     }
 
     CxxStatementDisambiguation probe_cxx_statement_disambiguation() {
@@ -1492,6 +1624,27 @@ classify_template_argument_list_scope_follow(TokenMgnt& mgnt,
                                              const Config& cfg) {
     detail::SyntaxProbe probe(mgnt, cfg);
     return probe.classify_template_argument_list_scope_follow();
+}
+
+inline TemplateArgumentListScan
+scan_template_argument_list_scope_follow(TokenMgnt& mgnt,
+                                         const Config& cfg) {
+    detail::SyntaxProbe probe(mgnt, cfg);
+    return probe.scan_template_argument_list_scope_follow();
+}
+
+inline CxxTypeConstructionScan
+scan_cpp_type_construction_candidate(TokenMgnt& mgnt,
+                                     const Config& cfg) {
+    detail::SyntaxProbe probe(mgnt, cfg);
+    return probe.scan_cpp_type_construction_candidate();
+}
+
+inline CxxParameterClauseShape
+scan_cxx_parameter_clause_shape(TokenMgnt& mgnt,
+                                const Config& cfg) {
+    detail::SyntaxProbe probe(mgnt, cfg);
+    return probe.scan_cxx_parameter_clause_shape();
 }
 
 inline CxxStatementDisambiguation

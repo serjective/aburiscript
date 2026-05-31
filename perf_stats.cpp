@@ -85,6 +85,8 @@ constexpr auto kCounterNames = std::to_array<const char*>({
     "parser.tentative_rollbacks",
     "parser.tentative_state_captures",
     "parser.tentative_state_restores",
+    "parser.annotation_cache_hits",
+    "parser.annotation_cache_misses",
     "parser.template_arg.template_name",
     "parser.template_arg.nullptr",
     "parser.template_arg.direct_type",

@@ -104,6 +104,7 @@ set(PARSER_SOURCES
         parser/parser_stmt.cpp
         parser/parser_cxx.cpp
         parser/parser.h
+        parser/parser_annotation_cache.h
 )
 
 set(SHARED_HELPER_SOURCES

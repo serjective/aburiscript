@@ -1299,6 +1299,10 @@ size_t TokenMgnt::get_token_idx() {
     return current;
 }
 
+size_t TokenMgnt::token_count() const {
+    return tokens.size();
+}
+
 void TokenMgnt::set_token_idx(size_t idx) {
     current = idx;
     split_tokens.clear();

@@ -6620,14 +6620,15 @@ bool Parser::is_cpp_qualified_id_start() {
         }
         advance();
         if (gentle_check(TokenType::LESS_THAN)) {
-            auto scope_follow =
-                classify_template_argument_list_scope_follow_syntax();
-            if (scope_follow ==
+            auto scope_scan = scan_template_argument_list_scope_follow_syntax();
+            if (scope_scan.scope_follow ==
                     tentative_syntax_probe::TemplateArgumentListScopeFollow::
-                        FollowedByScope ||
-                scope_follow ==
-                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
-                        Inconclusive) {
+                        FollowedByScope &&
+                scope_scan.complete) {
+                set_token_idx(get_token_idx() + scope_scan.end_offset);
+            } else if (scope_scan.scope_follow ==
+                       tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                           Inconclusive) {
                 RevertingTentativeParsingAction template_args(*this);
                 parse_cpp_template_argument_list();
                 if (is_cpp_scope_resolution_here()) {
@@ -8366,14 +8367,16 @@ Parser::TPResult Parser::try_parse_cpp_qualified_id() {
             }
             advance();
             if (gentle_check(TokenType::LESS_THAN)) {
-                auto scope_follow =
-                    classify_template_argument_list_scope_follow_syntax();
-                if (scope_follow ==
+                auto scope_scan =
+                    scan_template_argument_list_scope_follow_syntax();
+                if (scope_scan.scope_follow ==
                         tentative_syntax_probe::TemplateArgumentListScopeFollow::
-                            FollowedByScope ||
-                    scope_follow ==
-                        tentative_syntax_probe::TemplateArgumentListScopeFollow::
-                            Inconclusive) {
+                            FollowedByScope &&
+                    scope_scan.complete) {
+                    set_token_idx(get_token_idx() + scope_scan.end_offset);
+                } else if (scope_scan.scope_follow ==
+                           tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                               Inconclusive) {
                     RevertingTentativeParsingAction template_args(*this);
                     parse_cpp_template_argument_list();
                     if (is_cpp_scope_resolution_here()) {

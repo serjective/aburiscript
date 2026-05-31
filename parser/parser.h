@@ -14,6 +14,7 @@
 #include "../lang_options.h"
 #include "../diagnostics.h"
 #include "../collect/collect.h"
+#include "parser_annotation_cache.h"
 #include "tentative_syntax_probe.h"
 #include <cctype>
 #include <chrono>
@@ -334,6 +335,7 @@ public:
     TokenMgnt tok_mgnt;
     std::shared_ptr<ASTContext> ast_ctx;
 private:
+    ParserAnnotationCache annotation_cache_;
     size_t begin_tentative_context(TentativeMode mode);
     void commit_tentative_context(size_t context_id);
     void rollback_tentative_context(size_t context_id);
@@ -946,8 +948,16 @@ private:
     tentative_syntax_probe::Result probe_cpp_qualified_id_start_syntax();
     tentative_syntax_probe::Result probe_cpp_qualified_declarator_syntax();
     tentative_syntax_probe::Result probe_cpp_template_name_argument_prefix_syntax();
+    tentative_syntax_probe::Result probe_parenthesized_type_name_syntax();
+    tentative_syntax_probe::TemplateArgumentListScan
+    scan_template_argument_list_scope_follow_syntax();
     tentative_syntax_probe::TemplateArgumentListScopeFollow
     classify_template_argument_list_scope_follow_syntax();
+    tentative_syntax_probe::CxxTypeConstructionScan
+    scan_cpp_type_construction_candidate_syntax();
+    tentative_syntax_probe::CxxParameterClauseShape
+    scan_cxx_parameter_clause_shape_syntax();
+    bool can_use_annotation_cache() const;
 
     // Attribute parsing
     std::vector<ParsedAttribute> try_parse_attributes();
@@ -971,6 +981,7 @@ public:
     explicit Parser(const std::vector<Token>& tokens, std::shared_ptr<SourceManager> src_mgnt)
     : tok_mgnt(tokens, src_mgnt),
     ast_ctx(std::make_shared<ASTContext>()),
+    annotation_cache_(tok_mgnt.token_count()),
     type_ctx(ast_ctx->type_ctx),
     diag_engine(std::make_shared<DiagnosticEngine>(src_mgnt)),
     collect_(std::make_unique<Collect>(ast_ctx, src_mgnt, diag_engine, lang_opts)) {
@@ -981,6 +992,7 @@ public:
            std::shared_ptr<TargetInfo> ti)
     : tok_mgnt(tokens, src_mgnt),
     ast_ctx(std::make_shared<ASTContext>(std::move(ti))),
+    annotation_cache_(tok_mgnt.token_count()),
     type_ctx(ast_ctx->type_ctx),
     diag_engine(std::make_shared<DiagnosticEngine>(src_mgnt)),
     collect_(std::make_unique<Collect>(ast_ctx, src_mgnt, diag_engine, lang_opts)) {

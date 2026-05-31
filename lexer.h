@@ -360,6 +360,7 @@ struct TokenMgnt {
 
     const Token& current_token() const;
     size_t get_token_idx();
+    size_t token_count() const;
 
     void set_token_idx(size_t idx);
     SplitTokenState get_split_token_state() const;

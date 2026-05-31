@@ -94,6 +94,8 @@ enum class PerfCounter {
     ParserTentativeRollbacks,
     ParserTentativeStateCaptures,
     ParserTentativeStateRestores,
+    ParserAnnotationCacheHits,
+    ParserAnnotationCacheMisses,
     ParserTemplateArgumentTemplateName,
     ParserTemplateArgumentNullptr,
     ParserTemplateArgumentDirectType,
