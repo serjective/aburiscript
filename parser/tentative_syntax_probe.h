@@ -500,8 +500,10 @@ public:
             case TokenType::REGISTER:
             case TokenType::TYPEDEF:
             case TokenType::NORETURN_KW:
+            case TokenType::STATIC_ASSERT:
             case TokenType::ALIGNAS:
             case TokenType::THREAD_LOCAL:
+            case TokenType::EXTENSION_KW:
             case TokenType::TYPEOF_KW:
             case TokenType::DECLTYPE_KW:
             case TokenType::INT128:
@@ -528,6 +530,12 @@ public:
             case TokenType::CLASS:
             case TokenType::TYPENAME:
             case TokenType::TEMPLATE:
+            case TokenType::USING:
+            case TokenType::FRIEND_KW:
+            case TokenType::EXPLICIT_KW:
+            case TokenType::MUTABLE_KW:
+            case TokenType::CONSTEXPR_KW:
+            case TokenType::CONSTEVAL_KW:
                 return CxxParameterClauseShape::PotentialParameter;
             default:
                 return CxxParameterClauseShape::NoMatch;
