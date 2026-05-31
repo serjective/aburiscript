@@ -992,6 +992,12 @@ private:
     classify_cpp_qualified_declarator_prefix_for_lookahead();
     ParserAnnotationCache::CppQualifiedDeclaratorPrefixAnnotation
     compute_cpp_qualified_declarator_prefix_for_lookahead();
+    ParserAnnotationCache::CppTypeScopeAnnotation
+    classify_cpp_type_scope_for_lookahead(
+        ParserAnnotationCache::CppTypeScopeContext context);
+    ParserAnnotationCache::CppTypeScopeAnnotation
+    compute_cpp_type_scope_for_lookahead(
+        ParserAnnotationCache::CppTypeScopeContext context);
     bool compute_cpp_named_type_specifier_for_lookahead();
 
     // Attribute parsing

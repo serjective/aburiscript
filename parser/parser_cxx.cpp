@@ -164,6 +164,56 @@ void bump_template_arg_inconclusive_fallback() {
     }
 }
 
+void bump_type_scope_annotation_hit() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTypeScopeAnnotationHits);
+    }
+}
+
+void bump_type_scope_annotation_miss() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTypeScopeAnnotationMisses);
+    }
+}
+
+void bump_type_scope_annotation_publish() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTypeScopeAnnotationPublishes);
+    }
+}
+
+void bump_type_scope_fast_type_accept() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTypeScopeFastTypeAccepts);
+    }
+}
+
+void bump_type_scope_fast_non_type_reject() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTypeScopeFastNonTypeRejects);
+    }
+}
+
+void bump_type_scope_scope_only_accept() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTypeScopeScopeOnlyAccepts);
+    }
+}
+
+void bump_type_scope_inconclusive_fallback() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTypeScopeInconclusiveFallbacks);
+    }
+}
+
 Token make_template_split_token(const Token& source,
                                 TokenType type,
                                 std::string value,
@@ -291,6 +341,43 @@ bool is_builtin_template_type_specifier_token(TokenType type) {
         case TokenType::AUTO_TYPE:
         case TokenType::COMPLEX:
         case TokenType::FLOAT16:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool is_cpp_type_scope_obvious_non_type_start(TokenType type) {
+    switch (type) {
+        case TokenType::INTEGER_CONST:
+        case TokenType::UNSIGNED_INTEGER_CONST:
+        case TokenType::LONG_CONST:
+        case TokenType::UNSIGNED_LONG_CONST:
+        case TokenType::LONG_LONG_CONST:
+        case TokenType::UNSIGNED_LONG_LONG_CONST:
+        case TokenType::FLOAT_CONST:
+        case TokenType::DOUBLE_CONST:
+        case TokenType::LONG_DOUBLE_CONST:
+        case TokenType::CHAR_LITERAL:
+        case TokenType::STRING_LITERAL:
+        case TokenType::TRUE_KW:
+        case TokenType::FALSE_KW:
+        case TokenType::THIS_KW:
+        case TokenType::SIZEOF:
+        case TokenType::ALIGNOF:
+        case TokenType::LEFT_PAREN:
+        case TokenType::LEFT_BRACKET:
+        case TokenType::NEGATE:
+        case TokenType::BITWISE_NOT:
+        case TokenType::LOGICAL_NOT:
+        case TokenType::INCREMENT:
+        case TokenType::DECREMENT:
+        case TokenType::PLUS:
+        case TokenType::MULTIPLY:
+        case TokenType::BITWISE_AND:
+        case TokenType::NEW:
+        case TokenType::DELETE:
+        case TokenType::NULLPTR_KW:
             return true;
         default:
             return false;
@@ -1319,6 +1406,33 @@ Parser::compute_cpp_template_argument_for_lookahead() {
         case TokenType::IDENTIFIER:
         case TokenType::SCOPE_RESOLUTION:
         case TokenType::COLON:
+            if (auto type_scope = classify_cpp_type_scope_for_lookahead(
+                    ParserAnnotationCache::CppTypeScopeContext::
+                        TemplateArgument);
+                type_scope.kind ==
+                        ParserAnnotationCache::CppTypeScopeKind::TypeName ||
+                type_scope.kind ==
+                    ParserAnnotationCache::CppTypeScopeKind::TypeTemplateId) {
+                const size_t follow_offset =
+                    type_scope.end_token_idx >= get_token_idx()
+                        ? type_scope.end_token_idx - get_token_idx()
+                        : 0;
+                TokenType follow = peek_token_shortcut(follow_offset).type;
+                if (is_cpp_template_argument_direct_type_follow_token(follow)) {
+                    result.end_token_idx = type_scope.end_token_idx;
+                    result.kind =
+                        follow == TokenType::LEFT_BRACE
+                            ? ParserAnnotationCache::
+                                  CppTemplateArgumentKind::TypedBraced
+                            : ParserAnnotationCache::
+                                  CppTemplateArgumentKind::Type;
+                    result.followed_by_ellipsis =
+                        follow == TokenType::ELLIPSIS;
+                    result.dependent_or_ambiguous =
+                        type_scope.dependent_or_ambiguous;
+                    return result;
+                }
+            }
             result.kind =
                 has_template_argument_list_shape_before_boundary()
                     ? ParserAnnotationCache::CppTemplateArgumentKind::
@@ -1990,37 +2104,379 @@ bool Parser::try_consume_cpp_decltype_specifier_for_lookahead() {
     return true;
 }
 
-bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
+ParserAnnotationCache::CppTypeScopeAnnotation
+Parser::classify_cpp_type_scope_for_lookahead(
+    ParserAnnotationCache::CppTypeScopeContext context) {
+    ParserAnnotationCache::CppTypeScopeAnnotation inconclusive;
+    inconclusive.kind = ParserAnnotationCache::CppTypeScopeKind::Inconclusive;
+    inconclusive.end_token_idx = get_token_idx();
+    inconclusive.dependent_or_ambiguous = true;
+
+    if (tok_mgnt.has_split_tokens()) {
+        return inconclusive;
+    }
+
     const bool use_cache = can_use_semantic_annotation_cache();
     const size_t token_idx = get_token_idx();
     ParserAnnotationCache::SemanticKey key;
     if (use_cache) {
         key = semantic_annotation_key();
-        if (auto cached = annotation_cache_.lookup_semantic_annotation(
+        if (auto cached = annotation_cache_.lookup_cpp_type_scope_annotation(
                 token_idx,
-                ParserAnnotationCache::SemanticKind::
-                    CppNamedTypeSpecifierLookahead,
+                context,
                 key)) {
-            bump_parser_annotation_overlay_hit();
-            return cached->value != 0;
+            bump_type_scope_annotation_hit();
+            return *cached;
         }
-        bump_parser_annotation_overlay_miss();
+        bump_type_scope_annotation_miss();
     }
 
-    bool result = compute_cpp_named_type_specifier_for_lookahead();
+    auto annotation = compute_cpp_type_scope_for_lookahead(context);
     if (use_cache) {
-        annotation_cache_.store_semantic_annotation(
+        annotation_cache_.store_cpp_type_scope_annotation(
             token_idx,
-            ParserAnnotationCache::SemanticKind::
-                CppNamedTypeSpecifierLookahead,
+            context,
             key,
-            ParserAnnotationCache::SemanticAnnotation{
-                get_token_idx(),
-                static_cast<uint8_t>(result ? 1 : 0),
-                false});
-        bump_parser_annotation_overlay_publish();
+            annotation);
+        bump_type_scope_annotation_publish();
     }
-    return result;
+    return annotation;
+}
+
+ParserAnnotationCache::CppTypeScopeAnnotation
+Parser::compute_cpp_type_scope_for_lookahead(
+    ParserAnnotationCache::CppTypeScopeContext context) {
+    using Kind = ParserAnnotationCache::CppTypeScopeKind;
+    ParserAnnotationCache::CppTypeScopeAnnotation result;
+    const size_t start_idx = get_token_idx();
+    result.end_token_idx = start_idx;
+    result.terminal_token_idx = start_idx;
+
+    (void)context;
+
+    auto finish = [&](Kind kind, size_t end_offset = 0) {
+        result.kind = kind;
+        result.end_token_idx = start_idx + end_offset;
+        return result;
+    };
+    auto finish_inconclusive = [&]() {
+        result.kind = Kind::Inconclusive;
+        result.dependent_or_ambiguous = true;
+        result.end_token_idx = start_idx;
+        return result;
+    };
+    auto token_at = [&](size_t offset) {
+        return peek_token_shortcut(offset);
+    };
+    auto consume_scope_resolution_at = [&](size_t& offset) {
+        if (token_at(offset).type == TokenType::SCOPE_RESOLUTION) {
+            ++offset;
+            return true;
+        }
+        if (token_at(offset).type == TokenType::COLON &&
+            token_at(offset + 1).type == TokenType::COLON) {
+            offset += 2;
+            return true;
+        }
+        return false;
+    };
+    auto skip_balanced_group_at =
+        [&](size_t& offset,
+            TokenType open_tok,
+            TokenType close_tok) -> bool {
+        if (token_at(offset).type != open_tok) {
+            return false;
+        }
+        size_t depth = 0;
+        while (token_at(offset).type != TokenType::Eof) {
+            TokenType type = token_at(offset).type;
+            if (type == open_tok) {
+                ++depth;
+            } else if (type == close_tok) {
+                --depth;
+                ++offset;
+                if (depth == 0) {
+                    return true;
+                }
+                continue;
+            }
+            ++offset;
+        }
+        return false;
+    };
+    auto skip_template_argument_list_at = [&](size_t& offset) -> bool {
+        if (token_at(offset).type != TokenType::LESS_THAN) {
+            return false;
+        }
+        ++offset;
+        size_t angle_depth = 1;
+        while (token_at(offset).type != TokenType::Eof) {
+            TokenType type = token_at(offset).type;
+            switch (type) {
+                case TokenType::LESS_THAN:
+                    ++angle_depth;
+                    ++offset;
+                    break;
+                case TokenType::GREATER_THAN:
+                    --angle_depth;
+                    ++offset;
+                    if (angle_depth == 0) {
+                        return true;
+                    }
+                    break;
+                case TokenType::RIGHT_SHIFT:
+                    if (angle_depth <= 2) {
+                        ++offset;
+                        return true;
+                    }
+                    angle_depth -= 2;
+                    ++offset;
+                    break;
+                case TokenType::LEFT_PAREN:
+                    if (!skip_balanced_group_at(
+                            offset,
+                            TokenType::LEFT_PAREN,
+                            TokenType::RIGHT_PAREN)) {
+                        return false;
+                    }
+                    break;
+                case TokenType::LEFT_BRACE:
+                    if (!skip_balanced_group_at(
+                            offset,
+                            TokenType::LEFT_BRACE,
+                            TokenType::RIGHT_BRACE)) {
+                        return false;
+                    }
+                    break;
+                case TokenType::LEFT_BRACKET:
+                    if (!skip_balanced_group_at(
+                            offset,
+                            TokenType::LEFT_BRACKET,
+                            TokenType::RIGHT_BRACKET)) {
+                        return false;
+                    }
+                    break;
+                default:
+                    ++offset;
+                    break;
+            }
+        }
+        return false;
+    };
+
+    struct TypeScopeComponent {
+        std::string name;
+        size_t token_idx = 0;
+        bool has_template_argument_list = false;
+        bool preceded_by_template_keyword = false;
+    };
+
+    auto parse_component_at =
+        [&](size_t& offset,
+            bool allow_template_keyword) -> std::optional<TypeScopeComponent> {
+        TypeScopeComponent component;
+        if (allow_template_keyword &&
+            token_at(offset).type == TokenType::TEMPLATE) {
+            component.preceded_by_template_keyword = true;
+            ++offset;
+        }
+        if (token_at(offset).type != TokenType::IDENTIFIER) {
+            return std::nullopt;
+        }
+        component.name = token_at(offset).value;
+        component.token_idx = start_idx + offset;
+        ++offset;
+        if (token_at(offset).type == TokenType::LESS_THAN) {
+            component.has_template_argument_list = true;
+            if (!skip_template_argument_list_at(offset)) {
+                return std::nullopt;
+            }
+        }
+        return component;
+    };
+
+    if (!is_cxx_mode_active() || !collect_) {
+        return result;
+    }
+
+    TokenType start_type = current_token().type;
+    if (is_builtin_template_type_specifier_token(start_type)) {
+        return finish(Kind::TypeName, 1);
+    }
+
+    if (is_cpp_type_scope_obvious_non_type_start(start_type)) {
+        return finish(Kind::NonType);
+    }
+
+    size_t offset = 0;
+    if (start_type == TokenType::TYPENAME) {
+        result.starts_with_typename = true;
+        ++offset;
+        if (token_at(offset).type == TokenType::DECLTYPE_KW) {
+            result.starts_with_decltype = true;
+            ++offset;
+            if (!skip_balanced_group_at(
+                    offset,
+                    TokenType::LEFT_PAREN,
+                    TokenType::RIGHT_PAREN)) {
+                return finish_inconclusive();
+            }
+        }
+        result.has_global_qualifier = consume_scope_resolution_at(offset);
+        auto component = parse_component_at(
+            offset,
+            /*allow_template_keyword=*/false);
+        if (!component) {
+            return finish_inconclusive();
+        }
+        result.terminal_token_idx = component->token_idx;
+        result.has_template_id |= component->has_template_argument_list;
+        result.has_scope |= result.has_global_qualifier;
+        while (consume_scope_resolution_at(offset)) {
+            result.has_scope = true;
+            component = parse_component_at(
+                offset,
+                /*allow_template_keyword=*/true);
+            if (!component) {
+                return finish_inconclusive();
+            }
+            result.terminal_token_idx = component->token_idx;
+            result.has_template_id |= component->has_template_argument_list;
+        }
+        result.dependent_or_ambiguous = true;
+        return finish(result.has_template_id ? Kind::TypeTemplateId
+                                             : Kind::DependentType,
+                      offset);
+    }
+
+    if (start_type == TokenType::DECLTYPE_KW) {
+        result.starts_with_decltype = true;
+        ++offset;
+        if (!skip_balanced_group_at(
+                offset,
+                TokenType::LEFT_PAREN,
+                TokenType::RIGHT_PAREN)) {
+            return finish_inconclusive();
+        }
+        if (!consume_scope_resolution_at(offset)) {
+            return finish(Kind::TypeName, offset);
+        }
+        result.has_scope = true;
+        auto component = parse_component_at(
+            offset,
+            /*allow_template_keyword=*/true);
+        if (!component) {
+            return finish_inconclusive();
+        }
+        result.terminal_token_idx = component->token_idx;
+        result.has_template_id |= component->has_template_argument_list;
+        while (consume_scope_resolution_at(offset)) {
+            component = parse_component_at(
+                offset,
+                /*allow_template_keyword=*/true);
+            if (!component) {
+                return finish_inconclusive();
+            }
+            result.terminal_token_idx = component->token_idx;
+            result.has_template_id |= component->has_template_argument_list;
+        }
+        result.dependent_or_ambiguous = true;
+        return finish(result.has_template_id ? Kind::TypeTemplateId
+                                             : Kind::DependentType,
+                      offset);
+    }
+
+    if (!(start_type == TokenType::IDENTIFIER ||
+          start_type == TokenType::SCOPE_RESOLUTION ||
+          (start_type == TokenType::COLON &&
+           peek_token().type == TokenType::COLON))) {
+        return result;
+    }
+
+    result.has_global_qualifier = consume_scope_resolution_at(offset);
+    auto component = parse_component_at(
+        offset,
+        /*allow_template_keyword=*/false);
+    if (!component) {
+        return finish_inconclusive();
+    }
+
+    std::vector<TypeScopeComponent> components;
+    components.push_back(std::move(*component));
+    result.terminal_token_idx = components.back().token_idx;
+    result.has_template_id |= components.back().has_template_argument_list;
+    result.has_scope |= result.has_global_qualifier;
+
+    while (consume_scope_resolution_at(offset)) {
+        result.has_scope = true;
+        component = parse_component_at(
+            offset,
+            /*allow_template_keyword=*/true);
+        if (!component) {
+            return finish_inconclusive();
+        }
+        result.has_template_id |= component->has_template_argument_list;
+        result.terminal_token_idx = component->token_idx;
+        components.push_back(std::move(*component));
+    }
+
+    const bool has_type_name =
+        compute_cpp_named_type_specifier_for_lookahead();
+    if (has_type_name) {
+        if (!result.has_global_qualifier && components.size() == 1 &&
+            !components.front().has_template_argument_list) {
+            QualType direct_type = collect_->collect_lookup_type_name(
+                components.front().name,
+                true,
+                true);
+            result.resolved_type = direct_type.get_shared().get();
+            if (auto typedef_symbol =
+                    collect_->collect_lookup_typedef_symbol(
+                        components.front().name,
+                        true)) {
+                result.typedef_symbol = typedef_symbol.get();
+            }
+        }
+        return finish(result.has_template_id ? Kind::TypeTemplateId
+                                             : Kind::TypeName,
+                      offset);
+    }
+
+    if (!components.empty()) {
+        const auto& terminal = components.back();
+        if (!result.has_global_qualifier && components.size() == 1 &&
+            !terminal.has_template_argument_list) {
+            if (const auto* active_parameter =
+                    find_active_template_parameter(terminal.name)) {
+                auto* mutable_parameter =
+                    const_cast<TemplateParameterDecl*>(active_parameter);
+                if (isa<TemplateTypeParmDecl>(mutable_parameter)) {
+                    result.dependent_or_ambiguous = true;
+                    return finish(Kind::DependentType, offset);
+                }
+            }
+        }
+        if (result.has_scope || result.has_template_id) {
+            result.dependent_or_ambiguous = true;
+            return finish(Kind::Inconclusive, offset);
+        }
+    }
+
+    return finish_inconclusive();
+}
+
+bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
+    auto annotation = classify_cpp_type_scope_for_lookahead(
+        ParserAnnotationCache::CppTypeScopeContext::DeclSpecifier);
+    switch (annotation.kind) {
+        case ParserAnnotationCache::CppTypeScopeKind::TypeName:
+        case ParserAnnotationCache::CppTypeScopeKind::TypeTemplateId:
+        case ParserAnnotationCache::CppTypeScopeKind::DependentType:
+        case ParserAnnotationCache::CppTypeScopeKind::PlaceholderConstraint:
+            return true;
+        default:
+            return false;
+    }
 }
 
 bool Parser::compute_cpp_named_type_specifier_for_lookahead() {
@@ -3129,6 +3585,73 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                     type_depends_on_template_parameters(result.type,
                                                         ast_ctx.get())});
             bump_parser_annotation_overlay_publish();
+
+            auto token_by_index = [&](size_t idx) -> Token {
+                if (idx < tok_mgnt.tokens.size()) {
+                    return tok_mgnt.tokens[idx];
+                }
+                return current_token();
+            };
+            bool has_template_id = false;
+            for (size_t idx = saved_idx; idx < get_token_idx(); ++idx) {
+                Token tok = token_by_index(idx);
+                if (tok.type == TokenType::LESS_THAN &&
+                    start_tok.type != TokenType::DECLTYPE_KW) {
+                    has_template_id = true;
+                    break;
+                }
+            }
+            const bool dependent =
+                type_depends_on_template_parameters(result.type,
+                                                    ast_ctx.get());
+            ParserAnnotationCache::CppTypeScopeAnnotation type_scope;
+            type_scope.end_token_idx = get_token_idx();
+            type_scope.terminal_token_idx =
+                get_token_idx() > saved_idx ? get_token_idx() - 1 : saved_idx;
+            type_scope.resolved_type = result.type.get_shared().get();
+            type_scope.typedef_symbol = result.typedef_symbol.get();
+            type_scope.kind =
+                dependent
+                    ? ParserAnnotationCache::CppTypeScopeKind::DependentType
+                    : (has_template_id
+                           ? ParserAnnotationCache::CppTypeScopeKind::
+                                 TypeTemplateId
+                           : ParserAnnotationCache::CppTypeScopeKind::
+                                 TypeName);
+            type_scope.has_global_qualifier =
+                start_tok.type == TokenType::SCOPE_RESOLUTION ||
+                (start_tok.type == TokenType::COLON &&
+                 token_by_index(saved_idx + 1).type == TokenType::COLON);
+            type_scope.has_scope = type_scope.has_global_qualifier;
+            for (size_t idx = saved_idx; idx < get_token_idx(); ++idx) {
+                Token tok = token_by_index(idx);
+                if (tok.type == TokenType::SCOPE_RESOLUTION ||
+                    (tok.type == TokenType::COLON &&
+                     idx + 1 < get_token_idx() &&
+                     token_by_index(idx + 1).type == TokenType::COLON)) {
+                    type_scope.has_scope = true;
+                    break;
+                }
+            }
+            type_scope.has_template_id = has_template_id;
+            type_scope.starts_with_typename =
+                start_tok.type == TokenType::TYPENAME;
+            type_scope.starts_with_decltype =
+                start_tok.type == TokenType::DECLTYPE_KW;
+            type_scope.dependent_or_ambiguous = dependent;
+
+            auto scope_context =
+                context == CppTypeNameParseContext::TypeRequirement
+                    ? ParserAnnotationCache::CppTypeScopeContext::
+                          TypeRequirement
+                    : ParserAnnotationCache::CppTypeScopeContext::
+                          DeclSpecifier;
+            annotation_cache_.store_cpp_type_scope_annotation(
+                saved_idx,
+                scope_context,
+                type_annotation_key,
+                type_scope);
+            bump_type_scope_annotation_publish();
         }
         return result;
     };

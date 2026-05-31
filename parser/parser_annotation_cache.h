@@ -153,6 +153,44 @@ public:
         bool dependent_or_ambiguous = false;
     };
 
+    enum class CppTypeScopeContext : uint8_t {
+        DeclSpecifier,
+        TemplateArgument,
+        TypeConstruction,
+        QualifiedDeclarator,
+        Constraint,
+        TypeRequirement,
+        Count
+    };
+
+    enum class CppTypeScopeKind : uint8_t {
+        NoMatch,
+        NonType,
+        TypeName,
+        TypeTemplateId,
+        ScopeOnly,
+        DependentType,
+        DependentScope,
+        PlaceholderConstraint,
+        Inconclusive,
+        Error
+    };
+
+    struct CppTypeScopeAnnotation {
+        size_t end_token_idx = 0;
+        size_t terminal_token_idx = 0;
+        const void* resolved_type = nullptr;
+        const void* typedef_symbol = nullptr;
+        const void* resolved_template = nullptr;
+        CppTypeScopeKind kind = CppTypeScopeKind::NoMatch;
+        bool has_global_qualifier = false;
+        bool has_scope = false;
+        bool has_template_id = false;
+        bool starts_with_typename = false;
+        bool starts_with_decltype = false;
+        bool dependent_or_ambiguous = false;
+    };
+
     ParserAnnotationCache() = default;
     explicit ParserAnnotationCache(size_t token_count) {
         reset(token_count);
@@ -438,6 +476,36 @@ public:
         entry.value = value;
     }
 
+    std::optional<CppTypeScopeAnnotation>
+    lookup_cpp_type_scope_annotation(size_t token_idx,
+                                     CppTypeScopeContext context,
+                                     const SemanticKey& key) const {
+        const auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return std::nullopt;
+        }
+        const auto& entry =
+            slot->cpp_type_scope[static_cast<size_t>(context)];
+        if (!entry.valid || !(entry.key == key)) {
+            return std::nullopt;
+        }
+        return entry.value;
+    }
+
+    void store_cpp_type_scope_annotation(size_t token_idx,
+                                         CppTypeScopeContext context,
+                                         const SemanticKey& key,
+                                         CppTypeScopeAnnotation value) {
+        auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return;
+        }
+        auto& entry = slot->cpp_type_scope[static_cast<size_t>(context)];
+        entry.valid = true;
+        entry.key = key;
+        entry.value = value;
+    }
+
 private:
     struct ResultEntry {
         bool valid = false;
@@ -489,6 +557,12 @@ private:
         CppQualifiedDeclaratorPrefixAnnotation value;
     };
 
+    struct CppTypeScopeEntry {
+        bool valid = false;
+        SemanticKey key;
+        CppTypeScopeAnnotation value;
+    };
+
     struct TokenSlots {
         std::array<ResultEntry, static_cast<size_t>(ResultKind::Count)> results;
         Entry<tentative_syntax_probe::TemplateArgumentListScan>
@@ -504,6 +578,9 @@ private:
         CppTemplateArgumentEntry cpp_template_argument;
         CxxDeclaratorParenSuffixEntry cxx_declarator_paren_suffix;
         CppQualifiedDeclaratorPrefixEntry cpp_qualified_declarator_prefix;
+        std::array<CppTypeScopeEntry,
+                   static_cast<size_t>(CppTypeScopeContext::Count)>
+            cpp_type_scope;
     };
 
     TokenSlots* slot_for(size_t token_idx) {

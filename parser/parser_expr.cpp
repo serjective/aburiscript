@@ -640,12 +640,29 @@ Parser::classify_cpp_type_construction_candidate(
 
     CxxTypeConstructionClassification result =
         CxxTypeConstructionClassification::NeedsCurrentPath;
-    if (!can_start_cpp_named_type_specifier_for_lookahead()) {
-        result = CxxTypeConstructionClassification::Reject;
-    } else if (scan.is_qualified) {
-        result = CxxTypeConstructionClassification::DependentOrAmbiguous;
-    } else {
-        result = CxxTypeConstructionClassification::KnownType;
+    auto type_scope = classify_cpp_type_scope_for_lookahead(
+        ParserAnnotationCache::CppTypeScopeContext::TypeConstruction);
+    switch (type_scope.kind) {
+        case ParserAnnotationCache::CppTypeScopeKind::TypeName:
+        case ParserAnnotationCache::CppTypeScopeKind::TypeTemplateId:
+        case ParserAnnotationCache::CppTypeScopeKind::PlaceholderConstraint:
+            result = scan.is_qualified
+                         ? CxxTypeConstructionClassification::
+                               DependentOrAmbiguous
+                         : CxxTypeConstructionClassification::KnownType;
+            break;
+        case ParserAnnotationCache::CppTypeScopeKind::DependentType:
+        case ParserAnnotationCache::CppTypeScopeKind::ScopeOnly:
+        case ParserAnnotationCache::CppTypeScopeKind::DependentScope:
+            result =
+                CxxTypeConstructionClassification::DependentOrAmbiguous;
+            break;
+        case ParserAnnotationCache::CppTypeScopeKind::NoMatch:
+        case ParserAnnotationCache::CppTypeScopeKind::NonType:
+        case ParserAnnotationCache::CppTypeScopeKind::Inconclusive:
+        case ParserAnnotationCache::CppTypeScopeKind::Error:
+            result = CxxTypeConstructionClassification::Reject;
+            break;
     }
 
     if (use_cache) {
