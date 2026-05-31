@@ -27,6 +27,10 @@
 class CollectRecordBuilder;
 struct ASTCloneContext;
 
+namespace template_sema_internal {
+class TemplateInstantiationDepthGuard;
+}
+
 // Bundles the boolean mode flags for collect_variable_declaration.
 // Using a struct avoids long chains of positional booleans at call sites.
 struct VariableDeclFlags {
@@ -1401,6 +1405,7 @@ public:
 
 private:
     friend class CollectRecordBuilder;
+    friend class template_sema_internal::TemplateInstantiationDepthGuard;
 
     struct CollectRecordBuildContext {
         const CppRecordDecl* record = nullptr;

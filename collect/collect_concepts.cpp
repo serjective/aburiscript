@@ -438,23 +438,29 @@ std::optional<bool> Collect::evaluate_concept_specialization(
     if (specialization_entry.is_evaluating) {
         return false;
     }
-    if (!ast_ctx_->push_template_instantiation_frame()) {
+    template_sema_internal::TemplateInstantiationDepthGuard depth_guard(
+        ast_ctx_.get(),
+        this,
+        "concept",
+        canonical_concept
+            ? std::string_view(canonical_concept->name.data(),
+                               canonical_concept->name.size())
+            : std::string_view(),
+        loc,
+        template_sema_internal::TemplateInstantiationDepthDiagnostic::Suppress);
+    if (!depth_guard.ok()) {
         return false;
     }
 
     specialization_entry.is_evaluating = true;
     struct EvaluationGuard {
-        ASTContext* ast_ctx = nullptr;
         ConceptSpecializationEntry* entry = nullptr;
         ~EvaluationGuard() {
             if (entry) {
                 entry->is_evaluating = false;
             }
-            if (ast_ctx) {
-                ast_ctx->pop_template_instantiation_frame();
-            }
         }
-    } evaluation_guard{ast_ctx_.get(), &specialization_entry};
+    } evaluation_guard{&specialization_entry};
 
     if (!are_template_constraints_satisfied_with_bindings(
             canonical_concept,

@@ -763,11 +763,18 @@ struct Collect::VariableTemplateSpecializationInstantiator {
     }
 
     VariableDecl* instantiate_entry_definition() {
-        if (!ast_ctx()->push_template_instantiation_frame()) {
-            fail_instantiation(
-                "template instantiation depth exceeded while instantiating variable template '" +
-                    pattern->name + "'",
-                loc);
+        template_sema_internal::TemplateInstantiationDepthGuard depth_guard(
+            ast_ctx(),
+            &collect,
+            "variable",
+            pattern
+                ? std::string_view(pattern->name.data(), pattern->name.size())
+                : std::string_view(),
+            loc);
+        if (!depth_guard.ok()) {
+            if (entry) {
+                entry->instantiation_failed = true;
+            }
             return nullptr;
         }
 
@@ -784,14 +791,6 @@ struct Collect::VariableTemplateSpecializationInstantiator {
             VariableTemplateSpecializationEntry& entry;
             ~InstantiationGuard() { entry.is_instantiating = false; }
         } instantiation_guard{*entry};
-        struct DepthGuard {
-            ASTContext* ast_ctx = nullptr;
-            ~DepthGuard() {
-                if (ast_ctx) {
-                    ast_ctx->pop_template_instantiation_frame();
-                }
-            }
-        } depth_guard{ast_ctx()};
 
         if (!materialize_entry_declaration()) {
             return nullptr;

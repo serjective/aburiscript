@@ -574,11 +574,13 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             entry->instantiation_failed) {
             return entry->specialization_decl.get();
         }
-        if (!ast_ctx()->push_template_instantiation_frame()) {
-            collect.report_error(
-                "template instantiation depth exceeded while instantiating class template '" +
-                    specialization_name + "'",
-                loc);
+        template_sema_internal::TemplateInstantiationDepthGuard depth_guard(
+            ast_ctx(),
+            &collect,
+            "class",
+            specialization_name,
+            loc);
+        if (!depth_guard.ok()) {
             entry->instantiation_failed = true;
             return entry->specialization_decl.get();
         }
@@ -588,14 +590,6 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             ClassTemplateSpecializationEntry& entry;
             ~InstantiationGuard() { entry.is_instantiating = false; }
         } instantiation_guard{*entry};
-        struct DepthGuard {
-            ASTContext* ast_ctx = nullptr;
-            ~DepthGuard() {
-                if (ast_ctx) {
-                    ast_ctx->pop_template_instantiation_frame();
-                }
-            }
-        } depth_guard{ast_ctx()};
 
         build_pattern_symbol_maps();
         owner_type = QualType(entry->specialization_type);
@@ -5928,22 +5922,16 @@ bool Collect::materialize_class_template_member_body(
         make_class_template_specialization_name(
             entry.primary_template,
             entry.arguments);
-    if (!ast_ctx_->push_template_instantiation_frame()) {
-        report_error(
-            "template instantiation depth exceeded while instantiating class template '" +
-                specialization_name + "'",
-            loc);
+    template_sema_internal::TemplateInstantiationDepthGuard depth_guard(
+        ast_ctx_.get(),
+        this,
+        "class",
+        specialization_name,
+        loc);
+    if (!depth_guard.ok()) {
         entry.instantiation_failed = true;
         return false;
     }
-    struct DepthGuard {
-        ASTContext* ast_ctx = nullptr;
-        ~DepthGuard() {
-            if (ast_ctx) {
-                ast_ctx->pop_template_instantiation_frame();
-            }
-        }
-    } depth_guard{ast_ctx_.get()};
 
     const ClassTemplateDecl* instantiation_template =
         class_template_definition_for_instantiation(entry.primary_template);

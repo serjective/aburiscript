@@ -6,6 +6,37 @@
 
 namespace template_sema_internal {
 
+enum class TemplateInstantiationDepthDiagnostic {
+    Report,
+    Suppress
+};
+
+class TemplateInstantiationDepthGuard {
+public:
+    TemplateInstantiationDepthGuard(
+        ASTContext* ast_ctx,
+        const Collect* collect,
+        std::string_view template_kind,
+        std::string_view template_name,
+        SrcLoc loc,
+        TemplateInstantiationDepthDiagnostic diagnostic =
+            TemplateInstantiationDepthDiagnostic::Report);
+    ~TemplateInstantiationDepthGuard();
+
+    bool ok() const noexcept { return ok_; }
+    bool active() const noexcept { return active_; }
+
+    TemplateInstantiationDepthGuard(
+        const TemplateInstantiationDepthGuard&) = delete;
+    TemplateInstantiationDepthGuard& operator=(
+        const TemplateInstantiationDepthGuard&) = delete;
+
+private:
+    ASTContext* ast_ctx_ = nullptr;
+    bool active_ = false;
+    bool ok_ = false;
+};
+
 struct TemplateSubstitutionPass {
     ASTCloneContext ctx;
     std::function<std::vector<TemplateArgument>(
