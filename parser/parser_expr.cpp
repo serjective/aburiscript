@@ -358,6 +358,62 @@ std::unique_ptr<Expr> Parser::try_parse_fold_expression(SrcLoc lparen_loc) {
         return nullptr;
     }
 
+    auto fold_expression_shape_possible = [&]() {
+        size_t offset = 0;
+        size_t paren_depth = 0;
+        size_t bracket_depth = 0;
+        size_t brace_depth = 0;
+        while (true) {
+            TokenType tok = peek_token_shortcut(offset).type;
+            if (tok == TokenType::Eof) {
+                return false;
+            }
+            if (paren_depth == 0 &&
+                bracket_depth == 0 &&
+                brace_depth == 0) {
+                if (tok == TokenType::RIGHT_PAREN) {
+                    return false;
+                }
+                if (tok == TokenType::ELLIPSIS) {
+                    return true;
+                }
+            }
+            switch (tok) {
+                case TokenType::LEFT_PAREN:
+                    ++paren_depth;
+                    break;
+                case TokenType::RIGHT_PAREN:
+                    if (paren_depth > 0) {
+                        --paren_depth;
+                    }
+                    break;
+                case TokenType::LEFT_BRACKET:
+                    ++bracket_depth;
+                    break;
+                case TokenType::RIGHT_BRACKET:
+                    if (bracket_depth > 0) {
+                        --bracket_depth;
+                    }
+                    break;
+                case TokenType::LEFT_BRACE:
+                    ++brace_depth;
+                    break;
+                case TokenType::RIGHT_BRACE:
+                    if (brace_depth > 0) {
+                        --brace_depth;
+                    }
+                    break;
+                default:
+                    break;
+            }
+            ++offset;
+        }
+    };
+
+    if (!fold_expression_shape_possible()) {
+        return nullptr;
+    }
+
     RevertingTentativeParsingAction tentative(*this);
     try {
         auto build_fold =
@@ -784,13 +840,25 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             component.name = current_token().value;
             advance();
             if (gentle_check(TokenType::LESS_THAN)) {
-                RevertingTentativeParsingAction tentative(*this);
-                auto parsed_arguments = parse_cpp_template_argument_list();
-                bool scope_after_template_id = is_cpp_scope_resolution_here();
-                if (scope_after_template_id) {
-                    tentative.commit();
+                auto scope_follow =
+                    classify_template_argument_list_scope_follow_syntax();
+                if (scope_follow ==
+                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                        FollowedByScope) {
                     component.has_template_argument_list = true;
-                    component.template_arguments = std::move(parsed_arguments);
+                    component.template_arguments =
+                        parse_cpp_template_argument_list();
+                } else if (scope_follow ==
+                           tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                               Inconclusive) {
+                    RevertingTentativeParsingAction tentative(*this);
+                    auto parsed_arguments = parse_cpp_template_argument_list();
+                    bool scope_after_template_id = is_cpp_scope_resolution_here();
+                    if (scope_after_template_id) {
+                        tentative.commit();
+                        component.has_template_argument_list = true;
+                        component.template_arguments = std::move(parsed_arguments);
+                    }
                 }
             }
             return component;

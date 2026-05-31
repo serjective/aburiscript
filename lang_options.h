@@ -56,6 +56,10 @@ struct LangOptions {
     // Disabled by default to preserve current parser behavior until migrated.
     bool enable_cpp_parser = false;
 
+    // True for -fsyntax-only front-end runs. Normal code generation keeps
+    // full template body semantics available for later instantiation.
+    bool syntax_only = false;
+
     // C++ exception syntax/runtime support gate.
     bool exceptions_enabled = true;
 

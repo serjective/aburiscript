@@ -687,6 +687,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
         auto rebased_scope = std::make_shared<Scope>(*saved_scope);
         rebased_scope->parent = owner_namespace_scope;
         rebased_scope->associated_decl_context = saved_context.get();
+        rebased_scope->associated_decl_context_owner = saved_context;
         collect_->collect_set_current_scope(std::move(rebased_scope));
         collect_->set_current_decl_context(saved_context);
     } else {
@@ -1576,6 +1577,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_destructor_defi
         auto rebased_scope = std::make_shared<Scope>(*saved_scope);
         rebased_scope->parent = owner_namespace_scope;
         rebased_scope->associated_decl_context = saved_context.get();
+        rebased_scope->associated_decl_context_owner = saved_context;
         collect_->collect_set_current_scope(std::move(rebased_scope));
         collect_->set_current_decl_context(saved_context);
     } else {

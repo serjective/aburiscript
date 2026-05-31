@@ -79,6 +79,8 @@ constexpr auto kCounterNames = std::to_array<const char*>({
     "macro.argument_tokens",
     "macro.expansion_max_depth",
     "parser.tentative_begins",
+    "parser.tentative_parser_only_begins",
+    "parser.tentative_collect_backed_begins",
     "parser.tentative_commits",
     "parser.tentative_rollbacks",
     "parser.tentative_state_captures",
@@ -90,6 +92,7 @@ constexpr auto kCounterNames = std::to_array<const char*>({
     "parser.template_arg.tentative_type_failures",
     "parser.template_arg.typed_braced",
     "parser.template_arg.expression",
+    "parser.skipped_system_function_bodies",
     "collect.tentative_begins",
     "collect.tentative_commits",
     "collect.tentative_rollbacks",
@@ -425,6 +428,7 @@ void PerfProfiler::record_tentative_parse_site(
     std::string_view function,
     uint32_t line,
     bool committed,
+    bool collect_backed,
     uint64_t start_token,
     uint64_t end_token,
     uint64_t depth,
@@ -445,6 +449,11 @@ void PerfProfiler::record_tentative_parse_site(
     auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration);
 
     ++stats.begins;
+    if (collect_backed) {
+        ++stats.collect_backed_begins;
+    } else {
+        ++stats.parser_only_begins;
+    }
     stats.duration += nanos;
     stats.tokens_consumed += token_span;
     stats.max_token_span = std::max(stats.max_token_span, token_span);
@@ -517,7 +526,9 @@ void PerfProfiler::print_text_report(std::ostream& os) const {
             const auto& stats = row->second;
             os << "  " << stats.file << ":" << stats.line
                << " " << stats.function
-               << ": time=" << ms(stats.duration) << " ms"
+                << ": time=" << ms(stats.duration) << " ms"
+               << " parser_only=" << stats.parser_only_begins
+               << " collect_backed=" << stats.collect_backed_begins
                << " commits=" << stats.commits
                << " rollbacks=" << stats.rollbacks
                << " tokens=" << stats.tokens_consumed
@@ -633,6 +644,9 @@ bool PerfProfiler::write_json_report(const std::string& path, std::string& error
                 << "\", \"function\": \"" << json_escape(stats.function)
                 << "\", \"line\": " << stats.line
                 << ", \"begins\": " << stats.begins
+                << ", \"parser_only_begins\": " << stats.parser_only_begins
+                << ", \"collect_backed_begins\": "
+                << stats.collect_backed_begins
                 << ", \"commits\": " << stats.commits
                 << ", \"rollbacks\": " << stats.rollbacks
                 << ", \"time_ms\": " << ms(stats.duration)

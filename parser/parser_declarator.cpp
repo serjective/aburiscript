@@ -514,8 +514,8 @@ std::shared_ptr<CType> DeclarationParser::parse_declaration(bool run_second_half
                           mgnt->peek_token().type == TokenType::COLON))) {
                         auto constraint_syntax =
                             pars->probe_cxx_constrained_placeholder_type_specifier_syntax();
-                        if (constraint_syntax !=
-                            tentative_syntax_probe::Result::NoMatch) {
+                        if (constraint_syntax ==
+                            tentative_syntax_probe::Result::Match) {
                             Parser::RevertingTentativeParsingAction tentative(*pars);
                             std::optional<CppTypeConstraint> type_constraint;
                             try {

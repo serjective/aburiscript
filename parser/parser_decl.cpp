@@ -1,6 +1,7 @@
 #include "parser.h"
 #include "../helpers/auto_type_utils.h"
 #include "../helpers/qualified_name_utils.h"
+#include "../perf_stats.h"
 
 #include <limits>
 
@@ -261,6 +262,72 @@ std::unique_ptr<Decl> Parser::wrap_abbreviated_function_template_if_needed(
             template_decl.get());
     }
     return template_decl;
+}
+
+bool Parser::current_token_is_from_system_header() {
+    if (!tok_mgnt.sm) {
+        return false;
+    }
+    SrcLoc loc = current_token().loc;
+    if (loc.isInvalid()) {
+        return false;
+    }
+    const auto& entry = tok_mgnt.sm->getEntryForLocation(loc);
+    if (entry.is_expansion) {
+        if (entry.macro_src.caller.isInvalid()) {
+            return false;
+        }
+        const auto& caller_entry = tok_mgnt.sm->getEntryForLocation(
+            entry.macro_src.caller);
+        return !caller_entry.is_expansion &&
+               caller_entry.file_src &&
+               caller_entry.file_src->is_system_header;
+    }
+    return entry.file_src && entry.file_src->is_system_header;
+}
+
+bool Parser::should_skip_system_header_function_body_semantics() {
+    return lang_opts.syntax_only &&
+           current_token_is_from_system_header();
+}
+
+void Parser::skip_function_body_tokens() {
+    auto skip_balanced = [&](TokenType open_tok, TokenType close_tok) {
+        if (!gentle_check(open_tok)) {
+            error("expected function body");
+        }
+        size_t depth = 0;
+        do {
+            if (gentle_check(TokenType::Eof)) {
+                error("unexpected end of file while skipping function body");
+            }
+            if (gentle_check(open_tok)) {
+                ++depth;
+            } else if (gentle_check(close_tok)) {
+                if (depth == 0) {
+                    error("unbalanced function body");
+                }
+                --depth;
+            }
+            advance();
+        } while (depth > 0);
+    };
+
+    if (gentle_check(TokenType::LEFT_BRACE)) {
+        skip_balanced(TokenType::LEFT_BRACE, TokenType::RIGHT_BRACE);
+        return;
+    }
+
+    if (!gentle_check(TokenType::TRY_KW)) {
+        error("expected function body");
+    }
+    advance();
+    skip_balanced(TokenType::LEFT_BRACE, TokenType::RIGHT_BRACE);
+    while (gentle_check(TokenType::CATCH_KW)) {
+        advance();
+        skip_balanced(TokenType::LEFT_PAREN, TokenType::RIGHT_PAREN);
+        skip_balanced(TokenType::LEFT_BRACE, TokenType::RIGHT_BRACE);
+    }
 }
 
 std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
@@ -638,7 +705,19 @@ std::unique_ptr<Decl> Parser::parse_function(DeclarationParser * decl_parser,
     Collect::ImmediateFunctionContextScope immediate_function_context_guard(
         collect_.get(), fin_funcdecl->is_consteval != 0);
     try {
-        if (gentle_check(TokenType::LEFT_BRACE)) {
+        if (should_skip_system_header_function_body_semantics() &&
+            gentle_check(TokenType::LEFT_BRACE)) {
+            SrcLoc body_loc = current_token().loc;
+            if (auto* profiler = active_perf_profiler()) {
+                profiler->add_counter(
+                    PerfCounter::ParserSkippedSystemFunctionBodies);
+            }
+            skip_function_body_tokens();
+            collect_->collect_mark_current_function_body_semantics_skipped();
+            std::vector<std::unique_ptr<Stmt>> stmts;
+            compound_stmt = collect_->collect_compound_statement(
+                std::move(stmts), new_scope, body_loc);
+        } else if (gentle_check(TokenType::LEFT_BRACE)) {
             compound_stmt = parse_compound_stmt(new_scope);
             // its a statement
         } else if (is_cxx_mode_active() && gentle_check(TokenType::TRY_KW)) {

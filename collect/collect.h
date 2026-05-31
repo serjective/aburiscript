@@ -251,6 +251,8 @@ public:
 
     void collect_finish_function_definition(const std::shared_ptr<Scope>& function_scope) ;
 
+    void collect_mark_current_function_body_semantics_skipped() ;
+
     void collect_abort_function_definition() ;
 
     bool collect_is_in_function_definition() const ;

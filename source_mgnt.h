@@ -98,6 +98,7 @@ struct FileSrc {
     bool pragma_once = false;
     bool include_guard_checked = false;
     bool initial_preprocessed = false;
+    bool is_system_header = false;
     std::string include_guard;
 
     FileSrc(std::string name, std::string content, int32_t file_id = -1)

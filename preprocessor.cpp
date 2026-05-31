@@ -2526,6 +2526,7 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
         auto it = builtin_headers.find(file_name);
         if (it != builtin_headers.end()) {
             auto builtin_sloc = sm->createFileEntry(file_name, std::string(it->second));
+            builtin_sloc->is_system_header = true;
             if (perf_profiler) {
                 perf_profiler->record_resolved_header_request(perf_header_key(builtin_sloc));
                 perf_profiler->add_counter(PerfCounter::IncludeBuiltinEntered);
@@ -2549,6 +2550,7 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
         auto it = builtin_headers.find(file_name);
         if (it != builtin_headers.end()) {
             auto builtin_sloc = sm->createFileEntry(file_name, std::string(it->second));
+            builtin_sloc->is_system_header = true;
             if (perf_profiler) {
                 perf_profiler->record_resolved_header_request(perf_header_key(builtin_sloc));
                 perf_profiler->add_counter(PerfCounter::IncludeBuiltinEntered);
@@ -2566,6 +2568,12 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
             perf_profiler->add_counter(PerfCounter::IncludeLookupFailures);
         }
         error(sm->formatIncludeLookupFailure(file_name), def_loc);
+    }
+    if (new_file) {
+        new_file->is_system_header =
+            new_file->is_system_header ||
+            isSystem ||
+            (curr_file && curr_file->is_system_header);
     }
     if (perf_profiler) {
         perf_profiler->record_resolved_header_request(perf_header_key(new_file));

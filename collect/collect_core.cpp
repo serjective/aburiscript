@@ -240,6 +240,28 @@ std::shared_ptr<DeclContext> find_decl_context_in_subtree(
     return nullptr;
 }
 
+void set_scope_decl_context(
+    const std::shared_ptr<Scope>& scope,
+    const std::shared_ptr<DeclContext>& context) {
+    if (!scope) {
+        return;
+    }
+    scope->associated_decl_context = context.get();
+    scope->associated_decl_context_owner = context;
+}
+
+std::shared_ptr<DeclContext> lock_scope_decl_context(
+    const std::shared_ptr<Scope>& scope) {
+    if (!scope || !scope->associated_decl_context) {
+        return nullptr;
+    }
+    auto context = scope->associated_decl_context_owner.lock();
+    if (context && context.get() == scope->associated_decl_context) {
+        return context;
+    }
+    return nullptr;
+}
+
 DeclContextKind context_kind_for_scope_flags(ScopeFlags flags) {
     if (scope_flags_contains(flags, ScopeFlags::NamespaceScope)) {
         return DeclContextKind::Namespace;
@@ -494,7 +516,7 @@ void Collect::collect_start_translation_unit() {
         DeclContext::create_translation_unit(ast_ctx_);
     session_.current_decl_context_ = session_.translation_unit_decl_context_;
     session_.current_scope_->flags = ScopeFlags::FileScope;
-    session_.current_scope_->associated_decl_context = session_.current_decl_context_.get();
+    set_scope_decl_context(session_.current_scope_, session_.current_decl_context_);
     session_.current_global_scope_ = ast_ctx_ ? ast_ctx_->global_tracker : nullptr;
     session_.func_state_.current_function_name.clear();
     session_.func_state_.current_pretty_function_name.clear();
@@ -764,6 +786,13 @@ void Collect::collect_finish_function_definition(const std::shared_ptr<Scope>& f
         return;
     }
     reset_current_function_definition_state();
+}
+
+void Collect::collect_mark_current_function_body_semantics_skipped() {
+
+    session_.func_state_.current_function_has_cxx_auto_return_deduction = false;
+    session_.func_state_.current_function_has_deferred_cxx_auto_return_deduction = false;
+    session_.func_state_.current_function_has_return_statement = true;
 }
 
 
@@ -1054,7 +1083,7 @@ void Collect::set_current_decl_context(std::shared_ptr<DeclContext> decl_context
     materialize_tentative_snapshot_if_needed();
     session_.current_decl_context_ = std::move(decl_context);
     if (session_.current_scope_) {
-        session_.current_scope_->associated_decl_context = session_.current_decl_context_.get();
+        set_scope_decl_context(session_.current_scope_, session_.current_decl_context_);
     }
 }
 
@@ -1079,6 +1108,9 @@ std::shared_ptr<DeclContext> Collect::resolve_scope_decl_context(const std::shar
     for (auto it = scope; it; it = it->parent) {
         if (!it->associated_decl_context) {
             continue;
+        }
+        if (auto locked = lock_scope_decl_context(it)) {
+            return locked;
         }
         auto resolved = find_decl_context(it->associated_decl_context);
         if (resolved) {
@@ -1255,17 +1287,21 @@ void Collect::sync_decl_context_from_current_scope() {
         return;
     }
     if (session_.current_scope_->associated_decl_context) {
+        if (auto locked = lock_scope_decl_context(session_.current_scope_)) {
+            session_.current_decl_context_ = locked;
+            return;
+        }
         auto resolved = find_decl_context(session_.current_scope_->associated_decl_context);
         if (resolved) {
             session_.current_decl_context_ = resolved;
-            session_.current_scope_->associated_decl_context = session_.current_decl_context_.get();
+            set_scope_decl_context(session_.current_scope_, session_.current_decl_context_);
             return;
         }
     }
     if (!session_.current_decl_context_) {
         session_.current_decl_context_ = session_.translation_unit_decl_context_;
     }
-    session_.current_scope_->associated_decl_context = session_.current_decl_context_.get();
+    set_scope_decl_context(session_.current_scope_, session_.current_decl_context_);
 }
 
 
@@ -1314,9 +1350,10 @@ Collect::ScopeEnterResult Collect::collect_enter_scope(ScopeFlags scope_flags, s
             auto entered_context = parent_context->add_lexical_child(
                 context_kind_for_scope_flags(scope_flags));
             session_.current_decl_context_ = entered_context;
-            session_.current_scope_->associated_decl_context = entered_context.get();
+            set_scope_decl_context(session_.current_scope_, entered_context);
         } else {
             session_.current_scope_->associated_decl_context = nullptr;
+            session_.current_scope_->associated_decl_context_owner.reset();
         }
         return result;
     }

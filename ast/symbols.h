@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <optional>
 #include <cstdint>
+#include <memory>
 #include "types.h"
 #include "attributes.h"
 #include <string>
@@ -208,6 +209,7 @@ struct Scope {
     ScopeFlags flags = ScopeFlags::None;
     std::vector<std::string> cxx_namespace_path;
     DeclContext* associated_decl_context = nullptr;
+    std::weak_ptr<DeclContext> associated_decl_context_owner;
 
 
     Scope(): parent(nullptr), flags(ScopeFlags::None),

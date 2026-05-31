@@ -93,6 +93,17 @@ void bump_tentative_context_begins() {
     ++parser_tentative_metrics().tentative_context_begins;
 }
 
+void bump_tentative_context_mode_begin(Parser::TentativeMode mode) {
+    auto* profiler = active_perf_profiler();
+    if (!profiler) {
+        return;
+    }
+    profiler->add_counter(
+        mode == Parser::TentativeMode::ParserOnly
+            ? PerfCounter::ParserTentativeParserOnlyBegins
+            : PerfCounter::ParserTentativeCollectBackedBegins);
+}
+
 void bump_tentative_context_commits() {
     if (auto* profiler = active_perf_profiler()) {
         profiler->add_counter(PerfCounter::ParserTentativeCommits);
@@ -138,16 +149,22 @@ void bump_tentative_state_restores() {
 }
 } // namespace
 
-size_t Parser::begin_tentative_context() {
+size_t Parser::begin_tentative_context(TentativeMode mode) {
     bump_tentative_context_begins();
+    bump_tentative_context_mode_begin(mode);
     TentativeContextFrame frame;
     frame.id = next_tentative_context_id_++;
-    frame.parser_checkpoint = capture_tentative_state();
+    frame.mode = mode;
+    if (mode == TentativeMode::ParserOnly) {
+        frame.token_checkpoint = capture_tentative_token_state();
+    } else {
+        frame.parser_checkpoint = capture_tentative_state();
+    }
     frame.cxx_disambiguation_state = cxx_tentative_state_;
     if (diag_engine) {
         frame.diag_checkpoint = diag_engine->checkpoint();
     }
-    if (collect_) {
+    if (collect_ && mode == TentativeMode::CollectBacked) {
         collect_->collect_begin_speculative_parse();
     }
     tentative_context_stack_.push_back(std::move(frame));
@@ -155,10 +172,14 @@ size_t Parser::begin_tentative_context() {
 }
 
 void Parser::restore_tentative_context_frame(const TentativeContextFrame& frame) {
-    if (collect_) {
+    if (collect_ && frame.mode == TentativeMode::CollectBacked) {
         collect_->collect_rollback_speculative_parse();
     }
-    restore_tentative_state(frame.parser_checkpoint);
+    if (frame.mode == TentativeMode::ParserOnly) {
+        restore_tentative_token_state(frame.token_checkpoint);
+    } else {
+        restore_tentative_state(frame.parser_checkpoint);
+    }
     cxx_tentative_state_ = frame.cxx_disambiguation_state;
     if (diag_engine) {
         diag_engine->restore(frame.diag_checkpoint);
@@ -181,9 +202,10 @@ void Parser::commit_tentative_context(size_t context_id) {
         return;
     }
 
+    auto frame = std::move(tentative_context_stack_.back());
     tentative_context_stack_.pop_back();
     bump_tentative_context_commits();
-    if (collect_) {
+    if (collect_ && frame.mode == TentativeMode::CollectBacked) {
         collect_->collect_commit_speculative_parse();
     }
 }
@@ -273,7 +295,17 @@ Parser::classify_template_argument_list_scope_follow_syntax() {
 Parser::TentativeParsingAction::TentativeParsingAction(
     Parser& parser,
     std::source_location loc)
-    : parser_(parser) {
+    : TentativeParsingAction(
+          parser,
+          TentativeMode::CollectBacked,
+          loc) {}
+
+Parser::TentativeParsingAction::TentativeParsingAction(
+    Parser& parser,
+    TentativeMode mode,
+    std::source_location loc)
+    : parser_(parser),
+      tentative_mode_(mode) {
     if (auto* profiler = active_perf_profiler(); profiler && profiler->wants_full()) {
         tentative_profiler_ = profiler;
         tentative_file_ = loc.file_name();
@@ -283,7 +315,7 @@ Parser::TentativeParsingAction::TentativeParsingAction(
         tentative_depth_ = parser_.tentative_context_stack_.size() + 1;
         tentative_start_ = std::chrono::steady_clock::now();
     }
-    context_id_ = parser_.begin_tentative_context();
+    context_id_ = parser_.begin_tentative_context(mode);
 }
 
 Parser::TentativeParsingAction::~TentativeParsingAction() {
@@ -318,6 +350,7 @@ void Parser::TentativeParsingAction::record_tentative_outcome(bool committed) {
         tentative_function_,
         tentative_line_,
         committed,
+        tentative_mode_ == TentativeMode::CollectBacked,
         tentative_start_token_idx_,
         parser_.get_token_idx(),
         tentative_depth_,
@@ -371,6 +404,20 @@ void Parser::restore_tentative_state(const TentativeParserState& state) {
     template_argument_group_depth_ = state.template_argument_group_depth;
     cpp_template_declaration_subject_parse_depth_ =
         state.cpp_template_declaration_subject_parse_depth;
+}
+
+Parser::TentativeTokenState Parser::capture_tentative_token_state() {
+    bump_tentative_state_captures();
+    TentativeTokenState state;
+    state.token_idx = get_token_idx();
+    state.split_token_state = tok_mgnt.get_split_token_state();
+    return state;
+}
+
+void Parser::restore_tentative_token_state(const TentativeTokenState& state) {
+    bump_tentative_state_restores();
+    set_token_idx(state.token_idx);
+    tok_mgnt.set_split_token_state(state.split_token_state);
 }
 
 Parser::TPResult Parser::try_parse_type_name() {

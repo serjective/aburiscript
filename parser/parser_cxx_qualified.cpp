@@ -1245,11 +1245,13 @@ bool Parser::starts_with_cpp_dependent_qualified_call_expression() {
             auto scope_follow =
                 classify_template_argument_list_scope_follow_syntax();
             if (scope_follow ==
-                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
-                        FollowedByScope ||
-                scope_follow ==
-                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
-                        Inconclusive) {
+                tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                    FollowedByScope) {
+                component.template_arguments = parse_cpp_template_argument_list();
+                component.has_template_argument_list = true;
+            } else if (scope_follow ==
+                       tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                           Inconclusive) {
                 RevertingTentativeParsingAction template_args(*this);
                 try {
                     auto parsed_arguments = parse_cpp_template_argument_list();

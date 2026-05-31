@@ -607,7 +607,10 @@ private:
             } else if (tok_type == close_tok) {
                 --depth;
                 ++offset;
-                return depth == 0;
+                if (depth == 0) {
+                    return true;
+                }
+                continue;
             }
             ++offset;
         }
@@ -656,17 +659,28 @@ private:
             if (tok_type == TokenType::GREATER_THAN) {
                 --depth;
                 ++offset;
-                return depth == 0;
+                if (depth == 0) {
+                    return true;
+                }
+                continue;
             }
             if (tok_type == TokenType::RIGHT_SHIFT) {
+                if (depth <= 2) {
+                    ++offset;
+                    return true;
+                }
                 depth -= 2;
                 ++offset;
-                return depth <= 0;
+                continue;
             }
             if (tok_type == TokenType::ASSIGN_RSHIFT) {
+                if (depth <= 2) {
+                    ++offset;
+                    return true;
+                }
                 depth -= 2;
                 ++offset;
-                return depth <= 0;
+                continue;
             }
             ++offset;
         }

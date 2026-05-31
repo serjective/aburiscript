@@ -63,6 +63,12 @@ struct DeclarationRet {
 // tyehnically we only need to keep track of new types in the parser for now
 struct DeclarationParser;
 class Parser {
+public:
+    enum class TentativeMode : uint8_t {
+        CollectBacked,
+        ParserOnly
+    };
+
 private:
     struct CxxTentativeDisambiguationState {
         // Future C++ hook: dependent-name lookup where 'typename' may be required.
@@ -91,6 +97,11 @@ private:
         uint32_t template_argument_expression_depth = 0;
         uint32_t template_argument_group_depth = 0;
         uint32_t cpp_template_declaration_subject_parse_depth = 0;
+    };
+
+    struct TentativeTokenState {
+        size_t token_idx = 0;
+        TokenMgnt::SplitTokenState split_token_state;
     };
 
     struct ParsedCppTypeNameSpecifier {
@@ -248,7 +259,9 @@ private:
 
     struct TentativeContextFrame {
         size_t id = 0;
+        TentativeMode mode = TentativeMode::CollectBacked;
         TentativeParserState parser_checkpoint;
+        TentativeTokenState token_checkpoint;
         DiagnosticEngine::Checkpoint diag_checkpoint;
         CxxTentativeDisambiguationState cxx_disambiguation_state;
     };
@@ -276,6 +289,10 @@ public:
         explicit TentativeParsingAction(
             Parser& parser,
             std::source_location loc = std::source_location::current());
+        explicit TentativeParsingAction(
+            Parser& parser,
+            TentativeMode mode,
+            std::source_location loc = std::source_location::current());
         TentativeParsingAction(const TentativeParsingAction&) = delete;
         TentativeParsingAction& operator=(const TentativeParsingAction&) = delete;
         ~TentativeParsingAction();
@@ -294,6 +311,7 @@ public:
         uint32_t tentative_line_ = 0;
         size_t tentative_start_token_idx_ = 0;
         size_t tentative_depth_ = 0;
+        TentativeMode tentative_mode_ = TentativeMode::CollectBacked;
         std::chrono::steady_clock::time_point tentative_start_;
 
         void record_tentative_outcome(bool committed);
@@ -305,13 +323,18 @@ public:
             Parser& parser,
             std::source_location loc = std::source_location::current())
             : TentativeParsingAction(parser, loc) {}
+        explicit RevertingTentativeParsingAction(
+            Parser& parser,
+            TentativeMode mode,
+            std::source_location loc = std::source_location::current())
+            : TentativeParsingAction(parser, mode, loc) {}
         ~RevertingTentativeParsingAction() { revert(); }
     };
 
     TokenMgnt tok_mgnt;
     std::shared_ptr<ASTContext> ast_ctx;
 private:
-    size_t begin_tentative_context();
+    size_t begin_tentative_context(TentativeMode mode);
     void commit_tentative_context(size_t context_id);
     void rollback_tentative_context(size_t context_id);
     bool is_in_tentative_context() const;
@@ -319,6 +342,8 @@ private:
     void restore_tentative_context_frame(const TentativeContextFrame& frame);
     TentativeParserState capture_tentative_state();
     void restore_tentative_state(const TentativeParserState& state);
+    TentativeTokenState capture_tentative_token_state();
+    void restore_tentative_token_state(const TentativeTokenState& state);
 
     // function stuff
     std::shared_ptr<CType> func_type = nullptr; // todo: update
@@ -457,6 +482,9 @@ private:
     std::unique_ptr<Stmt> parse_stmt();
     std::unique_ptr<Stmt> parse_asm_stmt();
     std::string parse_asm_string_literal();
+    bool current_token_is_from_system_header();
+    bool should_skip_system_header_function_body_semantics();
+    void skip_function_body_tokens();
     std::unique_ptr<Stmt> parse_compound_stmt(std::shared_ptr<Scope> use_scope = nullptr);
     std::unique_ptr<Decl> parse_function(DeclarationParser *decl_parser,
                                          SrcLoc loc,

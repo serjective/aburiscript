@@ -88,6 +88,8 @@ enum class PerfCounter {
     MacroArgumentTokens,
     MacroExpansionMaxDepth,
     ParserTentativeBegins,
+    ParserTentativeParserOnlyBegins,
+    ParserTentativeCollectBackedBegins,
     ParserTentativeCommits,
     ParserTentativeRollbacks,
     ParserTentativeStateCaptures,
@@ -99,6 +101,7 @@ enum class PerfCounter {
     ParserTemplateArgumentTentativeTypeFailures,
     ParserTemplateArgumentTypedBraced,
     ParserTemplateArgumentExpression,
+    ParserSkippedSystemFunctionBodies,
     CollectTentativeBegins,
     CollectTentativeCommits,
     CollectTentativeRollbacks,
@@ -161,6 +164,7 @@ public:
                                      std::string_view function,
                                      uint32_t line,
                                      bool committed,
+                                     bool collect_backed,
                                      uint64_t start_token,
                                      uint64_t end_token,
                                      uint64_t depth,
@@ -193,6 +197,8 @@ public:
         std::string function;
         uint32_t line = 0;
         uint64_t begins = 0;
+        uint64_t parser_only_begins = 0;
+        uint64_t collect_backed_begins = 0;
         uint64_t commits = 0;
         uint64_t rollbacks = 0;
         uint64_t tokens_consumed = 0;

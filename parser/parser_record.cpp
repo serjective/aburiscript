@@ -2951,6 +2951,8 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
         rebased_scope->parent = lookup_scope;
         rebased_scope->associated_decl_context =
             context.scope_snapshot.decl_context.get();
+        rebased_scope->associated_decl_context_owner =
+            context.scope_snapshot.decl_context;
         collect_->collect_set_current_scope(std::move(rebased_scope));
     } else {
         collect_->collect_set_current_scope(lookup_scope);

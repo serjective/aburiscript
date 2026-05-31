@@ -681,11 +681,13 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
             auto scope_follow =
                 classify_template_argument_list_scope_follow_syntax();
             if (scope_follow ==
-                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
-                        FollowedByScope ||
-                scope_follow ==
-                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
-                        Inconclusive) {
+                tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                    FollowedByScope) {
+                component.template_arguments = parse_cpp_template_argument_list();
+                component.has_template_argument_list = true;
+            } else if (scope_follow ==
+                       tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                           Inconclusive) {
                 RevertingTentativeParsingAction template_args(*this);
                 auto parsed_arguments = parse_cpp_template_argument_list();
                 if (is_cpp_scope_resolution_here()) {
@@ -1108,6 +1110,9 @@ bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
             case TokenType::LEFT_BRACKET:
             case TokenType::LEFT_BRACE:
             case TokenType::COMMA:
+            case TokenType::GREATER_THAN:
+            case TokenType::RIGHT_SHIFT:
+            case TokenType::ASSIGN_RSHIFT:
             case TokenType::ELLIPSIS:
             case TokenType::CONST:
             case TokenType::VOLATILE:
@@ -1224,6 +1229,29 @@ bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
 
         const size_t terminal_idx = components.size() - 1;
         const auto& terminal = components.back();
+        if (!has_global_qualifier && terminal_idx == 0) {
+            if (!terminal.has_template_argument_list &&
+                collect_->collect_lookup_type_name(
+                    terminal.name,
+                    /*look_parents=*/true,
+                    /*include_tag_types=*/true)) {
+                return true;
+            }
+            if (const auto* active_parameter =
+                    find_active_template_parameter(terminal.name)) {
+                auto* mutable_parameter =
+                    const_cast<TemplateParameterDecl*>(active_parameter);
+                if (!terminal.has_template_argument_list &&
+                    isa<TemplateTypeParmDecl>(mutable_parameter)) {
+                    return true;
+                }
+                if (terminal.has_template_argument_list &&
+                    isa<TemplateTemplateParmDecl>(mutable_parameter)) {
+                    return true;
+                }
+            }
+        }
+
         LookupEngine::QualifiedNameSpec name_spec;
         name_spec.has_global_qualifier = has_global_qualifier;
         for (size_t idx = 0; idx < terminal_idx; ++idx) {
@@ -3883,7 +3911,7 @@ bool Parser::can_start_cpp_constrained_placeholder_type_specifier_for_lookahead(
     }
     auto syntax_result =
         probe_cxx_constrained_placeholder_type_specifier_syntax();
-    if (syntax_result == tentative_syntax_probe::Result::NoMatch) {
+    if (syntax_result != tentative_syntax_probe::Result::Match) {
         return false;
     }
 

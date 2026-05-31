@@ -1572,6 +1572,7 @@ int main(int argc, char** argv) {
             }
 
             LangOptions lang_opts;
+            lang_opts.syntax_only = FSyntaxOnly;
             if (!StdOption.empty()) {
                 lang_opts.set_standard(StdOption);
             }
