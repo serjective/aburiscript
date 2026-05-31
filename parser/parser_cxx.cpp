@@ -7,6 +7,7 @@
 #include "../numeric_utils.h"
 #include "../helpers/qualified_name_utils.h"
 #include "../helpers/auto_type_utils.h"
+#include "../perf_stats.h"
 
 // C++-only parser entrypoints and helpers belong here.
 // Keep shared C/C++ parsing logic in parser.cpp.
@@ -57,6 +58,46 @@ bool is_integer_pack_builtin_expr(const Expr* expr) {
         return callee_ref && callee_ref->get_name() == "__integer_pack";
     }
     return false;
+}
+
+bool is_cpp_template_argument_boundary_token_type(TokenType type) {
+    return type == TokenType::COMMA ||
+           type == TokenType::GREATER_THAN ||
+           type == TokenType::RIGHT_SHIFT ||
+           type == TokenType::ASSIGN_RSHIFT;
+}
+
+bool is_cpp_template_argument_direct_type_follow_token(TokenType type) {
+    return is_cpp_template_argument_boundary_token_type(type) ||
+           type == TokenType::ELLIPSIS ||
+           type == TokenType::LEFT_BRACE;
+}
+
+bool is_builtin_template_type_specifier_token(TokenType type) {
+    switch (type) {
+        case TokenType::VOID:
+        case TokenType::CHAR:
+        case TokenType::SHORT:
+        case TokenType::INT:
+        case TokenType::LONG:
+        case TokenType::FLOAT:
+        case TokenType::DOUBLE:
+        case TokenType::SIGNED:
+        case TokenType::UNSIGNED:
+        case TokenType::BOOL:
+        case TokenType::WCHAR_T:
+        case TokenType::CHAR16_T:
+        case TokenType::CHAR32_T:
+        case TokenType::INT128:
+        case TokenType::UINT128_T:
+        case TokenType::AUTO:
+        case TokenType::AUTO_TYPE:
+        case TokenType::COMPLEX:
+        case TokenType::FLOAT16:
+            return true;
+        default:
+            return false;
+    }
 }
 
 bool cpp_in_class_definition_is_inline(bool explicitly_inline, bool is_definition) {
@@ -1065,6 +1106,7 @@ bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
             case TokenType::LEFT_PAREN:
             case TokenType::RIGHT_PAREN:
             case TokenType::LEFT_BRACKET:
+            case TokenType::LEFT_BRACE:
             case TokenType::COMMA:
             case TokenType::ELLIPSIS:
             case TokenType::CONST:
@@ -1367,77 +1409,289 @@ bool Parser::expr_depends_on_active_template_parameter(const Expr* expr) const {
            collect_->expression_depends_on_template_parameters(expr);
 }
 
-std::unique_ptr<Expr> Parser::try_parse_cpp_typed_braced_template_argument_expr() {
-    if (probe_type_name_syntax() ==
-        tentative_syntax_probe::Result::NoMatch) {
-        return nullptr;
+bool Parser::can_direct_parse_cpp_template_type_argument_for_lookahead() {
+    if (!is_cxx_mode_active() || !collect_) {
+        return false;
     }
 
-    RevertingTentativeParsingAction tentative(*this);
+    auto token_at = [&](size_t offset) {
+        return peek_token_shortcut(offset);
+    };
+
+    auto skip_decltype_specifier_at = [&](size_t& offset) {
+        if (token_at(offset).type != TokenType::DECLTYPE_KW) {
+            return false;
+        }
+        ++offset;
+        return skip_balanced_group_for_template_id_lookahead(
+            offset,
+            TokenType::LEFT_PAREN,
+            TokenType::RIGHT_PAREN);
+    };
+
+    auto builtin_type_argument_has_direct_follow = [&]() {
+        size_t offset = 0;
+        bool saw_type_specifier = false;
+        while (true) {
+            TokenType type = token_at(offset).type;
+            if (type == TokenType::CONST ||
+                type == TokenType::VOLATILE ||
+                type == TokenType::RESTRICT ||
+                type == TokenType::NULLABILITY_QUALIFIER) {
+                ++offset;
+                continue;
+            }
+            if (is_builtin_template_type_specifier_token(type)) {
+                saw_type_specifier = true;
+                ++offset;
+                continue;
+            }
+            if (type == TokenType::DECLTYPE_KW) {
+                saw_type_specifier = true;
+                if (!skip_decltype_specifier_at(offset)) {
+                    return false;
+                }
+                continue;
+            }
+            break;
+        }
+        return saw_type_specifier &&
+               is_cpp_template_argument_direct_type_follow_token(
+                   token_at(offset).type);
+    };
+
+    auto consume_scope_resolution_at = [&](size_t& offset) {
+        if (token_at(offset).type == TokenType::SCOPE_RESOLUTION) {
+            ++offset;
+            return true;
+        }
+        if (token_at(offset).type == TokenType::COLON &&
+            token_at(offset + 1).type == TokenType::COLON) {
+            offset += 2;
+            return true;
+        }
+        return false;
+    };
+
+    auto consume_named_component_at =
+        [&](size_t& offset,
+            bool allow_template_keyword,
+            bool* has_template_arguments) {
+        if (has_template_arguments) {
+            *has_template_arguments = false;
+        }
+        if (allow_template_keyword &&
+            token_at(offset).type == TokenType::TEMPLATE) {
+            ++offset;
+        }
+        if (token_at(offset).type != TokenType::IDENTIFIER) {
+            return false;
+        }
+        ++offset;
+        if (token_at(offset).type == TokenType::LESS_THAN) {
+            if (has_template_arguments) {
+                *has_template_arguments = true;
+            }
+            if (!skip_template_argument_list_for_expression_probe(offset)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    auto named_type_argument_has_direct_follow = [&]() {
+        size_t offset = 0;
+        consume_scope_resolution_at(offset);
+        bool previous_component_has_template_arguments = false;
+        if (!consume_named_component_at(
+                offset,
+                /*allow_template_keyword=*/false,
+                &previous_component_has_template_arguments)) {
+            return false;
+        }
+        while (consume_scope_resolution_at(offset)) {
+            if (previous_component_has_template_arguments) {
+                return false;
+            }
+            if (!consume_named_component_at(
+                    offset,
+                    /*allow_template_keyword=*/true,
+                    &previous_component_has_template_arguments)) {
+                return false;
+            }
+        }
+        return is_cpp_template_argument_direct_type_follow_token(
+            token_at(offset).type);
+    };
+
+    if (builtin_type_argument_has_direct_follow()) {
+        return true;
+    }
+
+    return named_type_argument_has_direct_follow() &&
+           can_start_cpp_named_type_specifier_for_lookahead();
+}
+
+std::optional<Parser::ParsedCppTemplateTypeArgument>
+Parser::try_parse_cpp_direct_template_type_argument() {
+    if (!can_direct_parse_cpp_template_type_argument_for_lookahead()) {
+        return std::nullopt;
+    }
+
+    size_t saved_idx = get_token_idx();
+    auto saved_split_state = tok_mgnt.get_split_token_state();
+    auto restore = [&]() {
+        set_token_idx(saved_idx);
+        tok_mgnt.set_split_token_state(saved_split_state);
+    };
+
+    auto finish = [&](QualType type)
+        -> std::optional<ParsedCppTemplateTypeArgument> {
+        if (!type ||
+            !(is_cpp_template_argument_boundary_here() ||
+              gentle_check(TokenType::ELLIPSIS) ||
+              gentle_check(TokenType::LEFT_BRACE))) {
+            restore();
+            return std::nullopt;
+        }
+        ParsedCppTemplateTypeArgument result;
+        result.type = type;
+        result.followed_by_left_brace = gentle_check(TokenType::LEFT_BRACE);
+        return result;
+    };
+
     try {
-        DeclarationParser type_parser(this);
-        auto parsed_type = type_parser.parse_declaration();
-        if (!parsed_type || !type_parser.name.empty() ||
-            type_parser.str_class != StorageClass::NONE ||
-            !gentle_check(TokenType::LEFT_BRACE)) {
-            return nullptr;
+        TokenType start = current_token().type;
+        if (start == TokenType::IDENTIFIER ||
+            start == TokenType::SCOPE_RESOLUTION ||
+            (start == TokenType::COLON &&
+             peek_token().type == TokenType::COLON)) {
+            if (auto parsed_named_type = try_parse_cpp_named_type_specifier()) {
+                return finish(parsed_named_type->type);
+            }
+            restore();
+            return std::nullopt;
         }
 
-        tentative.commit();
-        QualType target_type(parsed_type, type_parser.qualifiers);
-        SrcLoc literal_loc = current_token().loc;
-        auto initializer_expr = parse_init_list();
-        auto* initializer = dyn_cast<InitListExpr>(initializer_expr.get());
-        if (!initializer) {
-            return nullptr;
+        DeclarationParser type_parser(this);
+        auto parsed_type = type_parser.parse_declaration(false);
+        if (!parsed_type ||
+            !type_parser.name.empty() ||
+            type_parser.str_class != StorageClass::NONE) {
+            restore();
+            return std::nullopt;
         }
-        auto owned_initializer = std::unique_ptr<InitListExpr>(
-            static_cast<InitListExpr*>(initializer_expr.release()));
-        if (type_depends_on_template_parameters(target_type, ast_ctx.get())) {
-            if (!owned_initializer->actions.empty() ||
-                !owned_initializer->mappings.empty()) {
-                error_custloc(
-                    "dependent braced template argument does not support lowered initializer actions",
-                    literal_loc);
-                return collect_->collect_error_expression(
-                    "unsupported dependent braced template argument",
-                    literal_loc);
-            }
-            std::vector<std::unique_ptr<Expr>> args;
-            args.reserve(owned_initializer->elements.size());
-            for (auto& element : owned_initializer->elements) {
-                if (!element.designators.empty()) {
-                    error_custloc(
-                        "dependent braced template argument does not support designators",
-                        element.loc);
-                    return collect_->collect_error_expression(
-                        "unsupported dependent braced template argument",
-                        element.loc);
-                }
-                args.push_back(std::move(element.value));
-            }
-            auto deferred =
-                collect_->collect_cpp_function_style_cast(
-                    target_type,
-                    std::move(args),
-                    literal_loc);
-            if (auto* cast = dyn_cast<CppFunctionStyleCastExpr>(deferred.get())) {
-                cast->is_list_init = true;
-            }
-            return deferred;
-        }
-        return collect_->collect_cpp_type_list_initialization_expression(
-            target_type,
-            std::move(owned_initializer),
-            literal_loc);
+        return finish(QualType(parsed_type, type_parser.qualifiers));
     } catch (const ParseError&) {
+        restore();
     } catch (const FatalErrorLimitReached&) {
         throw;
     }
-    return nullptr;
+    return std::nullopt;
+}
+
+std::unique_ptr<Expr>
+Parser::parse_cpp_typed_braced_template_argument_expr_after_type(
+    QualType target_type) {
+    SrcLoc literal_loc = current_token().loc;
+    auto initializer_expr = parse_init_list();
+    auto* initializer = dyn_cast<InitListExpr>(initializer_expr.get());
+    if (!initializer) {
+        return nullptr;
+    }
+    auto owned_initializer = std::unique_ptr<InitListExpr>(
+        static_cast<InitListExpr*>(initializer_expr.release()));
+    if (type_depends_on_template_parameters(target_type, ast_ctx.get())) {
+        if (!owned_initializer->actions.empty() ||
+            !owned_initializer->mappings.empty()) {
+            error_custloc(
+                "dependent braced template argument does not support lowered initializer actions",
+                literal_loc);
+            return collect_->collect_error_expression(
+                "unsupported dependent braced template argument",
+                literal_loc);
+        }
+        std::vector<std::unique_ptr<Expr>> args;
+        args.reserve(owned_initializer->elements.size());
+        for (auto& element : owned_initializer->elements) {
+            if (!element.designators.empty()) {
+                error_custloc(
+                    "dependent braced template argument does not support designators",
+                    element.loc);
+                return collect_->collect_error_expression(
+                    "unsupported dependent braced template argument",
+                    element.loc);
+            }
+            args.push_back(std::move(element.value));
+        }
+        auto deferred =
+            collect_->collect_cpp_function_style_cast(
+                target_type,
+                std::move(args),
+                literal_loc);
+        if (auto* cast = dyn_cast<CppFunctionStyleCastExpr>(deferred.get())) {
+            cast->is_list_init = true;
+        }
+        return deferred;
+    }
+    return collect_->collect_cpp_type_list_initialization_expression(
+        target_type,
+        std::move(owned_initializer),
+        literal_loc);
 }
 
 TemplateArgument Parser::parse_cpp_template_argument() {
+    enum class TemplateArgumentBranch {
+        TemplateName,
+        NullptrValue,
+        DirectType,
+        TentativeType,
+        TypedBracedValue,
+        ExpressionValue
+    };
+
+    auto record_template_argument_branch =
+        [](TemplateArgumentBranch branch) {
+        auto* profiler = active_perf_profiler();
+        if (!profiler || !profiler->wants_full()) {
+            return;
+        }
+        switch (branch) {
+            case TemplateArgumentBranch::TemplateName:
+                profiler->add_counter(
+                    PerfCounter::ParserTemplateArgumentTemplateName);
+                break;
+            case TemplateArgumentBranch::NullptrValue:
+                profiler->add_counter(
+                    PerfCounter::ParserTemplateArgumentNullptr);
+                break;
+            case TemplateArgumentBranch::DirectType:
+                profiler->add_counter(
+                    PerfCounter::ParserTemplateArgumentDirectType);
+                break;
+            case TemplateArgumentBranch::TentativeType:
+                profiler->add_counter(
+                    PerfCounter::ParserTemplateArgumentTentativeType);
+                break;
+            case TemplateArgumentBranch::TypedBracedValue:
+                profiler->add_counter(
+                    PerfCounter::ParserTemplateArgumentTypedBraced);
+                break;
+            case TemplateArgumentBranch::ExpressionValue:
+                profiler->add_counter(
+                    PerfCounter::ParserTemplateArgumentExpression);
+                break;
+        }
+    };
+
+    auto record_tentative_type_failure = []() {
+        auto* profiler = active_perf_profiler();
+        if (profiler && profiler->wants_full()) {
+            profiler->add_counter(
+                PerfCounter::ParserTemplateArgumentTentativeTypeFailures);
+        }
+    };
+
     auto finalize_template_argument =
         [&](TemplateArgument argument) -> TemplateArgument {
         const bool is_integer_pack_argument =
@@ -1596,24 +1850,40 @@ TemplateArgument Parser::parse_cpp_template_argument() {
 
     if (auto current_instantiation_argument =
             try_parse_injected_current_instantiation_type_argument()) {
+        record_template_argument_branch(TemplateArgumentBranch::TentativeType);
         return finalize_template_argument(
             std::move(*current_instantiation_argument));
     }
 
     if (auto template_argument = try_parse_cpp_template_name_argument()) {
+        record_template_argument_branch(TemplateArgumentBranch::TemplateName);
         return finalize_template_argument(std::move(*template_argument));
     }
 
     if (gentle_check(TokenType::NULLPTR_KW)) {
         advance();
+        record_template_argument_branch(TemplateArgumentBranch::NullptrValue);
         return finalize_template_argument(TemplateArgument::value_argument(
             QualType(type_ctx->get_builtin(BuiltinTypes::NullPtr)),
             ConstValue::null_pointer(),
             "nullptr"));
     }
 
-    bool parsed_type_argument = false;
-    QualType parsed_argument_type;
+    if (auto direct_type_argument =
+            try_parse_cpp_direct_template_type_argument()) {
+        if (direct_type_argument->followed_by_left_brace) {
+            record_template_argument_branch(
+                TemplateArgumentBranch::TypedBracedValue);
+            return finalize_template_argument(build_expression_argument(
+                parse_cpp_typed_braced_template_argument_expr_after_type(
+                    direct_type_argument->type)));
+        }
+
+        record_template_argument_branch(TemplateArgumentBranch::DirectType);
+        return finalize_template_argument(
+            TemplateArgument(direct_type_argument->type));
+    }
+
     if (probe_type_name_syntax() != tentative_syntax_probe::Result::NoMatch) {
         RevertingTentativeParsingAction tentative(*this);
         try {
@@ -1623,25 +1893,30 @@ TemplateArgument Parser::parse_cpp_template_argument() {
                 type_parser.name.empty() &&
                 type_parser.str_class == StorageClass::NONE &&
                 (is_cpp_template_argument_boundary_here() ||
-                 gentle_check(TokenType::ELLIPSIS))) {
+                 gentle_check(TokenType::ELLIPSIS) ||
+                 gentle_check(TokenType::LEFT_BRACE))) {
+                QualType parsed_argument_type(
+                    parsed_type,
+                    type_parser.qualifiers);
                 tentative.commit();
-                parsed_argument_type = QualType(parsed_type, type_parser.qualifiers);
-                parsed_type_argument = true;
+                if (gentle_check(TokenType::LEFT_BRACE)) {
+                    record_template_argument_branch(
+                        TemplateArgumentBranch::TypedBracedValue);
+                    return finalize_template_argument(build_expression_argument(
+                        parse_cpp_typed_braced_template_argument_expr_after_type(
+                            parsed_argument_type)));
+                }
+
+                record_template_argument_branch(
+                    TemplateArgumentBranch::TentativeType);
+                return finalize_template_argument(
+                    TemplateArgument(parsed_argument_type));
             }
         } catch (const ParseError&) {
         } catch (const FatalErrorLimitReached&) {
             throw;
         }
-    }
-
-    if (parsed_type_argument) {
-        return finalize_template_argument(TemplateArgument(parsed_argument_type));
-    }
-
-    if (auto typed_braced_expr =
-            try_parse_cpp_typed_braced_template_argument_expr()) {
-        return finalize_template_argument(
-            build_expression_argument(std::move(typed_braced_expr)));
+        record_tentative_type_failure();
     }
 
     struct TemplateArgumentExpressionGuard {
@@ -1657,6 +1932,7 @@ TemplateArgument Parser::parse_cpp_template_argument() {
         }
     } expr_guard(*this);
 
+    record_template_argument_branch(TemplateArgumentBranch::ExpressionValue);
     return finalize_template_argument(
         build_expression_argument(parse_assignment_expression()));
 }

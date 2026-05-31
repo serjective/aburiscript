@@ -732,7 +732,16 @@ private:
     const TemplateNonTypeParmDecl* find_active_non_type_template_parameter(
         const Symbol* sym) const;
     bool expr_depends_on_active_template_parameter(const Expr* expr) const;
-    std::unique_ptr<Expr> try_parse_cpp_typed_braced_template_argument_expr();
+    struct ParsedCppTemplateTypeArgument {
+        QualType type;
+        bool followed_by_left_brace = false;
+    };
+    bool can_direct_parse_cpp_template_type_argument_for_lookahead();
+    std::optional<ParsedCppTemplateTypeArgument>
+    try_parse_cpp_direct_template_type_argument();
+    std::unique_ptr<Expr>
+    parse_cpp_typed_braced_template_argument_expr_after_type(
+        QualType target_type);
     std::optional<TemplateArgument> try_parse_cpp_template_name_argument();
     TemplateArgument parse_cpp_template_argument();
     std::vector<TemplateArgument> parse_cpp_template_argument_list();
