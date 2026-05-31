@@ -4,21 +4,21 @@
 
 #include <optional>
 
-using template_sema_internal::build_pack_element_argument_bindings;
-using template_sema_internal::build_pack_element_argument_bindings_for_shape;
-using template_sema_internal::classify_parameter_pack_reference_in_type;
-using template_sema_internal::collect_pack_expansion_shape_in_expr;
-using template_sema_internal::collect_pack_expansion_shape_in_template_argument;
-using template_sema_internal::find_pack_expansion_arity_for_bindings;
-using template_sema_internal::find_template_parameter_index_by_identity;
-using template_sema_internal::find_template_parameter_index_by_decl;
-using template_sema_internal::make_template_binding_clone_pass_builder;
-using template_sema_internal::materialize_specialized_fold_expression;
-using template_sema_internal::normalize_concrete_template_value_argument;
-using template_sema_internal::TemplateClonePassBuilder;
-using template_sema_internal::TemplatePackReferenceResolutionKind;
-using template_sema_internal::template_arguments_depend_on_template_parameters;
-using template_sema_internal::TemplateSubstitutionPass;
+using collect_template_internal::build_pack_element_argument_bindings;
+using collect_template_internal::build_pack_element_argument_bindings_for_shape;
+using collect_template_internal::classify_parameter_pack_reference_in_type;
+using collect_template_internal::collect_pack_expansion_shape_in_expr;
+using collect_template_internal::collect_pack_expansion_shape_in_template_argument;
+using collect_template_internal::find_pack_expansion_arity_for_bindings;
+using collect_template_internal::find_template_parameter_index_by_identity;
+using collect_template_internal::find_template_parameter_index_by_decl;
+using collect_template_internal::make_template_binding_clone_pass_builder;
+using collect_template_internal::materialize_specialized_fold_expression;
+using collect_template_internal::normalize_concrete_template_value_argument;
+using collect_template_internal::TemplateClonePassBuilder;
+using collect_template_internal::TemplatePackReferenceResolutionKind;
+using collect_template_internal::template_arguments_depend_on_template_parameters;
+using collect_template_internal::TemplateSubstitutionPass;
 
 namespace {
 
@@ -115,7 +115,7 @@ std::unique_ptr<Expr> clone_substituted_pack_pattern_element(
     ASTContext* ast_ctx,
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& active_bindings,
-    const template_sema_internal::TemplatePackExpansionShape* expansion_shape,
+    const collect_template_internal::TemplatePackExpansionShape* expansion_shape,
     ASTCloneContext* clone_context,
     size_t element_index,
     const Expr* pattern_expr,
@@ -307,7 +307,7 @@ bool expand_substituted_pack_expression(
         return true;
     };
 
-    template_sema_internal::TemplatePackExpansionShape shape;
+    collect_template_internal::TemplatePackExpansionShape shape;
     if (!collect_pack_expansion_shape_in_expr(
             pattern_expr,
             parameters,
@@ -442,7 +442,7 @@ void remap_template_argument_symbols_for_substitution(
     if (!clone_context) {
         return;
     }
-    template_sema_internal::remap_template_argument_symbol_references(
+    collect_template_internal::remap_template_argument_symbol_references(
         argument,
         *clone_context);
 }
@@ -2177,7 +2177,7 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
         }
 
         if (argument.expands_parameter_pack) {
-            template_sema_internal::TemplatePackExpansionShape shape;
+            collect_template_internal::TemplatePackExpansionShape shape;
             if (!collect_pack_expansion_shape_in_template_argument(
                     argument,
                     parameters,

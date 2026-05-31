@@ -4,7 +4,7 @@
 #include "collect.h"
 #include "../ast/ast_clone.h"
 
-namespace template_sema_internal {
+namespace collect_template_internal {
 
 enum class TemplateInstantiationDepthDiagnostic {
     Report,
@@ -455,6 +455,6 @@ bool finalize_specialized_ctor_initializers(Collect& collect,
                                             CppConstructorDecl* ctor_decl,
                                             std::string* error_out);
 
-} // namespace template_sema_internal
+} // namespace collect_template_internal
 
 #endif // ABURI_COLLECT_TEMPLATES_INTERNAL_H

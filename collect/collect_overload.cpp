@@ -67,7 +67,7 @@ void repair_member_candidate_symbol_owner_type(
         return;
     }
 
-    QualType rewritten_type = template_sema_internal::replace_record_decl_in_type(
+    QualType rewritten_type = collect_template_internal::replace_record_decl_in_type(
         method.symbol->type,
         this_decl,
         QualType(owner_type),

@@ -2,12 +2,12 @@
 #include "collect_templates_internal.h"
 #include "../ast/special_members.h"
 
-using template_sema_internal::lookup_symbol_remap_in_clone_context;
-using template_sema_internal::clone_symbol_shallow_for_specialization;
-using template_sema_internal::make_template_binding_clone_pass_builder;
-using template_sema_internal::normalize_concrete_template_value_argument;
-using template_sema_internal::template_argument_has_known_payload;
-using template_sema_internal::template_arguments_depend_on_template_parameters;
+using collect_template_internal::lookup_symbol_remap_in_clone_context;
+using collect_template_internal::clone_symbol_shallow_for_specialization;
+using collect_template_internal::make_template_binding_clone_pass_builder;
+using collect_template_internal::normalize_concrete_template_value_argument;
+using collect_template_internal::template_argument_has_known_payload;
+using collect_template_internal::template_arguments_depend_on_template_parameters;
 
 namespace {
 
@@ -438,7 +438,7 @@ std::optional<bool> Collect::evaluate_concept_specialization(
     if (specialization_entry.is_evaluating) {
         return false;
     }
-    template_sema_internal::TemplateInstantiationDepthGuard depth_guard(
+    collect_template_internal::TemplateInstantiationDepthGuard depth_guard(
         ast_ctx_.get(),
         this,
         "concept",
@@ -447,7 +447,7 @@ std::optional<bool> Collect::evaluate_concept_specialization(
                                canonical_concept->name.size())
             : std::string_view(),
         loc,
-        template_sema_internal::TemplateInstantiationDepthDiagnostic::Suppress);
+        collect_template_internal::TemplateInstantiationDepthDiagnostic::Suppress);
     if (!depth_guard.ok()) {
         return false;
     }

@@ -1,7 +1,7 @@
 #include "collect_templates_internal.h"
 #include "../ast/ast_clone.h"
 
-namespace template_sema_internal {
+namespace collect_template_internal {
 
 QualType replace_record_decl_in_type(QualType type,
                                      const ObjectDecl* pattern_decl,
@@ -386,4 +386,4 @@ std::shared_ptr<Symbol> lookup_symbol_remap_in_clone_context(
     return remapped->second;
 }
 
-} // namespace template_sema_internal
+} // namespace collect_template_internal

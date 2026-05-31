@@ -27,7 +27,7 @@
 class CollectRecordBuilder;
 struct ASTCloneContext;
 
-namespace template_sema_internal {
+namespace collect_template_internal {
 class TemplateInstantiationDepthGuard;
 }
 
@@ -1405,7 +1405,7 @@ public:
 
 private:
     friend class CollectRecordBuilder;
-    friend class template_sema_internal::TemplateInstantiationDepthGuard;
+    friend class collect_template_internal::TemplateInstantiationDepthGuard;
 
     struct CollectRecordBuildContext {
         const CppRecordDecl* record = nullptr;

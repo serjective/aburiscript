@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace template_sema_internal {
+namespace collect_template_internal {
 
 TemplateInstantiationDepthGuard::TemplateInstantiationDepthGuard(
     ASTContext* ast_ctx,
@@ -36,4 +36,4 @@ TemplateInstantiationDepthGuard::~TemplateInstantiationDepthGuard() {
     }
 }
 
-} // namespace template_sema_internal
+} // namespace collect_template_internal

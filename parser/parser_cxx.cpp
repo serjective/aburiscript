@@ -1472,7 +1472,7 @@ TemplateArgument Parser::parse_cpp_template_argument() {
                 if (auto* var_ref =
                         dyn_cast<VarRef>(Collect::strip_implicit_casts(parsed_expr.get()))) {
                     concrete_expr =
-                        template_sema_internal::clone_constexpr_variable_initializer_expr(
+                        collect_template_internal::clone_constexpr_variable_initializer_expr(
                             var_ref->symref.get(),
                             ast_ctx.get());
                 }
@@ -4321,7 +4321,7 @@ bool Parser::cpp_function_template_decls_match_for_redeclaration(
                 return false;
             }
             QualType remapped_current_type =
-                template_sema_internal::remap_template_parameter_types_in_type(
+                collect_template_internal::remap_template_parameter_types_in_type(
                     current_non_type->type,
                     parameter_rebinds);
             if (!cpp_out_of_line_type_matches(
@@ -4360,7 +4360,7 @@ bool Parser::cpp_function_template_decls_match_for_redeclaration(
         }
     }
     QualType remapped_current_type =
-        template_sema_internal::remap_template_parameter_types_in_type(
+        collect_template_internal::remap_template_parameter_types_in_type(
             QualType(current_function->type),
             parameter_rebinds);
     bool type_matches = cpp_function_type_matches_for_template_redeclaration(
@@ -4413,7 +4413,7 @@ Parser::find_hidden_friend_function_template_redeclaration(
                 candidate_template->parameters[idx].get());
         }
         QualType remapped_current_type =
-            template_sema_internal::remap_template_parameter_types_in_type(
+            collect_template_internal::remap_template_parameter_types_in_type(
                 QualType(function_decl->type),
                 parameter_rebinds);
         if (!cpp_function_type_matches_for_template_redeclaration(

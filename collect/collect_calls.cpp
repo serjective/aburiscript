@@ -3850,7 +3850,7 @@ bool Collect::resolve_dependent_expr_after_substitution(
             {},
             nullptr);
         auto replacement =
-            template_sema_internal::make_constant_expr_for_template_argument(
+            collect_template_internal::make_constant_expr_for_template_argument(
                 argument,
                 ast_ctx_.get(),
                 candidate->location);

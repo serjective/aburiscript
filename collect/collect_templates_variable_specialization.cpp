@@ -1,14 +1,14 @@
 #include "collect.h"
 #include "collect_templates_internal.h"
 
-using template_sema_internal::clone_symbol_shallow_for_specialization;
-using template_sema_internal::deduce_variable_template_partial_specialization_bindings;
-using template_sema_internal::append_template_argument_cache_key;
-using template_sema_internal::is_variable_template_partial_specialization_more_specialized;
-using template_sema_internal::make_template_binding_clone_pass_builder;
-using template_sema_internal::normalize_concrete_template_value_argument;
-using template_sema_internal::template_argument_has_known_payload;
-using template_sema_internal::template_arguments_depend_on_template_parameters;
+using collect_template_internal::clone_symbol_shallow_for_specialization;
+using collect_template_internal::deduce_variable_template_partial_specialization_bindings;
+using collect_template_internal::append_template_argument_cache_key;
+using collect_template_internal::is_variable_template_partial_specialization_more_specialized;
+using collect_template_internal::make_template_binding_clone_pass_builder;
+using collect_template_internal::normalize_concrete_template_value_argument;
+using collect_template_internal::template_argument_has_known_payload;
+using collect_template_internal::template_arguments_depend_on_template_parameters;
 
 namespace {
 
@@ -763,7 +763,7 @@ struct Collect::VariableTemplateSpecializationInstantiator {
     }
 
     VariableDecl* instantiate_entry_definition() {
-        template_sema_internal::TemplateInstantiationDepthGuard depth_guard(
+        collect_template_internal::TemplateInstantiationDepthGuard depth_guard(
             ast_ctx(),
             &collect,
             "variable",

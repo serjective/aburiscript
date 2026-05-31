@@ -2396,7 +2396,7 @@ bool Collect::finalize_cpp_lambda_semantics(
         if (!with_function_definition_state(
                 synthesized_method.get(),
                 [&]() {
-                    return template_sema_internal::
+                    return collect_template_internal::
                         finalize_specialized_stmt_semantics(
                             *this,
                             synthesized_method->body,
@@ -2896,7 +2896,7 @@ bool Collect::collect_finalize_block_expression(BlockExpr& block,
         if (!with_function_definition_state(
                 invoke_decl.get(),
                 [&]() {
-                    return template_sema_internal::
+                    return collect_template_internal::
                         finalize_specialized_stmt_semantics(
                             *this,
                             invoke_decl->body,

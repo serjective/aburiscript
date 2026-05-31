@@ -2852,7 +2852,7 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
                         explicit_specialization = nullptr;
                     if (normalized_arguments.has_value()) {
                         explicit_specialization =
-                            template_sema_internal::
+                            collect_template_internal::
                                 find_class_template_explicit_specialization_for_lookup_identity(
                                     class_template,
                                     *normalized_arguments);
@@ -3645,7 +3645,7 @@ void Parser::remap_out_of_line_primary_template_method(
     }
 
     clone_ctx.rewrite_type = [&](QualType type) -> QualType {
-        return template_sema_internal::remap_template_parameter_types_in_type(
+        return collect_template_internal::remap_template_parameter_types_in_type(
             type,
             parameter_rebinds);
     };
@@ -3758,7 +3758,7 @@ void Parser::remap_out_of_line_primary_template_static_member(
     }
 
     clone_ctx.rewrite_type = [&](QualType type) -> QualType {
-        return template_sema_internal::remap_template_parameter_types_in_type(
+        return collect_template_internal::remap_template_parameter_types_in_type(
             type,
             parameter_rebinds);
     };

@@ -151,8 +151,8 @@ bool expr_references_active_parameter_pack(
     auto active_parameters = clone_active_template_parameters_for_shape_check(
         *ast_ctx,
         active_parameter_stack);
-    template_sema_internal::TemplatePackExpansionShape shape;
-    return template_sema_internal::collect_pack_expansion_shape_in_expr(
+    collect_template_internal::TemplatePackExpansionShape shape;
+    return collect_template_internal::collect_pack_expansion_shape_in_expr(
                expr,
                active_parameters,
                shape) &&

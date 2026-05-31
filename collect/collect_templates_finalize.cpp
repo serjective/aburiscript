@@ -2,7 +2,7 @@
 #include "collect_decl_internal.h"
 #include "../helpers/auto_type_utils.h"
 
-namespace template_sema_internal {
+namespace collect_template_internal {
 QualType implicit_this_type_for_specialized_function(const FuncDecl* decl);
 
 namespace {
@@ -1618,4 +1618,4 @@ bool finalize_specialized_ctor_initializers(Collect& collect,
     return true;
 }
 
-} // namespace template_sema_internal
+} // namespace collect_template_internal

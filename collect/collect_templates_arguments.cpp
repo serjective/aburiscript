@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <sstream>
 
-namespace template_sema_internal {
+namespace collect_template_internal {
 namespace {
 
 std::string pointer_identity_string(const void* ptr) {
@@ -1455,7 +1455,7 @@ std::string make_function_template_specialization_name(
     return out.str();
 }
 
-} // namespace template_sema_internal
+} // namespace collect_template_internal
 
 namespace {
 
@@ -1552,7 +1552,7 @@ bool Collect::finalize_substituted_default_template_argument(
                     }
                 } else {
                     std::string normalize_error;
-                    if (!template_sema_internal::
+                    if (!collect_template_internal::
                             normalize_concrete_template_value_argument(
                             rewritten_default,
                             expected_type,
@@ -1793,7 +1793,7 @@ bool Collect::bind_and_normalize_template_arguments_for_specialization(
 
     for (const auto& binding : bindings_out) {
         for (const auto& argument : binding.arguments) {
-            if (!template_sema_internal::template_argument_has_known_payload(
+            if (!collect_template_internal::template_argument_has_known_payload(
                     argument)) {
                 set_template_default_completion_error(
                     error_out,
@@ -1832,7 +1832,7 @@ bool Collect::bind_and_normalize_template_arguments_for_specialization(
                 continue;
             }
             std::string normalize_error;
-            if (!template_sema_internal::normalize_concrete_template_value_argument(
+            if (!collect_template_internal::normalize_concrete_template_value_argument(
                     bound_argument,
                     expected_type,
                     &normalize_error)) {

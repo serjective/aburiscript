@@ -317,7 +317,7 @@ bool bind_deduced_template_argument_value(
     const TemplateArgument& argument,
     const TemplateParameterList& parameters,
     TemplateArgumentBindings& deduced_arguments) {
-    auto parameter_index = template_sema_internal::find_template_parameter_index_by_decl(
+    auto parameter_index = collect_template_internal::find_template_parameter_index_by_decl(
         parameter,
         parameters);
     if (!parameter_index || *parameter_index >= deduced_arguments.size()) {
@@ -411,7 +411,7 @@ bool deduce_array_bound_template_argument(
         ConstValue::integer(
             ConstIntValue::from_unsigned(*argument_array.size, 64)),
         std::to_string(*argument_array.size));
-    if (!template_sema_internal::normalize_concrete_template_value_argument(
+    if (!collect_template_internal::normalize_concrete_template_value_argument(
             bound_argument,
             bound_parameter->type,
             nullptr)) {
@@ -496,11 +496,11 @@ TemplateArgumentDeductionResult deduce_class_template_argument_binding(
         ? normalized_argument.value_type
         : normalized_pattern.value_type;
     bool arguments_match =
-        template_sema_internal::normalize_concrete_template_value_argument(
+        collect_template_internal::normalize_concrete_template_value_argument(
             normalized_pattern,
             target_type,
             nullptr) &&
-        template_sema_internal::normalize_concrete_template_value_argument(
+        collect_template_internal::normalize_concrete_template_value_argument(
             normalized_argument,
             target_type,
             nullptr) &&
@@ -747,11 +747,11 @@ bool substituted_partial_specialization_arguments_match_actual(
         QualType target_type = normalized_actual.value_type
             ? normalized_actual.value_type
             : normalized_substituted.value_type;
-        if (!template_sema_internal::normalize_concrete_template_value_argument(
+        if (!collect_template_internal::normalize_concrete_template_value_argument(
                 normalized_substituted,
                 target_type,
                 nullptr) ||
-            !template_sema_internal::normalize_concrete_template_value_argument(
+            !collect_template_internal::normalize_concrete_template_value_argument(
                 normalized_actual,
                 target_type,
                 nullptr) ||
@@ -935,7 +935,7 @@ bool bind_deduced_template_template_argument(
         return false;
     }
 
-    auto parameter_index = template_sema_internal::find_template_parameter_index_by_decl(
+    auto parameter_index = collect_template_internal::find_template_parameter_index_by_decl(
         parameter_decl,
         parameters);
     if (!parameter_index || *parameter_index >= deduced_arguments.size()) {
@@ -1474,7 +1474,7 @@ bool class_template_partial_specialization_is_at_least_as_specialized_as(
 
 } // namespace
 
-namespace template_sema_internal {
+namespace collect_template_internal {
 
 bool deduce_class_template_partial_specialization_bindings(
     Collect& collect,
@@ -1729,7 +1729,7 @@ bool is_variable_template_partial_specialization_more_specialized(
     return compare_pack_layout_specificity(lhs_layout, rhs_layout) > 0;
 }
 
-} // namespace template_sema_internal
+} // namespace collect_template_internal
 
 bool Collect::deduce_function_template_call_arguments(
     const FunctionTemplateDecl* function_template,
@@ -2574,7 +2574,7 @@ Collect::compare_function_template_partial_ordering(
             TemplateArgumentBindings active_bindings = transformed_bindings;
             if (pack_element_index.has_value()) {
                 std::string binding_error;
-                if (!template_sema_internal::build_pack_element_argument_bindings(
+                if (!collect_template_internal::build_pack_element_argument_bindings(
                         argument_template->parameters,
                         transformed_bindings,
                         *pack_element_index,

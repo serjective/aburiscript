@@ -3,7 +3,7 @@
 
 #include <sstream>
 
-namespace template_sema_internal {
+namespace collect_template_internal {
 
 TemplateSubstitutionPass::TemplateSubstitutionPass() = default;
 
@@ -2292,4 +2292,4 @@ bool substitute_cpp_explicit_specifier_for_specialization(
     return true;
 }
 
-} // namespace template_sema_internal
+} // namespace collect_template_internal

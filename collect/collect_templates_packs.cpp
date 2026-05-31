@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-namespace template_sema_internal {
+namespace collect_template_internal {
 namespace {
 
 // Dual-lookup strategy for resolving pack parameter references:
@@ -1268,4 +1268,4 @@ std::string make_parameter_pack_element_name(const std::string& base_name,
     return base_name + "$" + std::to_string(element_index);
 }
 
-} // namespace template_sema_internal
+} // namespace collect_template_internal

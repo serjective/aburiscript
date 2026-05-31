@@ -6,7 +6,7 @@
 #include <optional>
 #include <sstream>
 
-using namespace template_sema_internal;
+using namespace collect_template_internal;
 
 namespace {
 
@@ -117,7 +117,7 @@ class_template_partial_specializations_for_instantiation(
 } // namespace
 
 const TemplateExplicitSpecializationDecl*
-template_sema_internal::find_class_template_explicit_specialization_for_lookup_identity(
+collect_template_internal::find_class_template_explicit_specialization_for_lookup_identity(
     const ClassTemplateDecl* class_template,
     const std::vector<TemplateArgument>& specialization_arguments,
     const std::vector<TemplateArgument>& owner_specialization_arguments,
@@ -574,7 +574,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             entry->instantiation_failed) {
             return entry->specialization_decl.get();
         }
-        template_sema_internal::TemplateInstantiationDepthGuard depth_guard(
+        collect_template_internal::TemplateInstantiationDepthGuard depth_guard(
             ast_ctx(),
             &collect,
             "class",
@@ -1041,7 +1041,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         CppExplicitSpecifier& specialized_specifier,
         bool& effective_value_out) {
         QualType specialized_this_type =
-            template_sema_internal::implicit_this_type_for_specialized_function(
+            collect_template_internal::implicit_this_type_for_specialized_function(
                 specialized_decl);
         auto resolution_pass =
             clone_pass_builder.build_dependent_resolution_pass(
@@ -1694,7 +1694,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         const Expr* pattern_expr,
         std::vector<std::unique_ptr<Expr>>& expanded_out,
         std::string* error_out) {
-        template_sema_internal::TemplatePackExpansionShape shape;
+        collect_template_internal::TemplatePackExpansionShape shape;
         if (!collect_pack_expansion_shape_in_expr(
                 pattern_expr,
                 *selected_parameters,
@@ -2206,7 +2206,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         if (!resolution_pass.resolve_decl_in_place(member_decl, error_out)) {
             return false;
         }
-        if (!template_sema_internal::finalize_specialized_decl_semantics(
+        if (!collect_template_internal::finalize_specialized_decl_semantics(
                 collect,
                 member_decl,
                 error_out)) {
@@ -2258,7 +2258,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         }
 
         std::string finalize_error;
-        if (!template_sema_internal::finalize_specialized_decl_semantics(
+        if (!collect_template_internal::finalize_specialized_decl_semantics(
                 collect,
                 cloned_decl,
                 &finalize_error)) {
@@ -2650,7 +2650,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 .record_type_remap[cloned_provisional_semantic_owner] =
                 QualType(record_type);
         }
-        if (!template_sema_internal::finalize_specialized_record_member_bodies(
+        if (!collect_template_internal::finalize_specialized_record_member_bodies(
                 collect,
                 cloned_record,
                 &clone_error)) {
@@ -2750,7 +2750,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 field_decl->location);
         }
         cloned_field_decl->type = substituted_type;
-        if (!template_sema_internal::finalize_specialized_decl_semantics(
+        if (!collect_template_internal::finalize_specialized_decl_semantics(
                 collect,
                 cloned_field_decl_base,
                 &clone_error)) {
@@ -5090,7 +5090,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             if (!static_member_resolution_pass.resolve_decl_in_place(
                     member_decl,
                     &clone_error) ||
-                !template_sema_internal::finalize_specialized_decl_semantics(
+                !collect_template_internal::finalize_specialized_decl_semantics(
                     collect,
                     member_decl,
                     &clone_error)) {
@@ -5303,7 +5303,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 [&](const Expr* pattern_expr,
                     std::vector<std::unique_ptr<Expr>>& expanded_out,
                     std::string* error_out) -> bool {
-                    template_sema_internal::TemplatePackExpansionShape outer_shape;
+                    collect_template_internal::TemplatePackExpansionShape outer_shape;
                     if (!collect_pack_expansion_shape_in_expr(
                             pattern_expr,
                             *selected_parameters,
@@ -5488,7 +5488,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
             specialized_function->parameters.clear();
             QualType member_template_this_type =
-                template_sema_internal::implicit_this_type_for_specialized_function(
+                collect_template_internal::implicit_this_type_for_specialized_function(
                     specialized_function);
             auto member_template_resolution_pass =
                 member_template_builder.build_dependent_resolution_pass(
@@ -5627,7 +5627,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             FuncDecl* specialized_func = pending_body_clone.specialized_func;
             QualType specialized_this_type =
                 pending_body_clone.use_implicit_this
-                    ? template_sema_internal::implicit_this_type_for_specialized_function(
+                    ? collect_template_internal::implicit_this_type_for_specialized_function(
                           specialized_func)
                     : QualType();
             auto member_resolution_pass =
@@ -5818,7 +5818,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         const FuncDecl* pattern_func = pending_body->pattern_function;
         QualType specialized_this_type =
             pending_body->use_implicit_this
-                ? template_sema_internal::implicit_this_type_for_specialized_function(
+                ? collect_template_internal::implicit_this_type_for_specialized_function(
                       specialized_func)
                 : QualType();
         auto member_resolution_pass =
@@ -5922,7 +5922,7 @@ bool Collect::materialize_class_template_member_body(
         make_class_template_specialization_name(
             entry.primary_template,
             entry.arguments);
-    template_sema_internal::TemplateInstantiationDepthGuard depth_guard(
+    collect_template_internal::TemplateInstantiationDepthGuard depth_guard(
         ast_ctx_.get(),
         this,
         "class",

@@ -1,21 +1,21 @@
 #include "collect.h"
 #include "collect_templates_internal.h"
 
-using template_sema_internal::build_pack_element_argument_bindings;
-using template_sema_internal::clone_and_finalize_ctor_initializers_for_specialization;
-using template_sema_internal::clone_function_body_for_specialization;
-using template_sema_internal::clone_function_parameters_for_specialization;
-using template_sema_internal::copy_cpp_member_decl_info;
-using template_sema_internal::lookup_symbol_remap_in_clone_context;
-using template_sema_internal::make_template_binding_clone_pass_builder;
-using template_sema_internal::materialize_specialized_fold_expression;
-using template_sema_internal::normalize_concrete_template_value_argument;
-using template_sema_internal::rebind_member_expr_for_specialized_record;
-using template_sema_internal::rebind_specialized_function_owner;
-using template_sema_internal::substitute_cpp_explicit_specifier_for_specialization;
-using template_sema_internal::template_argument_has_known_payload;
-using template_sema_internal::template_arguments_depend_on_template_parameters;
-using template_sema_internal::TemplateSubstitutionPass;
+using collect_template_internal::build_pack_element_argument_bindings;
+using collect_template_internal::clone_and_finalize_ctor_initializers_for_specialization;
+using collect_template_internal::clone_function_body_for_specialization;
+using collect_template_internal::clone_function_parameters_for_specialization;
+using collect_template_internal::copy_cpp_member_decl_info;
+using collect_template_internal::lookup_symbol_remap_in_clone_context;
+using collect_template_internal::make_template_binding_clone_pass_builder;
+using collect_template_internal::materialize_specialized_fold_expression;
+using collect_template_internal::normalize_concrete_template_value_argument;
+using collect_template_internal::rebind_member_expr_for_specialized_record;
+using collect_template_internal::rebind_specialized_function_owner;
+using collect_template_internal::substitute_cpp_explicit_specifier_for_specialization;
+using collect_template_internal::template_argument_has_known_payload;
+using collect_template_internal::template_arguments_depend_on_template_parameters;
+using collect_template_internal::TemplateSubstitutionPass;
 
 struct Collect::FunctionTemplateSpecializationInstantiator {
     Collect& collect;
@@ -628,7 +628,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
             auto clone_pass = clone_pass_builder.build_substitution_pass();
             ScopedActiveClonePass scoped_active_clone_pass(*this, &clone_pass);
             QualType specialization_this_type =
-                template_sema_internal::implicit_this_type_for_specialized_function(
+                collect_template_internal::implicit_this_type_for_specialized_function(
                     specialized_decl);
             auto resolution_pass =
                 clone_pass_builder.build_dependent_resolution_pass(
@@ -893,7 +893,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
         auto clone_pass = clone_pass_builder.build_substitution_pass();
         ScopedActiveClonePass scoped_active_clone_pass(*this, &clone_pass);
         QualType specialization_this_type =
-            template_sema_internal::implicit_this_type_for_specialized_function(
+            collect_template_internal::implicit_this_type_for_specialized_function(
                 specialization_decl_ptr);
         auto resolution_pass =
             clone_pass_builder.build_dependent_resolution_pass(
@@ -1000,7 +1000,7 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
     }
 
     FuncDecl* instantiate_entry_definition() {
-        template_sema_internal::TemplateInstantiationDepthGuard depth_guard(
+        collect_template_internal::TemplateInstantiationDepthGuard depth_guard(
             ast_ctx(),
             &collect,
             "function",
@@ -1166,13 +1166,13 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                 return sym;
             };
         QualType specialization_this_type =
-            template_sema_internal::implicit_this_type_for_specialized_function(
+            collect_template_internal::implicit_this_type_for_specialized_function(
                 specialization_decl_ptr);
         clone_pass_builder.expand_pack_expansion =
             [&](const Expr* pattern_expr,
                 std::vector<std::unique_ptr<Expr>>& expanded_out,
                 std::string* error_out) -> bool {
-                template_sema_internal::TemplatePackExpansionShape shape;
+                collect_template_internal::TemplatePackExpansionShape shape;
                 if (!collect_pack_expansion_shape_in_expr(
                         pattern_expr,
                         function_template->parameters,

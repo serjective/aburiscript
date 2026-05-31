@@ -133,7 +133,7 @@ QualType Collect::instantiate_alias_template_specialization(
     }
 
     for (const auto& argument : arguments) {
-        if (!template_sema_internal::template_argument_has_known_payload(argument)) {
+        if (!collect_template_internal::template_argument_has_known_payload(argument)) {
             report_error("alias template argument has unknown type", loc);
             return QualType();
         }
@@ -155,7 +155,7 @@ QualType Collect::instantiate_alias_template_specialization(
         expected_type = finalize_deferred_semantic_type(expected_type, loc);
         for (auto& bound_argument : specialization_bindings[idx].arguments) {
             std::string normalize_error;
-            if (!template_sema_internal::normalize_concrete_template_value_argument(
+            if (!collect_template_internal::normalize_concrete_template_value_argument(
                     bound_argument,
                     expected_type,
                     &normalize_error)) {
@@ -266,7 +266,7 @@ QualType Collect::substitute_class_template_type(
     if (!specialization_entry || !specialization_entry->specialization_type) {
         return substituted;
     }
-    return template_sema_internal::replace_record_decl_in_type(
+    return collect_template_internal::replace_record_decl_in_type(
         substituted,
         pattern_semantic_decl,
         QualType(specialization_entry->specialization_type),

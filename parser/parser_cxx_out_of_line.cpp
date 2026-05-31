@@ -230,7 +230,7 @@ void Parser::remap_out_of_line_constructor_with_parameter_rebinds(
     }
 
     clone_ctx.rewrite_type = [&](QualType type) -> QualType {
-        return template_sema_internal::remap_template_parameter_types_in_type(
+        return collect_template_internal::remap_template_parameter_types_in_type(
             type,
             parameter_rebinds);
     };
@@ -857,7 +857,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                 return false;
             }
             QualType remapped_active_type =
-                template_sema_internal::remap_template_parameter_types_in_type(
+                collect_template_internal::remap_template_parameter_types_in_type(
                     active_non_type->type,
                     rebinds);
             if (!cpp_out_of_line_type_matches(
@@ -932,7 +932,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
             }
 
             QualType remapped_parsed_type =
-                template_sema_internal::remap_template_parameter_types_in_type(
+                collect_template_internal::remap_template_parameter_types_in_type(
                     QualType(parsed_ctor->type),
                     rebinds);
             if (!cpp_out_of_line_type_matches(
