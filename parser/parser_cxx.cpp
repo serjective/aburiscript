@@ -592,6 +592,34 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
         return std::nullopt;
     }
 
+    auto is_simple_unqualified_template_name_argument_start = [&]() {
+        if (current_token().type != TokenType::IDENTIFIER) {
+            return false;
+        }
+        TokenType next_type = peek_token().type;
+        return next_type == TokenType::COMMA ||
+               next_type == TokenType::GREATER_THAN ||
+               next_type == TokenType::RIGHT_SHIFT ||
+               next_type == TokenType::ASSIGN_RSHIFT ||
+               next_type == TokenType::ELLIPSIS;
+    };
+
+    auto template_lookup_misses_without_blocking =
+        [&](LookupNamespace lookup_namespace) {
+        auto result = LookupEngine::lookup_unqualified_template_binding_result(
+            current_token().value,
+            current_scope,
+            true,
+            lookup_namespace);
+        return !result.binding && !result.blocked;
+    };
+
+    if (is_simple_unqualified_template_name_argument_start() &&
+        template_lookup_misses_without_blocking(LookupNamespace::Ordinary) &&
+        template_lookup_misses_without_blocking(LookupNamespace::Tag)) {
+        return std::nullopt;
+    }
+
     RevertingTentativeParsingAction tentative(*this);
     bool has_global_qualifier = consume_cpp_scope_resolution();
     if (!gentle_check(TokenType::IDENTIFIER)) {
