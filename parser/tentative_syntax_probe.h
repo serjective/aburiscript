@@ -23,6 +23,13 @@ enum class CxxStatementDisambiguation : uint8_t {
     Invalid
 };
 
+enum class TemplateArgumentListScopeFollow : uint8_t {
+    NoList,
+    FollowedByScope,
+    NotFollowedByScope,
+    Inconclusive
+};
+
 struct Config {
     bool cxx_mode = false;
     bool blocks_enabled = false;
@@ -379,6 +386,20 @@ public:
             return Result::Match;
         }
         return Result::NoMatch;
+    }
+
+    TemplateArgumentListScopeFollow
+    classify_template_argument_list_scope_follow() const {
+        size_t offset = 0;
+        if (token_at(offset).type != TokenType::LESS_THAN) {
+            return TemplateArgumentListScopeFollow::NoList;
+        }
+        if (!skip_template_argument_list_at(offset)) {
+            return TemplateArgumentListScopeFollow::Inconclusive;
+        }
+        return is_scope_resolution_at(offset)
+            ? TemplateArgumentListScopeFollow::FollowedByScope
+            : TemplateArgumentListScopeFollow::NotFollowedByScope;
     }
 
     CxxStatementDisambiguation probe_cxx_statement_disambiguation() {
@@ -1296,13 +1317,23 @@ private:
                     continue;
 
                 case TokenType::IDENTIFIER:
+                    if (current_token().value == "constexpr") {
+                        saw_specifier = true;
+                        advance();
+                        continue;
+                    }
                     if (cfg_.blocks_enabled &&
                         current_token().value == "__block") {
                         saw_specifier = true;
                         advance();
                         continue;
                     }
-                    break;
+                    if (!saw_definite_type_specifier) {
+                        return SpecScanStatus::Inconclusive;
+                    }
+                    return saw_specifier
+                        ? SpecScanStatus::Matched
+                        : SpecScanStatus::NoMatch;
 
                 case TokenType::AUTO:
                     saw_specifier = true;
@@ -1332,6 +1363,7 @@ private:
                     continue;
 
                 case TokenType::ALIGNAS:
+                case TokenType::DECLTYPE_KW:
                 case TokenType::TYPEOF_KW:
                     saw_specifier = true;
                     saw_definite_type_specifier = true;
@@ -1393,12 +1425,6 @@ private:
                     continue;
 
                 default:
-                    if (tok == TokenType::IDENTIFIER &&
-                        current_token().value == "constexpr") {
-                        saw_specifier = true;
-                        advance();
-                        continue;
-                    }
                     if (!saw_definite_type_specifier &&
                         (tok == TokenType::IDENTIFIER ||
                          (cfg_.cxx_mode && is_scope_resolution_here()))) {
@@ -1445,6 +1471,13 @@ inline Result probe_cpp_template_name_argument_prefix(TokenMgnt& mgnt,
                                                       const Config& cfg) {
     detail::SyntaxProbe probe(mgnt, cfg);
     return probe.probe_cpp_template_name_argument_prefix();
+}
+
+inline TemplateArgumentListScopeFollow
+classify_template_argument_list_scope_follow(TokenMgnt& mgnt,
+                                             const Config& cfg) {
+    detail::SyntaxProbe probe(mgnt, cfg);
+    return probe.classify_template_argument_list_scope_follow();
 }
 
 inline CxxStatementDisambiguation

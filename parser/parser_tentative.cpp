@@ -192,6 +192,16 @@ tentative_syntax_probe::Config Parser::syntax_probe_config() const {
                 lang_opts, *type_ctx->target)};
 }
 
+tentative_syntax_probe::Result Parser::probe_type_name_syntax() {
+    size_t start_idx = tok_mgnt.get_token_idx();
+    auto split_state = tok_mgnt.get_split_token_state();
+    auto result =
+        tentative_syntax_probe::probe_type_name(tok_mgnt, syntax_probe_config());
+    tok_mgnt.set_token_idx(start_idx);
+    tok_mgnt.set_split_token_state(split_state);
+    return result;
+}
+
 tentative_syntax_probe::Result
 Parser::probe_cxx_constrained_placeholder_type_specifier_syntax() {
     size_t start_idx = tok_mgnt.get_token_idx();
@@ -222,6 +232,19 @@ Parser::probe_cpp_template_name_argument_prefix_syntax() {
     auto split_state = tok_mgnt.get_split_token_state();
     auto result =
         tentative_syntax_probe::probe_cpp_template_name_argument_prefix(
+            tok_mgnt,
+            syntax_probe_config());
+    tok_mgnt.set_token_idx(start_idx);
+    tok_mgnt.set_split_token_state(split_state);
+    return result;
+}
+
+tentative_syntax_probe::TemplateArgumentListScopeFollow
+Parser::classify_template_argument_list_scope_follow_syntax() {
+    size_t start_idx = tok_mgnt.get_token_idx();
+    auto split_state = tok_mgnt.get_split_token_state();
+    auto result =
+        tentative_syntax_probe::classify_template_argument_list_scope_follow(
             tok_mgnt,
             syntax_probe_config());
     tok_mgnt.set_token_idx(start_idx);

@@ -1571,6 +1571,18 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                         mgnt->gentle_check(TokenType::RIGHT_PAREN) ||
                         mgnt->gentle_check(TokenType::ELLIPSIS) ||
                         pars->isTokenDeclarationSpec(mgnt->current_token());
+                    TokenType parameter_start_type = mgnt->current_token().type;
+                    if (looks_like_parameter_clause &&
+                        !mgnt->gentle_check(TokenType::RIGHT_PAREN) &&
+                        !mgnt->gentle_check(TokenType::ELLIPSIS) &&
+                        (parameter_start_type == TokenType::IDENTIFIER ||
+                         parameter_start_type == TokenType::SCOPE_RESOLUTION ||
+                         (parameter_start_type == TokenType::COLON &&
+                          mgnt->peek_token().type == TokenType::COLON)) &&
+                        pars->probe_type_name_syntax() ==
+                            tentative_syntax_probe::Result::NoMatch) {
+                        looks_like_parameter_clause = false;
+                    }
                     if (!looks_like_parameter_clause ||
                         (!cxx_parameter_clause_parses() &&
                          cxx_direct_initializer_clause_parses())) {

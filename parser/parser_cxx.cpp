@@ -609,12 +609,21 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
         component.preceded_by_template_keyword = preceded_by_template_keyword;
         advance();
         if (gentle_check(TokenType::LESS_THAN)) {
-            RevertingTentativeParsingAction template_args(*this);
-            auto parsed_arguments = parse_cpp_template_argument_list();
-            if (is_cpp_scope_resolution_here()) {
-                template_args.commit();
-                component.has_template_argument_list = true;
-                component.template_arguments = std::move(parsed_arguments);
+            auto scope_follow =
+                classify_template_argument_list_scope_follow_syntax();
+            if (scope_follow ==
+                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                        FollowedByScope ||
+                scope_follow ==
+                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                        Inconclusive) {
+                RevertingTentativeParsingAction template_args(*this);
+                auto parsed_arguments = parse_cpp_template_argument_list();
+                if (is_cpp_scope_resolution_here()) {
+                    template_args.commit();
+                    component.has_template_argument_list = true;
+                    component.template_arguments = std::move(parsed_arguments);
+                }
             }
         }
         return component;
@@ -1331,6 +1340,11 @@ bool Parser::expr_depends_on_active_template_parameter(const Expr* expr) const {
 }
 
 std::unique_ptr<Expr> Parser::try_parse_cpp_typed_braced_template_argument_expr() {
+    if (probe_type_name_syntax() ==
+        tentative_syntax_probe::Result::NoMatch) {
+        return nullptr;
+    }
+
     RevertingTentativeParsingAction tentative(*this);
     try {
         DeclarationParser type_parser(this);
@@ -1572,7 +1586,7 @@ TemplateArgument Parser::parse_cpp_template_argument() {
 
     bool parsed_type_argument = false;
     QualType parsed_argument_type;
-    {
+    if (probe_type_name_syntax() != tentative_syntax_probe::Result::NoMatch) {
         RevertingTentativeParsingAction tentative(*this);
         try {
             DeclarationParser type_parser(this);
@@ -6274,10 +6288,19 @@ bool Parser::is_cpp_qualified_id_start() {
         }
         advance();
         if (gentle_check(TokenType::LESS_THAN)) {
-            RevertingTentativeParsingAction template_args(*this);
-            parse_cpp_template_argument_list();
-            if (is_cpp_scope_resolution_here()) {
-                template_args.commit();
+            auto scope_follow =
+                classify_template_argument_list_scope_follow_syntax();
+            if (scope_follow ==
+                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                        FollowedByScope ||
+                scope_follow ==
+                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                        Inconclusive) {
+                RevertingTentativeParsingAction template_args(*this);
+                parse_cpp_template_argument_list();
+                if (is_cpp_scope_resolution_here()) {
+                    template_args.commit();
+                }
             }
         }
         return has_global_qualifier || is_cpp_scope_resolution_here();
@@ -8011,10 +8034,19 @@ Parser::TPResult Parser::try_parse_cpp_qualified_id() {
             }
             advance();
             if (gentle_check(TokenType::LESS_THAN)) {
-                RevertingTentativeParsingAction template_args(*this);
-                parse_cpp_template_argument_list();
-                if (is_cpp_scope_resolution_here()) {
-                    template_args.commit();
+                auto scope_follow =
+                    classify_template_argument_list_scope_follow_syntax();
+                if (scope_follow ==
+                        tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                            FollowedByScope ||
+                    scope_follow ==
+                        tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                            Inconclusive) {
+                    RevertingTentativeParsingAction template_args(*this);
+                    parse_cpp_template_argument_list();
+                    if (is_cpp_scope_resolution_here()) {
+                        template_args.commit();
+                    }
                 }
             }
             return true;

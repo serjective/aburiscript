@@ -1242,17 +1242,26 @@ bool Parser::starts_with_cpp_dependent_qualified_call_expression() {
         component.preceded_by_template_keyword = preceded_by_template_keyword;
         advance();
         if (gentle_check(TokenType::LESS_THAN)) {
-            RevertingTentativeParsingAction template_args(*this);
-            try {
-                auto parsed_arguments = parse_cpp_template_argument_list();
-                if (is_cpp_scope_resolution_here()) {
-                    template_args.commit();
-                    component.has_template_argument_list = true;
-                    component.template_arguments = std::move(parsed_arguments);
+            auto scope_follow =
+                classify_template_argument_list_scope_follow_syntax();
+            if (scope_follow ==
+                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                        FollowedByScope ||
+                scope_follow ==
+                    tentative_syntax_probe::TemplateArgumentListScopeFollow::
+                        Inconclusive) {
+                RevertingTentativeParsingAction template_args(*this);
+                try {
+                    auto parsed_arguments = parse_cpp_template_argument_list();
+                    if (is_cpp_scope_resolution_here()) {
+                        template_args.commit();
+                        component.has_template_argument_list = true;
+                        component.template_arguments = std::move(parsed_arguments);
+                    }
+                } catch (const ParseError&) {
+                } catch (const FatalErrorLimitReached&) {
+                    throw;
                 }
-            } catch (const ParseError&) {
-            } catch (const FatalErrorLimitReached&) {
-                throw;
             }
         }
         return component;
