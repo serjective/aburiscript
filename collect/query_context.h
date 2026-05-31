@@ -26,6 +26,7 @@ public:
         uint64_t dependent_name_type_misses = 0;
         uint64_t dependent_name_type_publications = 0;
         uint64_t overlay_begins = 0;
+        uint64_t overlay_materializations = 0;
         uint64_t overlay_commits = 0;
         uint64_t overlay_rollbacks = 0;
         uint64_t overlay_merges = 0;
@@ -96,9 +97,10 @@ private:
                                           TentativeOverlay child);
     static void apply_overlay_to_store(TentativeOverlay& overlay,
                                        CollectSemanticStore& store);
+    TentativeOverlay& ensure_current_tentative_overlay();
     void bump_revision();
 
-    std::vector<TentativeOverlay> tentative_overlays_;
+    std::vector<std::unique_ptr<TentativeOverlay>> tentative_overlays_;
     mutable Metrics metrics_;
     uint64_t revision_ = 1;
 };

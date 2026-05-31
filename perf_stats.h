@@ -119,6 +119,7 @@ enum class PerfCounter {
     CollectQueryDependentNameMisses,
     CollectQueryDependentNamePublishes,
     CollectQueryOverlayBegins,
+    CollectQueryOverlayMaterializations,
     CollectQueryOverlayCommits,
     CollectQueryOverlayRollbacks,
     CollectQueryOverlayMerges,

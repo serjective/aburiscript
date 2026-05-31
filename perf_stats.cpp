@@ -110,6 +110,7 @@ constexpr auto kCounterNames = std::to_array<const char*>({
     "collect.query_dependent_name_misses",
     "collect.query_dependent_name_publishes",
     "collect.query_overlay_begins",
+    "collect.query_overlay_materializations",
     "collect.query_overlay_commits",
     "collect.query_overlay_rollbacks",
     "collect.query_overlay_merges",

@@ -1,5 +1,6 @@
 #include "query_context.h"
 
+#include <cassert>
 #include <cstdlib>
 #include <iostream>
 #include <utility>
@@ -55,9 +56,20 @@ void CollectQueryContext::bump_revision() {
 }
 
 void CollectQueryContext::begin_tentative_overlay() {
-    tentative_overlays_.emplace_back();
+    tentative_overlays_.push_back(nullptr);
     ++metrics_.overlay_begins;
-    bump_revision();
+}
+
+CollectQueryContext::TentativeOverlay&
+CollectQueryContext::ensure_current_tentative_overlay() {
+    assert(!tentative_overlays_.empty() &&
+           "query overlay materialization requires speculative context");
+    auto& overlay = tentative_overlays_.back();
+    if (!overlay) {
+        overlay = std::make_unique<TentativeOverlay>();
+        ++metrics_.overlay_materializations;
+    }
+    return *overlay;
 }
 
 void CollectQueryContext::merge_overlay_into_parent(TentativeOverlay& parent,
@@ -125,25 +137,34 @@ void CollectQueryContext::commit_tentative_overlay(CollectSemanticStore& store) 
     if (tentative_overlays_.empty()) {
         return;
     }
-    TentativeOverlay overlay = std::move(tentative_overlays_.back());
+    auto overlay = std::move(tentative_overlays_.back());
     tentative_overlays_.pop_back();
     ++metrics_.overlay_commits;
-    bump_revision();
+    if (!overlay) {
+        return;
+    }
     if (!tentative_overlays_.empty()) {
-        merge_overlay_into_parent(tentative_overlays_.back(), std::move(overlay));
+        merge_overlay_into_parent(
+            ensure_current_tentative_overlay(),
+            std::move(*overlay));
         ++metrics_.overlay_merges;
         return;
     }
-    apply_overlay_to_store(overlay, store);
+    apply_overlay_to_store(*overlay, store);
+    bump_revision();
 }
 
 void CollectQueryContext::rollback_tentative_overlay() {
     if (tentative_overlays_.empty()) {
         return;
     }
+    bool had_materialized_overlay =
+        static_cast<bool>(tentative_overlays_.back());
     tentative_overlays_.pop_back();
     ++metrics_.overlay_rollbacks;
-    bump_revision();
+    if (had_materialized_overlay) {
+        bump_revision();
+    }
 }
 
 const RecordSemanticState* CollectQueryContext::lookup_record_semantics(
@@ -155,12 +176,16 @@ const RecordSemanticState* CollectQueryContext::lookup_record_semantics(
     for (auto it = tentative_overlays_.rbegin();
          it != tentative_overlays_.rend();
          ++it) {
-        if (it->erased_record_semantics.contains(record_decl)) {
+        if (!*it) {
+            continue;
+        }
+        const auto& overlay = **it;
+        if (overlay.erased_record_semantics.contains(record_decl)) {
             ++metrics_.record_semantics_misses;
             return nullptr;
         }
-        auto overlay_it = it->record_semantics.find(record_decl);
-        if (overlay_it != it->record_semantics.end()) {
+        auto overlay_it = overlay.record_semantics.find(record_decl);
+        if (overlay_it != overlay.record_semantics.end()) {
             ++metrics_.record_semantics_hits;
             return overlay_it->second.get();
         }
@@ -186,7 +211,7 @@ const RecordSemanticState* CollectQueryContext::publish_record_semantics(
         store.set_record_semantics(record_decl, std::move(state));
         return store.lookup_record_semantics(record_decl);
     }
-    auto& overlay = tentative_overlays_.back();
+    auto& overlay = ensure_current_tentative_overlay();
     overlay.erased_record_semantics.erase(record_decl);
     auto& slot = overlay.record_semantics[record_decl];
     slot = std::make_unique<RecordSemanticState>(std::move(state));
@@ -203,7 +228,7 @@ void CollectQueryContext::erase_record_semantics(const ObjectDecl* record_decl,
         store.erase_record_semantics(record_decl);
         return;
     }
-    auto& overlay = tentative_overlays_.back();
+    auto& overlay = ensure_current_tentative_overlay();
     overlay.record_semantics.erase(record_decl);
     overlay.erased_record_semantics.insert(record_decl);
 }
@@ -218,12 +243,16 @@ bool CollectQueryContext::lookup_enum_semantics(
     for (auto it = tentative_overlays_.rbegin();
          it != tentative_overlays_.rend();
          ++it) {
-        if (it->erased_enum_semantics.contains(enum_decl)) {
+        if (!*it) {
+            continue;
+        }
+        const auto& overlay = **it;
+        if (overlay.erased_enum_semantics.contains(enum_decl)) {
             ++metrics_.enum_semantics_misses;
             return false;
         }
-        auto overlay_it = it->enum_semantics.find(enum_decl);
-        if (overlay_it != it->enum_semantics.end()) {
+        auto overlay_it = overlay.enum_semantics.find(enum_decl);
+        if (overlay_it != overlay.enum_semantics.end()) {
             state_out = overlay_it->second;
             ++metrics_.enum_semantics_hits;
             return true;
@@ -249,7 +278,7 @@ void CollectQueryContext::publish_enum_semantics(
         store.set_enum_semantics(enum_decl, std::move(state));
         return;
     }
-    auto& overlay = tentative_overlays_.back();
+    auto& overlay = ensure_current_tentative_overlay();
     overlay.erased_enum_semantics.erase(enum_decl);
     overlay.enum_semantics[enum_decl] = std::move(state);
 }
@@ -263,7 +292,7 @@ void CollectQueryContext::erase_enum_semantics(const EnumDecl* enum_decl,
         store.erase_enum_semantics(enum_decl);
         return;
     }
-    auto& overlay = tentative_overlays_.back();
+    auto& overlay = ensure_current_tentative_overlay();
     overlay.enum_semantics.erase(enum_decl);
     overlay.erased_enum_semantics.insert(enum_decl);
 }
@@ -283,8 +312,14 @@ CollectQueryContext::lookup_template_specialization_resolved_type(
     for (auto it = tentative_overlays_.rbegin();
          it != tentative_overlays_.rend();
          ++it) {
-        auto overlay_it = it->template_specialization_resolved_types.find(type);
-        if (overlay_it != it->template_specialization_resolved_types.end()) {
+        if (!*it) {
+            continue;
+        }
+        const auto& overlay = **it;
+        auto overlay_it =
+            overlay.template_specialization_resolved_types.find(type);
+        if (overlay_it !=
+            overlay.template_specialization_resolved_types.end()) {
             ++metrics_.template_specialization_type_hits;
             return overlay_it->second.resolved_type;
         }
@@ -313,7 +348,8 @@ void CollectQueryContext::publish_template_specialization_resolved_type(
             std::move(resolved_type));
         return;
     }
-    tentative_overlays_.back().template_specialization_resolved_types[type] =
+    auto& overlay = ensure_current_tentative_overlay();
+    overlay.template_specialization_resolved_types[type] =
         ResolvedTypeCacheEntry{std::move(key_type), std::move(resolved_type)};
 }
 
@@ -331,8 +367,12 @@ QualType CollectQueryContext::lookup_dependent_name_resolved_type(
     for (auto it = tentative_overlays_.rbegin();
          it != tentative_overlays_.rend();
          ++it) {
-        auto overlay_it = it->dependent_name_resolved_types.find(type);
-        if (overlay_it != it->dependent_name_resolved_types.end()) {
+        if (!*it) {
+            continue;
+        }
+        const auto& overlay = **it;
+        auto overlay_it = overlay.dependent_name_resolved_types.find(type);
+        if (overlay_it != overlay.dependent_name_resolved_types.end()) {
             ++metrics_.dependent_name_type_hits;
             return overlay_it->second.resolved_type;
         }
@@ -360,7 +400,8 @@ void CollectQueryContext::publish_dependent_name_resolved_type(
                                                std::move(resolved_type));
         return;
     }
-    tentative_overlays_.back().dependent_name_resolved_types[type] =
+    auto& overlay = ensure_current_tentative_overlay();
+    overlay.dependent_name_resolved_types[type] =
         ResolvedTypeCacheEntry{std::move(key_type), std::move(resolved_type)};
 }
 
@@ -379,6 +420,7 @@ void CollectQueryContext::emit_metrics(std::ostream& os) const {
        << " depname_misses=" << metrics_.dependent_name_type_misses
        << " depname_publishes=" << metrics_.dependent_name_type_publications
        << " overlay_begins=" << metrics_.overlay_begins
+       << " overlay_materializations=" << metrics_.overlay_materializations
        << " overlay_commits=" << metrics_.overlay_commits
        << " overlay_rollbacks=" << metrics_.overlay_rollbacks
        << " overlay_merges=" << metrics_.overlay_merges
@@ -427,6 +469,8 @@ Collect::~Collect() {
             metrics.dependent_name_type_publications);
         profiler->add_counter(PerfCounter::CollectQueryOverlayBegins,
             metrics.overlay_begins);
+        profiler->add_counter(PerfCounter::CollectQueryOverlayMaterializations,
+            metrics.overlay_materializations);
         profiler->add_counter(PerfCounter::CollectQueryOverlayCommits,
             metrics.overlay_commits);
         profiler->add_counter(PerfCounter::CollectQueryOverlayRollbacks,
