@@ -19,6 +19,24 @@
 #include <unordered_map>
 
 namespace {
+void bump_parser_annotation_overlay_hit() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserAnnotationOverlayHits);
+    }
+}
+
+void bump_parser_annotation_overlay_miss() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserAnnotationOverlayMisses);
+    }
+}
+
+void bump_parser_annotation_overlay_publish() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserAnnotationOverlayPublishes);
+    }
+}
+
 Token make_template_split_token(const Token& source,
                                 TokenType type,
                                 std::string value,
@@ -964,6 +982,39 @@ bool Parser::try_consume_cpp_decltype_specifier_for_lookahead() {
 }
 
 bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
+    const bool use_cache = can_use_semantic_annotation_cache();
+    const size_t token_idx = get_token_idx();
+    ParserAnnotationCache::SemanticKey key;
+    if (use_cache) {
+        key = semantic_annotation_key();
+        if (auto cached = annotation_cache_.lookup_semantic_annotation(
+                token_idx,
+                ParserAnnotationCache::SemanticKind::
+                    CppNamedTypeSpecifierLookahead,
+                key)) {
+            bump_parser_annotation_overlay_hit();
+            return cached->value != 0;
+        }
+        bump_parser_annotation_overlay_miss();
+    }
+
+    bool result = compute_cpp_named_type_specifier_for_lookahead();
+    if (use_cache) {
+        annotation_cache_.store_semantic_annotation(
+            token_idx,
+            ParserAnnotationCache::SemanticKind::
+                CppNamedTypeSpecifierLookahead,
+            key,
+            ParserAnnotationCache::SemanticAnnotation{
+                get_token_idx(),
+                static_cast<uint8_t>(result ? 1 : 0),
+                false});
+        bump_parser_annotation_overlay_publish();
+    }
+    return result;
+}
+
+bool Parser::compute_cpp_named_type_specifier_for_lookahead() {
     if (!is_cxx_mode_active() || !collect_) {
         return false;
     }
@@ -2025,6 +2076,28 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
         set_token_idx(saved_idx);
         tok_mgnt.set_split_token_state(saved_split_state);
     };
+    const bool publish_type_annotation = can_use_semantic_annotation_cache();
+    const auto type_annotation_key =
+        publish_type_annotation ? semantic_annotation_key()
+                                : ParserAnnotationCache::SemanticKey{};
+    auto finish_type_annotation =
+        [&](ParsedCppTypeNameSpecifier result)
+            -> std::optional<ParsedCppTypeNameSpecifier> {
+        if (publish_type_annotation) {
+            annotation_cache_.store_semantic_annotation(
+                saved_idx,
+                ParserAnnotationCache::SemanticKind::
+                    CppNamedTypeSpecifierLookahead,
+                type_annotation_key,
+                ParserAnnotationCache::SemanticAnnotation{
+                    get_token_idx(),
+                    1,
+                    type_depends_on_template_parameters(result.type,
+                                                        ast_ctx.get())});
+            bump_parser_annotation_overlay_publish();
+        }
+        return result;
+    };
 
     auto current_scope = collect_->collect_current_scope();
     auto current_context = collect_->get_current_decl_context();
@@ -2597,16 +2670,16 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
         result.spelling =
             owner_chain.qualifier_chain_spelling + "::" +
             terminal_component.spelling();
-        return result;
+        return finish_type_annotation(std::move(result));
     };
 
     if (start_tok.type != TokenType::TYPENAME) {
         if (auto decltype_qualified =
                 try_parse_decltype_qualified_type(false)) {
-            return decltype_qualified;
+            return finish_type_annotation(std::move(*decltype_qualified));
         }
         if (auto concrete = try_parse_concrete_named_type()) {
-            return concrete;
+            return finish_type_annotation(std::move(*concrete));
         }
         restore();
     }
@@ -2615,18 +2688,18 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
     if (saw_typename_keyword) {
         if (auto decltype_qualified =
                 try_parse_decltype_qualified_type(true)) {
-            return decltype_qualified;
+            return finish_type_annotation(std::move(*decltype_qualified));
         }
         size_t after_typename_idx = get_token_idx();
         auto after_typename_split_state = tok_mgnt.get_split_token_state();
         if (auto concrete = try_parse_concrete_named_type()) {
-            return concrete;
+            return finish_type_annotation(std::move(*concrete));
         }
         set_token_idx(after_typename_idx);
         tok_mgnt.set_split_token_state(after_typename_split_state);
         if (is_type_requirement) {
             if (auto concrete = try_parse_concrete_named_type()) {
-                return concrete;
+                return finish_type_annotation(std::move(*concrete));
             }
             set_token_idx(after_typename_idx);
             tok_mgnt.set_split_token_state(after_typename_split_state);
@@ -2712,7 +2785,7 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
                 qualifier_name,
                 qualifier_arguments,
                 qualifier_has_template_argument_list);
-            return result;
+            return finish_type_annotation(std::move(result));
         }
         if (saw_typename_keyword) {
             error_custloc("expected qualified type name after 'typename'",
@@ -2871,7 +2944,7 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
             ParsedCppTypeNameSpecifier result;
             result.type = state.qualifier_type;
             result.spelling = current_qualifier_spelling + "::" + member_spelling;
-            return result;
+            return finish_type_annotation(std::move(result));
         }
 
         current_qualifier_spelling += "::";
@@ -6595,28 +6668,57 @@ bool Parser::is_cpp_qualified_id_start() {
     if (!is_cxx_mode_active()) {
         return false;
     }
+    const bool use_cache = can_use_semantic_annotation_cache();
+    const size_t token_idx = get_token_idx();
+    ParserAnnotationCache::SemanticKey key;
+    if (use_cache) {
+        key = semantic_annotation_key();
+        if (auto cached = annotation_cache_.lookup_semantic_annotation(
+                token_idx,
+                ParserAnnotationCache::SemanticKind::CppScope,
+                key)) {
+            bump_parser_annotation_overlay_hit();
+            return cached->value != 0;
+        }
+        bump_parser_annotation_overlay_miss();
+    }
+    auto finish = [&](bool result) {
+        if (use_cache) {
+            annotation_cache_.store_semantic_annotation(
+                token_idx,
+                ParserAnnotationCache::SemanticKind::CppScope,
+                key,
+                ParserAnnotationCache::SemanticAnnotation{
+                    get_token_idx(),
+                    static_cast<uint8_t>(result ? 1 : 0),
+                    false});
+            bump_parser_annotation_overlay_publish();
+        }
+        return result;
+    };
+
     auto syntax_result = probe_cpp_qualified_id_start_syntax();
     if (syntax_result == tentative_syntax_probe::Result::Match) {
-        return true;
+        return finish(true);
     }
     if (syntax_result == tentative_syntax_probe::Result::NoMatch) {
-        return false;
+        return finish(false);
     }
     RevertingTentativeParsingAction tentative(*this);
     try {
         if (gentle_check(TokenType::DECLTYPE_KW)) {
             if (!try_consume_cpp_decltype_specifier_for_lookahead()) {
-                return false;
+                return finish(false);
             }
-            return is_cpp_scope_resolution_here();
+            return finish(is_cpp_scope_resolution_here());
         }
         bool has_global_qualifier = consume_cpp_scope_resolution();
         if (!gentle_check(TokenType::IDENTIFIER) &&
             !(has_global_qualifier && gentle_check(TokenType::OPERATOR_KW))) {
-            return false;
+            return finish(false);
         }
         if (gentle_check(TokenType::OPERATOR_KW)) {
-            return has_global_qualifier;
+            return finish(has_global_qualifier);
         }
         advance();
         if (gentle_check(TokenType::LESS_THAN)) {
@@ -6636,9 +6738,9 @@ bool Parser::is_cpp_qualified_id_start() {
                 }
             }
         }
-        return has_global_qualifier || is_cpp_scope_resolution_here();
+        return finish(has_global_qualifier || is_cpp_scope_resolution_here());
     } catch (const ParseError&) {
-        return false;
+        return finish(false);
     }
 }
 

@@ -958,6 +958,18 @@ private:
     tentative_syntax_probe::CxxParameterClauseShape
     scan_cxx_parameter_clause_shape_syntax();
     bool can_use_annotation_cache() const;
+    bool can_use_semantic_annotation_cache() const;
+    ParserAnnotationCache::SemanticKey semantic_annotation_key() const;
+
+    enum class CxxTypeConstructionClassification : uint8_t {
+        Reject,
+        KnownType,
+        DependentOrAmbiguous,
+        NeedsCurrentPath
+    };
+    CxxTypeConstructionClassification classify_cpp_type_construction_candidate(
+        const tentative_syntax_probe::CxxTypeConstructionScan& scan);
+    bool compute_cpp_named_type_specifier_for_lookahead();
 
     // Attribute parsing
     std::vector<ParsedAttribute> try_parse_attributes();

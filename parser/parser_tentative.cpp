@@ -260,6 +260,25 @@ bool Parser::can_use_annotation_cache() const {
     return !tok_mgnt.has_split_tokens();
 }
 
+bool Parser::can_use_semantic_annotation_cache() const {
+    return can_use_annotation_cache() && collect_ &&
+           !is_in_tentative_context() &&
+           !collect_->collect_is_speculative_parsing();
+}
+
+ParserAnnotationCache::SemanticKey Parser::semantic_annotation_key() const {
+    ParserAnnotationCache::SemanticKey key;
+    key.syntax_key =
+        ParserAnnotationCache::make_config_key(syntax_probe_config());
+    if (!collect_) {
+        return key;
+    }
+    key.lookup_generation = collect_->collect_lookup_generation();
+    key.scope = collect_->collect_current_scope().get();
+    key.decl_context = collect_->get_current_decl_context().get();
+    return key;
+}
+
 tentative_syntax_probe::Result Parser::probe_type_name_syntax() {
     auto cfg = syntax_probe_config();
     uint32_t key = ParserAnnotationCache::make_config_key(cfg);

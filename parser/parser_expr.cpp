@@ -3,6 +3,7 @@
 #include "../helpers/auto_type_utils.h"
 #include "../collect/collect_templates_internal.h"
 #include "../collect/lookup_engine.h"
+#include "../perf_stats.h"
 
 #include <cstdint>
 
@@ -36,6 +37,36 @@ struct TemplateArgumentGroupGuard {
         }
     }
 };
+
+void bump_parser_annotation_overlay_hit() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserAnnotationOverlayHits);
+    }
+}
+
+void bump_parser_annotation_overlay_miss() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserAnnotationOverlayMisses);
+    }
+}
+
+void bump_parser_annotation_overlay_publish() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserAnnotationOverlayPublishes);
+    }
+}
+
+void bump_type_construction_fast_reject() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTypeConstructionFastRejects);
+    }
+}
+
+void bump_type_construction_lookup_reject() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTypeConstructionLookupRejects);
+    }
+}
 
 bool try_get_fold_operator(const Token& token, BinOpTypes& op_out) {
     std::string spelling = token.value;
@@ -543,6 +574,97 @@ std::unique_ptr<Expr> Parser::try_parse_fold_expression(SrcLoc lparen_loc) {
     }
 }
 
+Parser::CxxTypeConstructionClassification
+Parser::classify_cpp_type_construction_candidate(
+    const tentative_syntax_probe::CxxTypeConstructionScan& scan) {
+    if (!is_cxx_mode_active()) {
+        return CxxTypeConstructionClassification::Reject;
+    }
+
+    auto starts_named_type_spelling = [&]() {
+        TokenType tok = current_token().type;
+        return tok == TokenType::IDENTIFIER ||
+               tok == TokenType::SCOPE_RESOLUTION ||
+               (tok == TokenType::COLON &&
+                peek_token().type == TokenType::COLON);
+    };
+
+    if (!starts_named_type_spelling()) {
+        return CxxTypeConstructionClassification::NeedsCurrentPath;
+    }
+
+    if (!scan.complete) {
+        return CxxTypeConstructionClassification::NeedsCurrentPath;
+    }
+
+    if (!scan.followed_by_left_paren && !scan.followed_by_left_brace) {
+        return CxxTypeConstructionClassification::Reject;
+    }
+
+    const bool use_cache = can_use_semantic_annotation_cache();
+    const size_t token_idx = get_token_idx();
+    ParserAnnotationCache::SemanticKey key;
+    if (use_cache) {
+        key = semantic_annotation_key();
+        if (auto cached = annotation_cache_.lookup_semantic_annotation(
+                token_idx,
+                ParserAnnotationCache::SemanticKind::
+                    CppTypeConstructionClassification,
+                key)) {
+            bump_parser_annotation_overlay_hit();
+            return static_cast<CxxTypeConstructionClassification>(
+                cached->value);
+        }
+        bump_parser_annotation_overlay_miss();
+    }
+
+    if (!scan.is_qualified &&
+        (!cxx_record_parse_stack_.empty() ||
+         (collect_ && collect_->collect_current_cpp_record_lookup_type()))) {
+        CxxTypeConstructionClassification result =
+            CxxTypeConstructionClassification::DependentOrAmbiguous;
+        if (use_cache) {
+            annotation_cache_.store_semantic_annotation(
+                token_idx,
+                ParserAnnotationCache::SemanticKind::
+                    CppTypeConstructionClassification,
+                key,
+                ParserAnnotationCache::SemanticAnnotation{
+                    get_token_idx(),
+                    static_cast<uint8_t>(result),
+                    true});
+            bump_parser_annotation_overlay_publish();
+        }
+        return result;
+    }
+
+    CxxTypeConstructionClassification result =
+        CxxTypeConstructionClassification::NeedsCurrentPath;
+    if (!can_start_cpp_named_type_specifier_for_lookahead()) {
+        result = CxxTypeConstructionClassification::Reject;
+    } else if (scan.is_qualified) {
+        result = CxxTypeConstructionClassification::DependentOrAmbiguous;
+    } else {
+        result = CxxTypeConstructionClassification::KnownType;
+    }
+
+    if (use_cache) {
+        annotation_cache_.store_semantic_annotation(
+            token_idx,
+            ParserAnnotationCache::SemanticKind::
+                CppTypeConstructionClassification,
+            key,
+            ParserAnnotationCache::SemanticAnnotation{
+                get_token_idx(),
+                static_cast<uint8_t>(result),
+                result == CxxTypeConstructionClassification::
+                              DependentOrAmbiguous});
+        bump_parser_annotation_overlay_publish();
+    }
+
+    return result;
+}
+
 std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
     if (!is_cxx_mode_active()) {
         return nullptr;
@@ -563,6 +685,17 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
         current_token().type == TokenType::IDENTIFIER &&
         !qualified_scan.followed_by_left_paren &&
         !qualified_scan.followed_by_left_brace) {
+        return nullptr;
+    }
+    auto type_construction_classification =
+        classify_cpp_type_construction_candidate(qualified_scan);
+    if (type_construction_classification ==
+        CxxTypeConstructionClassification::Reject) {
+        bump_type_construction_fast_reject();
+        if (qualified_scan.followed_by_left_paren ||
+            qualified_scan.followed_by_left_brace) {
+            bump_type_construction_lookup_reject();
+        }
         return nullptr;
     }
     if (starts_with_cpp_dependent_qualified_call_expression()) {

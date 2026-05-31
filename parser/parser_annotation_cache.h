@@ -22,6 +22,34 @@ public:
         Count
     };
 
+    enum class SemanticKind : uint8_t {
+        CppNamedTypeSpecifierLookahead,
+        CppTypeConstructionClassification,
+        CppScope,
+        CppTemplateId,
+        Count
+    };
+
+    struct SemanticKey {
+        uint32_t syntax_key = 0;
+        uint64_t lookup_generation = 0;
+        const void* scope = nullptr;
+        const void* decl_context = nullptr;
+
+        bool operator==(const SemanticKey& other) const {
+            return syntax_key == other.syntax_key &&
+                   lookup_generation == other.lookup_generation &&
+                   scope == other.scope &&
+                   decl_context == other.decl_context;
+        }
+    };
+
+    struct SemanticAnnotation {
+        size_t end_token_idx = 0;
+        uint8_t value = 0;
+        bool dependent_or_ambiguous = false;
+    };
+
     ParserAnnotationCache() = default;
     explicit ParserAnnotationCache(size_t token_count) {
         reset(token_count);
@@ -139,6 +167,36 @@ public:
         slot->parameter_clause_shape.value = value;
     }
 
+    std::optional<SemanticAnnotation>
+    lookup_semantic_annotation(size_t token_idx,
+                               SemanticKind kind,
+                               const SemanticKey& key) const {
+        const auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return std::nullopt;
+        }
+        const auto& entry =
+            slot->semantic[static_cast<size_t>(kind)];
+        if (!entry.valid || !(entry.key == key)) {
+            return std::nullopt;
+        }
+        return entry.value;
+    }
+
+    void store_semantic_annotation(size_t token_idx,
+                                   SemanticKind kind,
+                                   const SemanticKey& key,
+                                   SemanticAnnotation value) {
+        auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return;
+        }
+        auto& entry = slot->semantic[static_cast<size_t>(kind)];
+        entry.valid = true;
+        entry.key = key;
+        entry.value = value;
+    }
+
 private:
     struct ResultEntry {
         bool valid = false;
@@ -154,6 +212,12 @@ private:
         T value{};
     };
 
+    struct SemanticEntry {
+        bool valid = false;
+        SemanticKey key;
+        SemanticAnnotation value;
+    };
+
     struct TokenSlots {
         std::array<ResultEntry, static_cast<size_t>(ResultKind::Count)> results;
         Entry<tentative_syntax_probe::TemplateArgumentListScan>
@@ -162,6 +226,8 @@ private:
             type_construction_scan;
         Entry<tentative_syntax_probe::CxxParameterClauseShape>
             parameter_clause_shape;
+        std::array<SemanticEntry, static_cast<size_t>(SemanticKind::Count)>
+            semantic;
     };
 
     TokenSlots* slot_for(size_t token_idx) {

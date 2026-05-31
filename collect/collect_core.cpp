@@ -509,6 +509,7 @@ bool Collect::collect_is_speculative_parsing() const {
 
 void Collect::collect_start_translation_unit() {
     query_context_.clear();
+    lookup_generation_ = 1;
 
     session_.func_state_.in_function = false;
     session_.current_scope_ = std::make_shared<Scope>();
@@ -843,6 +844,7 @@ void Collect::collect_register_namespace_binding(
     }
     record_decl_context_mutation(owner_context);
     owner_context->add_namespace_binding(std::move(binding));
+    bump_lookup_generation();
 }
 
 void Collect::collect_register_namespace_alias(
@@ -854,6 +856,7 @@ void Collect::collect_register_namespace_alias(
     }
     record_decl_context_mutation(owner_context);
     owner_context->add_namespace_alias(std::move(alias));
+    bump_lookup_generation();
 }
 
 void Collect::collect_register_namespace_nomination(
@@ -865,6 +868,7 @@ void Collect::collect_register_namespace_nomination(
     }
     record_decl_context_mutation(owner_context);
     owner_context->add_namespace_nomination(std::move(nomination));
+    bump_lookup_generation();
 }
 
 void Collect::collect_set_namespace_inline_metadata(
@@ -890,6 +894,7 @@ void Collect::collect_set_namespace_inline_metadata(
 
     record_decl_context_mutation(target_context);
     target_context->set_inline_namespace(is_inline, effective_enclosing);
+    bump_lookup_generation();
 }
 
 CppThisContext Collect::collect_current_cpp_this_context() const {
@@ -1157,6 +1162,7 @@ void Collect::bind_symbol_in_scope(const std::shared_ptr<Scope>& scope,
     binding.symbol = sym;
     record_decl_context_mutation(context);
     context->add_declaration(std::move(binding));
+    bump_lookup_generation();
 }
 
 void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
@@ -1190,6 +1196,7 @@ void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
 
     record_decl_context_mutation(context);
     context->add_declaration(std::move(binding));
+    bump_lookup_generation();
 }
 
 void Collect::collect_bind_template_decl(const std::string& name,
@@ -1254,6 +1261,7 @@ void Collect::bind_tag_decl_in_scope(const std::shared_ptr<Scope>& scope,
     binding.ast_decl = decl;
     record_decl_context_mutation(context);
     context->add_declaration(std::move(binding));
+    bump_lookup_generation();
 }
 
 void Collect::bind_label_in_scope(const std::shared_ptr<Scope>& scope,
@@ -1277,7 +1285,15 @@ void Collect::bind_label_in_scope(const std::shared_ptr<Scope>& scope,
     binding.ast_decl = nullptr;
     record_decl_context_mutation(context);
     context->add_declaration(std::move(binding));
+    bump_lookup_generation();
     (void)loc;
+}
+
+void Collect::bump_lookup_generation() {
+    ++lookup_generation_;
+    if (lookup_generation_ == 0) {
+        lookup_generation_ = 1;
+    }
 }
 
 void Collect::sync_decl_context_from_current_scope() {
@@ -1313,6 +1329,10 @@ bool Collect::collect_is_file_scope() const {
         scope = scope->parent;
     }
     return scope && scope_flags_contains(scope->flags, ScopeFlags::FileScope);
+}
+
+uint64_t Collect::collect_lookup_generation() const {
+    return lookup_generation_;
 }
 
 

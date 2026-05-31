@@ -315,6 +315,7 @@ public:
     void collect_set_current_scope(std::shared_ptr<Scope> scope) ;
 
     bool collect_is_file_scope() const ;
+    uint64_t collect_lookup_generation() const ;
 
     ScopeEnterResult collect_enter_scope(std::shared_ptr<Scope> current_scope,
                                          std::shared_ptr<Scope> use_scope = nullptr) const ;
@@ -2895,6 +2896,7 @@ private:
     void bind_label_in_scope(const std::shared_ptr<Scope>& scope,
                                      const std::string& label,
                                      SrcLoc loc) ;
+    void bump_lookup_generation() ;
     void sync_decl_context_from_current_scope() ;
     FunctionDefinitionState capture_current_function_definition_state() const ;
     void restore_current_function_definition_state(FunctionDefinitionState state) ;
@@ -2905,6 +2907,7 @@ private:
     // --- Context (immutable) ---
     std::shared_ptr<ASTContext> ast_ctx_;
     CollectQueryContext query_context_;
+    uint64_t lookup_generation_ = 1;
     CollectQueryContext* previous_active_query_context_ = nullptr;
     ASTContextSideTableScope side_table_scope_;
     std::shared_ptr<SourceManager> sm_;
