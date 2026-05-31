@@ -50,6 +50,34 @@ public:
         bool dependent_or_ambiguous = false;
     };
 
+    enum class CppTemplateIdKind : uint8_t {
+        NoMatch,
+        NoTemplate,
+        TypeTemplateId,
+        NonTypeTemplateId,
+        TemplateName,
+        DependentOrAmbiguous,
+        Inconclusive
+    };
+
+    struct CppTemplateIdAnnotation {
+        size_t end_token_idx = 0;
+        size_t terminal_identifier_token_idx = 0;
+        size_t terminal_template_argument_list_begin_token_idx = 0;
+        size_t terminal_template_argument_list_end_token_idx = 0;
+        const void* resolved_template = nullptr;
+        CppTemplateIdKind kind = CppTemplateIdKind::NoMatch;
+        bool has_global_qualifier = false;
+        bool has_scope = false;
+        bool has_any_template_argument_list = false;
+        bool terminal_has_template_argument_list = false;
+        bool terminal_preceded_by_template_keyword = false;
+        bool plain_qualified_name = false;
+        bool at_template_argument_boundary = false;
+        bool followed_by_ellipsis = false;
+        bool dependent_or_ambiguous = false;
+    };
+
     ParserAnnotationCache() = default;
     explicit ParserAnnotationCache(size_t token_count) {
         reset(token_count);
@@ -197,6 +225,33 @@ public:
         entry.value = value;
     }
 
+    std::optional<CppTemplateIdAnnotation>
+    lookup_cpp_template_id_annotation(size_t token_idx,
+                                      const SemanticKey& key) const {
+        const auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return std::nullopt;
+        }
+        const auto& entry = slot->cpp_template_id;
+        if (!entry.valid || !(entry.key == key)) {
+            return std::nullopt;
+        }
+        return entry.value;
+    }
+
+    void store_cpp_template_id_annotation(size_t token_idx,
+                                          const SemanticKey& key,
+                                          CppTemplateIdAnnotation value) {
+        auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return;
+        }
+        auto& entry = slot->cpp_template_id;
+        entry.valid = true;
+        entry.key = key;
+        entry.value = value;
+    }
+
 private:
     struct ResultEntry {
         bool valid = false;
@@ -218,6 +273,12 @@ private:
         SemanticAnnotation value;
     };
 
+    struct CppTemplateIdEntry {
+        bool valid = false;
+        SemanticKey key;
+        CppTemplateIdAnnotation value;
+    };
+
     struct TokenSlots {
         std::array<ResultEntry, static_cast<size_t>(ResultKind::Count)> results;
         Entry<tentative_syntax_probe::TemplateArgumentListScan>
@@ -228,6 +289,7 @@ private:
             parameter_clause_shape;
         std::array<SemanticEntry, static_cast<size_t>(SemanticKind::Count)>
             semantic;
+        CppTemplateIdEntry cpp_template_id;
     };
 
     TokenSlots* slot_for(size_t token_idx) {

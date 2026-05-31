@@ -37,6 +37,49 @@ void bump_parser_annotation_overlay_publish() {
     }
 }
 
+void bump_template_id_annotation_hit() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTemplateIdAnnotationHits);
+    }
+}
+
+void bump_template_id_annotation_miss() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTemplateIdAnnotationMisses);
+    }
+}
+
+void bump_template_id_annotation_publish() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTemplateIdAnnotationPublishes);
+    }
+}
+
+void bump_template_id_fast_no_match() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTemplateIdFastNoMatch);
+    }
+}
+
+void bump_template_id_fast_accept() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTemplateIdFastAccepts);
+    }
+}
+
+void bump_template_id_inconclusive_fallback() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(
+            PerfCounter::ParserTemplateIdInconclusiveFallbacks);
+    }
+}
+
+void bump_template_id_split_token_fallback() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTemplateIdSplitTokenFallbacks);
+    }
+}
+
 Token make_template_split_token(const Token& source,
                                 TokenType type,
                                 std::string value,
@@ -89,6 +132,58 @@ bool is_cpp_template_argument_direct_type_follow_token(TokenType type) {
     return is_cpp_template_argument_boundary_token_type(type) ||
            type == TokenType::ELLIPSIS ||
            type == TokenType::LEFT_BRACE;
+}
+
+const Decl* single_template_decl_from_binding(const DeclBinding* binding) {
+    if (!binding) {
+        return nullptr;
+    }
+    if (binding->template_decl) {
+        return binding->template_decl;
+    }
+    if (binding->template_overload_candidates.size() == 1) {
+        return binding->template_overload_candidates.front();
+    }
+    return nullptr;
+}
+
+bool is_type_template_id_decl(const Decl* decl) {
+    return isa<AliasTemplateDecl>(decl) ||
+           isa<ClassTemplateDecl>(decl) ||
+           isa<ClassTemplatePartialSpecializationDecl>(decl) ||
+           isa<TemplateTemplateParmDecl>(decl);
+}
+
+bool is_non_type_template_id_decl(const Decl* decl) {
+    return isa<FunctionTemplateDecl>(decl) ||
+           isa<VariableTemplateDecl>(decl) ||
+           isa<VariableTemplatePartialSpecializationDecl>(decl) ||
+           isa<ConceptDecl>(decl);
+}
+
+bool is_template_name_argument_decl(const Decl* decl) {
+    return is_type_template_id_decl(decl) ||
+           isa<FunctionTemplateDecl>(decl) ||
+           isa<VariableTemplateDecl>(decl) ||
+           isa<VariableTemplatePartialSpecializationDecl>(decl);
+}
+
+const TemplateDecl* template_decl_from_template_name_argument_decl(
+    const Decl* decl) {
+    if (!decl) {
+        return nullptr;
+    }
+    switch (decl->get_kind()) {
+        case DeclKind::AliasTemplateDecl:
+        case DeclKind::FunctionTemplateDecl:
+        case DeclKind::VariableTemplateDecl:
+        case DeclKind::ClassTemplateDecl:
+        case DeclKind::VariableTemplatePartialSpecializationDecl:
+        case DeclKind::ClassTemplatePartialSpecializationDecl:
+            return static_cast<const TemplateDecl*>(decl);
+        default:
+            return nullptr;
+    }
 }
 
 bool is_builtin_template_type_specifier_token(TokenType type) {
@@ -636,6 +731,425 @@ const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
     return semantic_owner;
 }
 
+ParserAnnotationCache::CppTemplateIdAnnotation
+Parser::classify_cpp_template_id_for_lookahead() {
+    ParserAnnotationCache::CppTemplateIdAnnotation inconclusive;
+    inconclusive.kind =
+        ParserAnnotationCache::CppTemplateIdKind::Inconclusive;
+    inconclusive.dependent_or_ambiguous = true;
+
+    if (tok_mgnt.has_split_tokens()) {
+        bump_template_id_split_token_fallback();
+        return inconclusive;
+    }
+
+    const bool use_cache = can_use_semantic_annotation_cache();
+    const size_t token_idx = get_token_idx();
+    ParserAnnotationCache::SemanticKey key;
+    if (use_cache) {
+        key = semantic_annotation_key();
+        if (auto cached =
+                annotation_cache_.lookup_cpp_template_id_annotation(
+                    token_idx,
+                    key)) {
+            bump_template_id_annotation_hit();
+            return *cached;
+        }
+        bump_template_id_annotation_miss();
+    }
+
+    auto annotation = compute_cpp_template_id_for_lookahead();
+    if (use_cache) {
+        annotation_cache_.store_cpp_template_id_annotation(
+            token_idx,
+            key,
+            annotation);
+        bump_template_id_annotation_publish();
+    }
+    return annotation;
+}
+
+ParserAnnotationCache::CppTemplateIdAnnotation
+Parser::compute_cpp_template_id_for_lookahead() {
+    ParserAnnotationCache::CppTemplateIdAnnotation result;
+    result.kind = ParserAnnotationCache::CppTemplateIdKind::NoMatch;
+    result.end_token_idx = get_token_idx();
+
+    if (!is_cxx_mode_active() || !collect_) {
+        return result;
+    }
+
+    struct Component {
+        std::string name;
+        size_t identifier_token_idx = 0;
+        size_t template_argument_list_begin_token_idx = 0;
+        size_t template_argument_list_end_token_idx = 0;
+        bool has_template_argument_list = false;
+        bool preceded_by_template_keyword = false;
+    };
+
+    const size_t start_idx = get_token_idx();
+    auto token_at = [&](size_t offset) {
+        return peek_token_shortcut(offset);
+    };
+    auto finish_inconclusive = [&]() {
+        result.kind =
+            ParserAnnotationCache::CppTemplateIdKind::Inconclusive;
+        result.dependent_or_ambiguous = true;
+        return result;
+    };
+    auto consume_scope_resolution_at = [&](size_t& offset) {
+        if (token_at(offset).type == TokenType::SCOPE_RESOLUTION) {
+            ++offset;
+            return true;
+        }
+        if (token_at(offset).type == TokenType::COLON &&
+            token_at(offset + 1).type == TokenType::COLON) {
+            offset += 2;
+            return true;
+        }
+        return false;
+    };
+    auto skip_template_argument_list_at = [&](size_t& offset) {
+        if (token_at(offset).type != TokenType::LESS_THAN) {
+            return false;
+        }
+
+        int depth = 0;
+        while (token_at(offset).type != TokenType::Eof) {
+            TokenType type = token_at(offset).type;
+            if (type == TokenType::LESS_THAN) {
+                ++depth;
+                ++offset;
+                continue;
+            }
+            if (type == TokenType::GREATER_THAN) {
+                --depth;
+                ++offset;
+                if (depth == 0) {
+                    return true;
+                }
+                if (depth < 0) {
+                    return false;
+                }
+                continue;
+            }
+            if (type == TokenType::RIGHT_SHIFT ||
+                type == TokenType::ASSIGN_RSHIFT) {
+                if (depth <= 0) {
+                    return false;
+                }
+                depth -= depth >= 2 ? 2 : 1;
+                ++offset;
+                if (depth == 0) {
+                    return true;
+                }
+                continue;
+            }
+            ++offset;
+        }
+        return false;
+    };
+
+    size_t offset = 0;
+    result.has_global_qualifier = consume_scope_resolution_at(offset);
+    std::vector<Component> components;
+    auto parse_component_at =
+        [&](size_t& component_offset,
+            bool allow_template_keyword) -> std::optional<Component> {
+        Component component;
+        if (allow_template_keyword &&
+            token_at(component_offset).type == TokenType::TEMPLATE) {
+            component.preceded_by_template_keyword = true;
+            ++component_offset;
+        }
+        if (token_at(component_offset).type != TokenType::IDENTIFIER) {
+            return std::nullopt;
+        }
+
+        component.name = token_at(component_offset).value;
+        component.identifier_token_idx = start_idx + component_offset;
+        ++component_offset;
+
+        if (token_at(component_offset).type == TokenType::LESS_THAN) {
+            component.has_template_argument_list = true;
+            component.template_argument_list_begin_token_idx =
+                start_idx + component_offset;
+            if (!skip_template_argument_list_at(component_offset)) {
+                return std::nullopt;
+            }
+            component.template_argument_list_end_token_idx =
+                start_idx + component_offset;
+        }
+        return component;
+    };
+
+    auto first_component = parse_component_at(
+        offset,
+        /*allow_template_keyword=*/false);
+    if (!first_component) {
+        return result;
+    }
+    components.push_back(std::move(*first_component));
+
+    while (consume_scope_resolution_at(offset)) {
+        result.has_scope = true;
+        auto component = parse_component_at(
+            offset,
+            /*allow_template_keyword=*/true);
+        if (!component) {
+            return finish_inconclusive();
+        }
+        components.push_back(std::move(*component));
+    }
+
+    const Component& terminal = components.back();
+    result.end_token_idx = start_idx + offset;
+    result.terminal_identifier_token_idx = terminal.identifier_token_idx;
+    result.terminal_template_argument_list_begin_token_idx =
+        terminal.template_argument_list_begin_token_idx;
+    result.terminal_template_argument_list_end_token_idx =
+        terminal.template_argument_list_end_token_idx;
+    result.terminal_has_template_argument_list =
+        terminal.has_template_argument_list;
+    result.terminal_preceded_by_template_keyword =
+        terminal.preceded_by_template_keyword;
+    result.at_template_argument_boundary =
+        is_cpp_template_argument_boundary_token_type(token_at(offset).type);
+    result.followed_by_ellipsis = token_at(offset).type == TokenType::ELLIPSIS;
+
+    bool plain_qualified_name = true;
+    for (const auto& component : components) {
+        result.has_any_template_argument_list |=
+            component.has_template_argument_list;
+        if (component.preceded_by_template_keyword) {
+            plain_qualified_name = false;
+        }
+    }
+    for (size_t idx = 0; idx + 1 < components.size(); ++idx) {
+        if (components[idx].has_template_argument_list) {
+            plain_qualified_name = false;
+            break;
+        }
+    }
+    result.plain_qualified_name = plain_qualified_name;
+
+    if (!result.at_template_argument_boundary &&
+        !result.followed_by_ellipsis) {
+        result.kind = ParserAnnotationCache::CppTemplateIdKind::NoMatch;
+        return result;
+    }
+
+    auto classify_decl = [&](const Decl* decl) {
+        result.resolved_template = decl;
+        if (!decl) {
+            result.kind =
+                ParserAnnotationCache::CppTemplateIdKind::NoTemplate;
+            return;
+        }
+
+        if (!terminal.has_template_argument_list) {
+            result.kind =
+                is_template_name_argument_decl(decl)
+                    ? ParserAnnotationCache::CppTemplateIdKind::TemplateName
+                    : ParserAnnotationCache::CppTemplateIdKind::NoTemplate;
+            return;
+        }
+
+        if (is_type_template_id_decl(decl)) {
+            result.kind =
+                ParserAnnotationCache::CppTemplateIdKind::TypeTemplateId;
+            return;
+        }
+        if (is_non_type_template_id_decl(decl)) {
+            result.kind =
+                ParserAnnotationCache::CppTemplateIdKind::NonTypeTemplateId;
+            return;
+        }
+        result.kind = ParserAnnotationCache::CppTemplateIdKind::NoTemplate;
+    };
+
+    if (!result.has_global_qualifier && components.size() == 1 &&
+        !terminal.preceded_by_template_keyword) {
+        if (const auto* parameter =
+                find_active_template_parameter(terminal.name)) {
+            auto* mutable_parameter =
+                const_cast<TemplateParameterDecl*>(parameter);
+            if (isa<TemplateTemplateParmDecl>(mutable_parameter)) {
+                classify_decl(mutable_parameter);
+                return result;
+            }
+        }
+
+        if (!terminal.has_template_argument_list) {
+            if (collect_->collect_lookup_typedef_symbol(
+                    terminal.name,
+                    /*look_parents=*/true)) {
+                result.kind =
+                    ParserAnnotationCache::CppTemplateIdKind::NoTemplate;
+                return result;
+            }
+            if (collect_->collect_current_cpp_record_lookup_type()) {
+                result.kind = ParserAnnotationCache::CppTemplateIdKind::
+                    DependentOrAmbiguous;
+                result.dependent_or_ambiguous = true;
+                return result;
+            }
+        }
+
+        auto current_scope = collect_->collect_current_scope();
+        if (!current_scope) {
+            return finish_inconclusive();
+        }
+
+        bool lookup_blocked = false;
+        const Decl* resolved_template = nullptr;
+        auto ordinary_lookup =
+            LookupEngine::lookup_unqualified_template_binding_result(
+                terminal.name,
+                current_scope,
+                true,
+                LookupNamespace::Ordinary);
+        lookup_blocked = lookup_blocked || ordinary_lookup.blocked;
+        resolved_template =
+            single_template_decl_from_binding(ordinary_lookup.binding);
+
+        if (!resolved_template) {
+            auto tag_lookup =
+                LookupEngine::lookup_unqualified_template_binding_result(
+                    terminal.name,
+                    current_scope,
+                    true,
+                    LookupNamespace::Tag);
+            lookup_blocked = lookup_blocked || tag_lookup.blocked;
+            resolved_template =
+                single_template_decl_from_binding(tag_lookup.binding);
+        }
+
+        if (lookup_blocked) {
+            result.kind =
+                ParserAnnotationCache::CppTemplateIdKind::DependentOrAmbiguous;
+            result.dependent_or_ambiguous = true;
+            return result;
+        }
+        if (!resolved_template &&
+            collect_->collect_current_cpp_record_lookup_type()) {
+            result.kind =
+                ParserAnnotationCache::CppTemplateIdKind::DependentOrAmbiguous;
+            result.dependent_or_ambiguous = true;
+            return result;
+        }
+
+        classify_decl(resolved_template);
+        return result;
+    }
+
+    if (!result.plain_qualified_name ||
+        terminal.preceded_by_template_keyword) {
+        result.kind =
+            ParserAnnotationCache::CppTemplateIdKind::DependentOrAmbiguous;
+        result.dependent_or_ambiguous = true;
+        return result;
+    }
+
+    auto current_context = collect_->get_current_decl_context();
+    if (!current_context) {
+        return finish_inconclusive();
+    }
+
+    LookupEngine::QualifiedNameSpec name_spec;
+    name_spec.has_global_qualifier = result.has_global_qualifier;
+    for (size_t idx = 0; idx + 1 < components.size(); ++idx) {
+        name_spec.qualifiers.push_back(components[idx].name);
+    }
+    name_spec.terminal_name = terminal.name;
+
+    const Decl* resolved_template = nullptr;
+    auto ordinary_lookup = LookupEngine::lookup_qualified_name(
+        name_spec,
+        current_context.get(),
+        LookupNamespace::Ordinary);
+    if (ordinary_lookup.status ==
+        LookupEngine::QualifiedLookupStatus::Unsupported) {
+        return finish_inconclusive();
+    }
+    resolved_template =
+        single_template_decl_from_binding(ordinary_lookup.binding);
+
+    if (!resolved_template) {
+        auto tag_lookup = LookupEngine::lookup_qualified_name(
+            name_spec,
+            current_context.get(),
+            LookupNamespace::Tag);
+        if (tag_lookup.status ==
+            LookupEngine::QualifiedLookupStatus::Unsupported) {
+            return finish_inconclusive();
+        }
+        resolved_template =
+            single_template_decl_from_binding(tag_lookup.binding);
+    }
+
+    classify_decl(resolved_template);
+    return result;
+}
+
+std::optional<TemplateArgument>
+Parser::try_make_cpp_template_name_argument_from_annotation(
+    const ParserAnnotationCache::CppTemplateIdAnnotation& annotation) {
+    if (annotation.kind !=
+            ParserAnnotationCache::CppTemplateIdKind::TemplateName ||
+        annotation.terminal_has_template_argument_list ||
+        !annotation.resolved_template) {
+        return std::nullopt;
+    }
+
+    const auto* resolved_template =
+        static_cast<const Decl*>(annotation.resolved_template);
+    if (!is_template_name_argument_decl(resolved_template)) {
+        return std::nullopt;
+    }
+
+    const size_t start_idx = get_token_idx();
+    std::string template_name;
+    for (size_t offset = 0; start_idx + offset < annotation.end_token_idx;) {
+        Token tok = peek_token_shortcut(offset);
+        if (tok.type == TokenType::SCOPE_RESOLUTION) {
+            template_name += "::";
+            ++offset;
+            continue;
+        }
+        if (tok.type == TokenType::COLON &&
+            start_idx + offset + 1 < annotation.end_token_idx &&
+            peek_token_shortcut(offset + 1).type == TokenType::COLON) {
+            template_name += "::";
+            offset += 2;
+            continue;
+        }
+        if (tok.type == TokenType::TEMPLATE) {
+            template_name += "template ";
+            ++offset;
+            continue;
+        }
+        template_name += tok.value;
+        ++offset;
+    }
+
+    set_token_idx(annotation.end_token_idx);
+    if (auto* template_parameter = dyn_cast<TemplateTemplateParmDecl>(
+            const_cast<Decl*>(resolved_template))) {
+        return TemplateArgument::dependent_template_argument(
+            template_name,
+            template_parameter);
+    }
+    if (const TemplateDecl* template_decl =
+            template_decl_from_template_name_argument_decl(resolved_template)) {
+        return TemplateArgument::template_argument(
+            template_decl,
+            template_name);
+    }
+    return std::nullopt;
+}
+
 std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
     auto syntax_result = probe_cpp_template_name_argument_prefix_syntax();
     if (syntax_result == tentative_syntax_probe::Result::NoMatch) {
@@ -649,6 +1163,30 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
     auto current_context = collect_->get_current_decl_context();
     if (!current_scope || !current_context) {
         return std::nullopt;
+    }
+
+    auto template_id_annotation = classify_cpp_template_id_for_lookahead();
+    switch (template_id_annotation.kind) {
+        case ParserAnnotationCache::CppTemplateIdKind::TemplateName:
+            if (auto argument =
+                    try_make_cpp_template_name_argument_from_annotation(
+                        template_id_annotation)) {
+                bump_template_id_fast_accept();
+                return argument;
+            }
+            bump_template_id_inconclusive_fallback();
+            break;
+        case ParserAnnotationCache::CppTemplateIdKind::NoTemplate:
+        case ParserAnnotationCache::CppTemplateIdKind::TypeTemplateId:
+        case ParserAnnotationCache::CppTemplateIdKind::NonTypeTemplateId:
+            bump_template_id_fast_no_match();
+            return std::nullopt;
+        case ParserAnnotationCache::CppTemplateIdKind::DependentOrAmbiguous:
+        case ParserAnnotationCache::CppTemplateIdKind::Inconclusive:
+            bump_template_id_inconclusive_fallback();
+            break;
+        case ParserAnnotationCache::CppTemplateIdKind::NoMatch:
+            break;
     }
 
     auto is_simple_unqualified_template_name_argument_start = [&]() {

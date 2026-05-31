@@ -969,6 +969,13 @@ private:
     };
     CxxTypeConstructionClassification classify_cpp_type_construction_candidate(
         const tentative_syntax_probe::CxxTypeConstructionScan& scan);
+    ParserAnnotationCache::CppTemplateIdAnnotation
+    classify_cpp_template_id_for_lookahead();
+    ParserAnnotationCache::CppTemplateIdAnnotation
+    compute_cpp_template_id_for_lookahead();
+    std::optional<TemplateArgument>
+    try_make_cpp_template_name_argument_from_annotation(
+        const ParserAnnotationCache::CppTemplateIdAnnotation& annotation);
     bool compute_cpp_named_type_specifier_for_lookahead();
 
     // Attribute parsing
