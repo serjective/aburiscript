@@ -1407,6 +1407,8 @@ private:
     friend class CollectRecordBuilder;
     friend class collect_template_internal::TemplateInstantiationDepthGuard;
 
+    struct PostSubstitutionExprResolver;
+
     struct CollectRecordBuildContext {
         const CppRecordDecl* record = nullptr;
         SrcLoc loc;
