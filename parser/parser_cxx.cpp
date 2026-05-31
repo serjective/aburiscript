@@ -8090,13 +8090,9 @@ Parser::TPResult Parser::try_parse_cpp_qualified_declarator() {
     if (!is_cxx_mode_active() || !isTokenDeclarationSpec(current_token())) {
         return TPResult::False;
     }
-    RevertingTentativeParsingAction tentative(*this);
-    size_t start_idx = tok_mgnt.get_token_idx();
 
     tentative_syntax_probe::Result syntax_probe_result =
-        tentative_syntax_probe::probe_cpp_qualified_declarator(
-            tok_mgnt,
-            syntax_probe_config());
+        probe_cpp_qualified_declarator_syntax();
     if (syntax_probe_result == tentative_syntax_probe::Result::Match) {
         return TPResult::True;
     }
@@ -8107,7 +8103,7 @@ Parser::TPResult Parser::try_parse_cpp_qualified_declarator() {
         return TPResult::Error;
     }
 
-    tok_mgnt.set_token_idx(start_idx);
+    RevertingTentativeParsingAction tentative(*this);
     try {
         DeclarationParser decl(this);
         auto parsed_type = decl.parse_declaration();

@@ -52,6 +52,36 @@ struct ParserTentativeMetricsReporter {
 
 ParserTentativeMetricsReporter g_parser_tentative_metrics_reporter;
 
+class TokenStreamCheckpoint {
+public:
+    explicit TokenStreamCheckpoint(TokenMgnt& tok_mgnt)
+        : tok_mgnt_(tok_mgnt),
+          token_idx_(tok_mgnt.get_token_idx()),
+          split_state_(tok_mgnt.get_split_token_state()) {}
+
+    TokenStreamCheckpoint(const TokenStreamCheckpoint&) = delete;
+    TokenStreamCheckpoint& operator=(const TokenStreamCheckpoint&) = delete;
+
+    ~TokenStreamCheckpoint() {
+        restore();
+    }
+
+    void restore() {
+        if (!active_) {
+            return;
+        }
+        tok_mgnt_.set_token_idx(token_idx_);
+        tok_mgnt_.set_split_token_state(split_state_);
+        active_ = false;
+    }
+
+private:
+    TokenMgnt& tok_mgnt_;
+    size_t token_idx_ = 0;
+    TokenMgnt::SplitTokenState split_state_;
+    bool active_ = true;
+};
+
 void bump_tentative_context_begins() {
     if (auto* profiler = active_perf_profiler()) {
         profiler->add_counter(PerfCounter::ParserTentativeBegins);
@@ -193,63 +223,51 @@ tentative_syntax_probe::Config Parser::syntax_probe_config() const {
 }
 
 tentative_syntax_probe::Result Parser::probe_type_name_syntax() {
-    size_t start_idx = tok_mgnt.get_token_idx();
-    auto split_state = tok_mgnt.get_split_token_state();
-    auto result =
-        tentative_syntax_probe::probe_type_name(tok_mgnt, syntax_probe_config());
-    tok_mgnt.set_token_idx(start_idx);
-    tok_mgnt.set_split_token_state(split_state);
-    return result;
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    return tentative_syntax_probe::probe_type_name(tok_mgnt, syntax_probe_config());
+}
+
+tentative_syntax_probe::Result Parser::probe_declarator_syntax() {
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    return tentative_syntax_probe::probe_declarator(tok_mgnt, syntax_probe_config());
 }
 
 tentative_syntax_probe::Result
 Parser::probe_cxx_constrained_placeholder_type_specifier_syntax() {
-    size_t start_idx = tok_mgnt.get_token_idx();
-    auto split_state = tok_mgnt.get_split_token_state();
-    auto result =
-        tentative_syntax_probe::probe_cxx_constrained_placeholder_type_specifier(
-            tok_mgnt,
-            syntax_probe_config());
-    tok_mgnt.set_token_idx(start_idx);
-    tok_mgnt.set_split_token_state(split_state);
-    return result;
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    return tentative_syntax_probe::probe_cxx_constrained_placeholder_type_specifier(
+        tok_mgnt,
+        syntax_probe_config());
 }
 
 tentative_syntax_probe::Result Parser::probe_cpp_qualified_id_start_syntax() {
-    size_t start_idx = tok_mgnt.get_token_idx();
-    auto split_state = tok_mgnt.get_split_token_state();
-    auto result = tentative_syntax_probe::probe_cpp_qualified_id_start(
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    return tentative_syntax_probe::probe_cpp_qualified_id_start(
         tok_mgnt,
         syntax_probe_config());
-    tok_mgnt.set_token_idx(start_idx);
-    tok_mgnt.set_split_token_state(split_state);
-    return result;
+}
+
+tentative_syntax_probe::Result Parser::probe_cpp_qualified_declarator_syntax() {
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    return tentative_syntax_probe::probe_cpp_qualified_declarator(
+        tok_mgnt,
+        syntax_probe_config());
 }
 
 tentative_syntax_probe::Result
 Parser::probe_cpp_template_name_argument_prefix_syntax() {
-    size_t start_idx = tok_mgnt.get_token_idx();
-    auto split_state = tok_mgnt.get_split_token_state();
-    auto result =
-        tentative_syntax_probe::probe_cpp_template_name_argument_prefix(
-            tok_mgnt,
-            syntax_probe_config());
-    tok_mgnt.set_token_idx(start_idx);
-    tok_mgnt.set_split_token_state(split_state);
-    return result;
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    return tentative_syntax_probe::probe_cpp_template_name_argument_prefix(
+        tok_mgnt,
+        syntax_probe_config());
 }
 
 tentative_syntax_probe::TemplateArgumentListScopeFollow
 Parser::classify_template_argument_list_scope_follow_syntax() {
-    size_t start_idx = tok_mgnt.get_token_idx();
-    auto split_state = tok_mgnt.get_split_token_state();
-    auto result =
-        tentative_syntax_probe::classify_template_argument_list_scope_follow(
-            tok_mgnt,
-            syntax_probe_config());
-    tok_mgnt.set_token_idx(start_idx);
-    tok_mgnt.set_split_token_state(split_state);
-    return result;
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    return tentative_syntax_probe::classify_template_argument_list_scope_follow(
+        tok_mgnt,
+        syntax_probe_config());
 }
 
 Parser::TentativeParsingAction::TentativeParsingAction(
@@ -359,11 +377,9 @@ Parser::TPResult Parser::try_parse_type_name() {
     if (!isTokenDeclarationSpec(current_token())) {
         return TPResult::False;
     }
-    RevertingTentativeParsingAction tentative(*this);
     size_t start_idx = tok_mgnt.get_token_idx();
 
-    tentative_syntax_probe::Result syntax_probe_result =
-        tentative_syntax_probe::probe_type_name(tok_mgnt, syntax_probe_config());
+    tentative_syntax_probe::Result syntax_probe_result = probe_type_name_syntax();
     if (syntax_probe_result == tentative_syntax_probe::Result::Match) {
         return TPResult::True;
     }
@@ -374,7 +390,7 @@ Parser::TPResult Parser::try_parse_type_name() {
         return TPResult::Error;
     }
 
-    tok_mgnt.set_token_idx(start_idx);
+    RevertingTentativeParsingAction tentative(*this);
     try {
         DeclarationParser decl(this);
         auto parsed_type = decl.parse_declaration();
@@ -406,11 +422,9 @@ Parser::TPResult Parser::try_parse_declarator() {
         tok != TokenType::LEFT_BRACKET) {
         return TPResult::False;
     }
-    RevertingTentativeParsingAction tentative(*this);
     size_t start_idx = tok_mgnt.get_token_idx();
 
-    tentative_syntax_probe::Result syntax_probe_result =
-        tentative_syntax_probe::probe_declarator(tok_mgnt, syntax_probe_config());
+    tentative_syntax_probe::Result syntax_probe_result = probe_declarator_syntax();
     if (syntax_probe_result == tentative_syntax_probe::Result::Match) {
         return TPResult::True;
     }
@@ -421,7 +435,7 @@ Parser::TPResult Parser::try_parse_declarator() {
         return TPResult::Error;
     }
 
-    tok_mgnt.set_token_idx(start_idx);
+    RevertingTentativeParsingAction tentative(*this);
     try {
         DeclarationParser decl(this);
         auto placeholder = std::make_shared<PlaceholderType>();

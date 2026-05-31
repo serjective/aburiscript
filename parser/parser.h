@@ -903,9 +903,11 @@ private:
     CxxStmtDisambiguation classify_cxx_stmt_disambiguation();
     tentative_syntax_probe::Config syntax_probe_config() const;
     tentative_syntax_probe::Result probe_type_name_syntax();
+    tentative_syntax_probe::Result probe_declarator_syntax();
     tentative_syntax_probe::Result
     probe_cxx_constrained_placeholder_type_specifier_syntax();
     tentative_syntax_probe::Result probe_cpp_qualified_id_start_syntax();
+    tentative_syntax_probe::Result probe_cpp_qualified_declarator_syntax();
     tentative_syntax_probe::Result probe_cpp_template_name_argument_prefix_syntax();
     tentative_syntax_probe::TemplateArgumentListScopeFollow
     classify_template_argument_list_scope_follow_syntax();
