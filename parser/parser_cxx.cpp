@@ -80,6 +80,43 @@ void bump_template_id_split_token_fallback() {
     }
 }
 
+void bump_qualified_id_annotation_hit() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserQualifiedIdAnnotationHits);
+    }
+}
+
+void bump_qualified_id_annotation_miss() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserQualifiedIdAnnotationMisses);
+    }
+}
+
+void bump_qualified_id_annotation_publish() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserQualifiedIdAnnotationPublishes);
+    }
+}
+
+void bump_qualified_id_fast_accept() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserQualifiedIdFastAccepts);
+    }
+}
+
+void bump_qualified_id_fast_reject() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserQualifiedIdFastRejects);
+    }
+}
+
+void bump_qualified_id_inconclusive_fallback() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(
+            PerfCounter::ParserQualifiedIdInconclusiveFallbacks);
+    }
+}
+
 Token make_template_split_token(const Token& source,
                                 TokenType type,
                                 std::string value,
@@ -1148,6 +1185,252 @@ Parser::try_make_cpp_template_name_argument_from_annotation(
             template_name);
     }
     return std::nullopt;
+}
+
+ParserAnnotationCache::CppQualifiedIdAnnotation
+Parser::classify_cpp_qualified_id_for_lookahead() {
+    ParserAnnotationCache::CppQualifiedIdAnnotation inconclusive;
+    inconclusive.kind =
+        ParserAnnotationCache::CppQualifiedIdKind::Inconclusive;
+    inconclusive.dependent_or_ambiguous = true;
+
+    if (tok_mgnt.has_split_tokens()) {
+        return inconclusive;
+    }
+
+    const bool use_cache = can_use_annotation_cache();
+    const size_t token_idx = get_token_idx();
+    const uint32_t key =
+        ParserAnnotationCache::make_config_key(syntax_probe_config());
+    if (use_cache) {
+        if (auto cached =
+                annotation_cache_.lookup_cpp_qualified_id_annotation(
+                    token_idx,
+                    key)) {
+            bump_qualified_id_annotation_hit();
+            return *cached;
+        }
+        bump_qualified_id_annotation_miss();
+    }
+
+    auto annotation = compute_cpp_qualified_id_for_lookahead();
+    if (use_cache) {
+        annotation_cache_.store_cpp_qualified_id_annotation(
+            token_idx,
+            key,
+            annotation);
+        bump_qualified_id_annotation_publish();
+    }
+    return annotation;
+}
+
+ParserAnnotationCache::CppQualifiedIdAnnotation
+Parser::compute_cpp_qualified_id_for_lookahead() {
+    ParserAnnotationCache::CppQualifiedIdAnnotation result;
+    result.kind = ParserAnnotationCache::CppQualifiedIdKind::NoMatch;
+    result.end_token_idx = get_token_idx();
+
+    if (!is_cxx_mode_active()) {
+        return result;
+    }
+
+    const size_t start_idx = get_token_idx();
+    auto token_at = [&](size_t offset) -> const Token& {
+        if (offset == 0) {
+            return tok_mgnt.current_token();
+        }
+        return tok_mgnt.peek_token(offset);
+    };
+    auto finish_inconclusive = [&]() {
+        result.kind =
+            ParserAnnotationCache::CppQualifiedIdKind::Inconclusive;
+        result.dependent_or_ambiguous = true;
+        return result;
+    };
+    auto consume_scope_resolution_at = [&](size_t& offset) {
+        if (token_at(offset).type == TokenType::SCOPE_RESOLUTION) {
+            ++offset;
+            return true;
+        }
+        if (token_at(offset).type == TokenType::COLON &&
+            token_at(offset + 1).type == TokenType::COLON) {
+            offset += 2;
+            return true;
+        }
+        return false;
+    };
+    auto skip_balanced_group_at =
+        [&](size_t& offset,
+            TokenType open_tok,
+            TokenType close_tok) {
+        if (token_at(offset).type != open_tok) {
+            return false;
+        }
+        size_t depth = 0;
+        while (token_at(offset).type != TokenType::Eof) {
+            TokenType type = token_at(offset).type;
+            if (type == open_tok) {
+                ++depth;
+            } else if (type == close_tok) {
+                --depth;
+                ++offset;
+                if (depth == 0) {
+                    return true;
+                }
+                continue;
+            }
+            ++offset;
+        }
+        return false;
+    };
+    auto skip_template_argument_list_at = [&](size_t& offset) {
+        if (token_at(offset).type != TokenType::LESS_THAN) {
+            return true;
+        }
+        int depth = 0;
+        while (token_at(offset).type != TokenType::Eof) {
+            TokenType type = token_at(offset).type;
+            if (type == TokenType::LEFT_PAREN) {
+                if (!skip_balanced_group_at(
+                        offset,
+                        TokenType::LEFT_PAREN,
+                        TokenType::RIGHT_PAREN)) {
+                    return false;
+                }
+                continue;
+            }
+            if (type == TokenType::LEFT_BRACKET) {
+                if (!skip_balanced_group_at(
+                        offset,
+                        TokenType::LEFT_BRACKET,
+                        TokenType::RIGHT_BRACKET)) {
+                    return false;
+                }
+                continue;
+            }
+            if (type == TokenType::LEFT_BRACE) {
+                if (!skip_balanced_group_at(
+                        offset,
+                        TokenType::LEFT_BRACE,
+                        TokenType::RIGHT_BRACE)) {
+                    return false;
+                }
+                continue;
+            }
+            if (type == TokenType::LESS_THAN) {
+                ++depth;
+                ++offset;
+                continue;
+            }
+            if (type == TokenType::GREATER_THAN) {
+                --depth;
+                ++offset;
+                if (depth == 0) {
+                    return true;
+                }
+                if (depth < 0) {
+                    return false;
+                }
+                continue;
+            }
+            if (type == TokenType::RIGHT_SHIFT ||
+                type == TokenType::ASSIGN_RSHIFT) {
+                if (depth <= 0) {
+                    return false;
+                }
+                if (depth <= 2) {
+                    ++offset;
+                    return true;
+                }
+                depth -= 2;
+                ++offset;
+                continue;
+            }
+            ++offset;
+        }
+        return false;
+    };
+
+    auto parse_component_at = [&](size_t& offset,
+                                  bool allow_template_keyword) {
+        if (allow_template_keyword &&
+            token_at(offset).type == TokenType::TEMPLATE) {
+            result.terminal_preceded_by_template_keyword = true;
+            ++offset;
+        } else {
+            result.terminal_preceded_by_template_keyword = false;
+        }
+
+        if (token_at(offset).type == TokenType::OPERATOR_KW) {
+            result.terminal_token_idx = start_idx + offset;
+            result.terminal_is_operator_id = true;
+            return false;
+        }
+        if (token_at(offset).type != TokenType::IDENTIFIER) {
+            return false;
+        }
+
+        result.terminal_token_idx = start_idx + offset;
+        result.terminal_is_operator_id = false;
+        ++offset;
+        if (token_at(offset).type == TokenType::LESS_THAN) {
+            result.has_template_id_component = true;
+            if (!skip_template_argument_list_at(offset)) {
+                return false;
+            }
+        }
+        if (result.component_count < std::numeric_limits<uint16_t>::max()) {
+            ++result.component_count;
+        }
+        return true;
+    };
+
+    size_t offset = 0;
+    if (token_at(offset).type == TokenType::DECLTYPE_KW) {
+        result.starts_with_decltype = true;
+        ++offset;
+        if (!skip_balanced_group_at(
+                offset,
+                TokenType::LEFT_PAREN,
+                TokenType::RIGHT_PAREN)) {
+            return finish_inconclusive();
+        }
+        if (!consume_scope_resolution_at(offset)) {
+            return result;
+        }
+        result.has_scope = true;
+        if (!parse_component_at(offset, /*allow_template_keyword=*/true)) {
+            return finish_inconclusive();
+        }
+    } else {
+        result.has_global_qualifier = consume_scope_resolution_at(offset);
+        result.has_scope = result.has_global_qualifier;
+        if (!parse_component_at(offset, /*allow_template_keyword=*/false)) {
+            if (result.has_global_qualifier &&
+                token_at(offset).type == TokenType::OPERATOR_KW) {
+                return finish_inconclusive();
+            }
+            return result;
+        }
+    }
+
+    while (consume_scope_resolution_at(offset)) {
+        result.has_scope = true;
+        if (!parse_component_at(offset, /*allow_template_keyword=*/true)) {
+            return finish_inconclusive();
+        }
+    }
+
+    if (!result.has_scope) {
+        result.kind = ParserAnnotationCache::CppQualifiedIdKind::NoMatch;
+        return result;
+    }
+
+    result.end_token_idx = start_idx + offset;
+    result.followed_by_left_paren =
+        token_at(offset).type == TokenType::LEFT_PAREN;
+    result.kind = ParserAnnotationCache::CppQualifiedIdKind::QualifiedId;
+    return result;
 }
 
 std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
@@ -7235,6 +7518,23 @@ bool Parser::is_cpp_qualified_id_start() {
         return result;
     };
 
+    auto qualified_id_annotation =
+        classify_cpp_qualified_id_for_lookahead();
+    switch (qualified_id_annotation.kind) {
+        case ParserAnnotationCache::CppQualifiedIdKind::QualifiedId:
+            bump_qualified_id_fast_accept();
+            return finish(true);
+        case ParserAnnotationCache::CppQualifiedIdKind::NoMatch:
+            bump_qualified_id_fast_reject();
+            return finish(false);
+        case ParserAnnotationCache::CppQualifiedIdKind::Error:
+            bump_qualified_id_fast_reject();
+            return finish(false);
+        case ParserAnnotationCache::CppQualifiedIdKind::Inconclusive:
+            bump_qualified_id_inconclusive_fallback();
+            break;
+    }
+
     auto syntax_result = probe_cpp_qualified_id_start_syntax();
     if (syntax_result == tentative_syntax_probe::Result::Match) {
         return finish(true);
@@ -8993,6 +9293,23 @@ std::unique_ptr<Expr> Parser::parse_cpp_typeid_expression() {
 }
 
 Parser::TPResult Parser::try_parse_cpp_qualified_id() {
+    auto qualified_id_annotation =
+        classify_cpp_qualified_id_for_lookahead();
+    switch (qualified_id_annotation.kind) {
+        case ParserAnnotationCache::CppQualifiedIdKind::QualifiedId:
+            bump_qualified_id_fast_accept();
+            return TPResult::True;
+        case ParserAnnotationCache::CppQualifiedIdKind::NoMatch:
+            bump_qualified_id_fast_reject();
+            return TPResult::False;
+        case ParserAnnotationCache::CppQualifiedIdKind::Error:
+            bump_qualified_id_fast_reject();
+            return TPResult::Error;
+        case ParserAnnotationCache::CppQualifiedIdKind::Inconclusive:
+            bump_qualified_id_inconclusive_fallback();
+            break;
+    }
+
     if (!is_cpp_qualified_id_start()) {
         return TPResult::False;
     }

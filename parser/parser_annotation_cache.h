@@ -78,6 +78,28 @@ public:
         bool dependent_or_ambiguous = false;
     };
 
+    enum class CppQualifiedIdKind : uint8_t {
+        NoMatch,
+        QualifiedId,
+        Inconclusive,
+        Error
+    };
+
+    struct CppQualifiedIdAnnotation {
+        size_t end_token_idx = 0;
+        size_t terminal_token_idx = 0;
+        uint16_t component_count = 0;
+        CppQualifiedIdKind kind = CppQualifiedIdKind::NoMatch;
+        bool has_global_qualifier = false;
+        bool has_scope = false;
+        bool starts_with_decltype = false;
+        bool has_template_id_component = false;
+        bool terminal_preceded_by_template_keyword = false;
+        bool terminal_is_operator_id = false;
+        bool followed_by_left_paren = false;
+        bool dependent_or_ambiguous = false;
+    };
+
     ParserAnnotationCache() = default;
     explicit ParserAnnotationCache(size_t token_count) {
         reset(token_count);
@@ -252,6 +274,32 @@ public:
         entry.value = value;
     }
 
+    std::optional<CppQualifiedIdAnnotation>
+    lookup_cpp_qualified_id_annotation(size_t token_idx, uint32_t key) const {
+        const auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return std::nullopt;
+        }
+        const auto& entry = slot->cpp_qualified_id;
+        if (!entry.valid || entry.key != key) {
+            return std::nullopt;
+        }
+        return entry.value;
+    }
+
+    void store_cpp_qualified_id_annotation(size_t token_idx,
+                                           uint32_t key,
+                                           CppQualifiedIdAnnotation value) {
+        auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return;
+        }
+        auto& entry = slot->cpp_qualified_id;
+        entry.valid = true;
+        entry.key = key;
+        entry.value = value;
+    }
+
 private:
     struct ResultEntry {
         bool valid = false;
@@ -279,6 +327,12 @@ private:
         CppTemplateIdAnnotation value;
     };
 
+    struct CppQualifiedIdEntry {
+        bool valid = false;
+        uint32_t key = 0;
+        CppQualifiedIdAnnotation value;
+    };
+
     struct TokenSlots {
         std::array<ResultEntry, static_cast<size_t>(ResultKind::Count)> results;
         Entry<tentative_syntax_probe::TemplateArgumentListScan>
@@ -290,6 +344,7 @@ private:
         std::array<SemanticEntry, static_cast<size_t>(SemanticKind::Count)>
             semantic;
         CppTemplateIdEntry cpp_template_id;
+        CppQualifiedIdEntry cpp_qualified_id;
     };
 
     TokenSlots* slot_for(size_t token_idx) {

@@ -976,6 +976,10 @@ private:
     std::optional<TemplateArgument>
     try_make_cpp_template_name_argument_from_annotation(
         const ParserAnnotationCache::CppTemplateIdAnnotation& annotation);
+    ParserAnnotationCache::CppQualifiedIdAnnotation
+    classify_cpp_qualified_id_for_lookahead();
+    ParserAnnotationCache::CppQualifiedIdAnnotation
+    compute_cpp_qualified_id_for_lookahead();
     bool compute_cpp_named_type_specifier_for_lookahead();
 
     // Attribute parsing

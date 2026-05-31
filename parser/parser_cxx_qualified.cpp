@@ -2,10 +2,20 @@
 
 #include "../collect/lookup_engine.h"
 #include "../helpers/qualified_name_utils.h"
+#include "../perf_stats.h"
 
 // Parser-owned C++ qualified-name and dependent-name classification helpers.
 // Keep semantic construction in Collect; keep grammar ownership and ambiguity
 // decisions here so declaration and expression parsing share one seam.
+
+namespace {
+void bump_dependent_qualified_call_fast_reject() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(
+            PerfCounter::ParserDependentQualifiedCallFastRejects);
+    }
+}
+} // namespace
 
 const Decl* Parser::lookup_cpp_unqualified_type_template_decl(
     const std::string& component_name,
@@ -1223,6 +1233,24 @@ bool Parser::starts_with_cpp_dependent_qualified_call_expression() {
         !(current_token().type == TokenType::COLON &&
           peek_token().type == TokenType::COLON)) {
         return false;
+    }
+
+    auto qualified_id_annotation =
+        classify_cpp_qualified_id_for_lookahead();
+    switch (qualified_id_annotation.kind) {
+        case ParserAnnotationCache::CppQualifiedIdKind::NoMatch:
+        case ParserAnnotationCache::CppQualifiedIdKind::Error:
+            bump_dependent_qualified_call_fast_reject();
+            return false;
+        case ParserAnnotationCache::CppQualifiedIdKind::QualifiedId:
+            if (qualified_id_annotation.component_count < 2 ||
+                !qualified_id_annotation.followed_by_left_paren) {
+                bump_dependent_qualified_call_fast_reject();
+                return false;
+            }
+            break;
+        case ParserAnnotationCache::CppQualifiedIdKind::Inconclusive:
+            break;
     }
 
     RevertingTentativeParsingAction tentative(*this);
