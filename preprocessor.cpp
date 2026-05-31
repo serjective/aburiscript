@@ -3,6 +3,7 @@
 #include "abi/darwin_blocks.h"
 #include "builtin_registry.h"
 #include "constexpr/pp_consteval.h"
+#include "perf_stats.h"
 #include "target_feature_gate.h"
 #include <ctime>
 #include <cctype>
@@ -42,6 +43,16 @@ enum class DirectiveKind {
     Define, Undef, Line, Error, Warning, Pragma, Include, IncludeNext,
     Import, If, Ifdef, Ifndef, Else, Elif, Endif, Ident, Sccs, Unknown
 };
+
+static std::string perf_header_key(const std::shared_ptr<FileSrc>& file) {
+    if (!file) {
+        return "";
+    }
+    if (file->directory.empty()) {
+        return file->file_name;
+    }
+    return (std::filesystem::path(file->directory) / file->file_name).string();
+}
 
 static DirectiveKind classify_directive(const std::string& name) {
     // Use a static lookup table for O(1) directive dispatch
@@ -102,6 +113,14 @@ static std::optional<size_t> parse_pack_alignment_value(const Token& tok, size_t
         return std::nullopt;
     }
     return value;
+}
+
+void PreProcess::set_perf_profiler(PerfProfiler* profiler) {
+    perf_profiler = profiler;
+    perf_full_detail = profiler != nullptr && profiler->wants_full();
+    if (sm) {
+        sm->perf_profiler = profiler;
+    }
 }
 
 static std::optional<WarningId> warning_id_from_flag(std::string_view flag) {
@@ -1718,6 +1737,10 @@ void PreProcess::detect_include_guard(const std::shared_ptr<FileSrc>& file) {
     if (!file || file->include_guard_checked) {
         return;
     }
+    PerfScopedTimer timer(perf_profiler, PerfPhase::IncludeGuardScan);
+    if (perf_profiler) {
+        perf_profiler->add_counter(PerfCounter::IncludeGuardChecks);
+    }
     file->include_guard_checked = true;
     ensure_initial_preprocessed(file);
 
@@ -1725,12 +1748,28 @@ void PreProcess::detect_include_guard(const std::shared_ptr<FileSrc>& file) {
     bool saw_pragma_once = false;
     // Fast text scan handles common guard shapes without spinning up a lexer.
     if (detect_include_guard_fast(file->modified_buffer, fast_guard_macro, saw_pragma_once)) {
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::IncludeGuardFastHits);
+            if (!fast_guard_macro.empty()) {
+                perf_profiler->add_counter(PerfCounter::IncludeGuardMacroHits);
+            }
+            if (saw_pragma_once) {
+                perf_profiler->add_counter(PerfCounter::PragmaOnceDetected);
+            }
+        }
         file->pragma_once = file->pragma_once || saw_pragma_once;
         file->include_guard = std::move(fast_guard_macro);
         return;
     }
+    if (perf_profiler) {
+        perf_profiler->add_counter(PerfCounter::IncludeGuardFastMisses);
+        perf_profiler->add_counter(PerfCounter::IncludeGuardSlowChecks);
+    }
     if (saw_pragma_once) {
         file->pragma_once = true;
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::PragmaOnceDetected);
+        }
     }
 
     Lexer lex(file->modified_buffer, file->offset, sm.get(), lang_opts);
@@ -1800,6 +1839,9 @@ void PreProcess::detect_include_guard(const std::shared_ptr<FileSrc>& file) {
                     Token t = lex.next_token().value();
                     if (t.isIdentifierLike() && t.value == "once") {
                         file->pragma_once = true;
+                        if (perf_profiler) {
+                            perf_profiler->add_counter(PerfCounter::PragmaOnceDetected);
+                        }
                     }
                     consume_rest_of_line();
                     continue;
@@ -1870,6 +1912,9 @@ void PreProcess::detect_include_guard(const std::shared_ptr<FileSrc>& file) {
 
     if (state == GuardDetectState::AfterGuard) {
         file->include_guard = guard_macro;
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::IncludeGuardMacroHits);
+        }
     }
 }
 
@@ -2465,11 +2510,28 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
     } else {
         error("Invalid argument for include directive, expected \" or < but got " + tokens[0].value, tokens[0].loc);
     }
+    if (perf_profiler) {
+        perf_profiler->record_header_request(file_name);
+        perf_profiler->add_counter(isSystem ? PerfCounter::IncludeSystemRequests
+                                            : PerfCounter::IncludeQuoteRequests);
+        if (is_next) {
+            perf_profiler->add_counter(PerfCounter::IncludeNextRequests);
+        }
+        if (is_import) {
+            perf_profiler->add_counter(PerfCounter::IncludeImportRequests);
+        }
+    }
     const bool use_builtin_header_first = isSystem && !lang_opts.is_cxx_mode();
     if (use_builtin_header_first) {
         auto it = builtin_headers.find(file_name);
         if (it != builtin_headers.end()) {
             auto builtin_sloc = sm->createFileEntry(file_name, std::string(it->second));
+            if (perf_profiler) {
+                perf_profiler->record_resolved_header_request(perf_header_key(builtin_sloc));
+                perf_profiler->add_counter(PerfCounter::IncludeBuiltinEntered);
+                perf_profiler->enter_header(perf_header_key(builtin_sloc),
+                    builtin_sloc->buffer.size(), perf_parser_tokens_emitted);
+            }
             tok_stack.push_back(
                 std::make_unique<FileTokenSrc>(builtin_sloc, builtin_sloc->offset, sm.get(), lang_opts));
             current_file_id = builtin_sloc->file_id;
@@ -2487,6 +2549,12 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
         auto it = builtin_headers.find(file_name);
         if (it != builtin_headers.end()) {
             auto builtin_sloc = sm->createFileEntry(file_name, std::string(it->second));
+            if (perf_profiler) {
+                perf_profiler->record_resolved_header_request(perf_header_key(builtin_sloc));
+                perf_profiler->add_counter(PerfCounter::IncludeBuiltinEntered);
+                perf_profiler->enter_header(perf_header_key(builtin_sloc),
+                    builtin_sloc->buffer.size(), perf_parser_tokens_emitted);
+            }
             tok_stack.push_back(
                 std::make_unique<FileTokenSrc>(builtin_sloc, builtin_sloc->offset, sm.get(), lang_opts));
             current_file_id = builtin_sloc->file_id;
@@ -2494,19 +2562,41 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
         }
     }
     if (!new_file) {
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::IncludeLookupFailures);
+        }
         error(sm->formatIncludeLookupFailure(file_name), def_loc);
+    }
+    if (perf_profiler) {
+        perf_profiler->record_resolved_header_request(perf_header_key(new_file));
     }
     detect_include_guard(new_file);
     if (import_once_included.contains(new_file->file_id)) {
+        if (perf_profiler) {
+            perf_profiler->record_header_skip(perf_header_key(new_file),
+                PerfCounter::IncludeSkippedImportOnce);
+        }
         return;
     }
     if (is_import && included_files.contains(new_file->file_id)) {
+        if (perf_profiler) {
+            perf_profiler->record_header_skip(perf_header_key(new_file),
+                PerfCounter::IncludeSkippedImportAlready);
+        }
         return;
     }
     if (new_file->pragma_once && pragma_once_included.contains(new_file->file_id)) {
+        if (perf_profiler) {
+            perf_profiler->record_header_skip(perf_header_key(new_file),
+                PerfCounter::IncludeSkippedPragmaOnce);
+        }
         return;
     }
     if (!new_file->include_guard.empty() && macro_table.contains(new_file->include_guard)) {
+        if (perf_profiler) {
+            perf_profiler->record_header_skip(perf_header_key(new_file),
+                PerfCounter::IncludeSkippedMacroGuard);
+        }
         return;
     }
     if (is_import) {
@@ -2514,6 +2604,10 @@ void PreProcess::handleIncludeDirective(SrcLoc def_loc, bool is_next, bool is_im
     }
     if (new_file->pragma_once) {
         pragma_once_included.insert(new_file->file_id);
+    }
+    if (perf_profiler) {
+        perf_profiler->enter_header(perf_header_key(new_file), new_file->buffer.size(),
+            perf_parser_tokens_emitted);
     }
     tok_stack.push_back(std::make_unique<FileTokenSrc>(new_file, new_file->offset, sm.get(), lang_opts));
     current_file_id = new_file->file_id;
@@ -2535,6 +2629,11 @@ void PreProcess::expand_object_macro(const Token& trigger, const MacroDefinition
         expandedTokens = mdef.replacement_list;
     }
     auto token_size = expandedTokens.size();
+    if (perf_profiler) {
+        perf_profiler->record_macro_expansion(mdef.name, token_size, false);
+        perf_profiler->set_counter_max(PerfCounter::MacroExpansionMaxDepth,
+            tok_stack.size() + 1);
+    }
     SrcLoc def_loc = mdef.def_loc;
     if (def_loc.isInvalid()) {
         def_loc = trigger.loc;
@@ -2897,6 +2996,13 @@ void PreProcess::expand_function_macro(const Token& trigger, const MacroDefiniti
             error("Macro argument count mismatch", trigger.loc);
         }
     }
+    if (perf_profiler) {
+        uint64_t arg_tokens = 0;
+        for (const auto& arg : args) {
+            arg_tokens += arg.size();
+        }
+        perf_profiler->add_counter(PerfCounter::MacroArgumentTokens, arg_tokens);
+    }
 
     // Calculate intersection of hidesets
     HideSetType newHideSet = std::make_shared<std::unordered_set<std::string>>();
@@ -2914,6 +3020,11 @@ void PreProcess::expand_function_macro(const Token& trigger, const MacroDefiniti
     // Add the macro name itself to the hideset
     newHideSet->insert(m.name);
     std::vector<Token> expandedTokens = subst(m, trigger, args);
+    if (perf_profiler) {
+        perf_profiler->record_macro_expansion(m.name, expandedTokens.size(), true);
+        perf_profiler->set_counter_max(PerfCounter::MacroExpansionMaxDepth,
+            tok_stack.size() + 1);
+    }
     auto src_offset = this->sm->createMacroEntry(m.def_loc, trigger.loc, expandedTokens.size());
     for (auto& t : expandedTokens) {
         t.hide_set = union_hide_sets(t.hide_set, newHideSet);
@@ -2926,6 +3037,12 @@ void PreProcess::expand_function_macro(const Token& trigger, const MacroDefiniti
 
 }
 void PreProcess::peel_off_exhausted() {
+    if (perf_profiler) {
+        if (auto* s = dyn_cast<FileTokenSrc>(tok_stack.back().get())) {
+            perf_profiler->leave_header(perf_header_key(s->file_src),
+                perf_parser_tokens_emitted);
+        }
+    }
     tok_stack.pop_back();
     if (tok_stack.empty()) return;
     if (auto *s = dyn_cast<FileTokenSrc>(tok_stack.back().get())) {
@@ -3053,7 +3170,17 @@ Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
             auto* src = current_tok_src();
             if (src->lex) {
                 // Fast path: scan raw characters for # at start of line
-                if (!skip_to_next_directive(src->lex.get())) {
+                size_t skip_start = perf_profiler ? src->lex->position : 0;
+                bool found_directive = skip_to_next_directive(src->lex.get());
+                if (perf_profiler) {
+                    perf_profiler->add_counter(PerfCounter::SkippedConditionalScans);
+                    if (src->lex->position >= skip_start) {
+                        perf_profiler->add_counter(
+                            PerfCounter::SkippedConditionalBytes,
+                            src->lex->position - skip_start);
+                    }
+                }
+                if (!found_directive) {
                     // Hit EOF
                     tok = Token{TokenType::Eof, "", src->lex->get_loc_at_pos()};
                 } else {
@@ -3066,6 +3193,9 @@ Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
             }
         } else {
             tok = current_tok_src()->nextToken();
+        }
+        if (perf_full_detail) {
+            ++perf_raw_tokens_lexed;
         }
         if (tok.type == TokenType::Eof) {
             if (peeloff) {
@@ -3270,6 +3400,12 @@ Token PreProcess::nextToken(bool peeloff, size_t peelofflimit) {
 
 }
 std::vector<Token> PreProcess::tokenize() {
+    PerfScopedTimer timer(perf_profiler, PerfPhase::Tokenize);
+    perf_parser_tokens_emitted = 0;
+    perf_raw_tokens_lexed = 0;
+    uint64_t pp_number_relex_attempts = 0;
+    uint64_t pp_number_relex_successes = 0;
+    uint64_t string_literal_concats = 0;
     std::vector<Token> tokens;
     // Pre-allocate based on source size: roughly 1 token per 4-5 characters
     auto main_file = sm->getFileWithId(0);
@@ -3287,6 +3423,7 @@ std::vector<Token> PreProcess::tokenize() {
         // Otherwise keep it as PP_NUMBER and let the parser handle it
         // (e.g. version numbers like 10.12.1 in availability attributes).
         if (token.type == TokenType::PP_NUMBER) {
+            ++pp_number_relex_attempts;
             try {
                 Lexer relex(token.value, token.loc, sm.get(), lang_opts);
                 auto tok = relex.next_token();
@@ -3295,6 +3432,7 @@ std::vector<Token> PreProcess::tokenize() {
                     if (next.has_value() && next->type == TokenType::Eof) {
                         token.type = tok->type;
                         token.value = tok->value;
+                        ++pp_number_relex_successes;
                     }
                     // else: can't re-lex as single token, keep as PP_NUMBER
                 }
@@ -3310,20 +3448,39 @@ std::vector<Token> PreProcess::tokenize() {
             tokens.back().value += token.value;
             tokens.back().hide_set = union_hide_sets(tokens.back().hide_set, token.hide_set);
             tokens.back().literal_prefix = merge_literal_prefix(tokens.back().literal_prefix, token.literal_prefix);
+            ++string_literal_concats;
         } else {
             if (token.type != TokenType::Eof && sm) {
                 sm->recordPragmaState(token.loc, current_pack_alignment, current_diag_state_id);
             }
             tokens.push_back(token);
+            if (perf_profiler) {
+                ++perf_parser_tokens_emitted;
+            }
         }
         if (token.type == TokenType::Eof) {
             break;
         }
     }
+    if (perf_profiler) {
+        perf_profiler->add_counter(PerfCounter::ParserTokensEmitted,
+            perf_parser_tokens_emitted);
+        if (perf_raw_tokens_lexed != 0) {
+            perf_profiler->add_counter(PerfCounter::RawTokensLexed,
+                perf_raw_tokens_lexed);
+        }
+        perf_profiler->add_counter(PerfCounter::PPNumberRelexAttempts,
+            pp_number_relex_attempts);
+        perf_profiler->add_counter(PerfCounter::PPNumberRelexSuccesses,
+            pp_number_relex_successes);
+        perf_profiler->add_counter(PerfCounter::StringLiteralConcats,
+            string_literal_concats);
+    }
     return tokens;
 }
 
 void PreProcess::emit_preprocessed_text(std::ostream& out) {
+    PerfScopedTimer timer(perf_profiler, PerfPhase::PreprocessEmit);
     bool at_line_start = true;
     bool have_last_token = false;
     int32_t last_file_id = -1;
@@ -3431,6 +3588,7 @@ void PreProcess::emit_preprocessed_text(std::ostream& out) {
 }
 
 void PreProcess::emit_macro_definitions(std::ostream& out) {
+    PerfScopedTimer timer(perf_profiler, PerfPhase::PreprocessEmit);
     std::vector<const MacroDefinition*> definitions;
     definitions.reserve(macro_table.size());
     for (const auto& [_, macro] : macro_table) {

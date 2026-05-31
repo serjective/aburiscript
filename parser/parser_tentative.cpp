@@ -1,5 +1,6 @@
 #include "parser.h"
 #include "tentative_syntax_probe.h"
+#include "../perf_stats.h"
 
 #include <cstdlib>
 #include <cstdint>
@@ -52,6 +53,10 @@ struct ParserTentativeMetricsReporter {
 ParserTentativeMetricsReporter g_parser_tentative_metrics_reporter;
 
 void bump_tentative_context_begins() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTentativeBegins);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -59,6 +64,10 @@ void bump_tentative_context_begins() {
 }
 
 void bump_tentative_context_commits() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTentativeCommits);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -66,6 +75,10 @@ void bump_tentative_context_commits() {
 }
 
 void bump_tentative_context_rollbacks() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTentativeRollbacks);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -73,6 +86,10 @@ void bump_tentative_context_rollbacks() {
 }
 
 void bump_tentative_state_captures() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTentativeStateCaptures);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -80,6 +97,10 @@ void bump_tentative_state_captures() {
 }
 
 void bump_tentative_state_restores() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::ParserTentativeStateRestores);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }

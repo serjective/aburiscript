@@ -1,4 +1,5 @@
 #include "source_mgnt.h"
+#include "perf_stats.h"
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
@@ -136,10 +137,17 @@ std::string SourceManager::formatIncludeLookupFailure(const std::string& name) c
 }
 
 std::shared_ptr<FileSrc> SourceManager::lookThroughPaths(const std::string& name) {
+    PerfScopedTimer timer(perf_profiler, PerfPhase::IncludeSearch);
     ensureIncludeSearchCacheFresh();
     auto cache_it = include_search_cache.find(name);
     if (cache_it != include_search_cache.end()) {
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::IncludeSearchCacheHits);
+        }
         return cache_it->second;
+    }
+    if (perf_profiler) {
+        perf_profiler->add_counter(PerfCounter::IncludeSearchCacheMisses);
     }
     for (const auto& path : source_look_paths) {
         if (auto file = getFileFromLoc(name, path)) {
@@ -151,11 +159,18 @@ std::shared_ptr<FileSrc> SourceManager::lookThroughPaths(const std::string& name
 }
 
 std::shared_ptr<FileSrc> SourceManager::lookThroughPathsFrom(const std::string& name, size_t start_index) {
+    PerfScopedTimer timer(perf_profiler, PerfPhase::IncludeSearch);
     ensureIncludeSearchCacheFresh();
     const std::string cache_key = makeIncludeSearchCacheKey(name, start_index);
     auto cache_it = include_next_search_cache.find(cache_key);
     if (cache_it != include_next_search_cache.end()) {
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::IncludeNextSearchCacheHits);
+        }
         return cache_it->second;
+    }
+    if (perf_profiler) {
+        perf_profiler->add_counter(PerfCounter::IncludeNextSearchCacheMisses);
     }
     for (size_t i = start_index; i < source_look_paths.size(); ++i) {
         if (auto file = getFileFromLoc(name, source_look_paths[i])) {
@@ -167,10 +182,17 @@ std::shared_ptr<FileSrc> SourceManager::lookThroughPathsFrom(const std::string& 
 }
 
 std::shared_ptr<FileSrc> SourceManager::lookThroughQuotePaths(const std::string& name) {
+    PerfScopedTimer timer(perf_profiler, PerfPhase::IncludeSearch);
     ensureIncludeSearchCacheFresh();
     auto cache_it = quote_include_search_cache.find(name);
     if (cache_it != quote_include_search_cache.end()) {
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::QuoteIncludeSearchCacheHits);
+        }
         return cache_it->second;
+    }
+    if (perf_profiler) {
+        perf_profiler->add_counter(PerfCounter::QuoteIncludeSearchCacheMisses);
     }
     for (const auto& path : quote_look_paths) {
         if (auto file = getFileFromLoc(name, path)) {
@@ -182,11 +204,18 @@ std::shared_ptr<FileSrc> SourceManager::lookThroughQuotePaths(const std::string&
 }
 
 std::shared_ptr<FileSrc> SourceManager::lookThroughQuotePathsFrom(const std::string& name, size_t start_index) {
+    PerfScopedTimer timer(perf_profiler, PerfPhase::IncludeSearch);
     ensureIncludeSearchCacheFresh();
     const std::string cache_key = makeIncludeSearchCacheKey(name, start_index);
     auto cache_it = quote_include_next_search_cache.find(cache_key);
     if (cache_it != quote_include_next_search_cache.end()) {
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::QuoteIncludeNextSearchCacheHits);
+        }
         return cache_it->second;
+    }
+    if (perf_profiler) {
+        perf_profiler->add_counter(PerfCounter::QuoteIncludeNextSearchCacheMisses);
     }
     for (size_t i = start_index; i < quote_look_paths.size(); ++i) {
         if (auto file = getFileFromLoc(name, quote_look_paths[i])) {
@@ -213,18 +242,31 @@ std::shared_ptr<FileSrc> SourceManager::getFileFromLoc(const std::string& name, 
         return it->second;
     }
     if (missing_file_table.contains(key)) {
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::MissingFileCacheHits);
+        }
         return nullptr;
     }
     if (is_virtual_env) {
         return nullptr;
     }
     auto load_file = [&](const std::filesystem::path& path, const std::string& path_key) -> std::shared_ptr<FileSrc> {
+        PerfScopedTimer timer(perf_profiler, PerfPhase::SourceRead);
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::FileOpenAttempts);
+        }
         std::ifstream input_file(path, std::ios::binary | std::ios::ate);
         if (!input_file.is_open()) {
+            if (perf_profiler) {
+                perf_profiler->add_counter(PerfCounter::FileOpenFailures);
+            }
             return nullptr;
         }
         std::streamsize size = input_file.tellg();
         if (size < 0) {
+            if (perf_profiler) {
+                perf_profiler->add_counter(PerfCounter::FileOpenFailures);
+            }
             return nullptr;
         }
         std::string content(static_cast<size_t>(size), '\0');
@@ -245,8 +287,14 @@ std::shared_ptr<FileSrc> SourceManager::getFileFromLoc(const std::string& name, 
     }
 
     if (!name_path.is_absolute()) {
+        if (perf_profiler) {
+            perf_profiler->add_counter(PerfCounter::FrameworkLookupAttempts);
+        }
         auto framework_path = resolve_framework_header_path(name_path, std::filesystem::path(directory));
         if (framework_path.has_value()) {
+            if (perf_profiler) {
+                perf_profiler->add_counter(PerfCounter::FrameworkLookupHits);
+            }
             std::string framework_key = normalize_path(*framework_path);
             auto loaded = file_table.find(framework_key);
             if (loaded != file_table.end()) {
@@ -278,6 +326,10 @@ std::shared_ptr<FileSrc> SourceManager::createFileEntry(std::string name, std::s
     }
     file_table[table_key] = shared_ptr;
     missing_file_table.erase(table_key);
+    if (perf_profiler) {
+        perf_profiler->add_counter(PerfCounter::FilesLoaded);
+        perf_profiler->add_counter(PerfCounter::SourceBytes, shared_ptr->buffer.size());
+    }
 
     uint32_t offset = next_offset;
     sloc_entry_table.push_back(SLocEntry::create_file(offset, files.back()));

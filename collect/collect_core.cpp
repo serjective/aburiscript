@@ -1,5 +1,6 @@
 #include "collect.h"
 #include "../helpers/auto_type_utils.h"
+#include "../perf_stats.h"
 #include "lookup_engine.h"
 #include <cassert>
 #include <cstdlib>
@@ -179,6 +180,10 @@ void collect_record_base_nested_type_matches(
 }
 
 void bump_snapshot_materializations() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::CollectSnapshotMaterializations);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -186,6 +191,10 @@ void bump_snapshot_materializations() {
 }
 
 void bump_tentative_begins() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::CollectTentativeBegins);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -193,6 +202,10 @@ void bump_tentative_begins() {
 }
 
 void bump_tentative_commits() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::CollectTentativeCommits);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -200,6 +213,10 @@ void bump_tentative_commits() {
 }
 
 void bump_tentative_rollbacks() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::CollectTentativeRollbacks);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }

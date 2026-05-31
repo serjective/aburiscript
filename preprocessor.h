@@ -11,6 +11,8 @@
 #include "abi/target_info.h"
 using ArgsType = std::vector<std::vector<Token>>;
 
+class PerfProfiler;
+
 struct PreprocPass {
     std::string pass_name;
     std::vector<MappingStep> steps;
@@ -148,6 +150,10 @@ struct PreProcess {
     std::string base_file_name;
     std::shared_ptr<TargetInfo> target_info;
     LangOptions lang_opts;
+    PerfProfiler* perf_profiler = nullptr;
+    bool perf_full_detail = false;
+    uint64_t perf_parser_tokens_emitted = 0;
+    uint64_t perf_raw_tokens_lexed = 0;
     uint64_t counter = 0;
     // Tracks the state of `defined(MACRO)` operator parsing in #if/#elif conditions.
     enum class DefinedOperatorState : uint8_t {
@@ -197,13 +203,16 @@ struct PreProcess {
 
     explicit PreProcess(std::string file_name, std::string content,
         std::shared_ptr<TargetInfo> target = nullptr,
-        LangOptions options = LangOptions()): macro_table({}), skipping(false), lang_opts(std::move(options)) {
+        LangOptions options = LangOptions(),
+        PerfProfiler* profiler = nullptr): macro_table({}), skipping(false), lang_opts(std::move(options)),
+        perf_profiler(profiler) {
         if (!target) {
             target = TargetInfo::create_host();
         }
         target_info = target;
         base_file_name = file_name;
         sm = std::make_shared<SourceManager>();
+        sm->perf_profiler = perf_profiler;
         current_diag_state_id = sm->defaultDiagnosticStateId();
         auto main_sloc = sm->createFileEntry(std::move(file_name),
             std::move(content));
@@ -215,6 +224,7 @@ struct PreProcess {
         init_target_macros(*target);
     }
     explicit PreProcess() {};
+    void set_perf_profiler(PerfProfiler* profiler);
     void init_builtin_state();
     void init_builtin_macros();
     void init_target_macros(const TargetInfo& target);

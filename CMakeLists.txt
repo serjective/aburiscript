@@ -163,6 +163,8 @@ set(ABURI_LIBRARY_SOURCES
         libaburi/library.h
         source_mgnt.cpp
         source_mgnt.h
+        perf_stats.cpp
+        perf_stats.h
         preprocessor.cpp
         preprocessor.h
         builtin_registry.cpp

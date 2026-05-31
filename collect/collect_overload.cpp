@@ -3,6 +3,7 @@
 #include "collect_templates_internal.h"
 #include "../ast/expr_clone.h"
 #include "../ast/special_members.h"
+#include "../perf_stats.h"
 #include "lookup_engine.h"
 #include <algorithm>
 #include <cstdlib>
@@ -108,6 +109,10 @@ struct OverloadMetricsReporter {
 OverloadMetricsReporter g_overload_metrics_reporter;
 
 void bump_overload_resolve_calls() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::OverloadResolveCalls);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -115,6 +120,10 @@ void bump_overload_resolve_calls() {
 }
 
 void bump_overload_candidate_evaluations() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::OverloadCandidateEvaluations);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -122,6 +131,10 @@ void bump_overload_candidate_evaluations() {
 }
 
 void bump_overload_pairwise_comparisons() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::OverloadPairwiseComparisons);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -129,6 +142,10 @@ void bump_overload_pairwise_comparisons() {
 }
 
 void bump_overload_frontier_prunes() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::OverloadFrontierPrunes);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -136,6 +153,10 @@ void bump_overload_frontier_prunes() {
 }
 
 void bump_overload_viable_candidates(size_t count) {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::OverloadViableCandidates, count);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -143,6 +164,10 @@ void bump_overload_viable_candidates(size_t count) {
 }
 
 void bump_overload_conversion_cache_hit() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::OverloadConversionCacheHits);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }
@@ -150,6 +175,10 @@ void bump_overload_conversion_cache_hit() {
 }
 
 void bump_overload_conversion_cache_miss() {
+    if (auto* profiler = active_perf_profiler()) {
+        profiler->add_counter(PerfCounter::OverloadConversionCacheMisses);
+        return;
+    }
     if (!refactor_metrics_enabled()) {
         return;
     }

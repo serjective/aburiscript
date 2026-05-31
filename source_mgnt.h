@@ -39,6 +39,9 @@ struct LogicalLocation {
     uint32_t line;
     uint32_t column;
 };
+
+class PerfProfiler;
+
 enum class DiagnosticLevel {
     Error,
     Warning,
@@ -165,6 +168,7 @@ struct SourceManager {
     std::string requested_cxx_stdlib;
     std::string resolved_cxx_stdlib;
     std::vector<std::string> attempted_cxx_stdlib_paths;
+    PerfProfiler* perf_profiler = nullptr;
     // used in testing when we don't want to import any real files. If true then source_look_paths should also be empty
     bool is_virtual_env = false;
     uint32_t next_offset = 1; // 0 is reserved for "Invalid"

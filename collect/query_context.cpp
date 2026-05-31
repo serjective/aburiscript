@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "collect.h"
+#include "../perf_stats.h"
 
 namespace {
 thread_local CollectQueryContext* g_active_collect_query_context = nullptr;
@@ -398,6 +399,41 @@ Collect::Collect(std::shared_ptr<ASTContext> ast_ctx,
 }
 
 Collect::~Collect() {
+    if (auto* profiler = active_perf_profiler()) {
+        const auto& metrics = query_context_.metrics();
+        profiler->add_counter(PerfCounter::CollectQueryRecordHits,
+            metrics.record_semantics_hits);
+        profiler->add_counter(PerfCounter::CollectQueryRecordMisses,
+            metrics.record_semantics_misses);
+        profiler->add_counter(PerfCounter::CollectQueryRecordPublishes,
+            metrics.record_semantics_publications);
+        profiler->add_counter(PerfCounter::CollectQueryEnumHits,
+            metrics.enum_semantics_hits);
+        profiler->add_counter(PerfCounter::CollectQueryEnumMisses,
+            metrics.enum_semantics_misses);
+        profiler->add_counter(PerfCounter::CollectQueryEnumPublishes,
+            metrics.enum_semantics_publications);
+        profiler->add_counter(PerfCounter::CollectQueryTemplateTypeHits,
+            metrics.template_specialization_type_hits);
+        profiler->add_counter(PerfCounter::CollectQueryTemplateTypeMisses,
+            metrics.template_specialization_type_misses);
+        profiler->add_counter(PerfCounter::CollectQueryTemplateTypePublishes,
+            metrics.template_specialization_type_publications);
+        profiler->add_counter(PerfCounter::CollectQueryDependentNameHits,
+            metrics.dependent_name_type_hits);
+        profiler->add_counter(PerfCounter::CollectQueryDependentNameMisses,
+            metrics.dependent_name_type_misses);
+        profiler->add_counter(PerfCounter::CollectQueryDependentNamePublishes,
+            metrics.dependent_name_type_publications);
+        profiler->add_counter(PerfCounter::CollectQueryOverlayBegins,
+            metrics.overlay_begins);
+        profiler->add_counter(PerfCounter::CollectQueryOverlayCommits,
+            metrics.overlay_commits);
+        profiler->add_counter(PerfCounter::CollectQueryOverlayRollbacks,
+            metrics.overlay_rollbacks);
+        profiler->add_counter(PerfCounter::CollectQueryOverlayMerges,
+            metrics.overlay_merges);
+    }
     if (refactor_metrics_enabled()) {
         query_context_.emit_metrics(std::cerr);
     }

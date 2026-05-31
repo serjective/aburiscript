@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include "preprocessor.h"
 #include "parser/parser.h"
@@ -17,6 +18,7 @@
 #include "abi/target_info.h"
 #include "target_feature_gate.h"
 #include "toolchain_profile.h"
+#include "perf_stats.h"
 #include <llvm/Config/llvm-config.h>
 #include <llvm/ADT/SmallString.h>
 #include <llvm/Support/CommandLine.h>
@@ -49,6 +51,15 @@ static cl::opt<bool> EmitDebugInfo("g", cl::desc("Emit debug information"), cl::
 static cl::opt<bool> AstMemoryReport("ast-memory-report",
     cl::desc("Print AST memory usage report after parsing"),
     cl::init(false), cl::cat(AburiCategory));
+static cl::opt<bool> FTimeReport("ftime-report",
+    cl::desc("Print an opt-in compiler time and counter report"),
+    cl::init(false), cl::cat(AburiCategory));
+static cl::opt<std::string> FTimeReportJson("ftime-report-json",
+    cl::desc("Write an opt-in compiler time report as JSON"),
+    cl::value_desc("path"), cl::init(""), cl::cat(AburiCategory));
+static cl::opt<std::string> FTimeReportDetail("ftime-report-detail",
+    cl::desc("Profiling detail level (summary|headers|full)"),
+    cl::value_desc("level"), cl::init("summary"), cl::cat(AburiCategory));
 static cl::opt<std::string> OptLevel("O", cl::desc("Optimization level"), cl::Prefix, cl::init("0"), cl::cat(AburiCategory));
 static cl::opt<bool> Verbose("v", cl::desc("Verbose output"), cl::cat(AburiCategory));
 static cl::list<std::string> IncludePaths("I", cl::desc("Add include search path"), cl::ZeroOrMore,
@@ -138,6 +149,41 @@ enum class EarlyDriverQuery {
     VerboseVersion,
     DumpMachine,
     DumpVersion
+};
+
+struct DriverPerfSession {
+    PerfProfiler profiler;
+    std::optional<PerfScopedTimer> driver_timer;
+    bool emit_text = false;
+    std::string json_path;
+
+    DriverPerfSession(PerfDetail detail, bool text_report, std::string json_report_path)
+        : profiler(detail),
+          driver_timer(std::in_place, &profiler, PerfPhase::Driver),
+          emit_text(text_report),
+          json_path(std::move(json_report_path)) {
+        set_active_perf_profiler(&profiler);
+    }
+
+    ~DriverPerfSession() {
+        driver_timer.reset();
+        if (emit_text) {
+            profiler.print_text_report(std::cerr);
+        }
+        if (!json_path.empty()) {
+            std::string error;
+            if (!profiler.write_json_report(json_path, error)) {
+                std::cerr << "Error: " << error << std::endl;
+            }
+        }
+        if (active_perf_profiler() == &profiler) {
+            set_active_perf_profiler(nullptr);
+        }
+    }
+
+    PerfProfiler* get() {
+        return &profiler;
+    }
 };
 
 struct DriverPersonaParseResult {
@@ -1296,6 +1342,17 @@ int main(int argc, char** argv) {
         int parsed_argc = static_cast<int>(arg_ptrs.size());
         cl::HideUnrelatedOptions(AburiCategory);
         cl::ParseCommandLineOptions(parsed_argc, arg_ptrs.data(), "Aburiscript compiler\n");
+        auto parsed_perf_detail = parse_perf_detail(FTimeReportDetail);
+        if (!parsed_perf_detail.has_value()) {
+            std::cerr << "Error: --ftime-report-detail must be 'summary', 'headers', or 'full'" << std::endl;
+            return 1;
+        }
+        std::unique_ptr<DriverPerfSession> perf_session;
+        if (FTimeReport || !FTimeReportJson.empty()) {
+            perf_session = std::make_unique<DriverPerfSession>(
+                *parsed_perf_detail, FTimeReport, FTimeReportJson);
+        }
+        PerfProfiler* perf_profiler = perf_session ? perf_session->get() : nullptr;
         if (DriverMode != "strict" && DriverMode != "compat") {
             std::cerr << "Error: --driver-mode must be 'strict' or 'compat'" << std::endl;
             return 1;
@@ -1419,6 +1476,9 @@ int main(int argc, char** argv) {
         std::vector<std::string> linkerInputFiles;
 
         for (const auto& inputFilename : InputFilenames) {
+            if (perf_profiler) {
+                perf_profiler->add_counter(PerfCounter::InputFiles);
+            }
             std::filesystem::path inputPath(inputFilename);
             if (!std::filesystem::exists(inputPath)) {
                 std::cerr << "Error: file not found: " << inputFilename << std::endl;
@@ -1539,56 +1599,65 @@ int main(int argc, char** argv) {
             }
 
             // 1. Preprocess
-            std::ifstream t(inputFilename);
-            std::string content((std::istreambuf_iterator<char>(t)), std::istreambuf_iterator<char>());
-            PreProcess pp(inputFilename, content, target_info, lang_opts);
+            std::string content;
+            {
+                PerfScopedTimer timer(perf_profiler, PerfPhase::InputRead);
+                std::ifstream t(inputFilename);
+                content.assign(std::istreambuf_iterator<char>(t),
+                    std::istreambuf_iterator<char>());
+            }
+            PreProcess pp(inputFilename, std::move(content), target_info, lang_opts, perf_profiler);
+            pp.set_perf_profiler(perf_profiler);
             auto main_file = pp.sm->getFileWithId(pp.current_file_id);
             if (main_file) {
                 main_file->directory = inputPath.parent_path().string();
             }
-            auto cxx_stdlib_paths = discover_cxx_stdlib_include_paths(
-                argc > 0 ? argv[0] : nullptr,
-                target_triple,
-                lang_opts.is_cxx_mode(),
-                requested_stdlib);
-            pp.sm->cxx_stdlib_lookup_active = lang_opts.is_cxx_mode();
-            pp.sm->requested_cxx_stdlib = stdlib_kind_name(requested_stdlib);
-            pp.sm->resolved_cxx_stdlib = stdlib_kind_name(cxx_stdlib_paths.resolved);
-            pp.sm->attempted_cxx_stdlib_paths = cxx_stdlib_paths.attempted_paths;
-            std::vector<std::string> include_paths;
-            std::unordered_set<std::string> seen_paths;
-            for (const auto& path : IncludePaths) {
-                try_add_include_path(path, include_paths, seen_paths);
-            }
-            for (const auto& path : SystemIncludePaths) {
-                try_add_include_path(path, include_paths, seen_paths);
-            }
-            for (const auto& path : cxx_stdlib_paths.include_paths) {
-                try_add_include_path(path, include_paths, seen_paths);
-            }
-            std::vector<std::string> quote_include_paths;
-            std::unordered_set<std::string> seen_quote_paths;
-            for (const auto& path : QuoteIncludePaths) {
-                try_add_include_path(path, quote_include_paths, seen_quote_paths);
-            }
-            if (target_info->os == TargetOS::MACOS) {
-                auto sdk_paths =
-                    discover_driver_macos_sdk_include_paths(argc > 0 ? argv[0] : nullptr);
-                for (const auto& path : sdk_paths) {
+            {
+                PerfScopedTimer timer(perf_profiler, PerfPhase::IncludeDiscovery);
+                auto cxx_stdlib_paths = discover_cxx_stdlib_include_paths(
+                    argc > 0 ? argv[0] : nullptr,
+                    target_triple,
+                    lang_opts.is_cxx_mode(),
+                    requested_stdlib);
+                pp.sm->cxx_stdlib_lookup_active = lang_opts.is_cxx_mode();
+                pp.sm->requested_cxx_stdlib = stdlib_kind_name(requested_stdlib);
+                pp.sm->resolved_cxx_stdlib = stdlib_kind_name(cxx_stdlib_paths.resolved);
+                pp.sm->attempted_cxx_stdlib_paths = cxx_stdlib_paths.attempted_paths;
+                std::vector<std::string> include_paths;
+                std::unordered_set<std::string> seen_paths;
+                for (const auto& path : IncludePaths) {
                     try_add_include_path(path, include_paths, seen_paths);
                 }
-            }
-            for (const auto& path : quote_include_paths) {
-                pp.sm->quote_look_paths.push_back(path);
-            }
-            for (const auto& path : include_paths) {
-                pp.sm->source_look_paths.push_back(path);
-            }
-            for (const auto& op : macro_ops) {
-                if (op.is_define) {
-                    pp.define_object_macro(op.name, op.value);
-                } else {
-                    pp.undef_macro(op.name);
+                for (const auto& path : SystemIncludePaths) {
+                    try_add_include_path(path, include_paths, seen_paths);
+                }
+                for (const auto& path : cxx_stdlib_paths.include_paths) {
+                    try_add_include_path(path, include_paths, seen_paths);
+                }
+                std::vector<std::string> quote_include_paths;
+                std::unordered_set<std::string> seen_quote_paths;
+                for (const auto& path : QuoteIncludePaths) {
+                    try_add_include_path(path, quote_include_paths, seen_quote_paths);
+                }
+                if (target_info->os == TargetOS::MACOS) {
+                    auto sdk_paths =
+                        discover_driver_macos_sdk_include_paths(argc > 0 ? argv[0] : nullptr);
+                    for (const auto& path : sdk_paths) {
+                        try_add_include_path(path, include_paths, seen_paths);
+                    }
+                }
+                for (const auto& path : quote_include_paths) {
+                    pp.sm->quote_look_paths.push_back(path);
+                }
+                for (const auto& path : include_paths) {
+                    pp.sm->source_look_paths.push_back(path);
+                }
+                for (const auto& op : macro_ops) {
+                    if (op.is_define) {
+                        pp.define_object_macro(op.name, op.value);
+                    } else {
+                        pp.undef_macro(op.name);
+                    }
                 }
             }
             if (PreprocessOnly) {
@@ -1626,12 +1695,17 @@ int main(int argc, char** argv) {
                 }
                 apply_driver_abi_overrides(*parser.ast_ctx->abi_policy, effective_abi_options);
             }
-            auto ast = parser.parse();
+            std::unique_ptr<Decl> ast;
+            {
+                PerfScopedTimer timer(perf_profiler, PerfPhase::ParseCollect);
+                ast = parser.parse();
+            }
             if (!ast) {
                 std::cerr << "Error: parsing failed for " << inputFilename << std::endl;
                 return 1;
             }
             if (AstMemoryReport) {
+                PerfScopedTimer timer(perf_profiler, PerfPhase::AstMemoryReport);
                 print_ast_memory_report(std::cout, ast.get(), *parser.ast_ctx);
             }
             if (FSyntaxOnly) {
@@ -1645,8 +1719,14 @@ int main(int argc, char** argv) {
             codegen.sm = pp.sm;
             codegen.ast_ctx = parser.ast_ctx;
             codegen.lang_opts = lang_opts;
-            codegen.convert_translation_unit(ast.get());
-            codegen.optimize();
+            {
+                PerfScopedTimer timer(perf_profiler, PerfPhase::LlvmLowering);
+                codegen.convert_translation_unit(ast.get());
+            }
+            {
+                PerfScopedTimer timer(perf_profiler, PerfPhase::LlvmOptimize);
+                codegen.optimize();
+            }
 
             bool producedOutput = false;
 
@@ -1663,13 +1743,19 @@ int main(int argc, char** argv) {
 
                 std::error_code ec;
                 llvm::raw_fd_ostream dest(out, ec, llvm::sys::fs::OF_None);
-                codegen.module->print(dest, nullptr);
+                {
+                    PerfScopedTimer timer(perf_profiler, PerfPhase::EmitLlvm);
+                    codegen.module->print(dest, nullptr);
+                }
                 producedOutput = true;
             }
 
             if (EmitAssembly) {
                 std::string out = OutputFilename.empty() ? inputPath.stem().string() + ".s" : OutputFilename;
-                codegen.emit(out, llvm::CodeGenFileType::AssemblyFile);
+                {
+                    PerfScopedTimer timer(perf_profiler, PerfPhase::EmitAssembly);
+                    codegen.emit(out, llvm::CodeGenFileType::AssemblyFile);
+                }
                 producedOutput = true;
             }
             // If we generated LLVM IR or Assembly, we stop here for this file.
@@ -1708,7 +1794,10 @@ int main(int argc, char** argv) {
                 objOut = inputPath.stem().string() + ".o";
             }
 
-            codegen.emit(objOut, llvm::CodeGenFileType::ObjectFile);
+            {
+                PerfScopedTimer timer(perf_profiler, PerfPhase::EmitObject);
+                codegen.emit(objOut, llvm::CodeGenFileType::ObjectFile);
+            }
             objectFiles.push_back(objOut);
             if (!CompileOnly) {
                 tempFiles.push_back(objOut);
@@ -1757,7 +1846,10 @@ int main(int argc, char** argv) {
             linkerArgs.push_back("-o");
             linkerArgs.push_back(exeOut);
 
-            run_command(linker_driver, linkerArgs);
+            {
+                PerfScopedTimer timer(perf_profiler, PerfPhase::Link);
+                run_command(linker_driver, linkerArgs);
+            }
 
             // Clean up temp object files
             for (const auto& temp : tempFiles) {
