@@ -149,6 +149,14 @@ public:
     void enter_header(std::string_view header_key, uint64_t bytes, uint64_t emitted_tokens);
     void leave_header(std::string_view header_key, uint64_t emitted_tokens);
     void record_macro_expansion(std::string_view macro_name, uint64_t tokens, bool function_like);
+    void record_tentative_parse_site(std::string_view file,
+                                     std::string_view function,
+                                     uint32_t line,
+                                     bool committed,
+                                     uint64_t start_token,
+                                     uint64_t end_token,
+                                     uint64_t depth,
+                                     std::chrono::steady_clock::duration duration);
 
     void print_text_report(std::ostream& os) const;
     bool write_json_report(const std::string& path, std::string& error) const;
@@ -172,6 +180,22 @@ public:
         uint64_t function_like_expansions = 0;
     };
 
+    struct TentativeParseSiteStats {
+        std::string file;
+        std::string function;
+        uint32_t line = 0;
+        uint64_t begins = 0;
+        uint64_t commits = 0;
+        uint64_t rollbacks = 0;
+        uint64_t tokens_consumed = 0;
+        uint64_t tokens_rewound = 0;
+        uint64_t max_token_span = 0;
+        uint64_t max_depth = 0;
+        std::chrono::nanoseconds duration{0};
+        std::chrono::nanoseconds commit_duration{0};
+        std::chrono::nanoseconds rollback_duration{0};
+    };
+
 private:
     using Clock = std::chrono::steady_clock;
 
@@ -193,6 +217,7 @@ private:
     std::vector<uint64_t> counters_;
     std::unordered_map<std::string, HeaderStats> headers_;
     std::unordered_map<std::string, MacroStats> macros_;
+    std::unordered_map<std::string, TentativeParseSiteStats> tentative_parse_sites_;
     std::vector<HeaderFrame> header_stack_;
 };
 

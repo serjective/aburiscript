@@ -229,9 +229,20 @@ Parser::probe_cpp_template_name_argument_prefix_syntax() {
     return result;
 }
 
-Parser::TentativeParsingAction::TentativeParsingAction(Parser& parser)
-    : parser_(parser),
-      context_id_(parser_.begin_tentative_context()) {
+Parser::TentativeParsingAction::TentativeParsingAction(
+    Parser& parser,
+    std::source_location loc)
+    : parser_(parser) {
+    if (auto* profiler = active_perf_profiler(); profiler && profiler->wants_full()) {
+        tentative_profiler_ = profiler;
+        tentative_file_ = loc.file_name();
+        tentative_function_ = loc.function_name();
+        tentative_line_ = loc.line();
+        tentative_start_token_idx_ = parser_.get_token_idx();
+        tentative_depth_ = parser_.tentative_context_stack_.size() + 1;
+        tentative_start_ = std::chrono::steady_clock::now();
+    }
+    context_id_ = parser_.begin_tentative_context();
 }
 
 Parser::TentativeParsingAction::~TentativeParsingAction() {
@@ -242,6 +253,7 @@ void Parser::TentativeParsingAction::commit() {
     if (!active_) {
         return;
     }
+    record_tentative_outcome(true);
     parser_.commit_tentative_context(context_id_);
     active_ = false;
 }
@@ -250,8 +262,26 @@ void Parser::TentativeParsingAction::revert() {
     if (!active_) {
         return;
     }
+    record_tentative_outcome(false);
     parser_.rollback_tentative_context(context_id_);
     active_ = false;
+}
+
+void Parser::TentativeParsingAction::record_tentative_outcome(bool committed) {
+    if (!tentative_profiler_) {
+        return;
+    }
+
+    tentative_profiler_->record_tentative_parse_site(
+        tentative_file_,
+        tentative_function_,
+        tentative_line_,
+        committed,
+        tentative_start_token_idx_,
+        parser_.get_token_idx(),
+        tentative_depth_,
+        std::chrono::steady_clock::now() - tentative_start_);
+    tentative_profiler_ = nullptr;
 }
 
 Parser::TentativeParserState Parser::capture_tentative_state() {

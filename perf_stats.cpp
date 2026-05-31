@@ -166,6 +166,19 @@ std::string json_escape(std::string_view value) {
     return out;
 }
 
+std::string tentative_site_key(std::string_view file,
+                               std::string_view function,
+                               uint32_t line) {
+    std::string key;
+    key.reserve(file.size() + function.size() + 32);
+    key.append(file);
+    key.push_back(':');
+    key += std::to_string(line);
+    key.push_back(':');
+    key.append(function);
+    return key;
+}
+
 template <typename Pair>
 auto sorted_top_by_value(const std::unordered_map<std::string, Pair>& map,
                          uint64_t Pair::*member,
@@ -208,6 +221,32 @@ sorted_headers_by_inclusive(
         }
         if (lhs->second.requests != rhs->second.requests) {
             return lhs->second.requests > rhs->second.requests;
+        }
+        return lhs->first < rhs->first;
+    });
+    if (rows.size() > limit) {
+        rows.resize(limit);
+    }
+    return rows;
+}
+
+std::vector<const std::pair<const std::string, PerfProfiler::TentativeParseSiteStats>*>
+sorted_tentative_sites_by_time(
+    const std::unordered_map<std::string, PerfProfiler::TentativeParseSiteStats>& sites,
+    size_t limit) {
+    std::vector<const std::pair<const std::string, PerfProfiler::TentativeParseSiteStats>*> rows;
+    rows.reserve(sites.size());
+    for (const auto& row : sites) {
+        if (row.second.begins != 0) {
+            rows.push_back(&row);
+        }
+    }
+    std::sort(rows.begin(), rows.end(), [](const auto* lhs, const auto* rhs) {
+        if (lhs->second.duration != rhs->second.duration) {
+            return lhs->second.duration > rhs->second.duration;
+        }
+        if (lhs->second.rollbacks != rhs->second.rollbacks) {
+            return lhs->second.rollbacks > rhs->second.rollbacks;
         }
         return lhs->first < rhs->first;
     });
@@ -373,6 +412,45 @@ void PerfProfiler::record_macro_expansion(std::string_view macro_name,
     }
 }
 
+void PerfProfiler::record_tentative_parse_site(
+    std::string_view file,
+    std::string_view function,
+    uint32_t line,
+    bool committed,
+    uint64_t start_token,
+    uint64_t end_token,
+    uint64_t depth,
+    std::chrono::steady_clock::duration duration) {
+    if (!wants_full()) {
+        return;
+    }
+
+    auto key = tentative_site_key(file, function, line);
+    auto& stats = tentative_parse_sites_[key];
+    if (stats.begins == 0) {
+        stats.file = std::string(file);
+        stats.function = std::string(function);
+        stats.line = line;
+    }
+
+    uint64_t token_span = end_token >= start_token ? end_token - start_token : 0;
+    auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration);
+
+    ++stats.begins;
+    stats.duration += nanos;
+    stats.tokens_consumed += token_span;
+    stats.max_token_span = std::max(stats.max_token_span, token_span);
+    stats.max_depth = std::max(stats.max_depth, depth);
+    if (committed) {
+        ++stats.commits;
+        stats.commit_duration += nanos;
+    } else {
+        ++stats.rollbacks;
+        stats.rollback_duration += nanos;
+        stats.tokens_rewound += token_span;
+    }
+}
+
 void PerfProfiler::print_text_report(std::ostream& os) const {
     auto total = std::chrono::duration_cast<std::chrono::nanoseconds>(
         Clock::now() - start_);
@@ -424,6 +502,23 @@ void PerfProfiler::print_text_report(std::ostream& os) const {
                << "\n";
         }
     }
+
+    if (wants_full() && !tentative_parse_sites_.empty()) {
+        os << "\nTop tentative parse sites:\n";
+        for (const auto* row : sorted_tentative_sites_by_time(tentative_parse_sites_, 20)) {
+            const auto& stats = row->second;
+            os << "  " << stats.file << ":" << stats.line
+               << " " << stats.function
+               << ": time=" << ms(stats.duration) << " ms"
+               << " commits=" << stats.commits
+               << " rollbacks=" << stats.rollbacks
+               << " tokens=" << stats.tokens_consumed
+               << " rewound=" << stats.tokens_rewound
+               << " max_span=" << stats.max_token_span
+               << " max_depth=" << stats.max_depth
+               << "\n";
+        }
+    }
 }
 
 bool PerfProfiler::write_json_report(const std::string& path, std::string& error) const {
@@ -436,7 +531,7 @@ bool PerfProfiler::write_json_report(const std::string& path, std::string& error
     auto total = std::chrono::duration_cast<std::chrono::nanoseconds>(
         Clock::now() - start_);
     out << "{\n";
-    out << "  \"schema_version\": 1,\n";
+    out << "  \"schema_version\": 2,\n";
     out << "  \"detail\": \"" << perf_detail_name(detail_) << "\",\n";
     out << "  \"total_ms\": " << std::fixed << std::setprecision(3) << ms(total) << ",\n";
 
@@ -512,6 +607,33 @@ bool PerfProfiler::write_json_report(const std::string& path, std::string& error
                 << "\", \"expansions\": " << stats.expansions
                 << ", \"function_like_expansions\": " << stats.function_like_expansions
                 << ", \"replacement_tokens\": " << stats.replacement_tokens
+                << "}";
+        }
+    }
+    out << "\n  ],\n";
+
+    out << "  \"tentative_sites\": [\n";
+    first = true;
+    if (wants_full()) {
+        for (const auto* row : sorted_tentative_sites_by_time(tentative_parse_sites_, 200)) {
+            const auto& stats = row->second;
+            if (!first) {
+                out << ",\n";
+            }
+            first = false;
+            out << "    {\"file\": \"" << json_escape(stats.file)
+                << "\", \"function\": \"" << json_escape(stats.function)
+                << "\", \"line\": " << stats.line
+                << ", \"begins\": " << stats.begins
+                << ", \"commits\": " << stats.commits
+                << ", \"rollbacks\": " << stats.rollbacks
+                << ", \"time_ms\": " << ms(stats.duration)
+                << ", \"commit_time_ms\": " << ms(stats.commit_duration)
+                << ", \"rollback_time_ms\": " << ms(stats.rollback_duration)
+                << ", \"tokens_consumed\": " << stats.tokens_consumed
+                << ", \"tokens_rewound\": " << stats.tokens_rewound
+                << ", \"max_token_span\": " << stats.max_token_span
+                << ", \"max_depth\": " << stats.max_depth
                 << "}";
         }
     }

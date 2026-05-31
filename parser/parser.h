@@ -16,9 +16,15 @@
 #include "../collect/collect.h"
 #include "tentative_syntax_probe.h"
 #include <cctype>
+#include <chrono>
+#include <cstdint>
+#include <source_location>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+
+class PerfProfiler;
+
 enum class PrecLevel {
     UNKNOWN = 0,
     COMMA = 1, // ,
@@ -267,7 +273,9 @@ public:
 
     class TentativeParsingAction {
     public:
-        explicit TentativeParsingAction(Parser& parser);
+        explicit TentativeParsingAction(
+            Parser& parser,
+            std::source_location loc = std::source_location::current());
         TentativeParsingAction(const TentativeParsingAction&) = delete;
         TentativeParsingAction& operator=(const TentativeParsingAction&) = delete;
         ~TentativeParsingAction();
@@ -280,12 +288,23 @@ public:
         Parser& parser_;
         size_t context_id_ = 0;
         bool active_ = true;
+        PerfProfiler* tentative_profiler_ = nullptr;
+        const char* tentative_file_ = "";
+        const char* tentative_function_ = "";
+        uint32_t tentative_line_ = 0;
+        size_t tentative_start_token_idx_ = 0;
+        size_t tentative_depth_ = 0;
+        std::chrono::steady_clock::time_point tentative_start_;
+
+        void record_tentative_outcome(bool committed);
     };
     // for optics only, this code is the same as class above
     class RevertingTentativeParsingAction final : public TentativeParsingAction {
     public:
-        explicit RevertingTentativeParsingAction(Parser& parser)
-            : TentativeParsingAction(parser) {}
+        explicit RevertingTentativeParsingAction(
+            Parser& parser,
+            std::source_location loc = std::source_location::current())
+            : TentativeParsingAction(parser, loc) {}
         ~RevertingTentativeParsingAction() { revert(); }
     };
 
