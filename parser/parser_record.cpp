@@ -8,6 +8,7 @@
 #include "../collect/collect_templates_internal.h"
 #include "../helpers/qualified_name_utils.h"
 #include "../ast/special_members.h"
+#include "../perf_stats.h"
 #include <functional>
 #include <cstdint>
 #include <limits>
@@ -17,6 +18,14 @@
 bool is_c23_family_standard(const std::string& std_name);
 
 namespace {
+void bump_qualified_declarator_fast_reject() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserQualifiedDeclaratorFastRejects);
+    }
+}
+
 std::shared_ptr<BuiltinType> fixed_enum_integer_underlying_type(
     const std::shared_ptr<CType>& type,
     const ASTContext* ast_ctx = nullptr) {
@@ -2690,6 +2699,14 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
         };
 
     if (!is_cxx_mode_active() || starts_with_member_pointer_declarator_prefix()) {
+        return context;
+    }
+
+    auto prefix_annotation =
+        classify_cpp_qualified_declarator_prefix_for_lookahead();
+    if (prefix_annotation.kind ==
+        ParserAnnotationCache::CppQualifiedDeclaratorPrefixKind::NoMatch) {
+        bump_qualified_declarator_fast_reject();
         return context;
     }
 

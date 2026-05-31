@@ -159,6 +159,27 @@ void bump_annotation_cache_miss() {
         profiler->add_counter(PerfCounter::ParserAnnotationCacheMisses);
     }
 }
+
+void bump_declarator_annotation_hit() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserDeclaratorAnnotationHits);
+    }
+}
+
+void bump_declarator_annotation_miss() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserDeclaratorAnnotationMisses);
+    }
+}
+
+void bump_declarator_annotation_publish() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserDeclaratorAnnotationPublishes);
+    }
+}
 } // namespace
 
 size_t Parser::begin_tentative_context(TentativeMode mode) {
@@ -584,6 +605,392 @@ Parser::scan_cxx_parameter_clause_shape_syntax() {
             shape);
     }
     return shape;
+}
+
+ParserAnnotationCache::CxxDeclaratorParenSuffixAnnotation
+Parser::classify_cxx_declarator_paren_suffix_for_lookahead() {
+    ParserAnnotationCache::CxxDeclaratorParenSuffixAnnotation inconclusive;
+    inconclusive.kind =
+        ParserAnnotationCache::CxxDeclaratorParenSuffixKind::Inconclusive;
+    inconclusive.dependent_or_ambiguous = true;
+
+    if (tok_mgnt.has_split_tokens()) {
+        return inconclusive;
+    }
+
+    const bool use_cache = can_use_semantic_annotation_cache();
+    const size_t token_idx = tok_mgnt.get_token_idx();
+    ParserAnnotationCache::SemanticKey key;
+    if (use_cache) {
+        key = semantic_annotation_key();
+        if (auto cached =
+                annotation_cache_
+                    .lookup_cxx_declarator_paren_suffix_annotation(
+                        token_idx,
+                        key)) {
+            bump_declarator_annotation_hit();
+            return *cached;
+        }
+        bump_declarator_annotation_miss();
+    }
+
+    auto annotation = compute_cxx_declarator_paren_suffix_for_lookahead();
+    if (use_cache) {
+        annotation_cache_.store_cxx_declarator_paren_suffix_annotation(
+            token_idx,
+            key,
+            annotation);
+        bump_declarator_annotation_publish();
+    }
+    return annotation;
+}
+
+ParserAnnotationCache::CxxDeclaratorParenSuffixAnnotation
+Parser::compute_cxx_declarator_paren_suffix_for_lookahead() {
+    ParserAnnotationCache::CxxDeclaratorParenSuffixAnnotation result;
+    result.kind =
+        ParserAnnotationCache::CxxDeclaratorParenSuffixKind::NoMatch;
+    result.end_token_idx = tok_mgnt.get_token_idx();
+
+    if (!is_cxx_mode_active()) {
+        return result;
+    }
+
+    auto finish = [&](ParserAnnotationCache::CxxDeclaratorParenSuffixKind kind) {
+        result.kind = kind;
+        return result;
+    };
+
+    if (tok_mgnt.current_token().type == TokenType::RIGHT_PAREN) {
+        return finish(
+            ParserAnnotationCache::CxxDeclaratorParenSuffixKind::
+                EmptyParameterClause);
+    }
+    if (tok_mgnt.current_token().type == TokenType::ELLIPSIS) {
+        return finish(
+            ParserAnnotationCache::CxxDeclaratorParenSuffixKind::
+                EllipsisParameterClause);
+    }
+    if (is_gnu_attribute_token(tok_mgnt.current_token()) ||
+        (tok_mgnt.current_token().type == TokenType::LEFT_BRACKET &&
+         tok_mgnt.peek_token().type == TokenType::LEFT_BRACKET)) {
+        return finish(
+            ParserAnnotationCache::CxxDeclaratorParenSuffixKind::
+                DefiniteParameterClause);
+    }
+
+    auto shape = scan_cxx_parameter_clause_shape_syntax();
+    if (shape == tentative_syntax_probe::CxxParameterClauseShape::NoMatch) {
+        return finish(
+            ParserAnnotationCache::CxxDeclaratorParenSuffixKind::
+                DefiniteDirectInitializer);
+    }
+    if (shape == tentative_syntax_probe::CxxParameterClauseShape::Empty) {
+        return finish(
+            ParserAnnotationCache::CxxDeclaratorParenSuffixKind::
+                EmptyParameterClause);
+    }
+    if (shape == tentative_syntax_probe::CxxParameterClauseShape::Ellipsis) {
+        return finish(
+            ParserAnnotationCache::CxxDeclaratorParenSuffixKind::
+                EllipsisParameterClause);
+    }
+    if (shape ==
+        tentative_syntax_probe::CxxParameterClauseShape::PotentialParameter) {
+        result.kind =
+            ParserAnnotationCache::CxxDeclaratorParenSuffixKind::Ambiguous;
+        result.dependent_or_ambiguous = true;
+        return result;
+    }
+
+    TokenType parameter_start_type = tok_mgnt.current_token().type;
+    if (parameter_start_type == TokenType::IDENTIFIER ||
+        parameter_start_type == TokenType::SCOPE_RESOLUTION ||
+        (parameter_start_type == TokenType::COLON &&
+         tok_mgnt.peek_token().type == TokenType::COLON)) {
+        result.kind =
+            ParserAnnotationCache::CxxDeclaratorParenSuffixKind::Ambiguous;
+        result.dependent_or_ambiguous = true;
+        return result;
+    }
+
+    result.kind =
+        ParserAnnotationCache::CxxDeclaratorParenSuffixKind::Inconclusive;
+    result.dependent_or_ambiguous = true;
+    return result;
+}
+
+ParserAnnotationCache::CppQualifiedDeclaratorPrefixAnnotation
+Parser::classify_cpp_qualified_declarator_prefix_for_lookahead() {
+    ParserAnnotationCache::CppQualifiedDeclaratorPrefixAnnotation inconclusive;
+    inconclusive.kind =
+        ParserAnnotationCache::CppQualifiedDeclaratorPrefixKind::Inconclusive;
+    inconclusive.dependent_or_ambiguous = true;
+
+    if (tok_mgnt.has_split_tokens()) {
+        return inconclusive;
+    }
+
+    const bool use_cache = can_use_annotation_cache();
+    const size_t token_idx = tok_mgnt.get_token_idx();
+    const uint32_t key =
+        ParserAnnotationCache::make_config_key(syntax_probe_config());
+    if (use_cache) {
+        if (auto cached =
+                annotation_cache_
+                    .lookup_cpp_qualified_declarator_prefix_annotation(
+                        token_idx,
+                        key)) {
+            bump_declarator_annotation_hit();
+            return *cached;
+        }
+        bump_declarator_annotation_miss();
+    }
+
+    auto annotation = compute_cpp_qualified_declarator_prefix_for_lookahead();
+    if (use_cache) {
+        annotation_cache_.store_cpp_qualified_declarator_prefix_annotation(
+            token_idx,
+            key,
+            annotation);
+        bump_declarator_annotation_publish();
+    }
+    return annotation;
+}
+
+ParserAnnotationCache::CppQualifiedDeclaratorPrefixAnnotation
+Parser::compute_cpp_qualified_declarator_prefix_for_lookahead() {
+    ParserAnnotationCache::CppQualifiedDeclaratorPrefixAnnotation result;
+    result.kind =
+        ParserAnnotationCache::CppQualifiedDeclaratorPrefixKind::NoMatch;
+    result.end_token_idx = tok_mgnt.get_token_idx();
+
+    if (!is_cxx_mode_active()) {
+        return result;
+    }
+
+    const size_t start_idx = tok_mgnt.get_token_idx();
+    auto token_at = [&](size_t offset) -> const Token& {
+        if (offset == 0) {
+            return tok_mgnt.current_token();
+        }
+        return tok_mgnt.peek_token(offset);
+    };
+    auto finish_inconclusive = [&]() {
+        result.kind =
+            ParserAnnotationCache::CppQualifiedDeclaratorPrefixKind::
+                Inconclusive;
+        result.dependent_or_ambiguous = true;
+        return result;
+    };
+    auto skip_balanced_group_at =
+        [&](size_t& offset,
+            TokenType open_tok,
+            TokenType close_tok) {
+        if (token_at(offset).type != open_tok) {
+            return false;
+        }
+        size_t depth = 0;
+        while (token_at(offset).type != TokenType::Eof) {
+            TokenType type = token_at(offset).type;
+            if (type == open_tok) {
+                ++depth;
+            } else if (type == close_tok) {
+                --depth;
+                ++offset;
+                if (depth == 0) {
+                    return true;
+                }
+                continue;
+            }
+            ++offset;
+        }
+        return false;
+    };
+    auto skip_template_argument_list_at = [&](size_t& offset) {
+        if (token_at(offset).type != TokenType::LESS_THAN) {
+            return true;
+        }
+        int depth = 0;
+        while (token_at(offset).type != TokenType::Eof) {
+            TokenType type = token_at(offset).type;
+            if (type == TokenType::LEFT_PAREN) {
+                if (!skip_balanced_group_at(
+                        offset,
+                        TokenType::LEFT_PAREN,
+                        TokenType::RIGHT_PAREN)) {
+                    return false;
+                }
+                continue;
+            }
+            if (type == TokenType::LEFT_BRACKET) {
+                if (!skip_balanced_group_at(
+                        offset,
+                        TokenType::LEFT_BRACKET,
+                        TokenType::RIGHT_BRACKET)) {
+                    return false;
+                }
+                continue;
+            }
+            if (type == TokenType::LEFT_BRACE) {
+                if (!skip_balanced_group_at(
+                        offset,
+                        TokenType::LEFT_BRACE,
+                        TokenType::RIGHT_BRACE)) {
+                    return false;
+                }
+                continue;
+            }
+            if (type == TokenType::LESS_THAN) {
+                ++depth;
+                ++offset;
+                continue;
+            }
+            if (type == TokenType::GREATER_THAN) {
+                --depth;
+                ++offset;
+                if (depth == 0) {
+                    return true;
+                }
+                if (depth < 0) {
+                    return false;
+                }
+                continue;
+            }
+            if (type == TokenType::RIGHT_SHIFT ||
+                type == TokenType::ASSIGN_RSHIFT) {
+                if (depth <= 0) {
+                    return false;
+                }
+                if (depth <= 2) {
+                    ++offset;
+                    return true;
+                }
+                depth -= 2;
+                ++offset;
+                continue;
+            }
+            ++offset;
+        }
+        return false;
+    };
+    auto consume_scope_resolution_at = [&](size_t& offset) {
+        if (token_at(offset).type == TokenType::SCOPE_RESOLUTION) {
+            ++offset;
+            return true;
+        }
+        if (token_at(offset).type == TokenType::COLON &&
+            token_at(offset + 1).type == TokenType::COLON) {
+            offset += 2;
+            return true;
+        }
+        return false;
+    };
+    auto skip_post_pointer_qualifiers_at = [&](size_t& offset) {
+        while (true) {
+            TokenType type = token_at(offset).type;
+            if (type == TokenType::CONST ||
+                type == TokenType::VOLATILE ||
+                type == TokenType::RESTRICT ||
+                type == TokenType::ATOMIC ||
+                type == TokenType::NULLABILITY_QUALIFIER) {
+                ++offset;
+                continue;
+            }
+            if (is_gnu_attribute_token(token_at(offset))) {
+                ++offset;
+                if (token_at(offset).type == TokenType::LEFT_PAREN &&
+                    !skip_balanced_group_at(offset,
+                                            TokenType::LEFT_PAREN,
+                                            TokenType::RIGHT_PAREN)) {
+                    return false;
+                }
+                continue;
+            }
+            return true;
+        }
+    };
+    auto skip_leading_declarator_prefix_at = [&](size_t& offset) {
+        while (true) {
+            TokenType type = token_at(offset).type;
+            if (type == TokenType::MULTIPLY ||
+                type == TokenType::BITWISE_XOR) {
+                ++offset;
+                if (!skip_post_pointer_qualifiers_at(offset)) {
+                    return false;
+                }
+                continue;
+            }
+            if (type == TokenType::LOGICAL_AND ||
+                type == TokenType::BITWISE_AND) {
+                ++offset;
+                continue;
+            }
+            return true;
+        }
+    };
+    auto parse_identifier_component_at = [&](size_t& offset) {
+        if (token_at(offset).type != TokenType::IDENTIFIER) {
+            return false;
+        }
+        ++offset;
+        if (token_at(offset).type == TokenType::LESS_THAN) {
+            result.has_template_id_component = true;
+            if (!skip_template_argument_list_at(offset)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    size_t offset = 0;
+    if (!skip_leading_declarator_prefix_at(offset)) {
+        return finish_inconclusive();
+    }
+
+    bool has_global_qualifier = consume_scope_resolution_at(offset);
+    result.has_global_qualifier = has_global_qualifier;
+    bool saw_scope = has_global_qualifier;
+
+    if (has_global_qualifier &&
+        token_at(offset).type == TokenType::OPERATOR_KW) {
+        result.terminal_is_operator_id = true;
+        result.end_token_idx = start_idx + offset;
+        result.kind =
+            ParserAnnotationCache::CppQualifiedDeclaratorPrefixKind::
+                QualifiedDeclarator;
+        return result;
+    }
+
+    if (!parse_identifier_component_at(offset)) {
+        if (has_global_qualifier) {
+            return finish_inconclusive();
+        }
+        return result;
+    }
+
+    while (consume_scope_resolution_at(offset)) {
+        saw_scope = true;
+        if (token_at(offset).type == TokenType::OPERATOR_KW) {
+            result.terminal_is_operator_id = true;
+            result.end_token_idx = start_idx + offset;
+            result.kind =
+                ParserAnnotationCache::CppQualifiedDeclaratorPrefixKind::
+                    QualifiedDeclarator;
+            return result;
+        }
+        if (!parse_identifier_component_at(offset)) {
+            return finish_inconclusive();
+        }
+    }
+
+    result.end_token_idx = start_idx + offset;
+    if (saw_scope) {
+        result.kind =
+            ParserAnnotationCache::CppQualifiedDeclaratorPrefixKind::
+                QualifiedDeclarator;
+    }
+    return result;
 }
 
 Parser::TentativeParsingAction::TentativeParsingAction(

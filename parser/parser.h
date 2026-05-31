@@ -976,10 +976,22 @@ private:
     std::optional<TemplateArgument>
     try_make_cpp_template_name_argument_from_annotation(
         const ParserAnnotationCache::CppTemplateIdAnnotation& annotation);
+    ParserAnnotationCache::CppTemplateArgumentAnnotation
+    classify_cpp_template_argument_for_lookahead();
+    ParserAnnotationCache::CppTemplateArgumentAnnotation
+    compute_cpp_template_argument_for_lookahead();
     ParserAnnotationCache::CppQualifiedIdAnnotation
     classify_cpp_qualified_id_for_lookahead();
     ParserAnnotationCache::CppQualifiedIdAnnotation
     compute_cpp_qualified_id_for_lookahead();
+    ParserAnnotationCache::CxxDeclaratorParenSuffixAnnotation
+    classify_cxx_declarator_paren_suffix_for_lookahead();
+    ParserAnnotationCache::CxxDeclaratorParenSuffixAnnotation
+    compute_cxx_declarator_paren_suffix_for_lookahead();
+    ParserAnnotationCache::CppQualifiedDeclaratorPrefixAnnotation
+    classify_cpp_qualified_declarator_prefix_for_lookahead();
+    ParserAnnotationCache::CppQualifiedDeclaratorPrefixAnnotation
+    compute_cpp_qualified_declarator_prefix_for_lookahead();
     bool compute_cpp_named_type_specifier_for_lookahead();
 
     // Attribute parsing

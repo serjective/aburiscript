@@ -6,12 +6,21 @@
 #include "../collect/collect_templates_internal.h"
 #include "../helpers/casting.h"
 #include "../helpers/qualified_name_utils.h"
+#include "../perf_stats.h"
 
 // Parser-owned handling for out-of-line C++ member definitions.
 // Keep the heavy definition replay/merge logic out of parser_cxx.cpp so the
 // main C++ parser file stays focused on core syntax entrypoints.
 
 namespace {
+void bump_qualified_declarator_fast_reject() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserQualifiedDeclaratorFastRejects);
+    }
+}
+
 std::optional<std::string> namespace_prefix_from_member_qualifier(
     const std::string* qualifier_prefix) {
     if (!qualifier_prefix || qualifier_prefix->empty()) {
@@ -321,6 +330,39 @@ bool Parser::is_cpp_out_of_line_constructor_declaration_start() {
         return false;
     }
 
+    auto lacks_scope_before_parameter_list = [&]() {
+        size_t offset = 0;
+        while (peek_token_shortcut(offset).type == TokenType::CONSTEXPR_KW ||
+               peek_token_shortcut(offset).type == TokenType::CONSTEVAL_KW ||
+               peek_token_shortcut(offset).type == TokenType::INLINE) {
+            ++offset;
+        }
+        while (peek_token_shortcut(offset).type != TokenType::Eof) {
+            TokenType type = peek_token_shortcut(offset).type;
+            if (type == TokenType::SCOPE_RESOLUTION ||
+                (type == TokenType::COLON &&
+                 peek_token_shortcut(offset + 1).type ==
+                     TokenType::COLON)) {
+                return false;
+            }
+            if (type == TokenType::LEFT_PAREN) {
+                return true;
+            }
+            if (type == TokenType::SEMICOLON ||
+                type == TokenType::LEFT_BRACE ||
+                type == TokenType::ASSIGN) {
+                return true;
+            }
+            ++offset;
+        }
+        return false;
+    };
+
+    if (lacks_scope_before_parameter_list()) {
+        bump_qualified_declarator_fast_reject();
+        return false;
+    }
+
     RevertingTentativeParsingAction tentative(*this);
     while (gentle_check(TokenType::CONSTEXPR_KW) ||
            gentle_check(TokenType::CONSTEVAL_KW) ||
@@ -376,6 +418,37 @@ bool Parser::is_cpp_out_of_line_constructor_declaration_start() {
 
 bool Parser::is_cpp_out_of_line_destructor_declaration_start() {
     if (!is_cxx_mode_active()) {
+        return false;
+    }
+
+    auto lacks_scope_before_parameter_list = [&]() {
+        size_t offset = 0;
+        while (peek_token_shortcut(offset).type == TokenType::CONSTEVAL_KW) {
+            ++offset;
+        }
+        while (peek_token_shortcut(offset).type != TokenType::Eof) {
+            TokenType type = peek_token_shortcut(offset).type;
+            if (type == TokenType::SCOPE_RESOLUTION ||
+                (type == TokenType::COLON &&
+                 peek_token_shortcut(offset + 1).type ==
+                     TokenType::COLON)) {
+                return false;
+            }
+            if (type == TokenType::LEFT_PAREN) {
+                return true;
+            }
+            if (type == TokenType::SEMICOLON ||
+                type == TokenType::LEFT_BRACE ||
+                type == TokenType::ASSIGN) {
+                return true;
+            }
+            ++offset;
+        }
+        return false;
+    };
+
+    if (lacks_scope_before_parameter_list()) {
+        bump_qualified_declarator_fast_reject();
         return false;
     }
 

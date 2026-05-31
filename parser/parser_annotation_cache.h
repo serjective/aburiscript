@@ -100,6 +100,59 @@ public:
         bool dependent_or_ambiguous = false;
     };
 
+    enum class CppTemplateArgumentKind : uint8_t {
+        NoMatch,
+        Type,
+        TemplateName,
+        Expression,
+        TypedBraced,
+        DependentOrAmbiguous,
+        Inconclusive,
+        Error
+    };
+
+    struct CppTemplateArgumentAnnotation {
+        size_t end_token_idx = 0;
+        CppTemplateArgumentKind kind = CppTemplateArgumentKind::NoMatch;
+        bool followed_by_ellipsis = false;
+        bool dependent_or_ambiguous = false;
+    };
+
+    enum class CxxDeclaratorParenSuffixKind : uint8_t {
+        NoMatch,
+        EmptyParameterClause,
+        EllipsisParameterClause,
+        DefiniteParameterClause,
+        DefiniteDirectInitializer,
+        Ambiguous,
+        Inconclusive,
+        Error
+    };
+
+    struct CxxDeclaratorParenSuffixAnnotation {
+        size_t end_token_idx = 0;
+        CxxDeclaratorParenSuffixKind kind =
+            CxxDeclaratorParenSuffixKind::NoMatch;
+        bool dependent_or_ambiguous = false;
+    };
+
+    enum class CppQualifiedDeclaratorPrefixKind : uint8_t {
+        NoMatch,
+        QualifiedDeclarator,
+        Inconclusive,
+        Error
+    };
+
+    struct CppQualifiedDeclaratorPrefixAnnotation {
+        size_t end_token_idx = 0;
+        CppQualifiedDeclaratorPrefixKind kind =
+            CppQualifiedDeclaratorPrefixKind::NoMatch;
+        bool has_global_qualifier = false;
+        bool has_template_id_component = false;
+        bool terminal_is_operator_id = false;
+        bool dependent_or_ambiguous = false;
+    };
+
     ParserAnnotationCache() = default;
     explicit ParserAnnotationCache(size_t token_count) {
         reset(token_count);
@@ -300,6 +353,91 @@ public:
         entry.value = value;
     }
 
+    std::optional<CppTemplateArgumentAnnotation>
+    lookup_cpp_template_argument_annotation(size_t token_idx,
+                                            const SemanticKey& key) const {
+        const auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return std::nullopt;
+        }
+        const auto& entry = slot->cpp_template_argument;
+        if (!entry.valid || !(entry.key == key)) {
+            return std::nullopt;
+        }
+        return entry.value;
+    }
+
+    void store_cpp_template_argument_annotation(
+        size_t token_idx,
+        const SemanticKey& key,
+        CppTemplateArgumentAnnotation value) {
+        auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return;
+        }
+        auto& entry = slot->cpp_template_argument;
+        entry.valid = true;
+        entry.key = key;
+        entry.value = value;
+    }
+
+    std::optional<CxxDeclaratorParenSuffixAnnotation>
+    lookup_cxx_declarator_paren_suffix_annotation(
+        size_t token_idx,
+        const SemanticKey& key) const {
+        const auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return std::nullopt;
+        }
+        const auto& entry = slot->cxx_declarator_paren_suffix;
+        if (!entry.valid || !(entry.key == key)) {
+            return std::nullopt;
+        }
+        return entry.value;
+    }
+
+    void store_cxx_declarator_paren_suffix_annotation(
+        size_t token_idx,
+        const SemanticKey& key,
+        CxxDeclaratorParenSuffixAnnotation value) {
+        auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return;
+        }
+        auto& entry = slot->cxx_declarator_paren_suffix;
+        entry.valid = true;
+        entry.key = key;
+        entry.value = value;
+    }
+
+    std::optional<CppQualifiedDeclaratorPrefixAnnotation>
+    lookup_cpp_qualified_declarator_prefix_annotation(size_t token_idx,
+                                                      uint32_t key) const {
+        const auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return std::nullopt;
+        }
+        const auto& entry = slot->cpp_qualified_declarator_prefix;
+        if (!entry.valid || entry.key != key) {
+            return std::nullopt;
+        }
+        return entry.value;
+    }
+
+    void store_cpp_qualified_declarator_prefix_annotation(
+        size_t token_idx,
+        uint32_t key,
+        CppQualifiedDeclaratorPrefixAnnotation value) {
+        auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return;
+        }
+        auto& entry = slot->cpp_qualified_declarator_prefix;
+        entry.valid = true;
+        entry.key = key;
+        entry.value = value;
+    }
+
 private:
     struct ResultEntry {
         bool valid = false;
@@ -333,6 +471,24 @@ private:
         CppQualifiedIdAnnotation value;
     };
 
+    struct CppTemplateArgumentEntry {
+        bool valid = false;
+        SemanticKey key;
+        CppTemplateArgumentAnnotation value;
+    };
+
+    struct CxxDeclaratorParenSuffixEntry {
+        bool valid = false;
+        SemanticKey key;
+        CxxDeclaratorParenSuffixAnnotation value;
+    };
+
+    struct CppQualifiedDeclaratorPrefixEntry {
+        bool valid = false;
+        uint32_t key = 0;
+        CppQualifiedDeclaratorPrefixAnnotation value;
+    };
+
     struct TokenSlots {
         std::array<ResultEntry, static_cast<size_t>(ResultKind::Count)> results;
         Entry<tentative_syntax_probe::TemplateArgumentListScan>
@@ -345,6 +501,9 @@ private:
             semantic;
         CppTemplateIdEntry cpp_template_id;
         CppQualifiedIdEntry cpp_qualified_id;
+        CppTemplateArgumentEntry cpp_template_argument;
+        CxxDeclaratorParenSuffixEntry cxx_declarator_paren_suffix;
+        CppQualifiedDeclaratorPrefixEntry cpp_qualified_declarator_prefix;
     };
 
     TokenSlots* slot_for(size_t token_idx) {

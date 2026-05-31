@@ -117,6 +117,53 @@ void bump_qualified_id_inconclusive_fallback() {
     }
 }
 
+void bump_template_arg_annotation_hit() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTemplateArgumentAnnotationHits);
+    }
+}
+
+void bump_template_arg_annotation_miss() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTemplateArgumentAnnotationMisses);
+    }
+}
+
+void bump_template_arg_annotation_publish() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTemplateArgumentAnnotationPublishes);
+    }
+}
+
+void bump_template_arg_fast_type() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTemplateArgumentFastType);
+    }
+}
+
+void bump_template_arg_fast_expression() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTemplateArgumentFastExpression);
+    }
+}
+
+void bump_template_arg_inconclusive_fallback() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTemplateArgumentInconclusiveFallbacks);
+    }
+}
+
 Token make_template_split_token(const Token& source,
                                 TokenType type,
                                 std::string value,
@@ -1185,6 +1232,147 @@ Parser::try_make_cpp_template_name_argument_from_annotation(
             template_name);
     }
     return std::nullopt;
+}
+
+ParserAnnotationCache::CppTemplateArgumentAnnotation
+Parser::classify_cpp_template_argument_for_lookahead() {
+    ParserAnnotationCache::CppTemplateArgumentAnnotation inconclusive;
+    inconclusive.kind =
+        ParserAnnotationCache::CppTemplateArgumentKind::Inconclusive;
+    inconclusive.dependent_or_ambiguous = true;
+
+    if (tok_mgnt.has_split_tokens()) {
+        return inconclusive;
+    }
+
+    const bool use_cache = can_use_semantic_annotation_cache();
+    const size_t token_idx = get_token_idx();
+    ParserAnnotationCache::SemanticKey key;
+    if (use_cache) {
+        key = semantic_annotation_key();
+        if (auto cached =
+                annotation_cache_.lookup_cpp_template_argument_annotation(
+                    token_idx,
+                    key)) {
+            bump_template_arg_annotation_hit();
+            return *cached;
+        }
+        bump_template_arg_annotation_miss();
+    }
+
+    auto annotation = compute_cpp_template_argument_for_lookahead();
+    if (use_cache) {
+        annotation_cache_.store_cpp_template_argument_annotation(
+            token_idx,
+            key,
+            annotation);
+        bump_template_arg_annotation_publish();
+    }
+    return annotation;
+}
+
+ParserAnnotationCache::CppTemplateArgumentAnnotation
+Parser::compute_cpp_template_argument_for_lookahead() {
+    ParserAnnotationCache::CppTemplateArgumentAnnotation result;
+    result.kind = ParserAnnotationCache::CppTemplateArgumentKind::NoMatch;
+    result.end_token_idx = get_token_idx();
+
+    if (!is_cxx_mode_active()) {
+        return result;
+    }
+
+    auto finish = [&](ParserAnnotationCache::CppTemplateArgumentKind kind) {
+        result.kind = kind;
+        result.followed_by_ellipsis =
+            current_token().type != TokenType::ELLIPSIS &&
+            peek_token().type == TokenType::ELLIPSIS;
+        return result;
+    };
+    auto has_template_argument_list_shape_before_boundary = [&]() {
+        size_t offset = 0;
+        while (true) {
+            TokenType type = peek_token_shortcut(offset).type;
+            if (type == TokenType::Eof ||
+                is_cpp_template_argument_boundary_token_type(type)) {
+                return false;
+            }
+            if (type == TokenType::LESS_THAN) {
+                return true;
+            }
+            if (type == TokenType::LEFT_PAREN ||
+                type == TokenType::LEFT_BRACE ||
+                type == TokenType::LEFT_BRACKET) {
+                return false;
+            }
+            ++offset;
+        }
+    };
+
+    switch (current_token().type) {
+        case TokenType::COMMA:
+        case TokenType::GREATER_THAN:
+        case TokenType::RIGHT_SHIFT:
+        case TokenType::ASSIGN_RSHIFT:
+        case TokenType::Eof:
+            return result;
+
+        case TokenType::IDENTIFIER:
+        case TokenType::SCOPE_RESOLUTION:
+        case TokenType::COLON:
+            result.kind =
+                has_template_argument_list_shape_before_boundary()
+                    ? ParserAnnotationCache::CppTemplateArgumentKind::
+                          Inconclusive
+                    : ParserAnnotationCache::CppTemplateArgumentKind::
+                          DependentOrAmbiguous;
+            result.dependent_or_ambiguous = true;
+            return result;
+
+        case TokenType::INTEGER_CONST:
+        case TokenType::UNSIGNED_INTEGER_CONST:
+        case TokenType::LONG_CONST:
+        case TokenType::UNSIGNED_LONG_CONST:
+        case TokenType::LONG_LONG_CONST:
+        case TokenType::UNSIGNED_LONG_LONG_CONST:
+        case TokenType::FLOAT_CONST:
+        case TokenType::DOUBLE_CONST:
+        case TokenType::LONG_DOUBLE_CONST:
+        case TokenType::CHAR_LITERAL:
+        case TokenType::STRING_LITERAL:
+        case TokenType::TRUE_KW:
+        case TokenType::FALSE_KW:
+        case TokenType::THIS_KW:
+        case TokenType::SIZEOF:
+        case TokenType::ALIGNOF:
+        case TokenType::LEFT_PAREN:
+        case TokenType::LEFT_BRACKET:
+        case TokenType::NEGATE:
+        case TokenType::BITWISE_NOT:
+        case TokenType::LOGICAL_NOT:
+        case TokenType::INCREMENT:
+        case TokenType::DECREMENT:
+        case TokenType::PLUS:
+        case TokenType::MULTIPLY:
+        case TokenType::BITWISE_AND:
+        case TokenType::NEW:
+        case TokenType::DELETE:
+            return finish(
+                ParserAnnotationCache::CppTemplateArgumentKind::Expression);
+
+        case TokenType::LEFT_BRACE:
+        case TokenType::RIGHT_PAREN:
+        case TokenType::RIGHT_BRACE:
+        case TokenType::RIGHT_BRACKET:
+        case TokenType::SEMICOLON:
+            result.kind = ParserAnnotationCache::CppTemplateArgumentKind::Error;
+            return result;
+
+        default:
+            result.kind =
+                ParserAnnotationCache::CppTemplateArgumentKind::Inconclusive;
+            result.dependent_or_ambiguous = true;
+            return result;
+    }
 }
 
 ParserAnnotationCache::CppQualifiedIdAnnotation
@@ -2784,7 +2972,32 @@ TemplateArgument Parser::parse_cpp_template_argument() {
             TemplateArgument(direct_type_argument->type));
     }
 
-    if (probe_type_name_syntax() != tentative_syntax_probe::Result::NoMatch) {
+    bool should_try_tentative_type_argument = true;
+    auto template_arg_annotation =
+        classify_cpp_template_argument_for_lookahead();
+    switch (template_arg_annotation.kind) {
+        case ParserAnnotationCache::CppTemplateArgumentKind::Expression:
+        case ParserAnnotationCache::CppTemplateArgumentKind::NoMatch:
+            bump_template_arg_fast_expression();
+            should_try_tentative_type_argument = false;
+            break;
+        case ParserAnnotationCache::CppTemplateArgumentKind::Error:
+            should_try_tentative_type_argument = false;
+            break;
+        case ParserAnnotationCache::CppTemplateArgumentKind::Type:
+        case ParserAnnotationCache::CppTemplateArgumentKind::TypedBraced:
+        case ParserAnnotationCache::CppTemplateArgumentKind::TemplateName:
+            bump_template_arg_fast_type();
+            break;
+        case ParserAnnotationCache::CppTemplateArgumentKind::
+            DependentOrAmbiguous:
+        case ParserAnnotationCache::CppTemplateArgumentKind::Inconclusive:
+            bump_template_arg_inconclusive_fallback();
+            break;
+    }
+
+    if (should_try_tentative_type_argument &&
+        probe_type_name_syntax() != tentative_syntax_probe::Result::NoMatch) {
         RevertingTentativeParsingAction tentative(*this);
         try {
             DeclarationParser type_parser(this);
