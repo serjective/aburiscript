@@ -24,6 +24,38 @@ bool expression_type_is_bool(Expr* expr, const ASTContext* ast_ctx) {
     auto builtin = desugar_type(expr->get_type(), ast_ctx).as_shared<BuiltinType>();
     return builtin && builtin->builtin_kind == BuiltinTypes::Bool;
 }
+
+std::optional<size_t> compute_member_field_path_byte_offset(
+    const ObjectType* root_record,
+    const std::vector<uint32_t>& field_path,
+    const ASTContext* ast_ctx) {
+    if (!root_record || field_path.empty()) {
+        return std::nullopt;
+    }
+
+    const ObjectType* current_record = root_record;
+    std::shared_ptr<ObjectType> current_record_owner;
+    size_t byte_offset = 0;
+    for (size_t step = 0; step < field_path.size(); ++step) {
+        if (!current_record) {
+            return std::nullopt;
+        }
+        const auto& fields = current_record->semantic_fields();
+        size_t idx = field_path[step];
+        if (idx >= fields.size()) {
+            return std::nullopt;
+        }
+        const auto& field = fields[idx];
+        byte_offset += field.offset;
+        if (step + 1 == field_path.size()) {
+            return byte_offset;
+        }
+        current_record_owner =
+            desugar_type(field.type, ast_ctx).as_shared<ObjectType>();
+        current_record = current_record_owner.get();
+    }
+    return byte_offset;
+}
 } // namespace
 
 llvm::Value * ASTToLLVM::convert_unary_expr(Expr *expr) {
@@ -954,9 +986,15 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
             ctype = member->member_type.get_shared();
         } else if (record_uses_byte_layout(member_record_type.get())) {
             // Byte-offset GEP for structs represented as byte-layout
+            size_t byte_offset =
+                compute_member_field_path_byte_offset(
+                    member_record_type.get(),
+                    member->field_path,
+                    ast_ctx.get())
+                    .value_or(member->byte_offset);
             llvm::Type* i8_type = llvm::Type::getInt8Ty(*context);
             llvm::Value* offset = llvm::ConstantInt::get(
-                llvm::Type::getInt64Ty(*context), member->byte_offset);
+                llvm::Type::getInt64Ty(*context), byte_offset);
             ptr = builder.CreateInBoundsGEP(i8_type, member_base_ptr, offset, "member_ptr");
             ctype = member->member_type.get_shared();
         } else if (!member->field_path.empty()) {
@@ -994,9 +1032,15 @@ LValueResult ASTToLLVM::get_lvalue(Expr * expr) {
 
                 if (record_uses_byte_layout(current_record.get())) {
                     // If any intermediate struct uses byte-layout, fall back to byte-offset GEP
+                    size_t byte_offset =
+                        compute_member_field_path_byte_offset(
+                            member_record_type.get(),
+                            member->field_path,
+                            ast_ctx.get())
+                            .value_or(member->byte_offset);
                     llvm::Type* i8_type = llvm::Type::getInt8Ty(*context);
                     llvm::Value* offset = llvm::ConstantInt::get(
-                        llvm::Type::getInt64Ty(*context), member->byte_offset);
+                        llvm::Type::getInt64Ty(*context), byte_offset);
                     ptr = builder.CreateInBoundsGEP(i8_type, member_base_ptr, offset, "member_ptr");
                     ctype = member->member_type.get_shared();
                     goto member_done;

@@ -16,18 +16,44 @@ enum class TemplateArgumentDeductionResult : uint8_t {
     NonDeduced,
 };
 
-bool deduce_function_template_argument_types(
+bool deduction_result_can_continue(TemplateArgumentDeductionResult result) {
+    return result != TemplateArgumentDeductionResult::Mismatch;
+}
+
+TemplateArgumentDeductionResult bool_to_deduction_result(bool matched) {
+    return matched
+        ? TemplateArgumentDeductionResult::Match
+        : TemplateArgumentDeductionResult::Mismatch;
+}
+
+TemplateArgumentDeductionResult combine_deduction_results(
+    TemplateArgumentDeductionResult lhs,
+    TemplateArgumentDeductionResult rhs) {
+    if (lhs == TemplateArgumentDeductionResult::Mismatch ||
+        rhs == TemplateArgumentDeductionResult::Mismatch) {
+        return TemplateArgumentDeductionResult::Mismatch;
+    }
+    if (lhs == TemplateArgumentDeductionResult::Match ||
+        rhs == TemplateArgumentDeductionResult::Match) {
+        return TemplateArgumentDeductionResult::Match;
+    }
+    return TemplateArgumentDeductionResult::NonDeduced;
+}
+
+TemplateArgumentDeductionResult deduce_function_template_argument_types(
     QualType pattern_type,
     QualType argument_type,
     const TemplateParameterList& parameters,
     TemplateArgumentBindings& deduced_arguments,
+    Collect* collect,
     bool argument_is_lvalue = false);
 
-bool deduce_template_argument_types_impl(
+TemplateArgumentDeductionResult deduce_template_argument_types_impl(
     QualType pattern_type,
     QualType argument_type,
     const TemplateParameterList& parameters,
     TemplateArgumentBindings& deduced_arguments,
+    Collect* collect,
     TemplateTypeDeductionMode deduction_mode,
     bool argument_is_lvalue = false);
 
@@ -441,7 +467,8 @@ TemplateArgumentDeductionResult deduce_class_template_argument_binding(
     const TemplateArgument& pattern_argument,
     const TemplateArgument& argument_argument,
     const TemplateParameterList& parameters,
-    TemplateArgumentBindings& deduced_bindings) {
+    TemplateArgumentBindings& deduced_bindings,
+    Collect* collect) {
     if (pattern_argument.kind != argument_argument.kind) {
         return TemplateArgumentDeductionResult::Mismatch;
     }
@@ -466,13 +493,12 @@ TemplateArgumentDeductionResult deduce_class_template_argument_binding(
                 : TemplateArgumentDeductionResult::Mismatch;
         }
         return deduce_template_argument_types_impl(
-                   pattern_argument.type,
-                   argument_argument.type,
-                   parameters,
-                   deduced_bindings,
-                   TemplateTypeDeductionMode::PartialOrdering)
-            ? TemplateArgumentDeductionResult::Match
-            : TemplateArgumentDeductionResult::Mismatch;
+            pattern_argument.type,
+            argument_argument.type,
+            parameters,
+            deduced_bindings,
+            collect,
+            TemplateTypeDeductionMode::PartialOrdering);
     }
 
     if (pattern_argument.is_dependent &&
@@ -516,7 +542,8 @@ bool deduce_class_template_specialization_argument_list_into_existing_bindings(
     const TemplateParameterList& parameters,
     const std::vector<TemplateArgument>& actual_arguments,
     TemplateArgumentBindings& deduced_bindings,
-    bool finalize_bindings) {
+    bool finalize_bindings,
+    Collect* collect) {
     if (!pattern_layout.valid) {
         return false;
     }
@@ -539,7 +566,8 @@ bool deduce_class_template_specialization_argument_list_into_existing_bindings(
                         pattern_arguments[idx],
                         actual_arguments[idx],
                         parameters,
-                        deduced_bindings))) {
+                        deduced_bindings,
+                        collect))) {
                 return false;
             }
         }
@@ -553,7 +581,8 @@ bool deduce_class_template_specialization_argument_list_into_existing_bindings(
                     pattern_arguments[idx],
                     actual_arguments[idx],
                     parameters,
-                    deduced_bindings))) {
+                    deduced_bindings,
+                    collect))) {
             return false;
         }
     }
@@ -570,7 +599,8 @@ bool deduce_class_template_specialization_argument_list_into_existing_bindings(
                         pack_pattern_argument,
                         actual_arguments[pattern_layout.leading_count + idx],
                         parameters,
-                        deduced_bindings))) {
+                        deduced_bindings,
+                        collect))) {
                 return false;
             }
         }
@@ -586,7 +616,8 @@ bool deduce_class_template_specialization_argument_list_into_existing_bindings(
                     pattern_arguments[pattern_index],
                     actual_arguments[argument_index],
                     parameters,
-                    deduced_bindings))) {
+                    deduced_bindings,
+                    collect))) {
             return false;
         }
     }
@@ -600,7 +631,8 @@ bool deduce_class_template_specialization_argument_list(
     const TemplatePatternLayout& pattern_layout,
     const TemplateParameterList& parameters,
     const std::vector<TemplateArgument>& actual_arguments,
-    TemplateArgumentBindings& deduced_bindings_out) {
+    TemplateArgumentBindings& deduced_bindings_out,
+    Collect* collect) {
     deduced_bindings_out.clear();
     deduced_bindings_out.resize(parameters.size());
     return deduce_class_template_specialization_argument_list_into_existing_bindings(
@@ -609,7 +641,8 @@ bool deduce_class_template_specialization_argument_list(
         parameters,
         actual_arguments,
         deduced_bindings_out,
-        true);
+        true,
+        collect);
 }
 
 bool expand_partial_specialization_argument_pattern(
@@ -792,6 +825,7 @@ int compare_pack_layout_specificity(const FunctionParameterLayout& lhs,
 
 template <typename CompleteBindings>
 bool function_template_is_at_least_as_specialized_as(
+    Collect* collect,
     const FunctionTemplateDecl* parameter_template,
     const FunctionParameterLayout& parameter_layout,
     const std::vector<QualType>& transformed_argument_types,
@@ -815,12 +849,14 @@ bool function_template_is_at_least_as_specialized_as(
         if (!parameter_decl || argument_index >= transformed_argument_types.size()) {
             return false;
         }
-        return deduce_template_argument_types_impl(
-            parameter_decl->type,
-            transformed_argument_types[argument_index],
-            parameter_template->parameters,
-            deduced_arguments,
-            TemplateTypeDeductionMode::PartialOrdering);
+        return deduction_result_can_continue(
+            deduce_template_argument_types_impl(
+                parameter_decl->type,
+                transformed_argument_types[argument_index],
+                parameter_template->parameters,
+                deduced_arguments,
+                collect,
+                TemplateTypeDeductionMode::PartialOrdering));
     };
 
     if (!parameter_layout.pack_index.has_value()) {
@@ -1026,7 +1062,8 @@ bool deduce_class_template_specialization_match_into_bindings(
     const TemplateSpecializationType& pattern_specialization,
     const TemplateSpecializationMatchInfo& argument_specialization,
     const TemplateParameterList& parameters,
-    TemplateArgumentBindings& deduced_bindings) {
+    TemplateArgumentBindings& deduced_bindings,
+    Collect* collect) {
     TemplateArgumentBindings candidate_bindings = deduced_bindings;
     if (auto* pattern_template_parameter = dyn_cast<TemplateTemplateParmDecl>(
             const_cast<Decl*>(pattern_specialization.primary_template))) {
@@ -1062,7 +1099,8 @@ bool deduce_class_template_specialization_match_into_bindings(
             parameters,
             argument_specialization.arguments,
             candidate_bindings,
-            false)) {
+            false,
+            collect)) {
         return false;
     }
 
@@ -1074,7 +1112,8 @@ bool deduce_class_template_specialization_from_base_classes(
     const TemplateSpecializationType& pattern_specialization,
     QualType argument_type,
     const TemplateParameterList& parameters,
-    TemplateArgumentBindings& deduced_bindings) {
+    TemplateArgumentBindings& deduced_bindings,
+    Collect* collect) {
     const ObjectDecl* argument_decl =
         record_decl_from_template_deduction_type(argument_type);
     if (!argument_decl) {
@@ -1116,7 +1155,8 @@ bool deduce_class_template_specialization_from_base_classes(
                         pattern_specialization,
                         *base_specialization,
                         parameters,
-                        candidate_bindings)) {
+                        candidate_bindings,
+                        collect)) {
                     if (!matched_bindings.has_value()) {
                         matched_bindings = std::move(candidate_bindings);
                     } else if (!template_argument_bindings_equal(
@@ -1142,35 +1182,55 @@ bool deduce_class_template_specialization_from_base_classes(
     return true;
 }
 
-bool deduce_template_argument_types_impl(
+QualType try_expand_alias_template_deduction_pattern(
+    Collect* collect,
+    const TemplateSpecializationType& specialization) {
+    if (!collect) {
+        return QualType();
+    }
+    auto* alias_template = dyn_cast<AliasTemplateDecl>(
+        const_cast<Decl*>(specialization.primary_template));
+    if (!alias_template) {
+        return QualType();
+    }
+    return collect->collect_try_instantiate_alias_template_specialization(
+        alias_template,
+        specialization.arguments,
+        SrcLoc());
+}
+
+TemplateArgumentDeductionResult deduce_template_argument_types_impl(
     QualType pattern_type,
     QualType argument_type,
     const TemplateParameterList& parameters,
     TemplateArgumentBindings& deduced_arguments,
+    Collect* collect,
     TemplateTypeDeductionMode deduction_mode,
     bool argument_is_lvalue) {
     if (!pattern_type) {
-        return true;
+        return TemplateArgumentDeductionResult::Match;
     }
     if (!argument_type) {
-        return false;
+        return TemplateArgumentDeductionResult::Mismatch;
     }
     if (!type_depends_on_template_parameters(pattern_type)) {
         if (deduction_mode == TemplateTypeDeductionMode::Call) {
-            return true;
+            return TemplateArgumentDeductionResult::Match;
         }
-        return desugar_type(pattern_type).equals_qualified(desugar_type(argument_type));
+        return bool_to_deduction_result(
+            desugar_type(pattern_type).equals_qualified(
+                desugar_type(argument_type)));
     }
 
     auto spelled_pattern = desugar_typedefs(pattern_type);
     auto pattern_raw = spelled_pattern.get_shared();
     if (!pattern_raw) {
-        return false;
+        return TemplateArgumentDeductionResult::Mismatch;
     }
 
     if (deduction_mode == TemplateTypeDeductionMode::PartialOrdering &&
         isa<DecltypeExprType>(pattern_raw.get())) {
-        return true;
+        return TemplateArgumentDeductionResult::NonDeduced;
     }
 
     if (auto pattern_ref = dyn_cast_shared<ReferenceType>(pattern_raw)) {
@@ -1187,6 +1247,7 @@ bool deduce_template_argument_types_impl(
                     make_reference_type(argument_type, ReferenceKind::LValue),
                     parameters,
                     deduced_arguments,
+                    collect,
                     deduction_mode);
             }
             return deduce_template_argument_types_impl(
@@ -1194,6 +1255,7 @@ bool deduce_template_argument_types_impl(
                 remove_reference(argument_type),
                 parameters,
                 deduced_arguments,
+                collect,
                 deduction_mode);
         }
 
@@ -1210,17 +1272,19 @@ bool deduce_template_argument_types_impl(
                 spelled_argument,
                 parameters,
                 deduced_arguments,
+                collect,
                 deduction_mode);
         }
         if (!argument_ref ||
             pattern_ref->reference_kind != argument_ref->reference_kind) {
-            return false;
+            return TemplateArgumentDeductionResult::Mismatch;
         }
         return deduce_template_argument_types_impl(
             pattern_ref->referred_type,
             argument_ref->referred_type,
             parameters,
             deduced_arguments,
+            collect,
             deduction_mode);
     }
 
@@ -1234,89 +1298,106 @@ bool deduce_template_argument_types_impl(
                 argument_type,
                 parameters,
                 deduced_arguments,
+                collect,
                 deduction_mode);
         }
-        return true;
+        return TemplateArgumentDeductionResult::NonDeduced;
     }
 
     if (auto parm_type = dyn_cast_shared<TemplateTypeParmType>(pattern_raw)) {
-        return bind_deduced_template_argument(
-            spelled_pattern,
-            parm_type.get(),
-            argument_type,
-            parameters,
-            deduced_arguments,
-            deduction_mode);
+        return bool_to_deduction_result(
+            bind_deduced_template_argument(
+                spelled_pattern,
+                parm_type.get(),
+                argument_type,
+                parameters,
+                deduced_arguments,
+                deduction_mode));
     }
 
     auto spelled_argument = desugar_typedefs(argument_type);
     if (deduction_mode != TemplateTypeDeductionMode::Call &&
         spelled_pattern.get_qualifiers() != spelled_argument.get_qualifiers()) {
-        return false;
+        return TemplateArgumentDeductionResult::Mismatch;
     }
     spelled_pattern = strip_top_level_qualifiers(spelled_pattern);
     spelled_argument = strip_top_level_qualifiers(spelled_argument);
     auto argument_raw = spelled_argument.get_shared();
     if (!argument_raw) {
-        return false;
+        return TemplateArgumentDeductionResult::Mismatch;
     }
 
     if (auto pattern_ptr = dyn_cast_shared<PointerType>(pattern_raw)) {
         auto argument_ptr = dyn_cast_shared<PointerType>(argument_raw);
-        return argument_ptr &&
-            deduce_template_argument_types_impl(
+        if (!argument_ptr) {
+            return TemplateArgumentDeductionResult::Mismatch;
+        }
+        return deduce_template_argument_types_impl(
                 pattern_ptr->pointed_type,
                 argument_ptr->pointed_type,
                 parameters,
                 deduced_arguments,
+                collect,
                 deduction_mode);
     }
 
     if (auto pattern_mem_ptr = dyn_cast_shared<MemberPointerType>(pattern_raw)) {
         auto argument_mem_ptr = dyn_cast_shared<MemberPointerType>(argument_raw);
-        return argument_mem_ptr &&
-            deduce_template_argument_types_impl(
-                pattern_mem_ptr->class_type,
-                argument_mem_ptr->class_type,
-                parameters,
-                deduced_arguments,
-                deduction_mode) &&
-            deduce_template_argument_types_impl(
-                pattern_mem_ptr->member_type,
-                argument_mem_ptr->member_type,
-                parameters,
-                deduced_arguments,
-                deduction_mode);
+        if (!argument_mem_ptr) {
+            return TemplateArgumentDeductionResult::Mismatch;
+        }
+        auto class_result = deduce_template_argument_types_impl(
+            pattern_mem_ptr->class_type,
+            argument_mem_ptr->class_type,
+            parameters,
+            deduced_arguments,
+            collect,
+            deduction_mode);
+        if (class_result == TemplateArgumentDeductionResult::Mismatch) {
+            return class_result;
+        }
+        auto member_result = deduce_template_argument_types_impl(
+            pattern_mem_ptr->member_type,
+            argument_mem_ptr->member_type,
+            parameters,
+            deduced_arguments,
+            collect,
+            deduction_mode);
+        return combine_deduction_results(class_result, member_result);
     }
 
     if (auto pattern_block_ptr = dyn_cast_shared<BlockPointerType>(pattern_raw)) {
         auto argument_block_ptr = dyn_cast_shared<BlockPointerType>(argument_raw);
-        return argument_block_ptr &&
-            deduce_template_argument_types_impl(
+        if (!argument_block_ptr) {
+            return TemplateArgumentDeductionResult::Mismatch;
+        }
+        return deduce_template_argument_types_impl(
                 pattern_block_ptr->pointed_type,
                 argument_block_ptr->pointed_type,
                 parameters,
                 deduced_arguments,
+                collect,
                 deduction_mode);
     }
 
     if (auto pattern_array = dyn_cast_shared<ArrayType>(pattern_raw)) {
         auto argument_array = dyn_cast_shared<ArrayType>(argument_raw);
         if (!argument_array) {
-            return false;
+            return TemplateArgumentDeductionResult::Mismatch;
         }
         if (!deduce_array_bound_template_argument(
                 *pattern_array,
                 *argument_array,
                 parameters,
                 deduced_arguments)) {
-            return false;
+            return TemplateArgumentDeductionResult::Mismatch;
         }
         return deduce_template_argument_types_impl(
             pattern_array->element_type,
             argument_array->element_type,
             parameters,
             deduced_arguments,
+            collect,
             deduction_mode);
     }
 
@@ -1325,43 +1406,64 @@ bool deduce_template_argument_types_impl(
         if (!argument_fn ||
             pattern_fn->parameters.size() != argument_fn->parameters.size() ||
             pattern_fn->is_variadic != argument_fn->is_variadic) {
-            return false;
+            return TemplateArgumentDeductionResult::Mismatch;
         }
-        if (!deduce_template_argument_types_impl(
-                pattern_fn->ret_type,
-                argument_fn->ret_type,
-                parameters,
-                deduced_arguments,
-                deduction_mode)) {
-            return false;
+        auto result = deduce_template_argument_types_impl(
+            pattern_fn->ret_type,
+            argument_fn->ret_type,
+            parameters,
+            deduced_arguments,
+            collect,
+            deduction_mode);
+        if (result == TemplateArgumentDeductionResult::Mismatch) {
+            return result;
         }
         for (size_t idx = 0; idx < pattern_fn->parameters.size(); ++idx) {
-            if (!deduce_template_argument_types_impl(
-                    pattern_fn->parameters[idx],
-                    argument_fn->parameters[idx],
-                    parameters,
-                    deduced_arguments,
-                    deduction_mode)) {
-                return false;
+            auto parameter_result = deduce_template_argument_types_impl(
+                pattern_fn->parameters[idx],
+                argument_fn->parameters[idx],
+                parameters,
+                deduced_arguments,
+                collect,
+                deduction_mode);
+            result = combine_deduction_results(result, parameter_result);
+            if (result == TemplateArgumentDeductionResult::Mismatch) {
+                return result;
             }
         }
-        return true;
+        return result;
     }
 
     if (auto pattern_vector = dyn_cast_shared<VectorType>(pattern_raw)) {
         auto argument_vector = dyn_cast_shared<VectorType>(argument_raw);
-        return argument_vector &&
-            pattern_vector->total_bytes == argument_vector->total_bytes &&
-            deduce_template_argument_types_impl(
+        if (!argument_vector ||
+            pattern_vector->total_bytes != argument_vector->total_bytes) {
+            return TemplateArgumentDeductionResult::Mismatch;
+        }
+        return deduce_template_argument_types_impl(
                 pattern_vector->element_type,
                 argument_vector->element_type,
                 parameters,
                 deduced_arguments,
+                collect,
                 deduction_mode);
     }
 
     if (auto pattern_specialization =
             dyn_cast_shared<TemplateSpecializationType>(pattern_raw)) {
+        if (auto expanded_alias =
+                try_expand_alias_template_deduction_pattern(
+                    collect,
+                    *pattern_specialization)) {
+            return deduce_template_argument_types_impl(
+                expanded_alias,
+                argument_type,
+                parameters,
+                deduced_arguments,
+                collect,
+                deduction_mode,
+                argument_is_lvalue);
+        }
         auto argument_specialization =
             extract_template_specialization_match_info(argument_type);
         if (argument_specialization.has_value()) {
@@ -1369,44 +1471,52 @@ bool deduce_template_argument_types_impl(
                     *pattern_specialization,
                     *argument_specialization,
                     parameters,
-                    deduced_arguments)) {
-                return true;
+                    deduced_arguments,
+                    collect)) {
+                return TemplateArgumentDeductionResult::Match;
             }
         } else {
             if (deduction_mode == TemplateTypeDeductionMode::PartialOrdering &&
                 isa<AliasTemplateDecl>(
                     const_cast<Decl*>(
                         pattern_specialization->primary_template))) {
-                return true;
+                return TemplateArgumentDeductionResult::NonDeduced;
             }
         }
-        return deduction_mode == TemplateTypeDeductionMode::Call &&
+        if (deduction_mode == TemplateTypeDeductionMode::Call &&
             deduce_class_template_specialization_from_base_classes(
-                *pattern_specialization,
-                argument_type,
-                parameters,
-                deduced_arguments);
+                    *pattern_specialization,
+                    argument_type,
+                    parameters,
+                    deduced_arguments,
+                    collect)) {
+            return TemplateArgumentDeductionResult::Match;
+        }
+        return TemplateArgumentDeductionResult::Mismatch;
     }
 
     auto canonical_pattern = desugar_type(spelled_pattern);
     auto canonical_argument = desugar_type(spelled_argument);
     if (!canonical_pattern || !canonical_argument) {
-        return false;
+        return TemplateArgumentDeductionResult::Mismatch;
     }
-    return canonical_pattern->equals(*canonical_argument.get_shared());
+    return bool_to_deduction_result(
+        canonical_pattern->equals(*canonical_argument.get_shared()));
 }
 
-bool deduce_function_template_argument_types(
+TemplateArgumentDeductionResult deduce_function_template_argument_types(
     QualType pattern_type,
     QualType argument_type,
     const TemplateParameterList& parameters,
     TemplateArgumentBindings& deduced_arguments,
+    Collect* collect,
     bool argument_is_lvalue) {
     return deduce_template_argument_types_impl(
         pattern_type,
         argument_type,
         parameters,
         deduced_arguments,
+        collect,
         TemplateTypeDeductionMode::Call,
         argument_is_lvalue);
 }
@@ -1469,7 +1579,8 @@ bool class_template_partial_specialization_is_at_least_as_specialized_as(
         parameter_layout,
         parameter_partial->parameters,
         transformed_argument_patterns,
-        deduced_bindings);
+        deduced_bindings,
+        &collect);
 }
 
 } // namespace
@@ -1510,7 +1621,8 @@ bool deduce_class_template_partial_specialization_bindings(
             partial_specialization->parameters,
             normalized_actual_arguments,
             deduced_bindings_out,
-            /*finalize_bindings=*/false) ||
+            /*finalize_bindings=*/false,
+            &collect) ||
         !finalize_deduced_template_bindings(
             partial_specialization->parameters,
             deduced_bindings_out)) {
@@ -1608,7 +1720,8 @@ bool deduce_variable_template_partial_specialization_bindings(
             partial_specialization->parameters,
             normalized_actual_arguments,
             deduced_bindings_out,
-            /*finalize_bindings=*/false) ||
+            /*finalize_bindings=*/false,
+            &collect) ||
         !finalize_deduced_template_bindings(
             partial_specialization->parameters,
             deduced_bindings_out)) {
@@ -1691,7 +1804,8 @@ bool is_variable_template_partial_specialization_more_specialized(
                 parameter_layout,
                 parameter_partial->parameters,
                 transformed_argument_patterns,
-                deduced_bindings);
+                deduced_bindings,
+                &collect);
         };
 
     bool rhs_from_lhs =
@@ -1864,13 +1978,14 @@ bool Collect::deduce_function_template_call_arguments(
             argument_type = strip_top_level_qualifiers(argument_type);
         }
 
-        bool deduced = deduce_function_template_argument_types(
+        auto deduced = deduce_function_template_argument_types(
             pattern_type,
             argument_type,
             function_template->parameters,
             deduced_arguments,
+            this,
             argument_category == ValueCategory::LValue);
-        return deduced;
+        return deduction_result_can_continue(deduced);
     };
 
     if (!pack_param_index.has_value()) {
@@ -2079,12 +2194,14 @@ bool Collect::resolve_class_template_argument_deduction(
                 argument_type = strip_top_level_qualifiers(argument_type);
             }
 
-            return deduce_function_template_argument_types(
-                pattern_type,
-                argument_type,
-                guide->parameters,
-                bindings_out,
-                argument_category == ValueCategory::LValue);
+            return deduction_result_can_continue(
+                deduce_function_template_argument_types(
+                    pattern_type,
+                    argument_type,
+                    guide->parameters,
+                    bindings_out,
+                    this,
+                    argument_category == ValueCategory::LValue));
         };
 
         if (!pack_param_index.has_value()) {
@@ -2360,20 +2477,24 @@ bool Collect::deduce_function_template_specialization_arguments_from_pattern(
         deduced_arguments = *initial_bindings;
     }
 
-    if (!deduce_function_template_argument_types(
-            pattern_function->ret_type,
-            specialized_function->ret_type,
-            template_parameters,
-            deduced_arguments)) {
+    if (!deduction_result_can_continue(
+            deduce_function_template_argument_types(
+                pattern_function->ret_type,
+                specialized_function->ret_type,
+                template_parameters,
+                deduced_arguments,
+                this))) {
         return false;
     }
 
     for (size_t idx = 0; idx < specialized_function->parameters.size(); ++idx) {
-        if (!deduce_function_template_argument_types(
-                pattern_function->parameters[idx + implicit_object_parameter_count],
-                specialized_function->parameters[idx],
-                template_parameters,
-                deduced_arguments)) {
+        if (!deduction_result_can_continue(
+                deduce_function_template_argument_types(
+                    pattern_function->parameters[idx + implicit_object_parameter_count],
+                    specialized_function->parameters[idx],
+                    template_parameters,
+                    deduced_arguments,
+                    this))) {
             return false;
         }
     }
@@ -2491,6 +2612,7 @@ Collect::compare_function_template_partial_ordering(
                 analyze_function_parameter_layout(
                     parameter_template ? parameter_template->function_decl() : nullptr);
             return function_template_is_at_least_as_specialized_as(
+                this,
                 parameter_template,
                 parameter_layout,
                 transformed_argument_types,
@@ -2645,6 +2767,7 @@ Collect::compare_function_template_partial_ordering(
         }
 
         return function_template_is_at_least_as_specialized_as(
+            this,
             parameter_template,
             parameter_layout,
             transformed_argument_types,
