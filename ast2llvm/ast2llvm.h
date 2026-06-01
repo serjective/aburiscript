@@ -318,6 +318,8 @@ public:
                                 const std::string& context,
                                 CppCtorDtorVariant variant =
                                     CppCtorDtorVariant::Complete);
+    llvm::Value* convert_cpp_pseudo_destructor_expression(
+        CppPseudoDestructorExpr* expr);
     llvm::Value* emit_cpp_operator_call(
         const std::shared_ptr<Symbol>& callee_sym,
         const std::vector<std::pair<llvm::Value*, QualType>>& args,

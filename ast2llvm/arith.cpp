@@ -1762,10 +1762,8 @@ llvm::Value * ASTToLLVM::convert_expression(Expr *expr) {
         case StmtKind::CppDeleteExpr:
             return convert_cpp_delete_expression(static_cast<CppDeleteExpr*>(expr));
         case StmtKind::CppPseudoDestructorExpr:
-            error(
-                "convert_expression(): pseudo-destructor expressions are only supported in unevaluated contexts",
-                expr->location);
-            return nullptr;
+            return convert_cpp_pseudo_destructor_expression(
+                static_cast<CppPseudoDestructorExpr*>(expr));
         case StmtKind::BlockExpr:
             return convert_block_expression(static_cast<BlockExpr*>(expr));
         case StmtKind::CppLambdaExpr: {

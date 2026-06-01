@@ -665,6 +665,47 @@ void ASTToLLVM::emit_cpp_object_teardown_recursive(
     }
 }
 
+llvm::Value* ASTToLLVM::convert_cpp_pseudo_destructor_expression(
+    CppPseudoDestructorExpr* expr) {
+    if (!expr || !expr->base) {
+        error("convert_cpp_pseudo_destructor_expression(): invalid expression",
+              expr ? expr->location : SrcLoc());
+        return nullptr;
+    }
+
+    llvm::Value* object_addr = nullptr;
+    if (expr->is_arrow) {
+        object_addr = convert_expression(expr->base.get());
+    } else {
+        auto base_lvalue = get_lvalue(expr->base.get());
+        object_addr = base_lvalue.address;
+        if (!object_addr) {
+            error(
+                "convert_cpp_pseudo_destructor_expression(): dot pseudo-destructor requires an lvalue object",
+                expr->location);
+            return nullptr;
+        }
+    }
+
+    if (!object_addr) {
+        error("convert_cpp_pseudo_destructor_expression(): failed to lower object address",
+              expr->location);
+        return nullptr;
+    }
+
+    if (canonical_type_kind(expr->destroyed_type, ast_ctx.get()) == TypeKind::Object) {
+        emit_cpp_object_teardown_recursive(
+            expr->destroyed_type,
+            object_addr,
+            expr->destructor_sym,
+            expr->location,
+            "convert_cpp_pseudo_destructor_expression()",
+            CppCtorDtorVariant::Complete);
+    }
+
+    return llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
+}
+
 void ASTToLLVM::emit_cpp_global_object_dtor_thunk(
     const std::string& thunk_name,
     const QualType& object_type,
