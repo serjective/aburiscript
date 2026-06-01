@@ -98,6 +98,36 @@ void bump_postfix_template_suffix_fast_reject() {
     }
 }
 
+void bump_cast_direct_type_id_parse() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserCastDirectTypeIdParses);
+    }
+}
+
+void bump_cast_direct_type_id_fallback() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserCastDirectTypeIdFallbacks);
+    }
+}
+
+void bump_type_construction_direct_type_id_parse() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTypeConstructionDirectTypeIdParses);
+    }
+}
+
+void bump_type_construction_direct_type_id_fallback() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTypeConstructionDirectTypeIdFallbacks);
+    }
+}
+
 bool try_get_fold_operator(const Token& token, BinOpTypes& op_out) {
     std::string spelling = token.value;
     op_out = string2bop(spelling);
@@ -747,6 +777,158 @@ std::unique_ptr<Expr> Parser::try_parse_cpp_type_construction_expression() {
     }
     if (starts_with_cpp_dependent_qualified_call_expression()) {
         return nullptr;
+    }
+
+    size_t direct_start_idx = get_token_idx();
+    auto direct_split_state = tok_mgnt.get_split_token_state();
+    auto restore_direct_type_construction = [&]() {
+        set_token_idx(direct_start_idx);
+        tok_mgnt.set_split_token_state(direct_split_state);
+    };
+    try {
+        auto direct_type =
+            try_parse_cpp_direct_simple_type_id(
+                CppDirectTypeIdContext::TypeConstruction);
+        if (direct_type) {
+            QualType target_type = direct_type->type;
+            if (auto dependent_name =
+                    dyn_cast_shared<DependentNameType>(
+                        target_type.get_shared());
+                dependent_name &&
+                !dependent_name->requires_typename_keyword) {
+                restore_direct_type_construction();
+                return nullptr;
+            }
+
+            if (gentle_check(TokenType::LEFT_PAREN)) {
+                advance(); // consume '('
+                std::vector<std::unique_ptr<Expr>> args;
+                if (!gentle_check(TokenType::RIGHT_PAREN)) {
+                    TemplateArgumentGroupGuard group_guard(*this);
+                    do {
+                        auto arg = parse_call_argument_expression();
+                        args.push_back(std::move(arg));
+                    } while (gentle_check_and_consume(TokenType::COMMA));
+                }
+                check_and_consume(TokenType::RIGHT_PAREN);
+                bump_type_construction_direct_type_id_parse();
+                return collect_->collect_cpp_function_style_cast(
+                    target_type,
+                    std::move(args),
+                    loc);
+            }
+
+            if (gentle_check(TokenType::LEFT_BRACE)) {
+                auto init_expr = parse_init_list();
+                auto* init_list = dyn_cast<InitListExpr>(init_expr.get());
+                if (!init_list) {
+                    restore_direct_type_construction();
+                    bump_type_construction_direct_type_id_fallback();
+                } else {
+                    auto owned_init_list = std::unique_ptr<InitListExpr>(
+                        static_cast<InitListExpr*>(init_expr.release()));
+
+                    auto init_list_depends_on_template_parameters =
+                        [&](const InitListExpr* list,
+                            const auto& self) -> bool {
+                        if (!list) {
+                            return false;
+                        }
+                        for (const auto& element : list->elements) {
+                            for (const auto& designator :
+                                 element.designators) {
+                                if (expr_depends_on_active_template_parameter(
+                                        designator.index.get()) ||
+                                    expr_depends_on_active_template_parameter(
+                                        designator.range_end.get())) {
+                                    return true;
+                                }
+                            }
+                            if (!element.value) {
+                                continue;
+                            }
+                            if (auto* nested =
+                                    dyn_cast<InitListExpr>(
+                                        element.value.get())) {
+                                if (self(nested, self)) {
+                                    return true;
+                                }
+                            }
+                            if (expr_depends_on_active_template_parameter(
+                                    element.value.get()) ||
+                                type_depends_on_template_parameters(
+                                    element.value->get_type(),
+                                    ast_ctx.get())) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+
+                    bool dependent_list_initialization =
+                        type_depends_on_template_parameters(
+                            target_type,
+                            ast_ctx.get()) ||
+                        init_list_depends_on_template_parameters(
+                            owned_init_list.get(),
+                            init_list_depends_on_template_parameters);
+                    bump_type_construction_direct_type_id_parse();
+                    if (dependent_list_initialization) {
+                        if (!owned_init_list->actions.empty() ||
+                            !owned_init_list->mappings.empty()) {
+                            error_custloc(
+                                "dependent braced type construction does not support lowered initializer actions",
+                                loc);
+                            return collect_->collect_error_expression(
+                                "unsupported dependent braced type construction",
+                                loc);
+                        }
+
+                        std::vector<std::unique_ptr<Expr>> args;
+                        args.reserve(owned_init_list->elements.size());
+                        for (auto& element : owned_init_list->elements) {
+                            if (!element.designators.empty()) {
+                                error_custloc(
+                                    "dependent braced type construction does not support designators",
+                                    element.loc);
+                                return collect_->collect_error_expression(
+                                    "unsupported dependent braced type construction",
+                                    element.loc);
+                            }
+                            args.push_back(std::move(element.value));
+                        }
+
+                        auto deferred =
+                            collect_->collect_cpp_function_style_cast(
+                                target_type,
+                                std::move(args),
+                                loc);
+                        if (auto* cast =
+                                dyn_cast<CppFunctionStyleCastExpr>(
+                                    deferred.get())) {
+                            cast->is_list_init = true;
+                        }
+                        return deferred;
+                    }
+
+                    return collect_
+                        ->collect_cpp_type_list_initialization_expression(
+                            target_type,
+                            std::move(owned_init_list),
+                            loc);
+                }
+            } else {
+                restore_direct_type_construction();
+                bump_type_construction_direct_type_id_fallback();
+            }
+        } else {
+            bump_type_construction_direct_type_id_fallback();
+        }
+    } catch (const FatalErrorLimitReached&) {
+        throw;
+    } catch (const ParseError&) {
+        restore_direct_type_construction();
+        bump_type_construction_direct_type_id_fallback();
     }
 
     RevertingTentativeParsingAction tentative(*this);
@@ -3451,6 +3633,37 @@ std::unique_ptr<Expr> Parser::parse_cast_expression() {
     }
 
     if (should_try_cast) {
+        size_t direct_start_idx = get_token_idx();
+        auto direct_split_state = tok_mgnt.get_split_token_state();
+        auto restore_direct_cast = [&]() {
+            set_token_idx(direct_start_idx);
+            tok_mgnt.set_split_token_state(direct_split_state);
+        };
+        try {
+            advance(); // consume '('
+            auto direct_type =
+                try_parse_cpp_direct_simple_type_id(
+                    CppDirectTypeIdContext::Cast);
+            if (direct_type &&
+                gentle_check_and_consume(TokenType::RIGHT_PAREN) &&
+                token_can_start_cast_operand(current_token().type) &&
+                !gentle_check(TokenType::LEFT_BRACE)) {
+                bump_cast_direct_type_id_parse();
+                auto exp = parse_cast_expression();
+                return collect_->collect_explicit_cast(
+                    std::move(exp),
+                    direct_type->type,
+                    t.loc);
+            }
+            restore_direct_cast();
+            bump_cast_direct_type_id_fallback();
+        } catch (const FatalErrorLimitReached&) {
+            throw;
+        } catch (const ParseError&) {
+            restore_direct_cast();
+            bump_cast_direct_type_id_fallback();
+        }
+
         TentativeParsingAction tentative(*this);
         try {
             advance(); // consume '('

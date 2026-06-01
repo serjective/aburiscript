@@ -762,6 +762,17 @@ private:
     const TemplateNonTypeParmDecl* find_active_non_type_template_parameter(
         const Symbol* sym) const;
     bool expr_depends_on_active_template_parameter(const Expr* expr) const;
+    enum class CppDirectTypeIdContext : uint8_t {
+        TemplateArgument,
+        Cast,
+        TypeConstruction,
+        DeclaratorParameter
+    };
+    struct ParsedCppDirectTypeId {
+        QualType type;
+    };
+    std::optional<ParsedCppDirectTypeId>
+    try_parse_cpp_direct_simple_type_id(CppDirectTypeIdContext context);
     struct ParsedCppTemplateTypeArgument {
         QualType type;
         bool followed_by_left_brace = false;

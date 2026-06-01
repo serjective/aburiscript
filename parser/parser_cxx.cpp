@@ -196,6 +196,27 @@ void bump_template_arg_tentative_type_avoided() {
     }
 }
 
+void bump_direct_type_id_parse() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserDirectTypeIdParses);
+    }
+}
+
+void bump_direct_type_id_fallback() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserDirectTypeIdFallbacks);
+    }
+}
+
+void bump_direct_type_id_complex_fallback() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserDirectTypeIdComplexFallbacks);
+    }
+}
+
 void bump_type_scope_annotation_hit() {
     if (auto* profiler = active_perf_profiler();
         profiler && profiler->wants_full()) {
@@ -2985,8 +3006,8 @@ bool Parser::expr_depends_on_active_template_parameter(const Expr* expr) const {
            collect_->expression_depends_on_template_parameters(expr);
 }
 
-std::optional<Parser::ParsedCppTemplateTypeArgument>
-Parser::try_parse_cpp_template_type_argument_from_annotation() {
+std::optional<Parser::ParsedCppDirectTypeId>
+Parser::try_parse_cpp_direct_simple_type_id(CppDirectTypeIdContext context) {
     if (!is_cxx_mode_active() || !collect_) {
         return std::nullopt;
     }
@@ -2998,15 +3019,15 @@ Parser::try_parse_cpp_template_type_argument_from_annotation() {
         tok_mgnt.set_split_token_state(saved_split_state);
     };
 
-    auto fallback = [&]() -> std::optional<ParsedCppTemplateTypeArgument> {
-        bump_template_arg_annotated_type_fallback();
+    auto fallback = [&]() -> std::optional<ParsedCppDirectTypeId> {
+        bump_direct_type_id_fallback();
         restore();
         return std::nullopt;
     };
 
     auto complex_fallback =
-        [&]() -> std::optional<ParsedCppTemplateTypeArgument> {
-        bump_template_arg_annotated_type_complex_fallback();
+        [&]() -> std::optional<ParsedCppDirectTypeId> {
+        bump_direct_type_id_complex_fallback();
         restore();
         return std::nullopt;
     };
@@ -3119,8 +3140,30 @@ Parser::try_parse_cpp_template_type_argument_from_annotation() {
     };
 
     auto can_consume_annotated_type_base = [&]() {
-        auto annotation = classify_cpp_type_scope_for_lookahead(
-            ParserAnnotationCache::CppTypeScopeContext::TemplateArgument);
+        ParserAnnotationCache::CppTypeScopeContext scope_context =
+            ParserAnnotationCache::CppTypeScopeContext::TypeId;
+        switch (context) {
+            case CppDirectTypeIdContext::TemplateArgument:
+                scope_context =
+                    ParserAnnotationCache::CppTypeScopeContext::
+                        TemplateArgument;
+                break;
+            case CppDirectTypeIdContext::Cast:
+                scope_context =
+                    ParserAnnotationCache::CppTypeScopeContext::TypeId;
+                break;
+            case CppDirectTypeIdContext::TypeConstruction:
+                scope_context =
+                    ParserAnnotationCache::CppTypeScopeContext::
+                        TypeConstruction;
+                break;
+            case CppDirectTypeIdContext::DeclaratorParameter:
+                scope_context =
+                    ParserAnnotationCache::CppTypeScopeContext::
+                        DeclaratorParameter;
+                break;
+        }
+        auto annotation = classify_cpp_type_scope_for_lookahead(scope_context);
         if (annotation.has_scope && annotation.has_template_id &&
             !annotation.starts_with_typename &&
             !annotation.starts_with_decltype) {
@@ -3137,18 +3180,13 @@ Parser::try_parse_cpp_template_type_argument_from_annotation() {
     };
 
     auto finish = [&](QualType type)
-        -> std::optional<ParsedCppTemplateTypeArgument> {
-        if (!type ||
-            !(is_cpp_template_argument_boundary_here() ||
-              gentle_check(TokenType::ELLIPSIS) ||
-              gentle_check(TokenType::LEFT_BRACE))) {
-            return complex_fallback();
+        -> std::optional<ParsedCppDirectTypeId> {
+        if (!type) {
+            return fallback();
         }
-        ParsedCppTemplateTypeArgument result;
+        ParsedCppDirectTypeId result;
         result.type = type;
-        result.followed_by_left_brace = gentle_check(TokenType::LEFT_BRACE);
-        bump_template_arg_annotated_type_direct();
-        bump_template_arg_tentative_type_avoided();
+        bump_direct_type_id_parse();
         return result;
     };
 
@@ -3215,19 +3253,53 @@ Parser::try_parse_cpp_template_type_argument_from_annotation() {
             break;
         }
 
-        if (gentle_check(TokenType::LEFT_PAREN) ||
-            gentle_check(TokenType::LEFT_BRACKET) ||
+        if (gentle_check(TokenType::LEFT_BRACKET) ||
             gentle_check(TokenType::BITWISE_XOR)) {
+            return complex_fallback();
+        }
+        if (gentle_check(TokenType::LEFT_PAREN) &&
+            context != CppDirectTypeIdContext::TypeConstruction) {
             return complex_fallback();
         }
 
         return finish(QualType(raw_type, current_qualifiers));
-    } catch (const ParseError&) {
-        restore();
     } catch (const FatalErrorLimitReached&) {
         throw;
+    } catch (const ParseError&) {
+        return fallback();
     }
     return std::nullopt;
+}
+
+std::optional<Parser::ParsedCppTemplateTypeArgument>
+Parser::try_parse_cpp_template_type_argument_from_annotation() {
+    size_t saved_idx = get_token_idx();
+    auto saved_split_state = tok_mgnt.get_split_token_state();
+    auto restore = [&]() {
+        set_token_idx(saved_idx);
+        tok_mgnt.set_split_token_state(saved_split_state);
+    };
+    auto parsed_type =
+        try_parse_cpp_direct_simple_type_id(
+            CppDirectTypeIdContext::TemplateArgument);
+    if (!parsed_type) {
+        bump_template_arg_annotated_type_fallback();
+        return std::nullopt;
+    }
+    if (!(is_cpp_template_argument_boundary_here() ||
+          gentle_check(TokenType::ELLIPSIS) ||
+          gentle_check(TokenType::LEFT_BRACE))) {
+        bump_template_arg_annotated_type_complex_fallback();
+        restore();
+        return std::nullopt;
+    }
+
+    ParsedCppTemplateTypeArgument result;
+    result.type = parsed_type->type;
+    result.followed_by_left_brace = gentle_check(TokenType::LEFT_BRACE);
+    bump_template_arg_annotated_type_direct();
+    bump_template_arg_tentative_type_avoided();
+    return result;
 }
 
 std::unique_ptr<Expr>
