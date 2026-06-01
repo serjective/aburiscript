@@ -115,13 +115,39 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                                 remapped.referenced_parameter = it->second;
                             }
                         }
+                        if (argument.value_expr) {
+                            auto cloned_expr = clone_expr_with_substitution(
+                                argument.value_expr.get(),
+                                ctx,
+                                nullptr);
+                            if (cloned_expr) {
+                                remapped.value_expr =
+                                    std::shared_ptr<Expr>(cloned_expr.release());
+                            }
+                        }
                         break;
+                }
+                for (auto*& parameter : remapped.pack_expansion_parameters) {
+                    auto it = ctx.template_parameter_remap.find(parameter);
+                    if (it != ctx.template_parameter_remap.end() && it->second) {
+                        parameter = it->second;
+                    }
                 }
                 remapped.is_dependent =
                     template_argument_depends_on_template_parameters(
                         remapped,
                         ctx.ast_ctx);
                 return remapped;
+            };
+            auto template_argument_changed =
+                [](const TemplateArgument& original,
+                   const TemplateArgument& remapped) {
+                if (!remapped.equals(original)) {
+                    return true;
+                }
+                return original.kind == TemplateArgumentKind::Value &&
+                       original.value_expr &&
+                       remapped.value_expr.get() != original.value_expr.get();
             };
 
             if (auto parm_type = dyn_cast_shared<TemplateTypeParmType>(raw)) {
@@ -151,7 +177,8 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                 for (auto& argument :
                      rewritten_constraint->template_arguments) {
                     auto rewritten_argument = remap_template_argument(argument);
-                    changed = changed || !rewritten_argument.equals(argument);
+                    changed = changed ||
+                        template_argument_changed(argument, rewritten_argument);
                     argument = std::move(rewritten_argument);
                 }
                 if (!changed) {
@@ -208,7 +235,8 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                 rewritten_arguments.reserve(specialization->arguments.size());
                 for (const auto& argument : specialization->arguments) {
                     auto rewritten_argument = remap_template_argument(argument);
-                    changed = changed || !rewritten_argument.equals(argument);
+                    changed = changed ||
+                        template_argument_changed(argument, rewritten_argument);
                     rewritten_arguments.push_back(std::move(rewritten_argument));
                 }
                 if (!changed) {
@@ -239,7 +267,8 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                     dependent_name->template_arguments.size());
                 for (const auto& argument : dependent_name->template_arguments) {
                     auto rewritten_argument = remap_template_argument(argument);
-                    changed = changed || !rewritten_argument.equals(argument);
+                    changed = changed ||
+                        template_argument_changed(argument, rewritten_argument);
                     rewritten_arguments.push_back(std::move(rewritten_argument));
                 }
                 if (!changed) {
@@ -362,7 +391,8 @@ QualType rewrite_type(QualType type, ASTCloneContext& ctx) {
                 rewritten_args.reserve(pack_element->arguments.size());
                 for (const auto& argument : pack_element->arguments) {
                     auto rewritten_argument = remap_template_argument(argument);
-                    changed = changed || !rewritten_argument.equals(argument);
+                    changed = changed ||
+                        template_argument_changed(argument, rewritten_argument);
                     rewritten_args.push_back(std::move(rewritten_argument));
                 }
                 if (!changed) {

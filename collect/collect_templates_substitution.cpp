@@ -2575,6 +2575,7 @@ bool Collect::substitute_template_arguments_with_bindings_checked(
                             new_argument.value_expr =
                                 std::shared_ptr<Expr>(cloned_expr.release());
                             new_argument.referenced_parameter = nullptr;
+                            new_argument.is_dependent = false;
                             new_argument.is_dependent =
                                 substituted_value_argument_depends_on_template_parameters(
                                     *this,

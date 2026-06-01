@@ -3220,6 +3220,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 parameter_rebinds.emplace(
                     type_parameter,
                     cloned_parameter.get());
+                template_clone_pass.context().template_parameter_remap
+                    [type_parameter] = cloned_parameter.get();
                 return cloned_parameter;
             }
 
@@ -3262,6 +3264,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 parameter_rebinds.emplace(
                     non_type_parameter,
                     cloned_parameter.get());
+                template_clone_pass.context().template_parameter_remap
+                    [non_type_parameter] = cloned_parameter.get();
                 return cloned_parameter;
             }
 
@@ -3293,6 +3297,8 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 parameter_rebinds.emplace(
                     template_parameter,
                     cloned_parameter.get());
+                template_clone_pass.context().template_parameter_remap
+                    [template_parameter] = cloned_parameter.get();
                 return cloned_parameter;
             }
 

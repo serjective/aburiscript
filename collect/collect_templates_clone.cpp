@@ -689,10 +689,19 @@ bool remap_template_argument_after_outer_substitution(
             remap_referenced_parameter(argument.referenced_parameter);
             remap_template_argument_symbol_references(argument, clone_ctx);
             if (argument.value_expr) {
+                ASTCloneContext value_expr_clone_ctx = clone_ctx;
+                for (const auto& [pattern_parameter, cloned_parameter] :
+                     parameter_rebinds) {
+                    if (cloned_parameter) {
+                        value_expr_clone_ctx
+                            .template_parameter_remap[pattern_parameter] =
+                            const_cast<TemplateParameterDecl*>(cloned_parameter);
+                    }
+                }
                 std::string clone_error;
                 auto cloned_expr = clone_expr_with_substitution(
                     argument.value_expr.get(),
-                    clone_ctx,
+                    value_expr_clone_ctx,
                     &clone_error);
                 if (!cloned_expr) {
                     if (error_out && error_out->empty()) {
@@ -824,6 +833,16 @@ QualType remap_template_parameter_types_in_type(
         }
         return remapped;
     };
+    auto template_argument_changed =
+        [](const TemplateArgument& original,
+           const TemplateArgument& remapped) {
+        if (!remapped.equals(original)) {
+            return true;
+        }
+        return original.kind == TemplateArgumentKind::Value &&
+               original.value_expr &&
+               remapped.value_expr.get() != original.value_expr.get();
+    };
 
     if (auto typedef_type = dyn_cast_shared<TypedefType>(raw)) {
         auto remapped_underlying = remap_template_parameter_types_in_type(
@@ -881,7 +900,7 @@ QualType remap_template_parameter_types_in_type(
         bool changed = primary_changed;
         for (const auto& argument : specialization->arguments) {
             auto remapped_argument = remap_template_argument(argument);
-            changed |= !remapped_argument.equals(argument);
+            changed |= template_argument_changed(argument, remapped_argument);
             remapped_arguments.push_back(std::move(remapped_argument));
         }
         if (!changed) {
@@ -903,7 +922,7 @@ QualType remap_template_parameter_types_in_type(
         bool changed = false;
         for (const auto& argument : pack_element->arguments) {
             auto remapped_argument = remap_template_argument(argument);
-            changed |= !remapped_argument.equals(argument);
+            changed |= template_argument_changed(argument, remapped_argument);
             remapped_arguments.push_back(std::move(remapped_argument));
         }
         if (!changed) {
@@ -926,7 +945,7 @@ QualType remap_template_parameter_types_in_type(
             !remapped_qualifier.equals_qualified(dependent_name->qualifier_type);
         for (const auto& argument : dependent_name->template_arguments) {
             auto remapped_argument = remap_template_argument(argument);
-            changed |= !remapped_argument.equals(argument);
+            changed |= template_argument_changed(argument, remapped_argument);
             remapped_arguments.push_back(std::move(remapped_argument));
         }
         if (!changed) {
@@ -1193,6 +1212,12 @@ TemplateClonePassBuilder make_nested_template_clone_pass_builder(
     builder.record_type_remap = outer_pass.context().record_type_remap;
     builder.template_parameter_remap =
         outer_pass.context().template_parameter_remap;
+    for (const auto& [pattern_parameter, cloned_parameter] : parameter_rebinds) {
+        if (cloned_parameter) {
+            builder.template_parameter_remap[pattern_parameter] =
+                const_cast<TemplateParameterDecl*>(cloned_parameter);
+        }
+    }
     builder.template_decl_remap = outer_pass.context().template_decl_remap;
     builder.preserve_dependent_function_exception_specs =
         outer_pass.context().preserve_dependent_function_exception_specs;
