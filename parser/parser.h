@@ -14,7 +14,7 @@
 #include "../lang_options.h"
 #include "../diagnostics.h"
 #include "../collect/collect.h"
-#include "parser_annotation_cache.h"
+#include "parser_annotation_store.h"
 #include "tentative_syntax_probe.h"
 #include <cctype>
 #include <chrono>
@@ -335,7 +335,7 @@ public:
     TokenMgnt tok_mgnt;
     std::shared_ptr<ASTContext> ast_ctx;
 private:
-    ParserAnnotationCache annotation_cache_;
+    ParserAnnotationStore annotation_store_;
     size_t begin_tentative_context(TentativeMode mode);
     void commit_tentative_context(size_t context_id);
     void rollback_tentative_context(size_t context_id);
@@ -967,9 +967,9 @@ private:
     scan_cpp_type_construction_candidate_syntax();
     tentative_syntax_probe::CxxParameterClauseShape
     scan_cxx_parameter_clause_shape_syntax();
-    bool can_use_annotation_cache() const;
-    bool can_use_semantic_annotation_cache() const;
-    ParserAnnotationCache::SemanticKey semantic_annotation_key() const;
+    bool can_use_annotation_store() const;
+    bool can_use_semantic_annotation_store() const;
+    ParserAnnotationStore::SemanticKey semantic_annotation_key() const;
 
     enum class CxxTypeConstructionClassification : uint8_t {
         Reject,
@@ -979,39 +979,42 @@ private:
     };
     CxxTypeConstructionClassification classify_cpp_type_construction_candidate(
         const tentative_syntax_probe::CxxTypeConstructionScan& scan);
-    ParserAnnotationCache::CppTemplateIdAnnotation
+    ParserAnnotationStore::CppTemplateIdAnnotation
     classify_cpp_template_id_for_lookahead();
-    ParserAnnotationCache::CppTemplateIdAnnotation
+    ParserAnnotationStore::CppTemplateIdAnnotation
     compute_cpp_template_id_for_lookahead();
     std::optional<TemplateArgument>
     try_make_cpp_template_name_argument_from_annotation(
-        const ParserAnnotationCache::CppTemplateIdAnnotation& annotation);
-    ParserAnnotationCache::CppTemplateArgumentAnnotation
+        const ParserAnnotationStore::CppTemplateIdAnnotation& annotation);
+    ParserAnnotationStore::CppTemplateArgumentAnnotation
     classify_cpp_template_argument_for_lookahead();
-    ParserAnnotationCache::CppTemplateArgumentAnnotation
+    ParserAnnotationStore::CppTemplateArgumentAnnotation
     compute_cpp_template_argument_for_lookahead();
-    ParserAnnotationCache::CxxParenthesizedTypeIdAnnotation
+    ParserAnnotationStore::CxxParenthesizedTypeIdAnnotation
     classify_cxx_parenthesized_type_id_for_lookahead();
-    ParserAnnotationCache::CxxParenthesizedTypeIdAnnotation
+    ParserAnnotationStore::CxxParenthesizedTypeIdAnnotation
     compute_cxx_parenthesized_type_id_for_lookahead();
-    ParserAnnotationCache::CppQualifiedIdAnnotation
+    ParserAnnotationStore::CppQualifiedIdAnnotation
     classify_cpp_qualified_id_for_lookahead();
-    ParserAnnotationCache::CppQualifiedIdAnnotation
+    ParserAnnotationStore::CppQualifiedIdAnnotation
     compute_cpp_qualified_id_for_lookahead();
-    ParserAnnotationCache::CxxDeclaratorParenSuffixAnnotation
+    ParserAnnotationStore::CxxDeclaratorParenSuffixAnnotation
     classify_cxx_declarator_paren_suffix_for_lookahead();
-    ParserAnnotationCache::CxxDeclaratorParenSuffixAnnotation
+    ParserAnnotationStore::CxxDeclaratorParenSuffixAnnotation
     compute_cxx_declarator_paren_suffix_for_lookahead();
-    ParserAnnotationCache::CppQualifiedDeclaratorPrefixAnnotation
+    ParserAnnotationStore::CppQualifiedDeclaratorPrefixAnnotation
     classify_cpp_qualified_declarator_prefix_for_lookahead();
-    ParserAnnotationCache::CppQualifiedDeclaratorPrefixAnnotation
+    ParserAnnotationStore::CppQualifiedDeclaratorPrefixAnnotation
     compute_cpp_qualified_declarator_prefix_for_lookahead();
-    ParserAnnotationCache::CppTypeScopeAnnotation
+    ParserAnnotationStore::CppTypeScopeAnnotation
     classify_cpp_type_scope_for_lookahead(
-        ParserAnnotationCache::CppTypeScopeContext context);
-    ParserAnnotationCache::CppTypeScopeAnnotation
+        ParserAnnotationStore::CppTypeScopeContext context);
+    ParserAnnotationStore::CppTypeScopeAnnotation
     compute_cpp_type_scope_for_lookahead(
-        ParserAnnotationCache::CppTypeScopeContext context);
+        ParserAnnotationStore::CppTypeScopeContext context);
+    bool consume_cpp_annotation(
+        const ParserAnnotationStore::AnnotationHeader& annotation,
+        size_t fallback_end_token_idx);
     bool compute_cpp_named_type_specifier_for_lookahead();
 
     // Attribute parsing
@@ -1036,7 +1039,7 @@ public:
     explicit Parser(const std::vector<Token>& tokens, std::shared_ptr<SourceManager> src_mgnt)
     : tok_mgnt(tokens, src_mgnt),
     ast_ctx(std::make_shared<ASTContext>()),
-    annotation_cache_(tok_mgnt.token_count()),
+    annotation_store_(tok_mgnt.token_count()),
     type_ctx(ast_ctx->type_ctx),
     diag_engine(std::make_shared<DiagnosticEngine>(src_mgnt)),
     collect_(std::make_unique<Collect>(ast_ctx, src_mgnt, diag_engine, lang_opts)) {
@@ -1047,7 +1050,7 @@ public:
            std::shared_ptr<TargetInfo> ti)
     : tok_mgnt(tokens, src_mgnt),
     ast_ctx(std::make_shared<ASTContext>(std::move(ti))),
-    annotation_cache_(tok_mgnt.token_count()),
+    annotation_store_(tok_mgnt.token_count()),
     type_ctx(ast_ctx->type_ctx),
     diag_engine(std::make_shared<DiagnosticEngine>(src_mgnt)),
     collect_(std::make_unique<Collect>(ast_ctx, src_mgnt, diag_engine, lang_opts)) {

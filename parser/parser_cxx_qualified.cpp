@@ -1238,18 +1238,18 @@ bool Parser::starts_with_cpp_dependent_qualified_call_expression() {
     auto qualified_id_annotation =
         classify_cpp_qualified_id_for_lookahead();
     switch (qualified_id_annotation.kind) {
-        case ParserAnnotationCache::CppQualifiedIdKind::NoMatch:
-        case ParserAnnotationCache::CppQualifiedIdKind::Error:
+        case ParserAnnotationStore::CppQualifiedIdKind::NoMatch:
+        case ParserAnnotationStore::CppQualifiedIdKind::Error:
             bump_dependent_qualified_call_fast_reject();
             return false;
-        case ParserAnnotationCache::CppQualifiedIdKind::QualifiedId:
+        case ParserAnnotationStore::CppQualifiedIdKind::QualifiedId:
             if (qualified_id_annotation.component_count < 2 ||
                 !qualified_id_annotation.followed_by_left_paren) {
                 bump_dependent_qualified_call_fast_reject();
                 return false;
             }
             break;
-        case ParserAnnotationCache::CppQualifiedIdKind::Inconclusive:
+        case ParserAnnotationStore::CppQualifiedIdKind::Inconclusive:
             break;
     }
 

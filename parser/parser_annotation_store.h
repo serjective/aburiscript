@@ -1,5 +1,5 @@
-#ifndef ABURI_PARSER_ANNOTATION_CACHE_H
-#define ABURI_PARSER_ANNOTATION_CACHE_H
+#ifndef ABURI_PARSER_ANNOTATION_STORE_H
+#define ABURI_PARSER_ANNOTATION_STORE_H
 
 #include "tentative_syntax_probe.h"
 
@@ -9,7 +9,7 @@
 #include <optional>
 #include <vector>
 
-class ParserAnnotationCache {
+class ParserAnnotationStore {
 public:
     enum class ResultKind : uint8_t {
         TypeName,
@@ -44,10 +44,53 @@ public:
         }
     };
 
+    enum class AnnotationKind : uint8_t {
+        SyntaxResult,
+        Semantic,
+        TemplateId,
+        QualifiedId,
+        TemplateArgument,
+        ParenthesizedTypeId,
+        DeclaratorParenSuffix,
+        QualifiedDeclaratorPrefix,
+        TypeScope,
+        TemplateArgumentListScan,
+        TypeConstructionScan,
+        ParameterClauseShape,
+        Count
+    };
+
+    struct AnnotationHandle {
+        size_t token_idx = 0;
+        AnnotationKind kind = AnnotationKind::SyntaxResult;
+        uint8_t context = 0;
+        bool valid = false;
+
+        explicit operator bool() const {
+            return valid;
+        }
+    };
+
+    struct AnnotationHeader {
+        AnnotationHandle handle;
+        size_t start_token_idx = 0;
+        size_t end_token_idx = 0;
+        size_t terminal_token_idx = 0;
+        uint32_t syntax_key = 0;
+        SemanticKey semantic_key;
+        bool uses_semantic_key = false;
+        bool dependent_or_ambiguous = false;
+
+        explicit operator bool() const {
+            return static_cast<bool>(handle);
+        }
+    };
+
     struct SemanticAnnotation {
         size_t end_token_idx = 0;
         uint8_t value = 0;
         bool dependent_or_ambiguous = false;
+        AnnotationHeader annotation;
     };
 
     enum class CppTemplateIdKind : uint8_t {
@@ -76,6 +119,7 @@ public:
         bool at_template_argument_boundary = false;
         bool followed_by_ellipsis = false;
         bool dependent_or_ambiguous = false;
+        AnnotationHeader annotation;
     };
 
     enum class CppQualifiedIdKind : uint8_t {
@@ -98,6 +142,7 @@ public:
         bool terminal_is_operator_id = false;
         bool followed_by_left_paren = false;
         bool dependent_or_ambiguous = false;
+        AnnotationHeader annotation;
     };
 
     enum class CppTemplateArgumentKind : uint8_t {
@@ -116,6 +161,7 @@ public:
         CppTemplateArgumentKind kind = CppTemplateArgumentKind::NoMatch;
         bool followed_by_ellipsis = false;
         bool dependent_or_ambiguous = false;
+        AnnotationHeader annotation;
     };
 
     enum class CxxParenthesizedTypeIdKind : uint8_t {
@@ -133,6 +179,7 @@ public:
         bool followed_by_cast_operand = false;
         bool followed_by_left_brace = false;
         bool dependent_or_ambiguous = false;
+        AnnotationHeader annotation;
     };
 
     enum class CxxDeclaratorParenSuffixKind : uint8_t {
@@ -151,6 +198,7 @@ public:
         CxxDeclaratorParenSuffixKind kind =
             CxxDeclaratorParenSuffixKind::NoMatch;
         bool dependent_or_ambiguous = false;
+        AnnotationHeader annotation;
     };
 
     enum class CppQualifiedDeclaratorPrefixKind : uint8_t {
@@ -168,6 +216,7 @@ public:
         bool has_template_id_component = false;
         bool terminal_is_operator_id = false;
         bool dependent_or_ambiguous = false;
+        AnnotationHeader annotation;
     };
 
     enum class CppTypeScopeContext : uint8_t {
@@ -208,10 +257,11 @@ public:
         bool starts_with_typename = false;
         bool starts_with_decltype = false;
         bool dependent_or_ambiguous = false;
+        AnnotationHeader annotation;
     };
 
-    ParserAnnotationCache() = default;
-    explicit ParserAnnotationCache(size_t token_count) {
+    ParserAnnotationStore() = default;
+    explicit ParserAnnotationStore(size_t token_count) {
         reset(token_count);
     }
 
@@ -229,6 +279,42 @@ public:
             key |= 1u << 1;
         }
         return key;
+    }
+
+    static AnnotationHeader make_syntax_header(size_t token_idx,
+                                               AnnotationKind kind,
+                                               uint32_t key,
+                                               size_t end_token_idx,
+                                               size_t terminal_token_idx,
+                                               bool dependent_or_ambiguous,
+                                               uint8_t context = 0) {
+        AnnotationHeader header;
+        header.handle = AnnotationHandle{token_idx, kind, context, true};
+        header.start_token_idx = token_idx;
+        header.end_token_idx = end_token_idx;
+        header.terminal_token_idx = terminal_token_idx;
+        header.syntax_key = key;
+        header.uses_semantic_key = false;
+        header.dependent_or_ambiguous = dependent_or_ambiguous;
+        return header;
+    }
+
+    static AnnotationHeader make_semantic_header(size_t token_idx,
+                                                 AnnotationKind kind,
+                                                 const SemanticKey& key,
+                                                 size_t end_token_idx,
+                                                 size_t terminal_token_idx,
+                                                 bool dependent_or_ambiguous,
+                                                 uint8_t context = 0) {
+        AnnotationHeader header;
+        header.handle = AnnotationHandle{token_idx, kind, context, true};
+        header.start_token_idx = token_idx;
+        header.end_token_idx = end_token_idx;
+        header.terminal_token_idx = terminal_token_idx;
+        header.semantic_key = key;
+        header.uses_semantic_key = true;
+        header.dependent_or_ambiguous = dependent_or_ambiguous;
+        return header;
     }
 
     std::optional<tentative_syntax_probe::Result>
@@ -343,18 +429,27 @@ public:
         return entry.value;
     }
 
-    void store_semantic_annotation(size_t token_idx,
-                                   SemanticKind kind,
-                                   const SemanticKey& key,
-                                   SemanticAnnotation value) {
+    SemanticAnnotation store_semantic_annotation(size_t token_idx,
+                                                 SemanticKind kind,
+                                                 const SemanticKey& key,
+                                                 SemanticAnnotation value) {
+        value.annotation = make_semantic_header(
+            token_idx,
+            AnnotationKind::Semantic,
+            key,
+            value.end_token_idx,
+            value.end_token_idx,
+            value.dependent_or_ambiguous,
+            static_cast<uint8_t>(kind));
         auto* slot = slot_for(token_idx);
         if (!slot) {
-            return;
+            return value;
         }
         auto& entry = slot->semantic[static_cast<size_t>(kind)];
         entry.valid = true;
         entry.key = key;
         entry.value = value;
+        return value;
     }
 
     std::optional<CppTemplateIdAnnotation>
@@ -371,17 +466,26 @@ public:
         return entry.value;
     }
 
-    void store_cpp_template_id_annotation(size_t token_idx,
-                                          const SemanticKey& key,
-                                          CppTemplateIdAnnotation value) {
+    CppTemplateIdAnnotation
+    store_cpp_template_id_annotation(size_t token_idx,
+                                     const SemanticKey& key,
+                                     CppTemplateIdAnnotation value) {
+        value.annotation = make_semantic_header(
+            token_idx,
+            AnnotationKind::TemplateId,
+            key,
+            value.end_token_idx,
+            value.terminal_identifier_token_idx,
+            value.dependent_or_ambiguous);
         auto* slot = slot_for(token_idx);
         if (!slot) {
-            return;
+            return value;
         }
         auto& entry = slot->cpp_template_id;
         entry.valid = true;
         entry.key = key;
         entry.value = value;
+        return value;
     }
 
     std::optional<CppQualifiedIdAnnotation>
@@ -397,17 +501,26 @@ public:
         return entry.value;
     }
 
-    void store_cpp_qualified_id_annotation(size_t token_idx,
-                                           uint32_t key,
-                                           CppQualifiedIdAnnotation value) {
+    CppQualifiedIdAnnotation
+    store_cpp_qualified_id_annotation(size_t token_idx,
+                                      uint32_t key,
+                                      CppQualifiedIdAnnotation value) {
+        value.annotation = make_syntax_header(
+            token_idx,
+            AnnotationKind::QualifiedId,
+            key,
+            value.end_token_idx,
+            value.terminal_token_idx,
+            value.dependent_or_ambiguous);
         auto* slot = slot_for(token_idx);
         if (!slot) {
-            return;
+            return value;
         }
         auto& entry = slot->cpp_qualified_id;
         entry.valid = true;
         entry.key = key;
         entry.value = value;
+        return value;
     }
 
     std::optional<CppTemplateArgumentAnnotation>
@@ -424,18 +537,26 @@ public:
         return entry.value;
     }
 
-    void store_cpp_template_argument_annotation(
+    CppTemplateArgumentAnnotation store_cpp_template_argument_annotation(
         size_t token_idx,
         const SemanticKey& key,
         CppTemplateArgumentAnnotation value) {
+        value.annotation = make_semantic_header(
+            token_idx,
+            AnnotationKind::TemplateArgument,
+            key,
+            value.end_token_idx,
+            value.end_token_idx,
+            value.dependent_or_ambiguous);
         auto* slot = slot_for(token_idx);
         if (!slot) {
-            return;
+            return value;
         }
         auto& entry = slot->cpp_template_argument;
         entry.valid = true;
         entry.key = key;
         entry.value = value;
+        return value;
     }
 
     std::optional<CxxParenthesizedTypeIdAnnotation>
@@ -453,18 +574,27 @@ public:
         return entry.value;
     }
 
-    void store_cxx_parenthesized_type_id_annotation(
+    CxxParenthesizedTypeIdAnnotation
+    store_cxx_parenthesized_type_id_annotation(
         size_t token_idx,
         const SemanticKey& key,
         CxxParenthesizedTypeIdAnnotation value) {
+        value.annotation = make_semantic_header(
+            token_idx,
+            AnnotationKind::ParenthesizedTypeId,
+            key,
+            value.end_token_idx,
+            value.close_token_idx,
+            value.dependent_or_ambiguous);
         auto* slot = slot_for(token_idx);
         if (!slot) {
-            return;
+            return value;
         }
         auto& entry = slot->cxx_parenthesized_type_id;
         entry.valid = true;
         entry.key = key;
         entry.value = value;
+        return value;
     }
 
     std::optional<CxxDeclaratorParenSuffixAnnotation>
@@ -482,18 +612,27 @@ public:
         return entry.value;
     }
 
-    void store_cxx_declarator_paren_suffix_annotation(
+    CxxDeclaratorParenSuffixAnnotation
+    store_cxx_declarator_paren_suffix_annotation(
         size_t token_idx,
         const SemanticKey& key,
         CxxDeclaratorParenSuffixAnnotation value) {
+        value.annotation = make_semantic_header(
+            token_idx,
+            AnnotationKind::DeclaratorParenSuffix,
+            key,
+            value.end_token_idx,
+            value.end_token_idx,
+            value.dependent_or_ambiguous);
         auto* slot = slot_for(token_idx);
         if (!slot) {
-            return;
+            return value;
         }
         auto& entry = slot->cxx_declarator_paren_suffix;
         entry.valid = true;
         entry.key = key;
         entry.value = value;
+        return value;
     }
 
     std::optional<CppQualifiedDeclaratorPrefixAnnotation>
@@ -510,18 +649,27 @@ public:
         return entry.value;
     }
 
-    void store_cpp_qualified_declarator_prefix_annotation(
+    CppQualifiedDeclaratorPrefixAnnotation
+    store_cpp_qualified_declarator_prefix_annotation(
         size_t token_idx,
         uint32_t key,
         CppQualifiedDeclaratorPrefixAnnotation value) {
+        value.annotation = make_syntax_header(
+            token_idx,
+            AnnotationKind::QualifiedDeclaratorPrefix,
+            key,
+            value.end_token_idx,
+            value.end_token_idx,
+            value.dependent_or_ambiguous);
         auto* slot = slot_for(token_idx);
         if (!slot) {
-            return;
+            return value;
         }
         auto& entry = slot->cpp_qualified_declarator_prefix;
         entry.valid = true;
         entry.key = key;
         entry.value = value;
+        return value;
     }
 
     std::optional<CppTypeScopeAnnotation>
@@ -540,18 +688,28 @@ public:
         return entry.value;
     }
 
-    void store_cpp_type_scope_annotation(size_t token_idx,
-                                         CppTypeScopeContext context,
-                                         const SemanticKey& key,
-                                         CppTypeScopeAnnotation value) {
+    CppTypeScopeAnnotation
+    store_cpp_type_scope_annotation(size_t token_idx,
+                                    CppTypeScopeContext context,
+                                    const SemanticKey& key,
+                                    CppTypeScopeAnnotation value) {
+        value.annotation = make_semantic_header(
+            token_idx,
+            AnnotationKind::TypeScope,
+            key,
+            value.end_token_idx,
+            value.terminal_token_idx,
+            value.dependent_or_ambiguous,
+            static_cast<uint8_t>(context));
         auto* slot = slot_for(token_idx);
         if (!slot) {
-            return;
+            return value;
         }
         auto& entry = slot->cpp_type_scope[static_cast<size_t>(context)];
         entry.valid = true;
         entry.key = key;
         entry.value = value;
+        return value;
     }
 
 private:

@@ -2734,7 +2734,7 @@ Parser::QualifiedDeclaratorContext Parser::prepare_qualified_declarator_context(
     auto prefix_annotation =
         classify_cpp_qualified_declarator_prefix_for_lookahead();
     if (prefix_annotation.kind ==
-        ParserAnnotationCache::CppQualifiedDeclaratorPrefixKind::NoMatch) {
+        ParserAnnotationStore::CppQualifiedDeclaratorPrefixKind::NoMatch) {
         bump_qualified_declarator_fast_reject();
         return context;
     }
@@ -7562,33 +7562,33 @@ bool Parser::isTokenDeclarationSpec(Token s) {
                     (is_cpp_qualified_id_start() ||
                      peek_token().type == TokenType::LESS_THAN)) {
                     auto type_scope = classify_cpp_type_scope_for_lookahead(
-                        ParserAnnotationCache::CppTypeScopeContext::
+                        ParserAnnotationStore::CppTypeScopeContext::
                             DeclSpecifier);
                     switch (type_scope.kind) {
-                        case ParserAnnotationCache::CppTypeScopeKind::
+                        case ParserAnnotationStore::CppTypeScopeKind::
                             TypeName:
-                        case ParserAnnotationCache::CppTypeScopeKind::
+                        case ParserAnnotationStore::CppTypeScopeKind::
                             TypeTemplateId:
-                        case ParserAnnotationCache::CppTypeScopeKind::
+                        case ParserAnnotationStore::CppTypeScopeKind::
                             DependentType:
-                        case ParserAnnotationCache::CppTypeScopeKind::
+                        case ParserAnnotationStore::CppTypeScopeKind::
                             PlaceholderConstraint:
                             bump_type_scope_fast_type_accept();
                             return true;
-                        case ParserAnnotationCache::CppTypeScopeKind::
+                        case ParserAnnotationStore::CppTypeScopeKind::
                             ScopeOnly:
-                        case ParserAnnotationCache::CppTypeScopeKind::
+                        case ParserAnnotationStore::CppTypeScopeKind::
                             DependentScope:
                             bump_type_scope_scope_only_accept();
                             return true;
-                        case ParserAnnotationCache::CppTypeScopeKind::NonType:
-                        case ParserAnnotationCache::CppTypeScopeKind::
+                        case ParserAnnotationStore::CppTypeScopeKind::NonType:
+                        case ParserAnnotationStore::CppTypeScopeKind::
                             NoMatch:
                             bump_type_scope_fast_non_type_reject();
                             return false;
-                        case ParserAnnotationCache::CppTypeScopeKind::
+                        case ParserAnnotationStore::CppTypeScopeKind::
                             Inconclusive:
-                        case ParserAnnotationCache::CppTypeScopeKind::Error:
+                        case ParserAnnotationStore::CppTypeScopeKind::Error:
                             bump_type_scope_inconclusive_fallback();
                             return can_start_cpp_named_type_specifier_for_lookahead();
                     }
@@ -7600,29 +7600,29 @@ bool Parser::isTokenDeclarationSpec(Token s) {
                  (s.type == TokenType::COLON &&
                   peek_token().type == TokenType::COLON))) {
                 auto type_scope = classify_cpp_type_scope_for_lookahead(
-                    ParserAnnotationCache::CppTypeScopeContext::
+                    ParserAnnotationStore::CppTypeScopeContext::
                         DeclSpecifier);
                 switch (type_scope.kind) {
-                    case ParserAnnotationCache::CppTypeScopeKind::TypeName:
-                    case ParserAnnotationCache::CppTypeScopeKind::
+                    case ParserAnnotationStore::CppTypeScopeKind::TypeName:
+                    case ParserAnnotationStore::CppTypeScopeKind::
                         TypeTemplateId:
-                    case ParserAnnotationCache::CppTypeScopeKind::
+                    case ParserAnnotationStore::CppTypeScopeKind::
                         DependentType:
-                    case ParserAnnotationCache::CppTypeScopeKind::
+                    case ParserAnnotationStore::CppTypeScopeKind::
                         PlaceholderConstraint:
                         bump_type_scope_fast_type_accept();
                         return true;
-                    case ParserAnnotationCache::CppTypeScopeKind::ScopeOnly:
-                    case ParserAnnotationCache::CppTypeScopeKind::
+                    case ParserAnnotationStore::CppTypeScopeKind::ScopeOnly:
+                    case ParserAnnotationStore::CppTypeScopeKind::
                         DependentScope:
                         bump_type_scope_scope_only_accept();
                         return true;
-                    case ParserAnnotationCache::CppTypeScopeKind::NonType:
-                    case ParserAnnotationCache::CppTypeScopeKind::NoMatch:
+                    case ParserAnnotationStore::CppTypeScopeKind::NonType:
+                    case ParserAnnotationStore::CppTypeScopeKind::NoMatch:
                         bump_type_scope_fast_non_type_reject();
                         return false;
-                    case ParserAnnotationCache::CppTypeScopeKind::Inconclusive:
-                    case ParserAnnotationCache::CppTypeScopeKind::Error:
+                    case ParserAnnotationStore::CppTypeScopeKind::Inconclusive:
+                    case ParserAnnotationStore::CppTypeScopeKind::Error:
                         bump_type_scope_inconclusive_fallback();
                         return can_start_cpp_named_type_specifier_for_lookahead();
                 }

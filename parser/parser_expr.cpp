@@ -661,19 +661,19 @@ Parser::classify_cpp_type_construction_candidate(
         return CxxTypeConstructionClassification::Reject;
     }
 
-    const bool use_cache = can_use_semantic_annotation_cache();
+    const bool use_store = can_use_semantic_annotation_store();
     const size_t token_idx = get_token_idx();
-    ParserAnnotationCache::SemanticKey key;
-    if (use_cache) {
+    ParserAnnotationStore::SemanticKey key;
+    if (use_store) {
         key = semantic_annotation_key();
-        if (auto cached = annotation_cache_.lookup_semantic_annotation(
+        if (auto stored = annotation_store_.lookup_semantic_annotation(
                 token_idx,
-                ParserAnnotationCache::SemanticKind::
+                ParserAnnotationStore::SemanticKind::
                     CppTypeConstructionClassification,
                 key)) {
             bump_parser_annotation_overlay_hit();
             return static_cast<CxxTypeConstructionClassification>(
-                cached->value);
+                stored->value);
         }
         bump_parser_annotation_overlay_miss();
     }
@@ -683,13 +683,13 @@ Parser::classify_cpp_type_construction_candidate(
          (collect_ && collect_->collect_current_cpp_record_lookup_type()))) {
         CxxTypeConstructionClassification result =
             CxxTypeConstructionClassification::DependentOrAmbiguous;
-        if (use_cache) {
-            annotation_cache_.store_semantic_annotation(
+        if (use_store) {
+            annotation_store_.store_semantic_annotation(
                 token_idx,
-                ParserAnnotationCache::SemanticKind::
+                ParserAnnotationStore::SemanticKind::
                     CppTypeConstructionClassification,
                 key,
-                ParserAnnotationCache::SemanticAnnotation{
+                ParserAnnotationStore::SemanticAnnotation{
                     get_token_idx(),
                     static_cast<uint8_t>(result),
                     true});
@@ -701,37 +701,37 @@ Parser::classify_cpp_type_construction_candidate(
     CxxTypeConstructionClassification result =
         CxxTypeConstructionClassification::NeedsCurrentPath;
     auto type_scope = classify_cpp_type_scope_for_lookahead(
-        ParserAnnotationCache::CppTypeScopeContext::TypeConstruction);
+        ParserAnnotationStore::CppTypeScopeContext::TypeConstruction);
     switch (type_scope.kind) {
-        case ParserAnnotationCache::CppTypeScopeKind::TypeName:
-        case ParserAnnotationCache::CppTypeScopeKind::TypeTemplateId:
-        case ParserAnnotationCache::CppTypeScopeKind::PlaceholderConstraint:
+        case ParserAnnotationStore::CppTypeScopeKind::TypeName:
+        case ParserAnnotationStore::CppTypeScopeKind::TypeTemplateId:
+        case ParserAnnotationStore::CppTypeScopeKind::PlaceholderConstraint:
             result = scan.is_qualified
                          ? CxxTypeConstructionClassification::
                                DependentOrAmbiguous
                          : CxxTypeConstructionClassification::KnownType;
             break;
-        case ParserAnnotationCache::CppTypeScopeKind::DependentType:
-        case ParserAnnotationCache::CppTypeScopeKind::ScopeOnly:
-        case ParserAnnotationCache::CppTypeScopeKind::DependentScope:
+        case ParserAnnotationStore::CppTypeScopeKind::DependentType:
+        case ParserAnnotationStore::CppTypeScopeKind::ScopeOnly:
+        case ParserAnnotationStore::CppTypeScopeKind::DependentScope:
             result =
                 CxxTypeConstructionClassification::DependentOrAmbiguous;
             break;
-        case ParserAnnotationCache::CppTypeScopeKind::NoMatch:
-        case ParserAnnotationCache::CppTypeScopeKind::NonType:
-        case ParserAnnotationCache::CppTypeScopeKind::Inconclusive:
-        case ParserAnnotationCache::CppTypeScopeKind::Error:
+        case ParserAnnotationStore::CppTypeScopeKind::NoMatch:
+        case ParserAnnotationStore::CppTypeScopeKind::NonType:
+        case ParserAnnotationStore::CppTypeScopeKind::Inconclusive:
+        case ParserAnnotationStore::CppTypeScopeKind::Error:
             result = CxxTypeConstructionClassification::Reject;
             break;
     }
 
-    if (use_cache) {
-        annotation_cache_.store_semantic_annotation(
+    if (use_store) {
+        annotation_store_.store_semantic_annotation(
             token_idx,
-            ParserAnnotationCache::SemanticKind::
+            ParserAnnotationStore::SemanticKind::
                 CppTypeConstructionClassification,
             key,
-            ParserAnnotationCache::SemanticAnnotation{
+            ParserAnnotationStore::SemanticAnnotation{
                 get_token_idx(),
                 static_cast<uint8_t>(result),
                 result == CxxTypeConstructionClassification::
@@ -2950,7 +2950,7 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             auto parenthesized_type =
                 classify_cxx_parenthesized_type_id_for_lookahead();
             switch (parenthesized_type.kind) {
-                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
                     TypeId:
                     should_try_compound_literal =
                         parenthesized_type.followed_by_left_brace;
@@ -2960,13 +2960,13 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                         bump_cast_disambiguation_fast_reject();
                     }
                     break;
-                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
                     NoMatch:
                     bump_cast_disambiguation_fast_reject();
                     break;
-                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
                     Inconclusive:
-                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
                     Error:
                     bump_cast_disambiguation_inconclusive_fallback();
                     should_try_compound_literal =
@@ -3601,7 +3601,7 @@ std::unique_ptr<Expr> Parser::parse_cast_expression() {
             auto parenthesized_type =
                 classify_cxx_parenthesized_type_id_for_lookahead();
             switch (parenthesized_type.kind) {
-                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
                     TypeId:
                     should_try_cast =
                         parenthesized_type.followed_by_cast_operand;
@@ -3611,13 +3611,13 @@ std::unique_ptr<Expr> Parser::parse_cast_expression() {
                         bump_cast_disambiguation_fast_reject();
                     }
                     break;
-                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
                     NoMatch:
                     bump_cast_disambiguation_fast_reject();
                     break;
-                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
                     Inconclusive:
-                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                case ParserAnnotationStore::CxxParenthesizedTypeIdKind::
                     Error:
                     bump_cast_disambiguation_inconclusive_fallback();
                     should_try_cast =

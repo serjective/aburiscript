@@ -1594,32 +1594,32 @@ std::shared_ptr<CType> DeclarationParser::parse_direct_declarator(std::shared_pt
                     bool parameter_clause_known = false;
                     bool looks_like_parameter_clause = false;
                     switch (paren_suffix_annotation.kind) {
-                        case ParserAnnotationCache::
+                        case ParserAnnotationStore::
                             CxxDeclaratorParenSuffixKind::
                                 EmptyParameterClause:
-                        case ParserAnnotationCache::
+                        case ParserAnnotationStore::
                             CxxDeclaratorParenSuffixKind::
                                 EllipsisParameterClause:
-                        case ParserAnnotationCache::
+                        case ParserAnnotationStore::
                             CxxDeclaratorParenSuffixKind::
                                 DefiniteParameterClause:
                             parameter_clause_known = true;
                             looks_like_parameter_clause = true;
                             bump_declarator_parameter_clause_fast_accept();
                             break;
-                        case ParserAnnotationCache::
+                        case ParserAnnotationStore::
                             CxxDeclaratorParenSuffixKind::
                                 DefiniteDirectInitializer:
-                        case ParserAnnotationCache::
+                        case ParserAnnotationStore::
                             CxxDeclaratorParenSuffixKind::NoMatch:
                             looks_like_parameter_clause = false;
                             bump_declarator_direct_initializer_fast_reject();
                             break;
-                        case ParserAnnotationCache::
+                        case ParserAnnotationStore::
                             CxxDeclaratorParenSuffixKind::Ambiguous:
-                        case ParserAnnotationCache::
+                        case ParserAnnotationStore::
                             CxxDeclaratorParenSuffixKind::Inconclusive:
-                        case ParserAnnotationCache::
+                        case ParserAnnotationStore::
                             CxxDeclaratorParenSuffixKind::Error:
                             looks_like_parameter_clause =
                                 pars->isTokenDeclarationSpec(

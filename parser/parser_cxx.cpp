@@ -37,6 +37,34 @@ void bump_parser_annotation_overlay_publish() {
     }
 }
 
+void bump_typed_annotation_hit() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTypedAnnotationHits);
+    }
+}
+
+void bump_typed_annotation_miss() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTypedAnnotationMisses);
+    }
+}
+
+void bump_typed_annotation_publish() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTypedAnnotationPublishes);
+    }
+}
+
+void bump_typed_annotation_consume() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserTypedAnnotationConsumes);
+    }
+}
+
 void bump_template_id_annotation_hit() {
     if (auto* profiler = active_perf_profiler()) {
         profiler->add_counter(PerfCounter::ParserTemplateIdAnnotationHits);
@@ -955,11 +983,11 @@ const ObjectDecl* Parser::ensure_cpp_specialized_record_semantic_owner(
     return semantic_owner;
 }
 
-ParserAnnotationCache::CppTemplateIdAnnotation
+ParserAnnotationStore::CppTemplateIdAnnotation
 Parser::classify_cpp_template_id_for_lookahead() {
-    ParserAnnotationCache::CppTemplateIdAnnotation inconclusive;
+    ParserAnnotationStore::CppTemplateIdAnnotation inconclusive;
     inconclusive.kind =
-        ParserAnnotationCache::CppTemplateIdKind::Inconclusive;
+        ParserAnnotationStore::CppTemplateIdKind::Inconclusive;
     inconclusive.dependent_or_ambiguous = true;
 
     if (tok_mgnt.has_split_tokens()) {
@@ -967,36 +995,39 @@ Parser::classify_cpp_template_id_for_lookahead() {
         return inconclusive;
     }
 
-    const bool use_cache = can_use_semantic_annotation_cache();
+    const bool use_store = can_use_semantic_annotation_store();
     const size_t token_idx = get_token_idx();
-    ParserAnnotationCache::SemanticKey key;
-    if (use_cache) {
+    ParserAnnotationStore::SemanticKey key;
+    if (use_store) {
         key = semantic_annotation_key();
-        if (auto cached =
-                annotation_cache_.lookup_cpp_template_id_annotation(
+        if (auto stored =
+                annotation_store_.lookup_cpp_template_id_annotation(
                     token_idx,
                     key)) {
+            bump_typed_annotation_hit();
             bump_template_id_annotation_hit();
-            return *cached;
+            return *stored;
         }
+        bump_typed_annotation_miss();
         bump_template_id_annotation_miss();
     }
 
     auto annotation = compute_cpp_template_id_for_lookahead();
-    if (use_cache) {
-        annotation_cache_.store_cpp_template_id_annotation(
+    if (use_store) {
+        annotation = annotation_store_.store_cpp_template_id_annotation(
             token_idx,
             key,
             annotation);
         bump_template_id_annotation_publish();
+        bump_typed_annotation_publish();
     }
     return annotation;
 }
 
-ParserAnnotationCache::CppTemplateIdAnnotation
+ParserAnnotationStore::CppTemplateIdAnnotation
 Parser::compute_cpp_template_id_for_lookahead() {
-    ParserAnnotationCache::CppTemplateIdAnnotation result;
-    result.kind = ParserAnnotationCache::CppTemplateIdKind::NoMatch;
+    ParserAnnotationStore::CppTemplateIdAnnotation result;
+    result.kind = ParserAnnotationStore::CppTemplateIdKind::NoMatch;
     result.end_token_idx = get_token_idx();
 
     if (!is_cxx_mode_active() || !collect_) {
@@ -1018,7 +1049,7 @@ Parser::compute_cpp_template_id_for_lookahead() {
     };
     auto finish_inconclusive = [&]() {
         result.kind =
-            ParserAnnotationCache::CppTemplateIdKind::Inconclusive;
+            ParserAnnotationStore::CppTemplateIdKind::Inconclusive;
         result.dependent_or_ambiguous = true;
         return result;
     };
@@ -1160,7 +1191,7 @@ Parser::compute_cpp_template_id_for_lookahead() {
 
     if (!result.at_template_argument_boundary &&
         !result.followed_by_ellipsis) {
-        result.kind = ParserAnnotationCache::CppTemplateIdKind::NoMatch;
+        result.kind = ParserAnnotationStore::CppTemplateIdKind::NoMatch;
         return result;
     }
 
@@ -1168,29 +1199,29 @@ Parser::compute_cpp_template_id_for_lookahead() {
         result.resolved_template = decl;
         if (!decl) {
             result.kind =
-                ParserAnnotationCache::CppTemplateIdKind::NoTemplate;
+                ParserAnnotationStore::CppTemplateIdKind::NoTemplate;
             return;
         }
 
         if (!terminal.has_template_argument_list) {
             result.kind =
                 is_template_name_argument_decl(decl)
-                    ? ParserAnnotationCache::CppTemplateIdKind::TemplateName
-                    : ParserAnnotationCache::CppTemplateIdKind::NoTemplate;
+                    ? ParserAnnotationStore::CppTemplateIdKind::TemplateName
+                    : ParserAnnotationStore::CppTemplateIdKind::NoTemplate;
             return;
         }
 
         if (is_type_template_id_decl(decl)) {
             result.kind =
-                ParserAnnotationCache::CppTemplateIdKind::TypeTemplateId;
+                ParserAnnotationStore::CppTemplateIdKind::TypeTemplateId;
             return;
         }
         if (is_non_type_template_id_decl(decl)) {
             result.kind =
-                ParserAnnotationCache::CppTemplateIdKind::NonTypeTemplateId;
+                ParserAnnotationStore::CppTemplateIdKind::NonTypeTemplateId;
             return;
         }
-        result.kind = ParserAnnotationCache::CppTemplateIdKind::NoTemplate;
+        result.kind = ParserAnnotationStore::CppTemplateIdKind::NoTemplate;
     };
 
     if (!result.has_global_qualifier && components.size() == 1 &&
@@ -1210,11 +1241,11 @@ Parser::compute_cpp_template_id_for_lookahead() {
                     terminal.name,
                     /*look_parents=*/true)) {
                 result.kind =
-                    ParserAnnotationCache::CppTemplateIdKind::NoTemplate;
+                    ParserAnnotationStore::CppTemplateIdKind::NoTemplate;
                 return result;
             }
             if (collect_->collect_current_cpp_record_lookup_type()) {
-                result.kind = ParserAnnotationCache::CppTemplateIdKind::
+                result.kind = ParserAnnotationStore::CppTemplateIdKind::
                     DependentOrAmbiguous;
                 result.dependent_or_ambiguous = true;
                 return result;
@@ -1252,14 +1283,14 @@ Parser::compute_cpp_template_id_for_lookahead() {
 
         if (lookup_blocked) {
             result.kind =
-                ParserAnnotationCache::CppTemplateIdKind::DependentOrAmbiguous;
+                ParserAnnotationStore::CppTemplateIdKind::DependentOrAmbiguous;
             result.dependent_or_ambiguous = true;
             return result;
         }
         if (!resolved_template &&
             collect_->collect_current_cpp_record_lookup_type()) {
             result.kind =
-                ParserAnnotationCache::CppTemplateIdKind::DependentOrAmbiguous;
+                ParserAnnotationStore::CppTemplateIdKind::DependentOrAmbiguous;
             result.dependent_or_ambiguous = true;
             return result;
         }
@@ -1271,7 +1302,7 @@ Parser::compute_cpp_template_id_for_lookahead() {
     if (!result.plain_qualified_name ||
         terminal.preceded_by_template_keyword) {
         result.kind =
-            ParserAnnotationCache::CppTemplateIdKind::DependentOrAmbiguous;
+            ParserAnnotationStore::CppTemplateIdKind::DependentOrAmbiguous;
         result.dependent_or_ambiguous = true;
         return result;
     }
@@ -1317,11 +1348,27 @@ Parser::compute_cpp_template_id_for_lookahead() {
     return result;
 }
 
+bool Parser::consume_cpp_annotation(
+    const ParserAnnotationStore::AnnotationHeader& annotation,
+    size_t fallback_end_token_idx) {
+    size_t end_token_idx =
+        annotation ? annotation.end_token_idx : fallback_end_token_idx;
+    if (end_token_idx < get_token_idx() ||
+        end_token_idx > tok_mgnt.token_count()) {
+        return false;
+    }
+    set_token_idx(end_token_idx);
+    if (annotation) {
+        bump_typed_annotation_consume();
+    }
+    return true;
+}
+
 std::optional<TemplateArgument>
 Parser::try_make_cpp_template_name_argument_from_annotation(
-    const ParserAnnotationCache::CppTemplateIdAnnotation& annotation) {
+    const ParserAnnotationStore::CppTemplateIdAnnotation& annotation) {
     if (annotation.kind !=
-            ParserAnnotationCache::CppTemplateIdKind::TemplateName ||
+            ParserAnnotationStore::CppTemplateIdKind::TemplateName ||
         annotation.terminal_has_template_argument_list ||
         !annotation.resolved_template) {
         return std::nullopt;
@@ -1358,7 +1405,7 @@ Parser::try_make_cpp_template_name_argument_from_annotation(
         ++offset;
     }
 
-    set_token_idx(annotation.end_token_idx);
+    consume_cpp_annotation(annotation.annotation, annotation.end_token_idx);
     if (auto* template_parameter = dyn_cast<TemplateTemplateParmDecl>(
             const_cast<Decl*>(resolved_template))) {
         return TemplateArgument::dependent_template_argument(
@@ -1374,54 +1421,57 @@ Parser::try_make_cpp_template_name_argument_from_annotation(
     return std::nullopt;
 }
 
-ParserAnnotationCache::CppTemplateArgumentAnnotation
+ParserAnnotationStore::CppTemplateArgumentAnnotation
 Parser::classify_cpp_template_argument_for_lookahead() {
-    ParserAnnotationCache::CppTemplateArgumentAnnotation inconclusive;
+    ParserAnnotationStore::CppTemplateArgumentAnnotation inconclusive;
     inconclusive.kind =
-        ParserAnnotationCache::CppTemplateArgumentKind::Inconclusive;
+        ParserAnnotationStore::CppTemplateArgumentKind::Inconclusive;
     inconclusive.dependent_or_ambiguous = true;
 
     if (tok_mgnt.has_split_tokens()) {
         return inconclusive;
     }
 
-    const bool use_cache = can_use_semantic_annotation_cache();
+    const bool use_store = can_use_semantic_annotation_store();
     const size_t token_idx = get_token_idx();
-    ParserAnnotationCache::SemanticKey key;
-    if (use_cache) {
+    ParserAnnotationStore::SemanticKey key;
+    if (use_store) {
         key = semantic_annotation_key();
-        if (auto cached =
-                annotation_cache_.lookup_cpp_template_argument_annotation(
-                    token_idx,
-                    key)) {
+        if (auto stored =
+                annotation_store_.lookup_cpp_template_argument_annotation(
+                        token_idx,
+                        key)) {
+            bump_typed_annotation_hit();
             bump_template_arg_annotation_hit();
-            return *cached;
+            return *stored;
         }
+        bump_typed_annotation_miss();
         bump_template_arg_annotation_miss();
     }
 
     auto annotation = compute_cpp_template_argument_for_lookahead();
-    if (use_cache) {
-        annotation_cache_.store_cpp_template_argument_annotation(
+    if (use_store) {
+        annotation = annotation_store_.store_cpp_template_argument_annotation(
             token_idx,
             key,
             annotation);
         bump_template_arg_annotation_publish();
+        bump_typed_annotation_publish();
     }
     return annotation;
 }
 
-ParserAnnotationCache::CppTemplateArgumentAnnotation
+ParserAnnotationStore::CppTemplateArgumentAnnotation
 Parser::compute_cpp_template_argument_for_lookahead() {
-    ParserAnnotationCache::CppTemplateArgumentAnnotation result;
-    result.kind = ParserAnnotationCache::CppTemplateArgumentKind::NoMatch;
+    ParserAnnotationStore::CppTemplateArgumentAnnotation result;
+    result.kind = ParserAnnotationStore::CppTemplateArgumentKind::NoMatch;
     result.end_token_idx = get_token_idx();
 
     if (!is_cxx_mode_active()) {
         return result;
     }
 
-    auto finish = [&](ParserAnnotationCache::CppTemplateArgumentKind kind) {
+    auto finish = [&](ParserAnnotationStore::CppTemplateArgumentKind kind) {
         result.kind = kind;
         result.followed_by_ellipsis =
             current_token().type != TokenType::ELLIPSIS &&
@@ -1460,12 +1510,12 @@ Parser::compute_cpp_template_argument_for_lookahead() {
         case TokenType::SCOPE_RESOLUTION:
         case TokenType::COLON:
             if (auto type_scope = classify_cpp_type_scope_for_lookahead(
-                    ParserAnnotationCache::CppTypeScopeContext::
+                    ParserAnnotationStore::CppTypeScopeContext::
                         TemplateArgument);
                 type_scope.kind ==
-                        ParserAnnotationCache::CppTypeScopeKind::TypeName ||
+                        ParserAnnotationStore::CppTypeScopeKind::TypeName ||
                 type_scope.kind ==
-                    ParserAnnotationCache::CppTypeScopeKind::TypeTemplateId) {
+                    ParserAnnotationStore::CppTypeScopeKind::TypeTemplateId) {
                 const size_t follow_offset =
                     type_scope.end_token_idx >= get_token_idx()
                         ? type_scope.end_token_idx - get_token_idx()
@@ -1475,9 +1525,9 @@ Parser::compute_cpp_template_argument_for_lookahead() {
                     result.end_token_idx = type_scope.end_token_idx;
                     result.kind =
                         follow == TokenType::LEFT_BRACE
-                            ? ParserAnnotationCache::
+                            ? ParserAnnotationStore::
                                   CppTemplateArgumentKind::TypedBraced
-                            : ParserAnnotationCache::
+                            : ParserAnnotationStore::
                                   CppTemplateArgumentKind::Type;
                     result.followed_by_ellipsis =
                         follow == TokenType::ELLIPSIS;
@@ -1488,9 +1538,9 @@ Parser::compute_cpp_template_argument_for_lookahead() {
             }
             result.kind =
                 has_template_argument_list_shape_before_boundary()
-                    ? ParserAnnotationCache::CppTemplateArgumentKind::
+                    ? ParserAnnotationStore::CppTemplateArgumentKind::
                           Inconclusive
-                    : ParserAnnotationCache::CppTemplateArgumentKind::
+                    : ParserAnnotationStore::CppTemplateArgumentKind::
                           DependentOrAmbiguous;
             result.dependent_or_ambiguous = true;
             return result;
@@ -1524,65 +1574,68 @@ Parser::compute_cpp_template_argument_for_lookahead() {
         case TokenType::NEW:
         case TokenType::DELETE:
             return finish(
-                ParserAnnotationCache::CppTemplateArgumentKind::Expression);
+                ParserAnnotationStore::CppTemplateArgumentKind::Expression);
 
         case TokenType::LEFT_BRACE:
         case TokenType::RIGHT_PAREN:
         case TokenType::RIGHT_BRACE:
         case TokenType::RIGHT_BRACKET:
         case TokenType::SEMICOLON:
-            result.kind = ParserAnnotationCache::CppTemplateArgumentKind::Error;
+            result.kind = ParserAnnotationStore::CppTemplateArgumentKind::Error;
             return result;
 
         default:
             result.kind =
-                ParserAnnotationCache::CppTemplateArgumentKind::Inconclusive;
+                ParserAnnotationStore::CppTemplateArgumentKind::Inconclusive;
             result.dependent_or_ambiguous = true;
             return result;
     }
 }
 
-ParserAnnotationCache::CppQualifiedIdAnnotation
+ParserAnnotationStore::CppQualifiedIdAnnotation
 Parser::classify_cpp_qualified_id_for_lookahead() {
-    ParserAnnotationCache::CppQualifiedIdAnnotation inconclusive;
+    ParserAnnotationStore::CppQualifiedIdAnnotation inconclusive;
     inconclusive.kind =
-        ParserAnnotationCache::CppQualifiedIdKind::Inconclusive;
+        ParserAnnotationStore::CppQualifiedIdKind::Inconclusive;
     inconclusive.dependent_or_ambiguous = true;
 
     if (tok_mgnt.has_split_tokens()) {
         return inconclusive;
     }
 
-    const bool use_cache = can_use_annotation_cache();
+    const bool use_store = can_use_annotation_store();
     const size_t token_idx = get_token_idx();
     const uint32_t key =
-        ParserAnnotationCache::make_config_key(syntax_probe_config());
-    if (use_cache) {
-        if (auto cached =
-                annotation_cache_.lookup_cpp_qualified_id_annotation(
+        ParserAnnotationStore::make_config_key(syntax_probe_config());
+    if (use_store) {
+        if (auto stored =
+                annotation_store_.lookup_cpp_qualified_id_annotation(
                     token_idx,
                     key)) {
+            bump_typed_annotation_hit();
             bump_qualified_id_annotation_hit();
-            return *cached;
+            return *stored;
         }
+        bump_typed_annotation_miss();
         bump_qualified_id_annotation_miss();
     }
 
     auto annotation = compute_cpp_qualified_id_for_lookahead();
-    if (use_cache) {
-        annotation_cache_.store_cpp_qualified_id_annotation(
+    if (use_store) {
+        annotation = annotation_store_.store_cpp_qualified_id_annotation(
             token_idx,
             key,
             annotation);
         bump_qualified_id_annotation_publish();
+        bump_typed_annotation_publish();
     }
     return annotation;
 }
 
-ParserAnnotationCache::CppQualifiedIdAnnotation
+ParserAnnotationStore::CppQualifiedIdAnnotation
 Parser::compute_cpp_qualified_id_for_lookahead() {
-    ParserAnnotationCache::CppQualifiedIdAnnotation result;
-    result.kind = ParserAnnotationCache::CppQualifiedIdKind::NoMatch;
+    ParserAnnotationStore::CppQualifiedIdAnnotation result;
+    result.kind = ParserAnnotationStore::CppQualifiedIdKind::NoMatch;
     result.end_token_idx = get_token_idx();
 
     if (!is_cxx_mode_active()) {
@@ -1598,7 +1651,7 @@ Parser::compute_cpp_qualified_id_for_lookahead() {
     };
     auto finish_inconclusive = [&]() {
         result.kind =
-            ParserAnnotationCache::CppQualifiedIdKind::Inconclusive;
+            ParserAnnotationStore::CppQualifiedIdKind::Inconclusive;
         result.dependent_or_ambiguous = true;
         return result;
     };
@@ -1777,14 +1830,14 @@ Parser::compute_cpp_qualified_id_for_lookahead() {
     }
 
     if (!result.has_scope) {
-        result.kind = ParserAnnotationCache::CppQualifiedIdKind::NoMatch;
+        result.kind = ParserAnnotationStore::CppQualifiedIdKind::NoMatch;
         return result;
     }
 
     result.end_token_idx = start_idx + offset;
     result.followed_by_left_paren =
         token_at(offset).type == TokenType::LEFT_PAREN;
-    result.kind = ParserAnnotationCache::CppQualifiedIdKind::QualifiedId;
+    result.kind = ParserAnnotationStore::CppQualifiedIdKind::QualifiedId;
     return result;
 }
 
@@ -1805,7 +1858,7 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
 
     auto template_id_annotation = classify_cpp_template_id_for_lookahead();
     switch (template_id_annotation.kind) {
-        case ParserAnnotationCache::CppTemplateIdKind::TemplateName:
+        case ParserAnnotationStore::CppTemplateIdKind::TemplateName:
             if (auto argument =
                     try_make_cpp_template_name_argument_from_annotation(
                         template_id_annotation)) {
@@ -1814,16 +1867,16 @@ std::optional<TemplateArgument> Parser::try_parse_cpp_template_name_argument() {
             }
             bump_template_id_inconclusive_fallback();
             break;
-        case ParserAnnotationCache::CppTemplateIdKind::NoTemplate:
-        case ParserAnnotationCache::CppTemplateIdKind::TypeTemplateId:
-        case ParserAnnotationCache::CppTemplateIdKind::NonTypeTemplateId:
+        case ParserAnnotationStore::CppTemplateIdKind::NoTemplate:
+        case ParserAnnotationStore::CppTemplateIdKind::TypeTemplateId:
+        case ParserAnnotationStore::CppTemplateIdKind::NonTypeTemplateId:
             bump_template_id_fast_no_match();
             return std::nullopt;
-        case ParserAnnotationCache::CppTemplateIdKind::DependentOrAmbiguous:
-        case ParserAnnotationCache::CppTemplateIdKind::Inconclusive:
+        case ParserAnnotationStore::CppTemplateIdKind::DependentOrAmbiguous:
+        case ParserAnnotationStore::CppTemplateIdKind::Inconclusive:
             bump_template_id_inconclusive_fallback();
             break;
-        case ParserAnnotationCache::CppTemplateIdKind::NoMatch:
+        case ParserAnnotationStore::CppTemplateIdKind::NoMatch:
             break;
     }
 
@@ -2157,11 +2210,11 @@ bool Parser::try_consume_cpp_decltype_specifier_for_lookahead() {
     return true;
 }
 
-ParserAnnotationCache::CppTypeScopeAnnotation
+ParserAnnotationStore::CppTypeScopeAnnotation
 Parser::classify_cpp_type_scope_for_lookahead(
-    ParserAnnotationCache::CppTypeScopeContext context) {
-    ParserAnnotationCache::CppTypeScopeAnnotation inconclusive;
-    inconclusive.kind = ParserAnnotationCache::CppTypeScopeKind::Inconclusive;
+    ParserAnnotationStore::CppTypeScopeContext context) {
+    ParserAnnotationStore::CppTypeScopeAnnotation inconclusive;
+    inconclusive.kind = ParserAnnotationStore::CppTypeScopeKind::Inconclusive;
     inconclusive.end_token_idx = get_token_idx();
     inconclusive.dependent_or_ambiguous = true;
 
@@ -2169,38 +2222,41 @@ Parser::classify_cpp_type_scope_for_lookahead(
         return inconclusive;
     }
 
-    const bool use_cache = can_use_semantic_annotation_cache();
+    const bool use_store = can_use_semantic_annotation_store();
     const size_t token_idx = get_token_idx();
-    ParserAnnotationCache::SemanticKey key;
-    if (use_cache) {
+    ParserAnnotationStore::SemanticKey key;
+    if (use_store) {
         key = semantic_annotation_key();
-        if (auto cached = annotation_cache_.lookup_cpp_type_scope_annotation(
+        if (auto stored = annotation_store_.lookup_cpp_type_scope_annotation(
                 token_idx,
                 context,
                 key)) {
+            bump_typed_annotation_hit();
             bump_type_scope_annotation_hit();
-            return *cached;
+            return *stored;
         }
+        bump_typed_annotation_miss();
         bump_type_scope_annotation_miss();
     }
 
     auto annotation = compute_cpp_type_scope_for_lookahead(context);
-    if (use_cache) {
-        annotation_cache_.store_cpp_type_scope_annotation(
+    if (use_store) {
+        annotation = annotation_store_.store_cpp_type_scope_annotation(
             token_idx,
             context,
             key,
             annotation);
         bump_type_scope_annotation_publish();
+        bump_typed_annotation_publish();
     }
     return annotation;
 }
 
-ParserAnnotationCache::CppTypeScopeAnnotation
+ParserAnnotationStore::CppTypeScopeAnnotation
 Parser::compute_cpp_type_scope_for_lookahead(
-    ParserAnnotationCache::CppTypeScopeContext context) {
-    using Kind = ParserAnnotationCache::CppTypeScopeKind;
-    ParserAnnotationCache::CppTypeScopeAnnotation result;
+    ParserAnnotationStore::CppTypeScopeContext context) {
+    using Kind = ParserAnnotationStore::CppTypeScopeKind;
+    ParserAnnotationStore::CppTypeScopeAnnotation result;
     const size_t start_idx = get_token_idx();
     result.end_token_idx = start_idx;
     result.terminal_token_idx = start_idx;
@@ -2520,12 +2576,12 @@ Parser::compute_cpp_type_scope_for_lookahead(
 
 bool Parser::can_start_cpp_named_type_specifier_for_lookahead() {
     auto annotation = classify_cpp_type_scope_for_lookahead(
-        ParserAnnotationCache::CppTypeScopeContext::DeclSpecifier);
+        ParserAnnotationStore::CppTypeScopeContext::DeclSpecifier);
     switch (annotation.kind) {
-        case ParserAnnotationCache::CppTypeScopeKind::TypeName:
-        case ParserAnnotationCache::CppTypeScopeKind::TypeTemplateId:
-        case ParserAnnotationCache::CppTypeScopeKind::DependentType:
-        case ParserAnnotationCache::CppTypeScopeKind::PlaceholderConstraint:
+        case ParserAnnotationStore::CppTypeScopeKind::TypeName:
+        case ParserAnnotationStore::CppTypeScopeKind::TypeTemplateId:
+        case ParserAnnotationStore::CppTypeScopeKind::DependentType:
+        case ParserAnnotationStore::CppTypeScopeKind::PlaceholderConstraint:
             return true;
         default:
             return false;
@@ -3140,26 +3196,26 @@ Parser::try_parse_cpp_direct_simple_type_id(CppDirectTypeIdContext context) {
     };
 
     auto can_consume_annotated_type_base = [&]() {
-        ParserAnnotationCache::CppTypeScopeContext scope_context =
-            ParserAnnotationCache::CppTypeScopeContext::TypeId;
+        ParserAnnotationStore::CppTypeScopeContext scope_context =
+            ParserAnnotationStore::CppTypeScopeContext::TypeId;
         switch (context) {
             case CppDirectTypeIdContext::TemplateArgument:
                 scope_context =
-                    ParserAnnotationCache::CppTypeScopeContext::
+                    ParserAnnotationStore::CppTypeScopeContext::
                         TemplateArgument;
                 break;
             case CppDirectTypeIdContext::Cast:
                 scope_context =
-                    ParserAnnotationCache::CppTypeScopeContext::TypeId;
+                    ParserAnnotationStore::CppTypeScopeContext::TypeId;
                 break;
             case CppDirectTypeIdContext::TypeConstruction:
                 scope_context =
-                    ParserAnnotationCache::CppTypeScopeContext::
+                    ParserAnnotationStore::CppTypeScopeContext::
                         TypeConstruction;
                 break;
             case CppDirectTypeIdContext::DeclaratorParameter:
                 scope_context =
-                    ParserAnnotationCache::CppTypeScopeContext::
+                    ParserAnnotationStore::CppTypeScopeContext::
                         DeclaratorParameter;
                 break;
         }
@@ -3170,9 +3226,9 @@ Parser::try_parse_cpp_direct_simple_type_id(CppDirectTypeIdContext context) {
             return false;
         }
         switch (annotation.kind) {
-            case ParserAnnotationCache::CppTypeScopeKind::TypeName:
-            case ParserAnnotationCache::CppTypeScopeKind::TypeTemplateId:
-            case ParserAnnotationCache::CppTypeScopeKind::DependentType:
+            case ParserAnnotationStore::CppTypeScopeKind::TypeName:
+            case ParserAnnotationStore::CppTypeScopeKind::TypeTemplateId:
+            case ParserAnnotationStore::CppTypeScopeKind::DependentType:
                 return true;
             default:
                 return false;
@@ -3600,22 +3656,22 @@ TemplateArgument Parser::parse_cpp_template_argument() {
     auto template_arg_annotation =
         classify_cpp_template_argument_for_lookahead();
     switch (template_arg_annotation.kind) {
-        case ParserAnnotationCache::CppTemplateArgumentKind::Expression:
-        case ParserAnnotationCache::CppTemplateArgumentKind::NoMatch:
+        case ParserAnnotationStore::CppTemplateArgumentKind::Expression:
+        case ParserAnnotationStore::CppTemplateArgumentKind::NoMatch:
             bump_template_arg_fast_expression();
             should_try_tentative_type_argument = false;
             break;
-        case ParserAnnotationCache::CppTemplateArgumentKind::Error:
+        case ParserAnnotationStore::CppTemplateArgumentKind::Error:
             should_try_tentative_type_argument = false;
             break;
-        case ParserAnnotationCache::CppTemplateArgumentKind::Type:
-        case ParserAnnotationCache::CppTemplateArgumentKind::TypedBraced:
-        case ParserAnnotationCache::CppTemplateArgumentKind::TemplateName:
+        case ParserAnnotationStore::CppTemplateArgumentKind::Type:
+        case ParserAnnotationStore::CppTemplateArgumentKind::TypedBraced:
+        case ParserAnnotationStore::CppTemplateArgumentKind::TemplateName:
             bump_template_arg_fast_type();
             break;
-        case ParserAnnotationCache::CppTemplateArgumentKind::
+        case ParserAnnotationStore::CppTemplateArgumentKind::
             DependentOrAmbiguous:
-        case ParserAnnotationCache::CppTemplateArgumentKind::Inconclusive:
+        case ParserAnnotationStore::CppTemplateArgumentKind::Inconclusive:
             bump_template_arg_inconclusive_fallback();
             break;
     }
@@ -3734,20 +3790,20 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
         set_token_idx(saved_idx);
         tok_mgnt.set_split_token_state(saved_split_state);
     };
-    const bool publish_type_annotation = can_use_semantic_annotation_cache();
+    const bool publish_type_annotation = can_use_semantic_annotation_store();
     const auto type_annotation_key =
         publish_type_annotation ? semantic_annotation_key()
-                                : ParserAnnotationCache::SemanticKey{};
+                                : ParserAnnotationStore::SemanticKey{};
     auto finish_type_annotation =
         [&](ParsedCppTypeNameSpecifier result)
             -> std::optional<ParsedCppTypeNameSpecifier> {
         if (publish_type_annotation) {
-            annotation_cache_.store_semantic_annotation(
+            annotation_store_.store_semantic_annotation(
                 saved_idx,
-                ParserAnnotationCache::SemanticKind::
+                ParserAnnotationStore::SemanticKind::
                     CppNamedTypeSpecifierLookahead,
                 type_annotation_key,
-                ParserAnnotationCache::SemanticAnnotation{
+                ParserAnnotationStore::SemanticAnnotation{
                     get_token_idx(),
                     1,
                     type_depends_on_template_parameters(result.type,
@@ -3772,7 +3828,7 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
             const bool dependent =
                 type_depends_on_template_parameters(result.type,
                                                     ast_ctx.get());
-            ParserAnnotationCache::CppTypeScopeAnnotation type_scope;
+            ParserAnnotationStore::CppTypeScopeAnnotation type_scope;
             type_scope.end_token_idx = get_token_idx();
             type_scope.terminal_token_idx =
                 get_token_idx() > saved_idx ? get_token_idx() - 1 : saved_idx;
@@ -3780,11 +3836,11 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
             type_scope.typedef_symbol = result.typedef_symbol.get();
             type_scope.kind =
                 dependent
-                    ? ParserAnnotationCache::CppTypeScopeKind::DependentType
+                    ? ParserAnnotationStore::CppTypeScopeKind::DependentType
                     : (has_template_id
-                           ? ParserAnnotationCache::CppTypeScopeKind::
+                           ? ParserAnnotationStore::CppTypeScopeKind::
                                  TypeTemplateId
-                           : ParserAnnotationCache::CppTypeScopeKind::
+                           : ParserAnnotationStore::CppTypeScopeKind::
                                  TypeName);
             type_scope.has_global_qualifier =
                 start_tok.type == TokenType::SCOPE_RESOLUTION ||
@@ -3810,16 +3866,17 @@ Parser::try_parse_cpp_named_type_specifier(CppTypeNameParseContext context) {
 
             auto scope_context =
                 context == CppTypeNameParseContext::TypeRequirement
-                    ? ParserAnnotationCache::CppTypeScopeContext::
+                    ? ParserAnnotationStore::CppTypeScopeContext::
                           TypeRequirement
-                    : ParserAnnotationCache::CppTypeScopeContext::
+                    : ParserAnnotationStore::CppTypeScopeContext::
                           DeclSpecifier;
-            annotation_cache_.store_cpp_type_scope_annotation(
+            type_scope = annotation_store_.store_cpp_type_scope_annotation(
                 saved_idx,
                 scope_context,
                 type_annotation_key,
                 type_scope);
             bump_type_scope_annotation_publish();
+            bump_typed_annotation_publish();
         }
         return result;
     };
@@ -8393,27 +8450,27 @@ bool Parser::is_cpp_qualified_id_start() {
     if (!is_cxx_mode_active()) {
         return false;
     }
-    const bool use_cache = can_use_semantic_annotation_cache();
+    const bool use_store = can_use_semantic_annotation_store();
     const size_t token_idx = get_token_idx();
-    ParserAnnotationCache::SemanticKey key;
-    if (use_cache) {
+    ParserAnnotationStore::SemanticKey key;
+    if (use_store) {
         key = semantic_annotation_key();
-        if (auto cached = annotation_cache_.lookup_semantic_annotation(
+        if (auto stored = annotation_store_.lookup_semantic_annotation(
                 token_idx,
-                ParserAnnotationCache::SemanticKind::CppScope,
+                ParserAnnotationStore::SemanticKind::CppScope,
                 key)) {
             bump_parser_annotation_overlay_hit();
-            return cached->value != 0;
+            return stored->value != 0;
         }
         bump_parser_annotation_overlay_miss();
     }
     auto finish = [&](bool result) {
-        if (use_cache) {
-            annotation_cache_.store_semantic_annotation(
+        if (use_store) {
+            annotation_store_.store_semantic_annotation(
                 token_idx,
-                ParserAnnotationCache::SemanticKind::CppScope,
+                ParserAnnotationStore::SemanticKind::CppScope,
                 key,
-                ParserAnnotationCache::SemanticAnnotation{
+                ParserAnnotationStore::SemanticAnnotation{
                     get_token_idx(),
                     static_cast<uint8_t>(result ? 1 : 0),
                     false});
@@ -8425,16 +8482,16 @@ bool Parser::is_cpp_qualified_id_start() {
     auto qualified_id_annotation =
         classify_cpp_qualified_id_for_lookahead();
     switch (qualified_id_annotation.kind) {
-        case ParserAnnotationCache::CppQualifiedIdKind::QualifiedId:
+        case ParserAnnotationStore::CppQualifiedIdKind::QualifiedId:
             bump_qualified_id_fast_accept();
             return finish(true);
-        case ParserAnnotationCache::CppQualifiedIdKind::NoMatch:
+        case ParserAnnotationStore::CppQualifiedIdKind::NoMatch:
             bump_qualified_id_fast_reject();
             return finish(false);
-        case ParserAnnotationCache::CppQualifiedIdKind::Error:
+        case ParserAnnotationStore::CppQualifiedIdKind::Error:
             bump_qualified_id_fast_reject();
             return finish(false);
-        case ParserAnnotationCache::CppQualifiedIdKind::Inconclusive:
+        case ParserAnnotationStore::CppQualifiedIdKind::Inconclusive:
             bump_qualified_id_inconclusive_fallback();
             break;
     }
@@ -10200,16 +10257,16 @@ Parser::TPResult Parser::try_parse_cpp_qualified_id() {
     auto qualified_id_annotation =
         classify_cpp_qualified_id_for_lookahead();
     switch (qualified_id_annotation.kind) {
-        case ParserAnnotationCache::CppQualifiedIdKind::QualifiedId:
+        case ParserAnnotationStore::CppQualifiedIdKind::QualifiedId:
             bump_qualified_id_fast_accept();
             return TPResult::True;
-        case ParserAnnotationCache::CppQualifiedIdKind::NoMatch:
+        case ParserAnnotationStore::CppQualifiedIdKind::NoMatch:
             bump_qualified_id_fast_reject();
             return TPResult::False;
-        case ParserAnnotationCache::CppQualifiedIdKind::Error:
+        case ParserAnnotationStore::CppQualifiedIdKind::Error:
             bump_qualified_id_fast_reject();
             return TPResult::Error;
-        case ParserAnnotationCache::CppQualifiedIdKind::Inconclusive:
+        case ParserAnnotationStore::CppQualifiedIdKind::Inconclusive:
             bump_qualified_id_inconclusive_fallback();
             break;
     }
