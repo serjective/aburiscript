@@ -979,6 +979,10 @@ private:
     classify_cpp_template_argument_for_lookahead();
     ParserAnnotationCache::CppTemplateArgumentAnnotation
     compute_cpp_template_argument_for_lookahead();
+    ParserAnnotationCache::CxxParenthesizedTypeIdAnnotation
+    classify_cxx_parenthesized_type_id_for_lookahead();
+    ParserAnnotationCache::CxxParenthesizedTypeIdAnnotation
+    compute_cxx_parenthesized_type_id_for_lookahead();
     ParserAnnotationCache::CppQualifiedIdAnnotation
     classify_cpp_qualified_id_for_lookahead();
     ParserAnnotationCache::CppQualifiedIdAnnotation

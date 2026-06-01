@@ -7,6 +7,8 @@
 #include <cassert>
 #include <iostream>
 
+bool token_can_start_cast_operand(TokenType tok);
+
 namespace {
 struct ParserTentativeMetrics {
     uint64_t tentative_context_begins = 0;
@@ -178,6 +180,22 @@ void bump_declarator_annotation_publish() {
     if (auto* profiler = active_perf_profiler();
         profiler && profiler->wants_full()) {
         profiler->add_counter(PerfCounter::ParserDeclaratorAnnotationPublishes);
+    }
+}
+
+void bump_declarator_paren_suffix_type_scope_reject() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserDeclaratorParenSuffixTypeScopeRejects);
+    }
+}
+
+void bump_declarator_paren_suffix_type_scope_fallback() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserDeclaratorParenSuffixTypeScopeFallbacks);
     }
 }
 } // namespace
@@ -512,6 +530,188 @@ tentative_syntax_probe::Result Parser::probe_parenthesized_type_name_syntax() {
     return result;
 }
 
+ParserAnnotationCache::CxxParenthesizedTypeIdAnnotation
+Parser::classify_cxx_parenthesized_type_id_for_lookahead() {
+    ParserAnnotationCache::CxxParenthesizedTypeIdAnnotation inconclusive;
+    inconclusive.kind =
+        ParserAnnotationCache::CxxParenthesizedTypeIdKind::Inconclusive;
+    inconclusive.close_token_idx = tok_mgnt.get_token_idx();
+    inconclusive.end_token_idx = tok_mgnt.get_token_idx();
+    inconclusive.dependent_or_ambiguous = true;
+
+    if (!is_cxx_mode_active()) {
+        ParserAnnotationCache::CxxParenthesizedTypeIdAnnotation no_match;
+        no_match.close_token_idx = tok_mgnt.get_token_idx();
+        no_match.end_token_idx = tok_mgnt.get_token_idx();
+        return no_match;
+    }
+    if (tok_mgnt.has_split_tokens()) {
+        return inconclusive;
+    }
+
+    const bool use_cache = can_use_semantic_annotation_cache();
+    const size_t token_idx = tok_mgnt.get_token_idx();
+    ParserAnnotationCache::SemanticKey key;
+    if (use_cache) {
+        key = semantic_annotation_key();
+        if (auto cached =
+                annotation_cache_
+                    .lookup_cxx_parenthesized_type_id_annotation(
+                        token_idx,
+                        key)) {
+            bump_annotation_cache_hit();
+            return *cached;
+        }
+        bump_annotation_cache_miss();
+    }
+
+    auto annotation = compute_cxx_parenthesized_type_id_for_lookahead();
+    if (use_cache) {
+        annotation_cache_.store_cxx_parenthesized_type_id_annotation(
+            token_idx,
+            key,
+            annotation);
+    }
+    return annotation;
+}
+
+ParserAnnotationCache::CxxParenthesizedTypeIdAnnotation
+Parser::compute_cxx_parenthesized_type_id_for_lookahead() {
+    using Kind = ParserAnnotationCache::CxxParenthesizedTypeIdKind;
+    ParserAnnotationCache::CxxParenthesizedTypeIdAnnotation result;
+    const size_t start_idx = tok_mgnt.get_token_idx();
+    result.close_token_idx = start_idx;
+    result.end_token_idx = start_idx;
+
+    auto finish = [&](Kind kind) {
+        result.kind = kind;
+        return result;
+    };
+    auto finish_inconclusive = [&]() {
+        result.kind = Kind::Inconclusive;
+        result.dependent_or_ambiguous = true;
+        return result;
+    };
+    auto is_cv_or_nullability_qualifier = [](TokenType type) {
+        switch (type) {
+            case TokenType::CONST:
+            case TokenType::VOLATILE:
+            case TokenType::RESTRICT:
+            case TokenType::ATOMIC:
+            case TokenType::NULLABILITY_QUALIFIER:
+                return true;
+            default:
+                return false;
+        }
+    };
+    auto should_semantically_classify_start = [](TokenType type) {
+        return type == TokenType::IDENTIFIER ||
+               type == TokenType::SCOPE_RESOLUTION ||
+               type == TokenType::TYPENAME ||
+               type == TokenType::DECLTYPE_KW ||
+               type == TokenType::COLON;
+    };
+    auto scan_parenthesized_follow_token = [&]() -> std::optional<TokenType> {
+        if (peek_token_shortcut(0).type != TokenType::LEFT_PAREN) {
+            return std::nullopt;
+        }
+        size_t offset = 0;
+        size_t depth = 0;
+        while (peek_token_shortcut(offset).type != TokenType::Eof) {
+            TokenType type = peek_token_shortcut(offset).type;
+            if (type == TokenType::LEFT_PAREN) {
+                ++depth;
+            } else if (type == TokenType::RIGHT_PAREN) {
+                --depth;
+                ++offset;
+                if (depth == 0) {
+                    return peek_token_shortcut(offset).type;
+                }
+                continue;
+            }
+            ++offset;
+        }
+        return std::nullopt;
+    };
+
+    if (!is_cxx_mode_active() || !collect_ ||
+        tok_mgnt.current_token().type != TokenType::LEFT_PAREN) {
+        return result;
+    }
+
+    bool semantic_start_dependent_or_ambiguous = false;
+    {
+        TokenStreamCheckpoint checkpoint(tok_mgnt);
+        tok_mgnt.advance(); // consume '('
+        if (tok_mgnt.current_token().type == TokenType::EXTENSION_KW) {
+            return result;
+        }
+        while (is_cv_or_nullability_qualifier(tok_mgnt.current_token().type)) {
+            tok_mgnt.advance();
+        }
+        TokenType semantic_start = tok_mgnt.current_token().type;
+        if (should_semantically_classify_start(semantic_start)) {
+            auto type_scope = classify_cpp_type_scope_for_lookahead(
+                ParserAnnotationCache::CppTypeScopeContext::TypeId);
+            switch (type_scope.kind) {
+                case ParserAnnotationCache::CppTypeScopeKind::TypeName:
+                case ParserAnnotationCache::CppTypeScopeKind::TypeTemplateId:
+                case ParserAnnotationCache::CppTypeScopeKind::DependentType:
+                case ParserAnnotationCache::CppTypeScopeKind::
+                    PlaceholderConstraint:
+                    break;
+                case ParserAnnotationCache::CppTypeScopeKind::NoMatch:
+                case ParserAnnotationCache::CppTypeScopeKind::NonType:
+                    return result;
+                case ParserAnnotationCache::CppTypeScopeKind::ScopeOnly:
+                case ParserAnnotationCache::CppTypeScopeKind::DependentScope:
+                case ParserAnnotationCache::CppTypeScopeKind::Inconclusive:
+                    semantic_start_dependent_or_ambiguous = true;
+                    break;
+                case ParserAnnotationCache::CppTypeScopeKind::Error:
+                    return finish(Kind::Error);
+            }
+        }
+    }
+
+    TokenStreamCheckpoint checkpoint(tok_mgnt);
+    tok_mgnt.advance(); // consume '('
+    if (tok_mgnt.current_token().type == TokenType::EXTENSION_KW) {
+        return result;
+    }
+
+    auto syntax_result =
+        tentative_syntax_probe::probe_type_name(tok_mgnt, syntax_probe_config());
+    switch (syntax_result) {
+        case tentative_syntax_probe::Result::NoMatch:
+            return result;
+        case tentative_syntax_probe::Result::Inconclusive:
+            if (auto follow = scan_parenthesized_follow_token();
+                follow && *follow != TokenType::LEFT_BRACE &&
+                !token_can_start_cast_operand(*follow)) {
+                return result;
+            }
+            return finish_inconclusive();
+        case tentative_syntax_probe::Result::Error:
+            return finish(Kind::Error);
+        case tentative_syntax_probe::Result::Match:
+            break;
+    }
+
+    if (tok_mgnt.current_token().type != TokenType::RIGHT_PAREN) {
+        return finish_inconclusive();
+    }
+    result.close_token_idx = tok_mgnt.get_token_idx();
+    tok_mgnt.advance(); // consume ')'
+    result.end_token_idx = tok_mgnt.get_token_idx();
+    TokenType follow = tok_mgnt.current_token().type;
+    result.followed_by_left_brace = follow == TokenType::LEFT_BRACE;
+    result.followed_by_cast_operand =
+        follow != TokenType::LEFT_BRACE && token_can_start_cast_operand(follow);
+    result.dependent_or_ambiguous = semantic_start_dependent_or_ambiguous;
+    return finish(Kind::TypeId);
+}
+
 tentative_syntax_probe::TemplateArgumentListScan
 Parser::scan_template_argument_list_scope_follow_syntax() {
     auto cfg = syntax_probe_config();
@@ -708,6 +908,27 @@ Parser::compute_cxx_declarator_paren_suffix_for_lookahead() {
         parameter_start_type == TokenType::SCOPE_RESOLUTION ||
         (parameter_start_type == TokenType::COLON &&
          tok_mgnt.peek_token().type == TokenType::COLON)) {
+        auto type_scope = classify_cpp_type_scope_for_lookahead(
+            ParserAnnotationCache::CppTypeScopeContext::DeclaratorParameter);
+        switch (type_scope.kind) {
+            case ParserAnnotationCache::CppTypeScopeKind::NoMatch:
+            case ParserAnnotationCache::CppTypeScopeKind::NonType:
+                bump_declarator_paren_suffix_type_scope_reject();
+                return finish(
+                    ParserAnnotationCache::CxxDeclaratorParenSuffixKind::
+                        DefiniteDirectInitializer);
+            case ParserAnnotationCache::CppTypeScopeKind::TypeName:
+            case ParserAnnotationCache::CppTypeScopeKind::TypeTemplateId:
+            case ParserAnnotationCache::CppTypeScopeKind::DependentType:
+            case ParserAnnotationCache::CppTypeScopeKind::DependentScope:
+            case ParserAnnotationCache::CppTypeScopeKind::ScopeOnly:
+            case ParserAnnotationCache::CppTypeScopeKind::
+                PlaceholderConstraint:
+            case ParserAnnotationCache::CppTypeScopeKind::Inconclusive:
+            case ParserAnnotationCache::CppTypeScopeKind::Error:
+                bump_declarator_paren_suffix_type_scope_fallback();
+                break;
+        }
         result.kind =
             ParserAnnotationCache::CxxDeclaratorParenSuffixKind::Ambiguous;
         result.dependent_or_ambiguous = true;

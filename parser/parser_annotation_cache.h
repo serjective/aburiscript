@@ -118,6 +118,23 @@ public:
         bool dependent_or_ambiguous = false;
     };
 
+    enum class CxxParenthesizedTypeIdKind : uint8_t {
+        NoMatch,
+        TypeId,
+        Inconclusive,
+        Error
+    };
+
+    struct CxxParenthesizedTypeIdAnnotation {
+        size_t close_token_idx = 0;
+        size_t end_token_idx = 0;
+        CxxParenthesizedTypeIdKind kind =
+            CxxParenthesizedTypeIdKind::NoMatch;
+        bool followed_by_cast_operand = false;
+        bool followed_by_left_brace = false;
+        bool dependent_or_ambiguous = false;
+    };
+
     enum class CxxDeclaratorParenSuffixKind : uint8_t {
         NoMatch,
         EmptyParameterClause,
@@ -160,6 +177,8 @@ public:
         QualifiedDeclarator,
         Constraint,
         TypeRequirement,
+        TypeId,
+        DeclaratorParameter,
         Count
     };
 
@@ -419,6 +438,35 @@ public:
         entry.value = value;
     }
 
+    std::optional<CxxParenthesizedTypeIdAnnotation>
+    lookup_cxx_parenthesized_type_id_annotation(
+        size_t token_idx,
+        const SemanticKey& key) const {
+        const auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return std::nullopt;
+        }
+        const auto& entry = slot->cxx_parenthesized_type_id;
+        if (!entry.valid || !(entry.key == key)) {
+            return std::nullopt;
+        }
+        return entry.value;
+    }
+
+    void store_cxx_parenthesized_type_id_annotation(
+        size_t token_idx,
+        const SemanticKey& key,
+        CxxParenthesizedTypeIdAnnotation value) {
+        auto* slot = slot_for(token_idx);
+        if (!slot) {
+            return;
+        }
+        auto& entry = slot->cxx_parenthesized_type_id;
+        entry.valid = true;
+        entry.key = key;
+        entry.value = value;
+    }
+
     std::optional<CxxDeclaratorParenSuffixAnnotation>
     lookup_cxx_declarator_paren_suffix_annotation(
         size_t token_idx,
@@ -545,6 +593,12 @@ private:
         CppTemplateArgumentAnnotation value;
     };
 
+    struct CxxParenthesizedTypeIdEntry {
+        bool valid = false;
+        SemanticKey key;
+        CxxParenthesizedTypeIdAnnotation value;
+    };
+
     struct CxxDeclaratorParenSuffixEntry {
         bool valid = false;
         SemanticKey key;
@@ -576,6 +630,7 @@ private:
         CppTemplateIdEntry cpp_template_id;
         CppQualifiedIdEntry cpp_qualified_id;
         CppTemplateArgumentEntry cpp_template_argument;
+        CxxParenthesizedTypeIdEntry cxx_parenthesized_type_id;
         CxxDeclaratorParenSuffixEntry cxx_declarator_paren_suffix;
         CppQualifiedDeclaratorPrefixEntry cpp_qualified_declarator_prefix;
         std::array<CppTypeScopeEntry,

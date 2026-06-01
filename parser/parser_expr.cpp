@@ -68,6 +68,36 @@ void bump_type_construction_lookup_reject() {
     }
 }
 
+void bump_cast_disambiguation_fast_accept() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserCastDisambiguationFastAccepts);
+    }
+}
+
+void bump_cast_disambiguation_fast_reject() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(PerfCounter::ParserCastDisambiguationFastRejects);
+    }
+}
+
+void bump_cast_disambiguation_inconclusive_fallback() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserCastDisambiguationInconclusiveFallbacks);
+    }
+}
+
+void bump_postfix_template_suffix_fast_reject() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserPostfixTemplateSuffixFastRejects);
+    }
+}
+
 bool try_get_fold_operator(const Token& token, BinOpTypes& op_out) {
     std::string spelling = token.value;
     op_out = string2bop(spelling);
@@ -2732,9 +2762,44 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
     std::unique_ptr<Expr> expr = nullptr;
     Token start_tok = current_token();
 
-    if (gentle_check(TokenType::LEFT_PAREN) &&
-        probe_parenthesized_type_name_syntax() !=
-            tentative_syntax_probe::Result::NoMatch) {
+    bool should_try_compound_literal = false;
+    if (gentle_check(TokenType::LEFT_PAREN)) {
+        if (is_cxx_mode_active()) {
+            auto parenthesized_type =
+                classify_cxx_parenthesized_type_id_for_lookahead();
+            switch (parenthesized_type.kind) {
+                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                    TypeId:
+                    should_try_compound_literal =
+                        parenthesized_type.followed_by_left_brace;
+                    if (should_try_compound_literal) {
+                        bump_cast_disambiguation_fast_accept();
+                    } else {
+                        bump_cast_disambiguation_fast_reject();
+                    }
+                    break;
+                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                    NoMatch:
+                    bump_cast_disambiguation_fast_reject();
+                    break;
+                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                    Inconclusive:
+                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                    Error:
+                    bump_cast_disambiguation_inconclusive_fallback();
+                    should_try_compound_literal =
+                        probe_parenthesized_type_name_syntax() !=
+                        tentative_syntax_probe::Result::NoMatch;
+                    break;
+            }
+        } else {
+            should_try_compound_literal =
+                probe_parenthesized_type_name_syntax() !=
+                tentative_syntax_probe::Result::NoMatch;
+        }
+    }
+
+    if (should_try_compound_literal) {
         TentativeParsingAction tentative(*this);
         try {
             advance(); // consume '('
@@ -2861,10 +2926,12 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
             if (callee_ref || member_callee ||
                 unresolved_member_callee || unresolved_lookup_callee) {
                 size_t explicit_suffix_probe_offset = 0;
-                bool parse_known_unqualified_template =
-                    unqualified_var_ref_names_template(callee_ref) &&
+                bool has_complete_template_suffix =
                     skip_template_argument_list_for_expression_probe(
                         explicit_suffix_probe_offset);
+                bool parse_known_unqualified_template =
+                    unqualified_var_ref_names_template(callee_ref) &&
+                    has_complete_template_suffix;
                 if (parse_known_unqualified_template) {
                     auto explicit_template_args =
                         parse_cpp_template_argument_list();
@@ -2904,6 +2971,10 @@ std::unique_ptr<Expr> Parser::parse_postfix_expression() {
                         member_callee,
                         unresolved_member_callee,
                         unresolved_lookup_callee)) {
+                    break;
+                }
+                if (!has_complete_template_suffix) {
+                    bump_postfix_template_suffix_fast_reject();
                     break;
                 }
                 TentativeParsingAction tentative(*this);
@@ -3342,9 +3413,44 @@ std::unique_ptr<Expr> Parser::parse_unary_expression() {
 }
 std::unique_ptr<Expr> Parser::parse_cast_expression() {
     Token t = current_token();
-    if (gentle_check(TokenType::LEFT_PAREN) &&
-        probe_parenthesized_type_name_syntax() !=
-            tentative_syntax_probe::Result::NoMatch) {
+    bool should_try_cast = false;
+    if (gentle_check(TokenType::LEFT_PAREN)) {
+        if (is_cxx_mode_active()) {
+            auto parenthesized_type =
+                classify_cxx_parenthesized_type_id_for_lookahead();
+            switch (parenthesized_type.kind) {
+                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                    TypeId:
+                    should_try_cast =
+                        parenthesized_type.followed_by_cast_operand;
+                    if (should_try_cast) {
+                        bump_cast_disambiguation_fast_accept();
+                    } else {
+                        bump_cast_disambiguation_fast_reject();
+                    }
+                    break;
+                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                    NoMatch:
+                    bump_cast_disambiguation_fast_reject();
+                    break;
+                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                    Inconclusive:
+                case ParserAnnotationCache::CxxParenthesizedTypeIdKind::
+                    Error:
+                    bump_cast_disambiguation_inconclusive_fallback();
+                    should_try_cast =
+                        probe_parenthesized_type_name_syntax() !=
+                        tentative_syntax_probe::Result::NoMatch;
+                    break;
+            }
+        } else {
+            should_try_cast =
+                probe_parenthesized_type_name_syntax() !=
+                tentative_syntax_probe::Result::NoMatch;
+        }
+    }
+
+    if (should_try_cast) {
         TentativeParsingAction tentative(*this);
         try {
             advance(); // consume '('
