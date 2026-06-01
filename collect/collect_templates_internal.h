@@ -418,6 +418,9 @@ std::string make_class_template_specialization_name(
     const ClassTemplateDecl* class_template,
     const std::vector<TemplateArgument>& arguments);
 
+std::vector<const ClassTemplateDecl*> class_template_lookup_identity_decls(
+    const ClassTemplateDecl* class_template);
+
 const TemplateExplicitSpecializationDecl*
 find_class_template_explicit_specialization_for_lookup_identity(
     const ClassTemplateDecl* class_template,

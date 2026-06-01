@@ -81,6 +81,79 @@ const ClassTemplateDecl* canonical_class_template_primary(
     return canonical ? canonical : class_template;
 }
 
+bool template_argument_vectors_match(
+    const std::vector<TemplateArgument>& lhs,
+    const std::vector<TemplateArgument>& rhs) {
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (size_t idx = 0; idx < lhs.size(); ++idx) {
+        if (!lhs[idx].equals(rhs[idx])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool explicit_specialization_matches_lookup_identity(
+    const TemplateExplicitSpecializationDecl* explicit_specialization,
+    const ClassTemplateDecl* class_template,
+    const std::vector<TemplateArgument>& specialization_arguments,
+    const std::vector<TemplateArgument>& owner_specialization_arguments,
+    const Decl* primary_member_decl) {
+    return explicit_specialization &&
+           template_decls_share_lookup_identity(
+               explicit_specialization->primary_template,
+               class_template) &&
+           explicit_specialization->primary_member_decl == primary_member_decl &&
+           template_argument_vectors_match(
+               explicit_specialization->specialization_arguments,
+               specialization_arguments) &&
+           template_argument_vectors_match(
+               explicit_specialization->owner_specialization_arguments,
+               owner_specialization_arguments);
+}
+
+bool explicit_specialization_has_complete_record_semantics(
+    const TemplateExplicitSpecializationDecl* explicit_specialization) {
+    const auto* semantic_decl = explicit_specialization
+        ? explicit_specialization->specialized_record_semantic_decl()
+        : nullptr;
+    if (!semantic_decl) {
+        return false;
+    }
+    const auto* state = record_semantics_cache_lookup(
+        semantic_decl,
+        get_side_table_ast_context_for(semantic_decl));
+    return state && !state->is_incomplete;
+}
+
+int explicit_specialization_lookup_score(
+    const TemplateExplicitSpecializationDecl* explicit_specialization) {
+    if (!explicit_specialization) {
+        return 0;
+    }
+    const bool is_definition = explicit_specialization->is_definition();
+    const bool has_semantic_owner =
+        explicit_specialization->specialized_record_semantic_decl() != nullptr;
+    const bool has_complete_semantics =
+        explicit_specialization_has_complete_record_semantics(
+            explicit_specialization);
+    if (is_definition && has_complete_semantics) {
+        return 5;
+    }
+    if (is_definition && has_semantic_owner) {
+        return 4;
+    }
+    if (is_definition) {
+        return 3;
+    }
+    if (has_semantic_owner) {
+        return 2;
+    }
+    return 1;
+}
+
 std::vector<const ClassTemplatePartialSpecializationDecl*>
 class_template_partial_specializations_for_instantiation(
     const ClassTemplateDecl* class_template) {
@@ -106,22 +179,19 @@ class_template_partial_specializations_for_instantiation(
         }
     };
 
-    const ClassTemplateDecl* canonical =
-        canonical_class_template_primary(class_template);
-    append_from(canonical);
-    append_from(class_template_definition_for_instantiation(canonical));
-    append_from(class_template);
+    for (const auto* candidate :
+         collect_template_internal::class_template_lookup_identity_decls(
+             class_template)) {
+        append_from(candidate);
+    }
     return partials;
 }
 
 } // namespace
 
-const TemplateExplicitSpecializationDecl*
-collect_template_internal::find_class_template_explicit_specialization_for_lookup_identity(
-    const ClassTemplateDecl* class_template,
-    const std::vector<TemplateArgument>& specialization_arguments,
-    const std::vector<TemplateArgument>& owner_specialization_arguments,
-    const Decl* primary_member_decl) {
+std::vector<const ClassTemplateDecl*>
+collect_template_internal::class_template_lookup_identity_decls(
+    const ClassTemplateDecl* class_template) {
     std::vector<const ClassTemplateDecl*> candidates;
     auto append_candidate = [&](const ClassTemplateDecl* candidate) {
         if (!candidate) {
@@ -140,17 +210,38 @@ collect_template_internal::find_class_template_explicit_specialization_for_looku
     append_candidate(canonical);
     append_candidate(class_template_definition_for_instantiation(canonical));
     append_candidate(class_template);
+    return candidates;
+}
 
-    for (const auto* candidate : candidates) {
-        if (const auto* explicit_specialization =
-                candidate->find_explicit_specialization(
+const TemplateExplicitSpecializationDecl*
+collect_template_internal::find_class_template_explicit_specialization_for_lookup_identity(
+    const ClassTemplateDecl* class_template,
+    const std::vector<TemplateArgument>& specialization_arguments,
+    const std::vector<TemplateArgument>& owner_specialization_arguments,
+    const Decl* primary_member_decl) {
+    const TemplateExplicitSpecializationDecl* best = nullptr;
+    int best_score = 0;
+    for (const auto* candidate :
+         class_template_lookup_identity_decls(class_template)) {
+        for (const auto* explicit_specialization :
+             candidate->explicit_specializations()) {
+            if (!explicit_specialization_matches_lookup_identity(
+                    explicit_specialization,
+                    class_template,
                     specialization_arguments,
                     owner_specialization_arguments,
                     primary_member_decl)) {
-            return explicit_specialization;
+                continue;
+            }
+            int score =
+                explicit_specialization_lookup_score(explicit_specialization);
+            if (!best || score > best_score) {
+                best = explicit_specialization;
+                best_score = score;
+            }
         }
     }
-    return nullptr;
+    return best;
 }
 
 namespace {

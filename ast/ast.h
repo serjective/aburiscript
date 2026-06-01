@@ -3458,7 +3458,9 @@ TemplateDecl::find_explicit_specialization(
 
     for (auto* explicit_specialization : explicit_specializations_) {
         if (!explicit_specialization ||
-            explicit_specialization->primary_template != this ||
+            !template_decls_share_lookup_identity(
+                explicit_specialization->primary_template,
+                this) ||
             explicit_specialization->primary_member_decl != primary_member_decl) {
             continue;
         }

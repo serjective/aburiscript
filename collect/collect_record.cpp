@@ -45,6 +45,70 @@ const ObjectDecl* cpp_base_record_decl_from_type(QualType base_type) {
     return base_object ? dyn_cast<ObjectDecl>(base_object->get_decl()) : nullptr;
 }
 
+bool record_state_has_structural_members(const RecordSemanticState& state) {
+    return !state.fields.empty() ||
+           !state.static_data_members.empty() ||
+           !state.nested_types.empty() ||
+           !state.nested_templates.empty() ||
+           !state.enumerator_members.empty();
+}
+
+void preserve_structural_record_semantics(RecordSemanticState& target,
+                                          const RecordSemanticState& source) {
+    if (!source.is_incomplete) {
+        target.is_incomplete = false;
+    }
+    if (target.bases.empty() && !source.bases.empty()) {
+        target.bases = source.bases;
+    }
+    if (target.virtual_bases.empty() && !source.virtual_bases.empty()) {
+        target.virtual_bases = source.virtual_bases;
+    }
+    if (target.fields.empty() && !source.fields.empty()) {
+        target.fields = source.fields;
+    }
+    if (target.static_data_members.empty() &&
+        !source.static_data_members.empty()) {
+        target.static_data_members = source.static_data_members;
+    }
+    if (target.nested_types.empty() && !source.nested_types.empty()) {
+        target.nested_types = source.nested_types;
+    }
+    if (target.nested_templates.empty() && !source.nested_templates.empty()) {
+        target.nested_templates = source.nested_templates;
+    }
+    if (target.friend_types.empty() && !source.friend_types.empty()) {
+        target.friend_types = source.friend_types;
+    }
+    if (target.enumerator_members.empty() &&
+        !source.enumerator_members.empty()) {
+        target.enumerator_members = source.enumerator_members;
+    }
+    if (target.size_bits == 0 && source.size_bits != 0) {
+        target.size_bits = source.size_bits;
+        target.alignment = source.alignment;
+        target.non_virtual_size_bits = source.non_virtual_size_bits;
+        target.non_virtual_alignment = source.non_virtual_alignment;
+    }
+}
+
+bool class_template_specialization_pattern_has_structural_members(
+    const ObjectDecl* owner_record_decl) {
+    if (!owner_record_decl) {
+        return false;
+    }
+    auto record_type = owner_record_decl->get_record_type();
+    if (!record_type || !record_type->is_class_template_specialization()) {
+        return false;
+    }
+    const auto* primary_template = record_type->get_primary_class_template();
+    const auto* pattern_decl =
+        primary_template ? primary_template->pattern_semantic_decl() : nullptr;
+    const auto* pattern_state =
+        pattern_decl ? record_semantics_cache_lookup(pattern_decl) : nullptr;
+    return pattern_state && record_state_has_structural_members(*pattern_state);
+}
+
 std::optional<size_t> collect_aligned_attribute_value(Collect& collect,
                                                       const AttributeArg& arg,
                                                       ConstEvalMode eval_mode,
@@ -4881,6 +4945,11 @@ bool Collect::collect_ensure_defaulted_special_member_body(
     if (!owner_state) {
         return false;
     }
+    if (owner_state->is_incomplete ||
+        owner_state->is_template_pattern_provisional) {
+        sync_symbol();
+        return true;
+    }
 
     bool materialized = false;
     const FriendDecl* friend_decl = nullptr;
@@ -4943,6 +5012,14 @@ bool Collect::collect_ensure_defaulted_special_member_body(
     sync_symbol();
 
     RecordSemanticState updated_state = *owner_state;
+    if (ast_ctx_) {
+        if (const auto* durable_state =
+                ast_ctx_->lookup_record_semantics(owner_record_decl)) {
+            preserve_structural_record_semantics(
+                updated_state,
+                *durable_state);
+        }
+    }
     if (auto* ctor_decl = dyn_cast<CppConstructorDecl>(function_decl)) {
         for (auto& ctor : updated_state.constructors) {
             if (ctor.decl != ctor_decl && ctor.symbol.get() != symbol.get()) {
@@ -4986,6 +5063,12 @@ bool Collect::collect_ensure_defaulted_special_member_body(
         updated_state.methods,
         updated_state.destructors,
         ast_ctx_.get());
+
+    if (class_template_specialization_pattern_has_structural_members(
+            owner_record_decl) &&
+        !record_state_has_structural_members(updated_state)) {
+        return true;
+    }
 
     query_publish_record_semantics(owner_record_decl, updated_state);
     if (const ObjectDecl* canonical_decl =

@@ -5269,6 +5269,20 @@ Parser::parse_cpp_explicit_specialization_declaration(
             return true;
         };
 
+    auto template_argument_vectors_match =
+        [](const std::vector<TemplateArgument>& lhs,
+           const std::vector<TemplateArgument>& rhs) -> bool {
+        if (lhs.size() != rhs.size()) {
+            return false;
+        }
+        for (size_t idx = 0; idx < lhs.size(); ++idx) {
+            if (!lhs[idx].equals(rhs[idx])) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     auto normalize_explicit_specialization_arguments =
         [&](const TemplateDecl* primary_template,
             std::vector<TemplateArgument>& arguments,
@@ -5339,10 +5353,43 @@ Parser::parse_cpp_explicit_specialization_declaration(
 
             auto* primary_template_mutable =
                 const_cast<TemplateDecl*>(primary_template);
-            auto* existing = primary_template_mutable->find_explicit_specialization(
-                explicit_specialization->specialization_arguments,
-                explicit_specialization->owner_specialization_arguments,
-                explicit_specialization->primary_member_decl);
+            auto class_template_registration_family =
+                [&]() -> std::vector<TemplateDecl*> {
+                std::vector<TemplateDecl*> family;
+                auto* class_template =
+                    dyn_cast<ClassTemplateDecl>(primary_template_mutable);
+                if (!class_template) {
+                    family.push_back(primary_template_mutable);
+                    return family;
+                }
+                for (const auto* candidate :
+                     collect_template_internal::
+                         class_template_lookup_identity_decls(class_template)) {
+                    family.push_back(
+                        const_cast<ClassTemplateDecl*>(candidate));
+                }
+                return family;
+            };
+            auto* existing =
+                [&]() -> TemplateExplicitSpecializationDecl* {
+                if (auto* class_template =
+                        dyn_cast<ClassTemplateDecl>(primary_template_mutable)) {
+                    return const_cast<TemplateExplicitSpecializationDecl*>(
+                        collect_template_internal::
+                            find_class_template_explicit_specialization_for_lookup_identity(
+                                class_template,
+                                explicit_specialization
+                                    ->specialization_arguments,
+                                explicit_specialization
+                                    ->owner_specialization_arguments,
+                                explicit_specialization
+                                    ->primary_member_decl));
+                }
+                return primary_template_mutable->find_explicit_specialization(
+                    explicit_specialization->specialization_arguments,
+                    explicit_specialization->owner_specialization_arguments,
+                    explicit_specialization->primary_member_decl);
+            }();
             if (!existing) {
                 SrcLoc first_required_loc =
                     find_late_explicit_specialization_first_required_loc(
@@ -5388,6 +5435,54 @@ Parser::parse_cpp_explicit_specialization_declaration(
                     primary_template_mutable->replace_explicit_specialization(
                         existing,
                         explicit_specialization.get());
+                    auto specialization_matches_current =
+                        [&](const TemplateExplicitSpecializationDecl*
+                                registered) -> bool {
+                        return registered &&
+                               template_decls_share_lookup_identity(
+                                   registered->primary_template,
+                                   primary_template) &&
+                               registered->primary_member_decl ==
+                                   explicit_specialization
+                                       ->primary_member_decl &&
+                               template_argument_vectors_match(
+                                   registered->specialization_arguments,
+                                   explicit_specialization
+                                       ->specialization_arguments) &&
+                               template_argument_vectors_match(
+                                   registered
+                                       ->owner_specialization_arguments,
+                                   explicit_specialization
+                                       ->owner_specialization_arguments);
+                    };
+                    for (auto* candidate :
+                         class_template_registration_family()) {
+                        std::vector<TemplateExplicitSpecializationDecl*>
+                            matching_entries;
+                        for (auto* registered :
+                             candidate->explicit_specializations()) {
+                            if (registered != explicit_specialization.get() &&
+                                specialization_matches_current(registered)) {
+                                matching_entries.push_back(registered);
+                            }
+                        }
+                        for (auto* registered : matching_entries) {
+                            candidate->replace_explicit_specialization(
+                                registered,
+                                explicit_specialization.get());
+                        }
+                    }
+                    if (!primary_template_mutable
+                             ->find_explicit_specialization(
+                                 explicit_specialization
+                                     ->specialization_arguments,
+                                 explicit_specialization
+                                     ->owner_specialization_arguments,
+                                 explicit_specialization
+                                     ->primary_member_decl)) {
+                        primary_template_mutable->add_explicit_specialization(
+                            explicit_specialization.get());
+                    }
                 }
             } else {
                 primary_template_mutable->add_explicit_specialization(
