@@ -9,6 +9,31 @@ bool is_narrow_character_builtin_kind(BuiltinTypes kind) {
            kind == BuiltinTypes::UChar;
 }
 
+bool record_semantics_describes_aggregate(
+    const RecordSemanticState* record_state) {
+    if (!record_state) {
+        return true;
+    }
+
+    if (record_state->definition_data.has_user_declared_constructor ||
+        record_state->is_polymorphic) {
+        return false;
+    }
+    for (const auto& base : record_state->bases) {
+        if (base.is_virtual ||
+            base.declared_access != RecordMemberAccess::Public) {
+            return false;
+        }
+    }
+    for (const auto& field : record_state->fields) {
+        if (!field.is_base_subobject &&
+            field.declared_access != RecordMemberAccess::Public) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool string_array_element_types_compatible(const QualType& target_elem,
                                            const QualType& literal_elem,
                                            ASTContext* ast_ctx,
@@ -335,27 +360,7 @@ bool Collect::is_aggregate_type(const std::shared_ptr<CType>& type) const {
     const RecordSemanticState* record_state =
         record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
 
-    if (!record_state) {
-        return true;
-    }
-
-    if (record_state->definition_data.has_user_declared_constructor ||
-        record_state->is_polymorphic) {
-        return false;
-    }
-    for (const auto& base : record_state->bases) {
-        if (base.is_virtual ||
-            base.declared_access != RecordMemberAccess::Public) {
-            return false;
-        }
-    }
-    for (const auto& field : record_state->fields) {
-        if (!field.is_base_subobject &&
-            field.declared_access != RecordMemberAccess::Public) {
-            return false;
-        }
-    }
-    return true;
+    return record_semantics_describes_aggregate(record_state);
 }
 
 
@@ -1017,7 +1022,24 @@ std::unique_ptr<Expr> Collect::process_init_list_expression(std::unique_ptr<Init
         }
     }
 
-    if (!is_aggregate_type(type)) {
+    ObjectInitializationRecordSemantics object_record_semantics;
+    bool has_cxx_object_record_semantics =
+        lang_opts_.is_cxx_mode() &&
+        canonical_type_kind(QualType(type), ast_ctx_.get()) == TypeKind::Object;
+    if (has_cxx_object_record_semantics) {
+        object_record_semantics =
+            collect_object_initialization_record_semantics(
+                QualType(type),
+                init_list->location);
+    }
+
+    bool aggregate_type = is_aggregate_type(type);
+    if (object_record_semantics.record_type && object_record_semantics.state) {
+        aggregate_type =
+            record_semantics_describes_aggregate(object_record_semantics.state);
+    }
+
+    if (!aggregate_type) {
         // Non-aggregate braces are treated like a single scalar/object
         // initializer with optional nested brace elision.
         for (const auto& elem : init_list->elements) {
@@ -1029,16 +1051,8 @@ std::unique_ptr<Expr> Collect::process_init_list_expression(std::unique_ptr<Init
         if (lang_opts_.is_cxx_mode() &&
             canonical_type_kind(QualType(type), ast_ctx_.get()) == TypeKind::Object) {
             if (init_list->elements.empty()) {
-                auto object_type =
-                    desugar_type(QualType(type), ast_ctx_.get())
-                        .as_shared<ObjectType>();
-                const ObjectDecl* object_decl =
-                    object_type
-                        ? dyn_cast<ObjectDecl>(object_type->get_decl())
-                        : nullptr;
                 const RecordSemanticState* object_state =
-                    object_decl ? record_semantics_cache_lookup(object_decl)
-                                : nullptr;
+                    object_record_semantics.state;
                 if (!object_state ||
                     (object_state->constructors.empty() &&
                      object_state->method_templates.empty())) {
@@ -1069,8 +1083,14 @@ std::unique_ptr<Expr> Collect::process_init_list_expression(std::unique_ptr<Init
     }
 
     if (type->kind == TypeKind::Object) {
-        auto record_type = dyn_cast_shared<ObjectType>(type);
-        if (record_type && record_type->isIncomplete()) {
+        auto record_type =
+            object_record_semantics.record_type
+                ? object_record_semantics.record_type
+                : dyn_cast_shared<ObjectType>(type);
+        const RecordSemanticState* record_state = object_record_semantics.state;
+        if (record_type &&
+            record_type->isIncomplete() &&
+            (!record_state || record_state->is_incomplete)) {
             report_error("cannot initialize variable of incomplete struct type", init_list->location);
             return nullptr;
         }

@@ -515,7 +515,12 @@ const RecordSemanticState* Collect::ensure_record_semantics_available(
     owner_decl = const_cast<ObjectDecl*>(canonical_record_owner_decl(owner_decl));
 
     const RecordSemanticState* state = query_lookup_record_semantics(owner_decl);
-    if (state && !state->is_incomplete) {
+    bool needs_specialization_instantiation =
+        record_type->is_class_template_specialization() &&
+        (!state ||
+         state->is_incomplete ||
+         state->is_template_pattern_provisional);
+    if (state && !state->is_incomplete && !needs_specialization_instantiation) {
         return state;
     }
     if (!record_type->is_class_template_specialization()) {
@@ -543,6 +548,65 @@ const RecordSemanticState* Collect::ensure_record_semantics_available(
         return realized_state;
     }
     return query_lookup_record_semantics(owner_decl);
+}
+
+Collect::ObjectInitializationRecordSemantics
+Collect::collect_object_initialization_record_semantics(
+    QualType object_type,
+    SrcLoc loc) {
+    ObjectInitializationRecordSemantics result;
+    if (!ast_ctx_ || !object_type) {
+        return result;
+    }
+
+    result.record_type =
+        desugar_type(object_type, ast_ctx_.get()).as_shared<ObjectType>();
+    if (!result.record_type) {
+        return result;
+    }
+
+    auto* owner_decl = dyn_cast<ObjectDecl>(result.record_type->get_decl());
+    if (!owner_decl) {
+        return result;
+    }
+
+    result.record_decl = canonical_record_owner_decl(owner_decl);
+    result.state = query_lookup_record_semantics(result.record_decl);
+
+    bool needs_specialization_instantiation =
+        result.record_type->is_class_template_specialization() &&
+        (!result.state ||
+         result.state->is_incomplete ||
+         result.state->is_template_pattern_provisional);
+    if (!needs_specialization_instantiation) {
+        return result;
+    }
+
+    const ClassTemplateDecl* primary_template =
+        result.record_type->get_primary_class_template();
+    if (!primary_template) {
+        return result;
+    }
+
+    ObjectDecl* realized_decl = try_instantiate_class_template_specialization(
+        primary_template,
+        result.record_type->get_template_specialization_arguments(),
+        loc);
+    if (!realized_decl) {
+        return result;
+    }
+
+    result.record_decl = canonical_record_owner_decl(realized_decl);
+    if (result.record_decl) {
+        if (auto realized_type = result.record_decl->get_record_type()) {
+            result.record_type = realized_type;
+        }
+        if (const RecordSemanticState* realized_state =
+                query_lookup_record_semantics(result.record_decl)) {
+            result.state = realized_state;
+        }
+    }
+    return result;
 }
 
 const RecordSemanticState* Collect::query_publish_record_semantics(

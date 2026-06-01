@@ -434,17 +434,12 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
     // These derived flags determine which code paths (constructor selection,
     // destructor binding, initializer processing) apply to this variable.
     VariableInitializationSelection selection;
-    auto record_type =
+    auto record_semantics =
         declared_type
-            ? desugar_type(declared_type, ast_ctx_.get()).as_shared<ObjectType>()
-            : nullptr;
-    const TagDecl* tag_decl = record_type ? record_type->get_decl() : nullptr;
-    const ObjectDecl* record_decl =
-        (tag_decl && tag_decl->is_record_decl())
-            ? static_cast<const ObjectDecl*>(tag_decl)
-            : nullptr;
-    const RecordSemanticState* record_state =
-        record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
+            ? collect_object_initialization_record_semantics(declared_type, loc)
+            : ObjectInitializationRecordSemantics{};
+    auto record_type = record_semantics.record_type;
+    const RecordSemanticState* record_state = record_semantics.state;
 
     bool constexpr_default_initialization_allowed =
         is_constexpr &&
@@ -909,15 +904,10 @@ std::unique_ptr<Expr> Collect::collect_class_object_initializer_expression(
     }
 
     auto init_list = make_deferred_init_list(std::move(init_args));
-    auto record_type =
-        desugar_type(object_type, ast_ctx_.get()).as_shared<ObjectType>();
-    const TagDecl* tag_decl = record_type ? record_type->get_decl() : nullptr;
-    const ObjectDecl* record_decl =
-        (tag_decl && tag_decl->is_record_decl())
-            ? static_cast<const ObjectDecl*>(tag_decl)
-            : nullptr;
-    const RecordSemanticState* record_state =
-        record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
+    auto record_semantics =
+        collect_object_initialization_record_semantics(object_type, loc);
+    auto record_type = record_semantics.record_type;
+    const RecordSemanticState* record_state = record_semantics.state;
 
     if (record_type &&
         record_state &&

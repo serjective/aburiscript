@@ -1563,6 +1563,14 @@ public:
     const RecordSemanticState* ensure_record_semantics_available(
         QualType owner_type,
         SrcLoc loc);
+    struct ObjectInitializationRecordSemantics {
+        std::shared_ptr<ObjectType> record_type;
+        const ObjectDecl* record_decl = nullptr;
+        const RecordSemanticState* state = nullptr;
+    };
+    ObjectInitializationRecordSemantics collect_object_initialization_record_semantics(
+        QualType object_type,
+        SrcLoc loc);
     const RecordSemanticState* query_publish_record_semantics(
         const ObjectDecl* record_decl,
         RecordSemanticState state);

@@ -11427,9 +11427,14 @@ std::unique_ptr<Decl> Parser::parse_cpp_record_specifier(
                     components.back().has_template_argument_list &&
                     template_arguments_are_dependent(
                         components.back().template_arguments)) {
+                    std::string template_name =
+                        qualified_name_utils::format_cpp_qualified_name(
+                            has_global_qualifier,
+                            qualifiers,
+                            components.back().name);
                     parsed.type = QualType(
                         std::make_shared<TemplateSpecializationType>(
-                            parsed.spelling,
+                            std::move(template_name),
                             current_primary_class_template,
                             components.back().template_arguments,
                             true));
