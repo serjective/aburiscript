@@ -1223,6 +1223,15 @@ public:
     void materialize_specialization_uses_for_evaluated_expression(
         const Expr* expr,
         SrcLoc loc) const ;
+    void materialize_specialization_uses_for_default_initialization(
+        QualType type,
+        SrcLoc loc) const ;
+    void materialize_specialization_uses_for_evaluated_statement(
+        const Stmt* stmt,
+        SrcLoc loc) const ;
+    void materialize_specialization_lifetime_uses_for_evaluated_statement(
+        const Stmt* stmt,
+        SrcLoc loc) const ;
     void materialize_specialization_uses_for_constant_evaluation(
         const Expr* expr,
         SrcLoc loc) const ;

@@ -2719,6 +2719,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                     nested_type.type = QualType(nested_object->get_record_type());
                     nested_type.declared_access = current_access;
                     nested_type.decl = nested_object;
+                    set_object_decl_owner_record_type(
+                        nested_object,
+                        QualType(ctx.record_type));
                     ctx.nested_types.push_back(std::move(nested_type));
                 } else {
                     ctx.fields.emplace_back(
@@ -2786,6 +2789,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 nested_template.kind =
                     RecordSemanticState::NestedTemplateKind::Alias;
                 nested_template.decl = alias_template;
+                set_template_decl_owner_record_type(
+                    alias_template,
+                    QualType(ctx.record_type));
                 ctx.nested_templates.push_back(std::move(nested_template));
             }
             continue;
@@ -2800,6 +2806,9 @@ void Collect::collect_record_collect_members(CollectRecordBuildContext& ctx) {
                 nested_template.kind =
                     RecordSemanticState::NestedTemplateKind::Class;
                 nested_template.decl = class_template;
+                set_template_decl_owner_record_type(
+                    class_template,
+                    QualType(ctx.record_type));
                 ctx.nested_templates.push_back(std::move(nested_template));
             }
             continue;

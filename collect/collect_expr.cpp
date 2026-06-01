@@ -6257,6 +6257,7 @@ std::unique_ptr<Expr> Collect::collect_cpp_delete_expression(
         const auto& selected_destructor =
             destroyed_record_state->destructors[viable_indices.front()];
         selected_destructor_sym = selected_destructor.symbol;
+        note_specialization_use_for_symbol(selected_destructor_sym, loc);
         destruction_kind = selected_destructor.is_virtual
             ? CppDeleteExpr::DestructionKind::Virtual
             : CppDeleteExpr::DestructionKind::Direct;
@@ -6407,6 +6408,7 @@ std::unique_ptr<Expr> Collect::collect_cpp_pseudo_destructor_expression(
                 continue;
             }
             destructor_sym = dtor.symbol;
+            note_specialization_use_for_symbol(destructor_sym, loc);
             break;
         }
     }

@@ -1608,6 +1608,23 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
         specialization_symbol_ptr->type = QualType(specialization_decl_ptr->type);
         specialization_symbol_ptr->is_defined =
             function_decl_defines_entity(specialization_decl_ptr);
+        SrcLoc use_loc =
+            !specialization_decl_ptr->location.isInvalid()
+                ? specialization_decl_ptr->location
+                : loc;
+        collect.materialize_specialization_lifetime_uses_for_evaluated_statement(
+            specialization_decl_ptr->body.get(),
+            use_loc);
+        if (auto* specialization_ctor =
+                dyn_cast<CppConstructorDecl>(specialization_decl_ptr)) {
+            for (const auto& initializer : specialization_ctor->ctor_initializers) {
+                collect.materialize_specialization_uses_for_evaluated_expression(
+                    initializer.init_expr.get(),
+                    initializer.location.isInvalid()
+                        ? use_loc
+                        : initializer.location);
+            }
+        }
         return true;
     }
 };

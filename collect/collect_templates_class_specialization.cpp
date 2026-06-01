@@ -698,6 +698,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             !prepare_pending_member_body_instantiations()) {
             return entry->specialization_decl.get();
         }
+        note_virtual_slot_member_body_uses();
 
         collect.collect_record_publish_state(
             entry->specialization_decl.get(),
@@ -3814,6 +3815,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         nested_template.declared_access = declared_access;
         nested_template.kind = RecordSemanticState::NestedTemplateKind::Class;
         nested_template.decl = cloned_template_ptr;
+        set_template_decl_owner_record_type(cloned_template_ptr, owner_type);
         nested_templates.push_back(std::move(nested_template));
         publish_provisional_nested_members();
 
@@ -3937,6 +3939,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         nested_template.declared_access = declared_access;
         nested_template.kind = RecordSemanticState::NestedTemplateKind::Alias;
         nested_template.decl = cloned_template_decl.get();
+        set_template_decl_owner_record_type(cloned_template_decl.get(), owner_type);
         nested_templates.push_back(std::move(nested_template));
         publish_provisional_nested_members();
 
@@ -5985,6 +5988,15 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return true;
     }
 
+    void note_virtual_slot_member_body_uses() {
+        for (const auto& slot : semantic_state.virtual_slots) {
+            if (slot.is_pure || !slot.final_symbol) {
+                continue;
+            }
+            collect.note_specialization_use_for_symbol(slot.final_symbol, loc);
+        }
+    }
+
     bool materialize_pending_member_body(const Decl* primary_member_decl) {
         if (!entry || !primary_member_decl) {
             return true;
@@ -6107,15 +6119,36 @@ struct Collect::ClassTemplateSpecializationInstantiator {
             }
         }
 
+        SrcLoc use_loc = specialized_func && !specialized_func->location.isInvalid()
+            ? specialized_func->location
+            : loc;
+        collect.materialize_specialization_lifetime_uses_for_evaluated_statement(
+            specialized_func ? specialized_func->body.get() : nullptr,
+            use_loc);
+        if (auto* ctor = dyn_cast<CppConstructorDecl>(specialized_func)) {
+            for (const auto& initializer : ctor->ctor_initializers) {
+                collect.materialize_specialization_uses_for_evaluated_expression(
+                    initializer.init_expr.get(),
+                    initializer.location.isInvalid() ? use_loc : initializer.location);
+            }
+        }
+
         pending_body->is_materialized = true;
-        if (pending_body->specialized_symbol) {
-            pending_body->specialized_symbol->type =
-                QualType(specialized_func->type);
-            pending_body->specialized_symbol->is_defined =
-                function_decl_defines_entity(specialized_func);
-            pending_body->specialized_symbol->function_definition =
-                pending_body->specialized_symbol->is_defined ? specialized_func
-                                                             : nullptr;
+        auto publish_materialized_symbol = [&](Symbol* symbol) {
+            if (!symbol || !specialized_func) {
+                return;
+            }
+            symbol->type = QualType(specialized_func->type);
+            symbol->is_defined = function_decl_defines_entity(specialized_func);
+            symbol->function_definition =
+                symbol->is_defined ? specialized_func : nullptr;
+        };
+        publish_materialized_symbol(pending_body->specialized_symbol.get());
+        for (auto& [symbol, mapped_primary] :
+             entry->specialized_member_symbol_to_primary_member_decl) {
+            if (mapped_primary == primary_member_decl) {
+                publish_materialized_symbol(const_cast<Symbol*>(symbol));
+            }
         }
         return true;
     }

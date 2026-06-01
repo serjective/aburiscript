@@ -2,6 +2,24 @@
 #include "collect_templates_internal.h"
 
 namespace {
+bool function_symbol_matches_specialized_member(
+    const Symbol* symbol,
+    const FuncDecl* member_decl,
+    const ASTContext* ast_ctx) {
+    if (!symbol || !member_decl || symbol->kind != SymbolKind::FUNCTION) {
+        return false;
+    }
+    if (symbol->function_definition == member_decl) {
+        return true;
+    }
+    if (symbol->name != member_decl->name || !symbol->type || !member_decl->type) {
+        return false;
+    }
+    return desugar_type(symbol->type, ast_ctx)
+        .equals_unqualified(
+            desugar_type(QualType(member_decl->type), ast_ctx));
+}
+
 bool nested_template_arguments_are_dependent(
     const Decl* nested_template,
     const std::vector<TemplateArgument>& arguments,
@@ -28,12 +46,13 @@ QualType make_deferred_nested_template_specialization_type(
 void Collect::note_specialization_use_for_symbol(
     const std::shared_ptr<Symbol>& symbol,
     SrcLoc loc) const {
-    if (!ast_ctx_ || !symbol || loc.isInvalid()) {
+    std::shared_ptr<Symbol> stable_symbol = symbol;
+    if (!ast_ctx_ || !stable_symbol || loc.isInvalid()) {
         return;
     }
 
     const auto* specialization_info =
-        get_symbol_function_template_specialization(symbol.get());
+        get_symbol_function_template_specialization(stable_symbol.get());
     if (specialization_info && specialization_info->primary_template) {
         if (auto* entry =
                 ast_ctx_->lookup_function_template_specialization(
@@ -45,7 +64,7 @@ void Collect::note_specialization_use_for_symbol(
     }
 
     const auto* variable_specialization_info =
-        get_symbol_variable_template_specialization(symbol.get());
+        get_symbol_variable_template_specialization(stable_symbol.get());
     if (variable_specialization_info &&
         variable_specialization_info->primary_template) {
         if (auto* entry =
@@ -57,7 +76,7 @@ void Collect::note_specialization_use_for_symbol(
         return;
     }
 
-    QualType owner_type = get_symbol_owner_record_type(symbol.get());
+    QualType owner_type = get_symbol_owner_record_type(stable_symbol.get());
     auto owner_record_type =
         desugar_type(owner_type, ast_ctx_.get()).as_shared<ObjectType>();
     if (!owner_record_type || !owner_record_type->is_class_template_specialization()) {
@@ -79,10 +98,11 @@ void Collect::note_specialization_use_for_symbol(
     }
 
     const auto* primary_member_decl =
-        owner_entry->lookup_primary_member_for_specialized_symbol(symbol.get());
+        owner_entry->lookup_primary_member_for_specialized_symbol(
+            stable_symbol.get());
     if (!primary_member_decl) {
         const auto* specialized_member_decl =
-            dyn_cast<FuncDecl>(symbol->function_definition);
+            dyn_cast<FuncDecl>(stable_symbol->function_definition);
         if (specialized_member_decl) {
             primary_member_decl =
                 owner_entry->lookup_primary_member_for_specialized_decl(
@@ -90,9 +110,29 @@ void Collect::note_specialization_use_for_symbol(
         }
     }
     if (!primary_member_decl) {
+        for (const auto& member_decl : owner_entry->member_decls) {
+            const auto* specialized_member_decl =
+                dyn_cast<FuncDecl>(member_decl.get());
+            if (!function_symbol_matches_specialized_member(
+                    stable_symbol.get(),
+                    specialized_member_decl,
+                    ast_ctx_.get())) {
+                continue;
+            }
+            primary_member_decl =
+                owner_entry->lookup_primary_member_for_specialized_decl(
+                    specialized_member_decl);
+            if (primary_member_decl) {
+                owner_entry->map_specialized_member_symbol_to_primary_member(
+                    stable_symbol.get(),
+                    primary_member_decl);
+                break;
+            }
+        }
+    }
+    if (!primary_member_decl) {
         return;
     }
-
     owner_entry->note_primary_member_first_required_loc(
         primary_member_decl,
         loc);
@@ -100,6 +140,18 @@ void Collect::note_specialization_use_for_symbol(
         *owner_entry,
         primary_member_decl,
         loc);
+    if (auto* pending_body =
+            owner_entry->lookup_pending_member_body_instantiation(
+                primary_member_decl);
+        pending_body &&
+        pending_body->is_materialized &&
+        pending_body->specialized_function) {
+        stable_symbol->type = QualType(pending_body->specialized_function->type);
+        stable_symbol->is_defined =
+            function_decl_defines_entity(pending_body->specialized_function);
+        stable_symbol->function_definition =
+            stable_symbol->is_defined ? pending_body->specialized_function : nullptr;
+    }
 }
 
 QualType Collect::instantiate_alias_template_specialization(

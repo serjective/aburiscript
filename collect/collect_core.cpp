@@ -1,5 +1,6 @@
 #include "collect.h"
 #include "../helpers/auto_type_utils.h"
+#include "../helpers/qualified_name_utils.h"
 #include "../perf_stats.h"
 #include "lookup_engine.h"
 #include <cassert>
@@ -1194,6 +1195,30 @@ void Collect::bind_template_decl_in_scope(const std::shared_ptr<Scope>& scope,
     binding.ast_decl = decl;
     binding.template_decl = decl;
 
+    const TemplateDecl* template_decl = nullptr;
+    switch (decl->get_kind()) {
+        case DeclKind::AliasTemplateDecl:
+        case DeclKind::FunctionTemplateDecl:
+        case DeclKind::VariableTemplateDecl:
+        case DeclKind::ClassTemplateDecl:
+        case DeclKind::ConceptDecl:
+        case DeclKind::VariableTemplatePartialSpecializationDecl:
+        case DeclKind::ClassTemplatePartialSpecializationDecl:
+            template_decl = static_cast<const TemplateDecl*>(decl);
+            break;
+        default:
+            break;
+    }
+    if (template_decl) {
+        if (auto ns_prefix =
+                qualified_name_utils::namespace_prefix_from_effective_decl_scope(
+                    scope)) {
+            set_template_decl_cxx_qualifier_prefix(
+                template_decl,
+                std::move(*ns_prefix));
+        }
+    }
+
     record_decl_context_mutation(context);
     context->add_declaration(std::move(binding));
     bump_lookup_generation();
@@ -1259,6 +1284,15 @@ void Collect::bind_tag_decl_in_scope(const std::shared_ptr<Scope>& scope,
     binding.type = decl->get_tag_type();
     binding.is_definition = decl->is_complete_definition();
     binding.ast_decl = decl;
+    if (auto* object_decl = dyn_cast<ObjectDecl>(decl)) {
+        if (auto ns_prefix =
+                qualified_name_utils::namespace_prefix_from_effective_decl_scope(
+                    scope)) {
+            set_object_decl_cxx_qualifier_prefix(
+                object_decl,
+                std::move(*ns_prefix));
+        }
+    }
     record_decl_context_mutation(context);
     context->add_declaration(std::move(binding));
     bump_lookup_generation();

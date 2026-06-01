@@ -2,6 +2,7 @@
 #include "collect_internal.h"
 #include "../ast/ast_clone.h"
 #include "../ast/expr_clone.h"
+#include "../ast/special_members.h"
 #include "../helpers/auto_type_utils.h"
 
 namespace {
@@ -1775,6 +1776,457 @@ void Collect::materialize_specialization_uses_for_evaluated_expression(
         note_specialization_use,
         active_exprs,
         active_symbols);
+}
+
+void Collect::materialize_specialization_uses_for_default_initialization(
+    QualType type,
+    SrcLoc loc) const {
+    std::unordered_set<const ObjectDecl*> active_records;
+    auto visit_type = [&](auto&& self, QualType candidate_type) -> void {
+        auto record_type =
+            desugar_type(candidate_type, ast_ctx_.get()).as_shared<ObjectType>();
+        if (!record_type) {
+            return;
+        }
+        auto* record_decl = dyn_cast<ObjectDecl>(record_type->get_decl());
+        if (!record_decl || !active_records.insert(record_decl).second) {
+            return;
+        }
+        struct ActiveRecordGuard {
+            std::unordered_set<const ObjectDecl*>& active_records;
+            const ObjectDecl* record_decl;
+            ~ActiveRecordGuard() { active_records.erase(record_decl); }
+        } guard{active_records, record_decl};
+
+        const RecordSemanticState* record_state =
+            const_cast<Collect*>(this)->ensure_record_semantics_available(
+                QualType(record_type),
+                loc);
+        if (!record_state) {
+            return;
+        }
+        for (const auto& ctor : record_state->constructors) {
+            if (!cpp_constructor_is_viable_default_candidate(
+                    ctor,
+                    /*allow_protected_access=*/false)) {
+                continue;
+            }
+            note_specialization_use_for_symbol(ctor.symbol, loc);
+            return;
+        }
+        if (record_type->is_union) {
+            for (const auto& field : record_state->fields) {
+                if (field.is_base_subobject || field.is_virtual_base_storage ||
+                    !field.decl || !field.decl->has_default_member_initializer()) {
+                    continue;
+                }
+                materialize_specialization_uses_for_evaluated_expression(
+                    field.decl->default_member_initializer.get(),
+                    loc);
+                return;
+            }
+            return;
+        }
+        for (const auto& base : record_state->bases) {
+            if (base.is_virtual || !base.record_decl) {
+                continue;
+            }
+            self(self, base.type);
+        }
+        for (const auto& field : record_state->fields) {
+            if (field.is_base_subobject || field.is_virtual_base_storage ||
+                field.is_bitfield) {
+                continue;
+            }
+            if (field.decl && field.decl->has_default_member_initializer()) {
+                materialize_specialization_uses_for_evaluated_expression(
+                    field.decl->default_member_initializer.get(),
+                    loc);
+                continue;
+            }
+            self(self, field.type);
+        }
+    };
+    visit_type(visit_type, type);
+}
+
+void Collect::materialize_specialization_uses_for_evaluated_statement(
+    const Stmt* stmt,
+    SrcLoc loc) const {
+    auto visit_expr = [&](const std::unique_ptr<Expr>& expr) {
+        materialize_specialization_uses_for_evaluated_expression(
+            expr.get(),
+            loc);
+    };
+    auto visit_decl = [&](const Decl* decl) {
+        if (!decl) {
+            return;
+        }
+        if (auto* var_decl = dyn_cast<VariableDecl>(const_cast<Decl*>(decl))) {
+            materialize_specialization_uses_for_evaluated_expression(
+                var_decl->init.get(),
+                loc);
+            if (!var_decl->init &&
+                canonical_type_kind(var_decl->type, ast_ctx_.get()) ==
+                    TypeKind::Object) {
+                materialize_specialization_uses_for_default_initialization(
+                    var_decl->type,
+                    loc);
+            }
+            if (ast_ctx_) {
+                if (auto* destructor_symbol =
+                        ast_ctx_->get_cpp_variable_destructor_symbol(
+                            var_decl->node_id)) {
+                    note_specialization_use_for_symbol(
+                        *destructor_symbol,
+                        loc);
+                } else if (auto record_type =
+                               desugar_type(var_decl->type, ast_ctx_.get())
+                                   .as_shared<ObjectType>()) {
+                    const RecordSemanticState* record_state =
+                        const_cast<Collect*>(this)
+                            ->ensure_record_semantics_available(
+                                QualType(record_type),
+                                loc);
+                    if (record_state) {
+                        for (const auto& destructor :
+                             record_state->destructors) {
+                            if (!destructor.is_deleted &&
+                                destructor.symbol &&
+                                destructor.symbol->kind ==
+                                    SymbolKind::FUNCTION) {
+                                note_specialization_use_for_symbol(
+                                    destructor.symbol,
+                                    loc);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    auto visit_control_condition =
+        [&](auto&& self, const ControlCondition& condition) -> void {
+            if (condition.declaration) {
+                materialize_specialization_uses_for_evaluated_statement(
+                    condition.declaration.get(),
+                    loc);
+            }
+            if (condition.expression) {
+                materialize_specialization_uses_for_evaluated_expression(
+                    condition.expression.get(),
+                    loc);
+            }
+        };
+
+    auto visit_stmt = [&](auto&& self, const Stmt* candidate) -> void {
+        if (!candidate) {
+            return;
+        }
+        if (auto* expr = dyn_cast<Expr>(const_cast<Stmt*>(candidate))) {
+            materialize_specialization_uses_for_evaluated_expression(
+                expr,
+                loc);
+            if (auto* stmt_expr = dyn_cast<StmtExpr>(expr)) {
+                self(self, stmt_expr->compound_stmt.get());
+            }
+            return;
+        }
+
+        switch (candidate->get_kind()) {
+            case StmtKind::CompoundStmt: {
+                auto* compound = static_cast<const CompoundStmt*>(candidate);
+                for (const auto& child : compound->statements) {
+                    self(self, child.get());
+                }
+                return;
+            }
+            case StmtKind::Decl2Stmt: {
+                auto* decl_stmt = static_cast<const Decl2Stmt*>(candidate);
+                for (const auto& decl : decl_stmt->decls) {
+                    visit_decl(decl.get());
+                }
+                return;
+            }
+            case StmtKind::ReturnStmt:
+                visit_expr(static_cast<const ReturnStmt*>(candidate)->expression);
+                return;
+            case StmtKind::CppTryStmt: {
+                auto* try_stmt = static_cast<const CppTryStmt*>(candidate);
+                self(self, try_stmt->try_block.get());
+                for (const auto& handler : try_stmt->handlers) {
+                    self(self, handler.handler.get());
+                }
+                return;
+            }
+            case StmtKind::IfStmt: {
+                auto* if_stmt = static_cast<const IfStmt*>(candidate);
+                self(self, if_stmt->init_stmt.get());
+                visit_control_condition(
+                    visit_control_condition,
+                    if_stmt->condition);
+                self(self, if_stmt->then_stmt.get());
+                self(self, if_stmt->else_stmt.get());
+                return;
+            }
+            case StmtKind::CaseStmt: {
+                auto* case_stmt = static_cast<const CaseStmt*>(candidate);
+                visit_expr(case_stmt->const_expr);
+                visit_expr(case_stmt->range_end);
+                self(self, case_stmt->stmt.get());
+                return;
+            }
+            case StmtKind::DefaultStmt:
+                self(self, static_cast<const DefaultStmt*>(candidate)->stmt.get());
+                return;
+            case StmtKind::LabeledStmt:
+                self(self, static_cast<const LabeledStmt*>(candidate)->stmt.get());
+                return;
+            case StmtKind::ComputedGotoStmt:
+                visit_expr(static_cast<const ComputedGotoStmt*>(candidate)->target);
+                return;
+            case StmtKind::SwitchStmt: {
+                auto* switch_stmt = static_cast<const SwitchStmt*>(candidate);
+                visit_control_condition(
+                    visit_control_condition,
+                    switch_stmt->condition);
+                self(self, switch_stmt->stmt.get());
+                return;
+            }
+            case StmtKind::WhileStmt: {
+                auto* while_stmt = static_cast<const WhileStmt*>(candidate);
+                visit_control_condition(
+                    visit_control_condition,
+                    while_stmt->condition);
+                self(self, while_stmt->body_stmt.get());
+                return;
+            }
+            case StmtKind::DoWhileStmt: {
+                auto* do_stmt = static_cast<const DoWhileStmt*>(candidate);
+                visit_expr(do_stmt->condition);
+                self(self, do_stmt->body_stmt.get());
+                return;
+            }
+            case StmtKind::ForStmt: {
+                auto* for_stmt = static_cast<const ForStmt*>(candidate);
+                self(self, for_stmt->init.get());
+                visit_control_condition(
+                    visit_control_condition,
+                    for_stmt->cond);
+                visit_expr(for_stmt->action);
+                self(self, for_stmt->body_stmt.get());
+                return;
+            }
+            case StmtKind::CppRangeForStmt: {
+                auto* range_for = static_cast<const CppRangeForStmt*>(candidate);
+                self(self, range_for->init_statement.get());
+                for (const auto& decl : range_for->range_declaration_side_decls) {
+                    visit_decl(decl.get());
+                }
+                visit_decl(range_for->range_variable.get());
+                visit_decl(range_for->begin_variable.get());
+                visit_decl(range_for->end_variable.get());
+                visit_decl(range_for->loop_variable.get());
+                visit_expr(range_for->condition);
+                visit_expr(range_for->increment);
+                self(self, range_for->body_stmt.get());
+                return;
+            }
+            case StmtKind::AsmStmt: {
+                auto* asm_stmt = static_cast<const AsmStmt*>(candidate);
+                for (const auto& operand : asm_stmt->output_operands) {
+                    visit_expr(operand.expr);
+                }
+                for (const auto& operand : asm_stmt->input_operands) {
+                    visit_expr(operand.expr);
+                }
+                return;
+            }
+            case StmtKind::GoToStmt:
+            case StmtKind::ContinueStmt:
+            case StmtKind::BreakStmt:
+            case StmtKind::EmptyStmt:
+            case StmtKind::ErrorStmt:
+                return;
+            default:
+                return;
+        }
+    };
+
+    visit_stmt(visit_stmt, stmt);
+}
+
+void Collect::materialize_specialization_lifetime_uses_for_evaluated_statement(
+    const Stmt* stmt,
+    SrcLoc loc) const {
+    auto visit_decl = [&](const Decl* decl) {
+        if (!decl) {
+            return;
+        }
+        auto* var_decl = dyn_cast<VariableDecl>(const_cast<Decl*>(decl));
+        if (!var_decl) {
+            return;
+        }
+        if (auto* construct = dyn_cast<CppConstructExpr>(var_decl->init.get())) {
+            note_specialization_use_for_symbol(construct->ctor_sym, loc);
+        } else if (!var_decl->init &&
+                   canonical_type_kind(var_decl->type, ast_ctx_.get()) ==
+                       TypeKind::Object) {
+            materialize_specialization_uses_for_default_initialization(
+                var_decl->type,
+                loc);
+        }
+        if (!ast_ctx_) {
+            return;
+        }
+        if (auto* destructor_symbol =
+                ast_ctx_->get_cpp_variable_destructor_symbol(var_decl->node_id)) {
+            note_specialization_use_for_symbol(*destructor_symbol, loc);
+            return;
+        }
+        auto record_type =
+            desugar_type(var_decl->type, ast_ctx_.get()).as_shared<ObjectType>();
+        if (!record_type) {
+            return;
+        }
+        const RecordSemanticState* record_state =
+            const_cast<Collect*>(this)->ensure_record_semantics_available(
+                QualType(record_type),
+                loc);
+        if (!record_state) {
+            return;
+        }
+        for (const auto& destructor : record_state->destructors) {
+            if (!destructor.is_deleted &&
+                destructor.symbol &&
+                destructor.symbol->kind == SymbolKind::FUNCTION) {
+                note_specialization_use_for_symbol(destructor.symbol, loc);
+                break;
+            }
+        }
+    };
+
+    auto visit_control_condition =
+        [&](auto&& self, const ControlCondition& condition) -> void {
+            if (condition.declaration) {
+                materialize_specialization_lifetime_uses_for_evaluated_statement(
+                    condition.declaration.get(),
+                    loc);
+            }
+        };
+
+    auto visit_stmt = [&](auto&& self, const Stmt* candidate) -> void {
+        if (!candidate) {
+            return;
+        }
+        if (isa<Expr>(const_cast<Stmt*>(candidate))) {
+            if (auto* stmt_expr =
+                    dyn_cast<StmtExpr>(const_cast<Stmt*>(candidate))) {
+                self(self, stmt_expr->compound_stmt.get());
+            }
+            return;
+        }
+
+        switch (candidate->get_kind()) {
+            case StmtKind::CompoundStmt: {
+                auto* compound = static_cast<const CompoundStmt*>(candidate);
+                for (const auto& child : compound->statements) {
+                    self(self, child.get());
+                }
+                return;
+            }
+            case StmtKind::Decl2Stmt: {
+                auto* decl_stmt = static_cast<const Decl2Stmt*>(candidate);
+                for (const auto& decl : decl_stmt->decls) {
+                    visit_decl(decl.get());
+                }
+                return;
+            }
+            case StmtKind::CppTryStmt: {
+                auto* try_stmt = static_cast<const CppTryStmt*>(candidate);
+                self(self, try_stmt->try_block.get());
+                for (const auto& handler : try_stmt->handlers) {
+                    self(self, handler.handler.get());
+                }
+                return;
+            }
+            case StmtKind::IfStmt: {
+                auto* if_stmt = static_cast<const IfStmt*>(candidate);
+                self(self, if_stmt->init_stmt.get());
+                visit_control_condition(
+                    visit_control_condition,
+                    if_stmt->condition);
+                self(self, if_stmt->then_stmt.get());
+                self(self, if_stmt->else_stmt.get());
+                return;
+            }
+            case StmtKind::CaseStmt:
+                self(self, static_cast<const CaseStmt*>(candidate)->stmt.get());
+                return;
+            case StmtKind::DefaultStmt:
+                self(self, static_cast<const DefaultStmt*>(candidate)->stmt.get());
+                return;
+            case StmtKind::LabeledStmt:
+                self(self, static_cast<const LabeledStmt*>(candidate)->stmt.get());
+                return;
+            case StmtKind::SwitchStmt: {
+                auto* switch_stmt = static_cast<const SwitchStmt*>(candidate);
+                visit_control_condition(
+                    visit_control_condition,
+                    switch_stmt->condition);
+                self(self, switch_stmt->stmt.get());
+                return;
+            }
+            case StmtKind::WhileStmt: {
+                auto* while_stmt = static_cast<const WhileStmt*>(candidate);
+                visit_control_condition(
+                    visit_control_condition,
+                    while_stmt->condition);
+                self(self, while_stmt->body_stmt.get());
+                return;
+            }
+            case StmtKind::DoWhileStmt:
+                self(self, static_cast<const DoWhileStmt*>(candidate)->body_stmt.get());
+                return;
+            case StmtKind::ForStmt: {
+                auto* for_stmt = static_cast<const ForStmt*>(candidate);
+                self(self, for_stmt->init.get());
+                visit_control_condition(
+                    visit_control_condition,
+                    for_stmt->cond);
+                self(self, for_stmt->body_stmt.get());
+                return;
+            }
+            case StmtKind::CppRangeForStmt: {
+                auto* range_for = static_cast<const CppRangeForStmt*>(candidate);
+                self(self, range_for->init_statement.get());
+                for (const auto& decl : range_for->range_declaration_side_decls) {
+                    visit_decl(decl.get());
+                }
+                visit_decl(range_for->range_variable.get());
+                visit_decl(range_for->begin_variable.get());
+                visit_decl(range_for->end_variable.get());
+                visit_decl(range_for->loop_variable.get());
+                self(self, range_for->body_stmt.get());
+                return;
+            }
+            case StmtKind::ReturnStmt:
+            case StmtKind::AsmStmt:
+            case StmtKind::ComputedGotoStmt:
+            case StmtKind::GoToStmt:
+            case StmtKind::ContinueStmt:
+            case StmtKind::BreakStmt:
+            case StmtKind::EmptyStmt:
+            case StmtKind::ErrorStmt:
+                return;
+            default:
+                return;
+        }
+    };
+
+    visit_stmt(visit_stmt, stmt);
 }
 
 void Collect::materialize_specialization_uses_for_constant_evaluation(

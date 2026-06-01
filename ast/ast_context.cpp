@@ -1114,6 +1114,36 @@ void ASTContext::clear_template_decl_canonical_decls() {
     semantic_store_->clear_template_decl_canonical_decls();
 }
 
+void ASTContext::set_template_decl_cxx_qualifier_prefix(
+    const TemplateDecl* decl,
+    std::optional<std::string> prefix) {
+    semantic_store_->set_template_decl_cxx_qualifier_prefix(decl, std::move(prefix));
+}
+
+const std::string* ASTContext::get_template_decl_cxx_qualifier_prefix(
+    const TemplateDecl* decl) const {
+    return semantic_store_->get_template_decl_cxx_qualifier_prefix(decl);
+}
+
+void ASTContext::clear_template_decl_cxx_qualifier_prefixes() {
+    semantic_store_->clear_template_decl_cxx_qualifier_prefixes();
+}
+
+void ASTContext::set_template_decl_owner_record_type(
+    const TemplateDecl* decl,
+    QualType owner_type) {
+    semantic_store_->set_template_decl_owner_record_type(decl, owner_type);
+}
+
+QualType ASTContext::get_template_decl_owner_record_type(
+    const TemplateDecl* decl) const {
+    return semantic_store_->get_template_decl_owner_record_type(decl);
+}
+
+void ASTContext::clear_template_decl_owner_record_types() {
+    semantic_store_->clear_template_decl_owner_record_types();
+}
+
 void ASTContext::set_template_parameter_default_argument(
     const TemplateParameterDecl* decl,
     std::optional<TemplateArgument> argument) {
@@ -1188,6 +1218,35 @@ QualType ASTContext::get_symbol_owner_record_type(const Symbol* sym) const {
 
 void ASTContext::clear_symbol_owner_record_types() {
     semantic_store_->clear_symbol_owner_record_types();
+}
+
+void ASTContext::set_object_decl_cxx_qualifier_prefix(
+    const ObjectDecl* decl,
+    std::optional<std::string> prefix) {
+    semantic_store_->set_object_decl_cxx_qualifier_prefix(decl, std::move(prefix));
+}
+
+const std::string* ASTContext::get_object_decl_cxx_qualifier_prefix(
+    const ObjectDecl* decl) const {
+    return semantic_store_->get_object_decl_cxx_qualifier_prefix(decl);
+}
+
+void ASTContext::clear_object_decl_cxx_qualifier_prefixes() {
+    semantic_store_->clear_object_decl_cxx_qualifier_prefixes();
+}
+
+void ASTContext::set_object_decl_owner_record_type(const ObjectDecl* decl,
+                                                   QualType owner_type) {
+    semantic_store_->set_object_decl_owner_record_type(decl, owner_type);
+}
+
+QualType ASTContext::get_object_decl_owner_record_type(
+    const ObjectDecl* decl) const {
+    return semantic_store_->get_object_decl_owner_record_type(decl);
+}
+
+void ASTContext::clear_object_decl_owner_record_types() {
+    semantic_store_->clear_object_decl_owner_record_types();
 }
 
 void ASTContext::set_symbol_function_template_specialization(

@@ -113,6 +113,12 @@ void erase_template_decl_owner_if_unused(const CollectSemanticStore* store,
     if (!store || !decl) {
         return;
     }
+    if (store->get_template_decl_cxx_qualifier_prefix(decl) != nullptr) {
+        return;
+    }
+    if (store->get_template_decl_owner_record_type(decl)) {
+        return;
+    }
     if (!decl->merged_default_arguments.empty()) {
         return;
     }
@@ -121,6 +127,25 @@ void erase_template_decl_owner_if_unused(const CollectSemanticStore* store,
         return;
     }
     if (decl->definition_decl) {
+        return;
+    }
+    if (decl->external_semantic_owner_id == store->registry_id()) {
+        decl->external_semantic_owner_id = 0;
+    }
+}
+
+void erase_object_decl_owner_if_unused(const CollectSemanticStore* store,
+                                       const ObjectDecl* decl) {
+    if (!store || !decl) {
+        return;
+    }
+    if (store->get_object_decl_cxx_qualifier_prefix(decl) != nullptr) {
+        return;
+    }
+    if (store->get_object_decl_owner_record_type(decl)) {
+        return;
+    }
+    if (store->lookup_record_semantics(decl) != nullptr) {
         return;
     }
     if (decl->external_semantic_owner_id == store->registry_id()) {
@@ -1269,6 +1294,99 @@ void CollectSemanticStore::clear_template_decl_canonical_decls() {
     }
 }
 
+void CollectSemanticStore::set_template_decl_cxx_qualifier_prefix(
+    const TemplateDecl* decl,
+    std::optional<std::string> prefix) {
+    if (!decl) {
+        return;
+    }
+    auto& info = template_decl_semantic_info_map_[decl];
+    if (!prefix.has_value() || prefix->empty()) {
+        info.cxx_qualifier_prefix = nullptr;
+        erase_external_semantic_info_if_empty(template_decl_semantic_info_map_, decl);
+        erase_template_decl_owner_if_unused(this, decl);
+        return;
+    }
+    auto [it, _] = external_qualifier_pool_.emplace(std::move(*prefix));
+    info.cxx_qualifier_prefix = &(*it);
+    decl->external_semantic_owner_id = registry_id_;
+}
+
+const std::string* CollectSemanticStore::get_template_decl_cxx_qualifier_prefix(
+    const TemplateDecl* decl) const {
+    const auto* info =
+        find_external_semantic_info(template_decl_semantic_info_map_, decl);
+    if (!info) {
+        return nullptr;
+    }
+    return info->cxx_qualifier_prefix;
+}
+
+void CollectSemanticStore::clear_template_decl_cxx_qualifier_prefixes() {
+    std::vector<const TemplateDecl*> decls;
+    decls.reserve(template_decl_semantic_info_map_.size());
+    for (const auto& [decl, info] : template_decl_semantic_info_map_) {
+        if (info.cxx_qualifier_prefix != nullptr) {
+            decls.push_back(decl);
+        }
+    }
+    for (const TemplateDecl* decl : decls) {
+        auto* info =
+            find_external_semantic_info(template_decl_semantic_info_map_, decl);
+        if (info) {
+            info->cxx_qualifier_prefix = nullptr;
+        }
+        erase_external_semantic_info_if_empty(template_decl_semantic_info_map_, decl);
+        erase_template_decl_owner_if_unused(this, decl);
+    }
+}
+
+void CollectSemanticStore::set_template_decl_owner_record_type(
+    const TemplateDecl* decl,
+    QualType owner_type) {
+    if (!decl) {
+        return;
+    }
+    auto& info = template_decl_semantic_info_map_[decl];
+    if (!owner_type) {
+        info.owner_record_type = QualType();
+        erase_external_semantic_info_if_empty(template_decl_semantic_info_map_, decl);
+        erase_template_decl_owner_if_unused(this, decl);
+        return;
+    }
+    info.owner_record_type = owner_type;
+    decl->external_semantic_owner_id = registry_id_;
+}
+
+QualType CollectSemanticStore::get_template_decl_owner_record_type(
+    const TemplateDecl* decl) const {
+    const auto* info =
+        find_external_semantic_info(template_decl_semantic_info_map_, decl);
+    if (!info) {
+        return QualType();
+    }
+    return info->owner_record_type;
+}
+
+void CollectSemanticStore::clear_template_decl_owner_record_types() {
+    std::vector<const TemplateDecl*> decls;
+    decls.reserve(template_decl_semantic_info_map_.size());
+    for (const auto& [decl, info] : template_decl_semantic_info_map_) {
+        if (info.owner_record_type) {
+            decls.push_back(decl);
+        }
+    }
+    for (const TemplateDecl* decl : decls) {
+        auto* info =
+            find_external_semantic_info(template_decl_semantic_info_map_, decl);
+        if (info) {
+            info->owner_record_type = QualType();
+        }
+        erase_external_semantic_info_if_empty(template_decl_semantic_info_map_, decl);
+        erase_template_decl_owner_if_unused(this, decl);
+    }
+}
+
 void CollectSemanticStore::set_template_parameter_default_argument(
     const TemplateParameterDecl* decl,
     std::optional<TemplateArgument> argument) {
@@ -1501,6 +1619,99 @@ void CollectSemanticStore::clear_symbol_owner_record_types() {
         }
         erase_external_semantic_info_if_empty(symbol_semantic_info_map_, sym);
         erase_symbol_owner_if_unused(this, sym);
+    }
+}
+
+void CollectSemanticStore::set_object_decl_cxx_qualifier_prefix(
+    const ObjectDecl* decl,
+    std::optional<std::string> prefix) {
+    if (!decl) {
+        return;
+    }
+    auto& info = object_decl_semantic_info_map_[decl];
+    if (!prefix.has_value() || prefix->empty()) {
+        info.cxx_qualifier_prefix = nullptr;
+        erase_external_semantic_info_if_empty(object_decl_semantic_info_map_, decl);
+        erase_object_decl_owner_if_unused(this, decl);
+        return;
+    }
+    auto [it, _] = external_qualifier_pool_.emplace(std::move(*prefix));
+    info.cxx_qualifier_prefix = &(*it);
+    decl->external_semantic_owner_id = registry_id_;
+}
+
+const std::string* CollectSemanticStore::get_object_decl_cxx_qualifier_prefix(
+    const ObjectDecl* decl) const {
+    const auto* info =
+        find_external_semantic_info(object_decl_semantic_info_map_, decl);
+    if (!info) {
+        return nullptr;
+    }
+    return info->cxx_qualifier_prefix;
+}
+
+void CollectSemanticStore::clear_object_decl_cxx_qualifier_prefixes() {
+    std::vector<const ObjectDecl*> decls;
+    decls.reserve(object_decl_semantic_info_map_.size());
+    for (const auto& [decl, info] : object_decl_semantic_info_map_) {
+        if (info.cxx_qualifier_prefix != nullptr) {
+            decls.push_back(decl);
+        }
+    }
+    for (const ObjectDecl* decl : decls) {
+        auto* info =
+            find_external_semantic_info(object_decl_semantic_info_map_, decl);
+        if (info) {
+            info->cxx_qualifier_prefix = nullptr;
+        }
+        erase_external_semantic_info_if_empty(object_decl_semantic_info_map_, decl);
+        erase_object_decl_owner_if_unused(this, decl);
+    }
+}
+
+void CollectSemanticStore::set_object_decl_owner_record_type(
+    const ObjectDecl* decl,
+    QualType owner_type) {
+    if (!decl) {
+        return;
+    }
+    auto& info = object_decl_semantic_info_map_[decl];
+    if (!owner_type) {
+        info.owner_record_type = QualType();
+        erase_external_semantic_info_if_empty(object_decl_semantic_info_map_, decl);
+        erase_object_decl_owner_if_unused(this, decl);
+        return;
+    }
+    info.owner_record_type = owner_type;
+    decl->external_semantic_owner_id = registry_id_;
+}
+
+QualType CollectSemanticStore::get_object_decl_owner_record_type(
+    const ObjectDecl* decl) const {
+    const auto* info =
+        find_external_semantic_info(object_decl_semantic_info_map_, decl);
+    if (!info) {
+        return QualType();
+    }
+    return info->owner_record_type;
+}
+
+void CollectSemanticStore::clear_object_decl_owner_record_types() {
+    std::vector<const ObjectDecl*> decls;
+    decls.reserve(object_decl_semantic_info_map_.size());
+    for (const auto& [decl, info] : object_decl_semantic_info_map_) {
+        if (info.owner_record_type) {
+            decls.push_back(decl);
+        }
+    }
+    for (const ObjectDecl* decl : decls) {
+        auto* info =
+            find_external_semantic_info(object_decl_semantic_info_map_, decl);
+        if (info) {
+            info->owner_record_type = QualType();
+        }
+        erase_external_semantic_info_if_empty(object_decl_semantic_info_map_, decl);
+        erase_object_decl_owner_if_unused(this, decl);
     }
 }
 
@@ -2124,10 +2335,14 @@ void CollectSemanticStore::clear_translation_unit_semantic_state() {
     clear_func_decl_function_template_specializations();
     clear_variable_decl_variable_template_specializations();
     clear_template_decl_canonical_decls();
+    clear_template_decl_cxx_qualifier_prefixes();
+    clear_template_decl_owner_record_types();
     clear_template_parameter_default_arguments();
     clear_template_decl_default_arguments();
     clear_symbol_cxx_qualifier_prefixes();
     clear_symbol_owner_record_types();
+    clear_object_decl_cxx_qualifier_prefixes();
+    clear_object_decl_owner_record_types();
     clear_symbol_function_template_specializations();
     clear_symbol_variable_template_specializations();
     clear_param_decl_default_arguments();

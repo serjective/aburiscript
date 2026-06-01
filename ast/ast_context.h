@@ -361,6 +361,24 @@ struct FuncExternalSemanticInfo {
     }
 };
 
+struct TemplateDeclExternalSemanticInfo {
+    const std::string* cxx_qualifier_prefix = nullptr;
+    QualType owner_record_type;
+
+    bool empty() const {
+        return cxx_qualifier_prefix == nullptr && !owner_record_type;
+    }
+};
+
+struct ObjectDeclExternalSemanticInfo {
+    const std::string* cxx_qualifier_prefix = nullptr;
+    QualType owner_record_type;
+
+    bool empty() const {
+        return cxx_qualifier_prefix == nullptr && !owner_record_type;
+    }
+};
+
 struct VariableExternalSemanticInfo {
     std::optional<VariableTemplateSpecializationInfo>
         variable_template_specialization;
@@ -543,6 +561,17 @@ public:
     const TemplateDecl* get_template_decl_definition_decl(
         const TemplateDecl* decl) const;
     void clear_template_decl_canonical_decls();
+    void set_template_decl_cxx_qualifier_prefix(
+        const TemplateDecl* decl,
+        std::optional<std::string> prefix);
+    const std::string* get_template_decl_cxx_qualifier_prefix(
+        const TemplateDecl* decl) const;
+    void clear_template_decl_cxx_qualifier_prefixes();
+    void set_template_decl_owner_record_type(const TemplateDecl* decl,
+                                             QualType owner_type);
+    QualType get_template_decl_owner_record_type(
+        const TemplateDecl* decl) const;
+    void clear_template_decl_owner_record_types();
 
     void set_template_parameter_default_argument(
         const TemplateParameterDecl* decl,
@@ -571,6 +600,17 @@ public:
     void set_symbol_owner_record_type(const Symbol* sym, QualType owner_type);
     QualType get_symbol_owner_record_type(const Symbol* sym) const;
     void clear_symbol_owner_record_types();
+
+    void set_object_decl_cxx_qualifier_prefix(
+        const ObjectDecl* decl,
+        std::optional<std::string> prefix);
+    const std::string* get_object_decl_cxx_qualifier_prefix(
+        const ObjectDecl* decl) const;
+    void clear_object_decl_cxx_qualifier_prefixes();
+    void set_object_decl_owner_record_type(const ObjectDecl* decl,
+                                           QualType owner_type);
+    QualType get_object_decl_owner_record_type(const ObjectDecl* decl) const;
+    void clear_object_decl_owner_record_types();
 
     void set_symbol_function_template_specialization(
         const Symbol* sym,

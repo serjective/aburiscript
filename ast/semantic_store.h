@@ -53,6 +53,17 @@ public:
     const TemplateDecl* get_template_decl_definition_decl(
         const TemplateDecl* decl) const;
     void clear_template_decl_canonical_decls();
+    void set_template_decl_cxx_qualifier_prefix(
+        const TemplateDecl* decl,
+        std::optional<std::string> prefix);
+    const std::string* get_template_decl_cxx_qualifier_prefix(
+        const TemplateDecl* decl) const;
+    void clear_template_decl_cxx_qualifier_prefixes();
+    void set_template_decl_owner_record_type(const TemplateDecl* decl,
+                                             QualType owner_type);
+    QualType get_template_decl_owner_record_type(
+        const TemplateDecl* decl) const;
+    void clear_template_decl_owner_record_types();
 
     void set_template_parameter_default_argument(
         const TemplateParameterDecl* decl,
@@ -81,6 +92,17 @@ public:
     void set_symbol_owner_record_type(const Symbol* sym, QualType owner_type);
     QualType get_symbol_owner_record_type(const Symbol* sym) const;
     void clear_symbol_owner_record_types();
+
+    void set_object_decl_cxx_qualifier_prefix(
+        const ObjectDecl* decl,
+        std::optional<std::string> prefix);
+    const std::string* get_object_decl_cxx_qualifier_prefix(
+        const ObjectDecl* decl) const;
+    void clear_object_decl_cxx_qualifier_prefixes();
+    void set_object_decl_owner_record_type(const ObjectDecl* decl,
+                                           QualType owner_type);
+    QualType get_object_decl_owner_record_type(const ObjectDecl* decl) const;
+    void clear_object_decl_owner_record_types();
 
     void set_symbol_function_template_specialization(
         const Symbol* sym,
@@ -216,6 +238,10 @@ private:
         std::unordered_map<const FuncDecl*, FuncExternalSemanticInfo>;
     using VariableExternalSemanticInfoMap =
         std::unordered_map<const VariableDecl*, VariableExternalSemanticInfo>;
+    using TemplateDeclExternalSemanticInfoMap =
+        std::unordered_map<const TemplateDecl*, TemplateDeclExternalSemanticInfo>;
+    using ObjectDeclExternalSemanticInfoMap =
+        std::unordered_map<const ObjectDecl*, ObjectDeclExternalSemanticInfo>;
     using ParamExternalSemanticInfoMap =
         std::unordered_map<const ParamDecl*, ParamExternalSemanticInfo>;
     using SymbolExternalSemanticInfoMap =
@@ -234,6 +260,8 @@ private:
     std::unordered_set<std::string> external_qualifier_pool_;
     FuncExternalSemanticInfoMap func_decl_semantic_info_map_;
     VariableExternalSemanticInfoMap variable_decl_semantic_info_map_;
+    TemplateDeclExternalSemanticInfoMap template_decl_semantic_info_map_;
+    ObjectDeclExternalSemanticInfoMap object_decl_semantic_info_map_;
     std::unordered_set<const TemplateDecl*> tracked_template_decls_;
     std::unordered_set<const TemplateParameterDecl*> tracked_template_parameter_decls_;
     ParamExternalSemanticInfoMap param_decl_semantic_info_map_;

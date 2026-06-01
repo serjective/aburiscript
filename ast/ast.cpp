@@ -27,6 +27,13 @@ ASTContext* side_table_context_for(const TemplateDecl* decl) {
     return get_active_side_table_ast_context();
 }
 
+ASTContext* side_table_context_for(const ObjectDecl* decl) {
+    if (ASTContext* owner = get_side_table_ast_context_for(decl)) {
+        return owner;
+    }
+    return get_active_side_table_ast_context();
+}
+
 ASTContext* side_table_context_for(const TemplateParameterDecl* decl) {
     if (ASTContext* owner = get_side_table_ast_context_for(decl)) {
         return owner;
@@ -219,6 +226,48 @@ const TemplateDecl* get_template_decl_definition_decl(const TemplateDecl* decl) 
 void clear_template_decl_canonical_decls() {
     if (ASTContext* ctx = current_side_table_context()) {
         ctx->clear_template_decl_canonical_decls();
+    }
+}
+
+void set_template_decl_cxx_qualifier_prefix(
+    const TemplateDecl* decl,
+    std::optional<std::string> prefix) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_template_decl_cxx_qualifier_prefix(decl, std::move(prefix));
+    }
+}
+
+const std::string* get_template_decl_cxx_qualifier_prefix(
+    const TemplateDecl* decl) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_template_decl_cxx_qualifier_prefix(decl);
+    }
+    return nullptr;
+}
+
+void clear_template_decl_cxx_qualifier_prefixes() {
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_template_decl_cxx_qualifier_prefixes();
+    }
+}
+
+void set_template_decl_owner_record_type(const TemplateDecl* decl,
+                                         QualType owner_type) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_template_decl_owner_record_type(decl, owner_type);
+    }
+}
+
+QualType get_template_decl_owner_record_type(const TemplateDecl* decl) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_template_decl_owner_record_type(decl);
+    }
+    return QualType();
+}
+
+void clear_template_decl_owner_record_types() {
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_template_decl_owner_record_types();
     }
 }
 
@@ -565,6 +614,48 @@ const Expr* get_param_decl_default_argument(const ParamDecl* decl) {
 void clear_param_decl_default_arguments() {
     if (ASTContext* ctx = current_side_table_context()) {
         ctx->clear_param_decl_default_arguments();
+    }
+}
+
+void set_object_decl_cxx_qualifier_prefix(
+    const ObjectDecl* decl,
+    std::optional<std::string> prefix) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_object_decl_cxx_qualifier_prefix(decl, std::move(prefix));
+    }
+}
+
+const std::string* get_object_decl_cxx_qualifier_prefix(
+    const ObjectDecl* decl) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_object_decl_cxx_qualifier_prefix(decl);
+    }
+    return nullptr;
+}
+
+void clear_object_decl_cxx_qualifier_prefixes() {
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_object_decl_cxx_qualifier_prefixes();
+    }
+}
+
+void set_object_decl_owner_record_type(const ObjectDecl* decl,
+                                       QualType owner_type) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        ctx->set_object_decl_owner_record_type(decl, owner_type);
+    }
+}
+
+QualType get_object_decl_owner_record_type(const ObjectDecl* decl) {
+    if (ASTContext* ctx = side_table_context_for(decl)) {
+        return ctx->get_object_decl_owner_record_type(decl);
+    }
+    return QualType();
+}
+
+void clear_object_decl_owner_record_types() {
+    if (ASTContext* ctx = current_side_table_context()) {
+        ctx->clear_object_decl_owner_record_types();
     }
 }
 

@@ -1347,6 +1347,9 @@ const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
                 nested_type.type = QualType(nested_decl->get_record_type());
                 nested_type.declared_access = current_access;
                 nested_type.decl = nested_decl;
+                set_object_decl_owner_record_type(
+                    nested_decl,
+                    QualType(record_type));
                 state.nested_types.push_back(std::move(nested_type));
             }
             continue;
@@ -1429,6 +1432,9 @@ const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
                 nested_template.kind =
                     RecordSemanticState::NestedTemplateKind::Alias;
                 nested_template.decl = alias_template;
+                set_template_decl_owner_record_type(
+                    alias_template,
+                    QualType(record_type));
                 state.nested_templates.push_back(std::move(nested_template));
             }
             continue;
@@ -1442,6 +1448,9 @@ const ObjectDecl* Parser::ensure_cpp_template_pattern_nested_record_semantics(
                 nested_template.kind =
                     RecordSemanticState::NestedTemplateKind::Class;
                 nested_template.decl = class_template;
+                set_template_decl_owner_record_type(
+                    class_template,
+                    QualType(record_type));
                 state.nested_templates.push_back(std::move(nested_template));
             }
             continue;
@@ -1815,6 +1824,9 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 nested_type.type = QualType(nested_decl->get_record_type());
                 nested_type.declared_access = current_access;
                 nested_type.decl = nested_decl;
+                set_object_decl_owner_record_type(
+                    nested_decl,
+                    QualType(record_type));
                 nested_types.push_back(std::move(nested_type));
             }
             continue;
@@ -1946,6 +1958,9 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 nested_template.kind =
                     RecordSemanticState::NestedTemplateKind::Alias;
                 nested_template.decl = alias_template;
+                set_template_decl_owner_record_type(
+                    alias_template,
+                    QualType(record_type));
                 nested_templates.push_back(std::move(nested_template));
             }
             continue;
@@ -1960,6 +1975,9 @@ void Parser::prepare_cpp_template_pattern_record_impl(TemplateDeclT& class_templ
                 nested_template.kind =
                     RecordSemanticState::NestedTemplateKind::Class;
                 nested_template.decl = class_template;
+                set_template_decl_owner_record_type(
+                    class_template,
+                    QualType(record_type));
                 nested_templates.push_back(std::move(nested_template));
             }
             continue;

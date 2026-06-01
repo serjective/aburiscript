@@ -1099,6 +1099,16 @@ void set_template_decl_definition_decl(const TemplateDecl* decl,
                                        const TemplateDecl* definition_decl);
 const TemplateDecl* get_template_decl_definition_decl(const TemplateDecl* decl);
 void clear_template_decl_canonical_decls();
+void set_template_decl_cxx_qualifier_prefix(
+    const TemplateDecl* decl,
+    std::optional<std::string> prefix);
+const std::string* get_template_decl_cxx_qualifier_prefix(
+    const TemplateDecl* decl);
+void clear_template_decl_cxx_qualifier_prefixes();
+void set_template_decl_owner_record_type(const TemplateDecl* decl,
+                                         QualType owner_type);
+QualType get_template_decl_owner_record_type(const TemplateDecl* decl);
+void clear_template_decl_owner_record_types();
 const TemplateDecl* get_template_decl_lookup_identity(const Decl* decl);
 bool template_decls_share_lookup_identity(const Decl* lhs, const Decl* rhs);
 bool template_decl_is_preferred_lookup_representative(const Decl* existing,
@@ -1119,6 +1129,16 @@ struct ParamDecl;
 void set_param_decl_default_argument(const ParamDecl* decl, std::unique_ptr<Expr> expr);
 const Expr* get_param_decl_default_argument(const ParamDecl* decl);
 void clear_param_decl_default_arguments();
+void set_object_decl_cxx_qualifier_prefix(
+    const ObjectDecl* decl,
+    std::optional<std::string> prefix);
+const std::string* get_object_decl_cxx_qualifier_prefix(
+    const ObjectDecl* decl);
+void clear_object_decl_cxx_qualifier_prefixes();
+void set_object_decl_owner_record_type(const ObjectDecl* decl,
+                                       QualType owner_type);
+QualType get_object_decl_owner_record_type(const ObjectDecl* decl);
+void clear_object_decl_owner_record_types();
 // this wraps a decl(s) in a statement
 struct Decl2Stmt: Stmt {
     std::vector<std::unique_ptr<Decl>> decls;

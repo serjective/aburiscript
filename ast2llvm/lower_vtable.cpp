@@ -743,6 +743,7 @@ llvm::GlobalVariable* ASTToLLVM::get_or_create_cpp_vtable(
                 entries.push_back(entry);
                 return;
             }
+            mark_function_symbol_odr_used(resolved_symbol);
 
             std::shared_ptr<Symbol> context_symbol =
                 context_slot.final_symbol ? context_slot.final_symbol : resolved_symbol;

@@ -9,7 +9,6 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <typeinfo>
@@ -1125,6 +1124,10 @@ FuncDecl* ASTToLLVM::find_function_symbol_definition(
         return direct;
     }
 
+    auto is_definition_bearing_decl = [](const FuncDecl* decl) {
+        return decl && function_decl_defines_entity(decl) &&
+               (decl->body || decl->is_deleted || decl->is_defaulted);
+    };
     auto select_decl = [&](const auto& entries) -> FuncDecl* {
         for (const auto& entry : entries) {
             if (entry.symbol.get() == sym.get() && entry.decl) {
@@ -1135,23 +1138,107 @@ FuncDecl* ASTToLLVM::find_function_symbol_definition(
         return nullptr;
     };
 
+    FuncDecl* record_match = nullptr;
     if (auto* method = select_decl(state->methods)) {
-        return method;
-    }
-    if (auto* ctor = select_decl(state->constructors)) {
-        return ctor;
-    }
-    if (auto* dtor = select_decl(state->destructors)) {
-        return dtor;
+        record_match = method;
+    } else if (auto* ctor = select_decl(state->constructors)) {
+        record_match = ctor;
+    } else if (auto* dtor = select_decl(state->destructors)) {
+        record_match = dtor;
     }
     for (const auto& friend_function : state->friend_functions) {
         if (friend_function.symbol.get() == sym.get() &&
             friend_function.function_decl) {
-            return const_cast<FuncDecl*>(friend_function.function_decl);
+            record_match = const_cast<FuncDecl*>(friend_function.function_decl);
+            break;
+        }
+    }
+    if (is_definition_bearing_decl(record_match)) {
+        return record_match;
+    }
+    if (!direct) {
+        direct = record_match;
+    }
+
+    FuncDecl* selected_decl = record_match ? record_match : direct;
+    if (!is_definition_bearing_decl(selected_decl)) {
+        auto type_matches_symbol = [&](const FuncDecl* candidate) {
+            return candidate &&
+                   candidate->name == sym->name &&
+                   QualType(candidate->type).equals_unqualified(sym->type);
+        };
+        auto select_definition_decl = [&](const auto& entries) -> FuncDecl* {
+            for (const auto& entry : entries) {
+                auto* candidate =
+                    static_cast<const FuncDecl*>(entry.decl);
+                if (type_matches_symbol(candidate) &&
+                    is_definition_bearing_decl(candidate)) {
+                    return const_cast<FuncDecl*>(candidate);
+                }
+                if (entry.symbol &&
+                    entry.symbol->function_definition &&
+                    type_matches_symbol(entry.symbol->function_definition) &&
+                    is_definition_bearing_decl(
+                        entry.symbol->function_definition)) {
+                    return const_cast<FuncDecl*>(
+                        entry.symbol->function_definition);
+                }
+            }
+            return nullptr;
+        };
+        if (selected_decl && isa<CppConstructorDecl>(selected_decl)) {
+            if (auto* ctor = select_definition_decl(state->constructors)) {
+                return ctor;
+            }
+        } else if (selected_decl && isa<CppDestructorDecl>(selected_decl)) {
+            if (auto* dtor = select_definition_decl(state->destructors)) {
+                return dtor;
+            }
+        } else if (selected_decl && isa<CppMethodDecl>(selected_decl)) {
+            if (auto* method = select_definition_decl(state->methods)) {
+                return method;
+            }
+        }
+
+        if (owner_type &&
+            owner_type->is_class_template_specialization()) {
+            auto* owner_entry =
+                ast_ctx
+                    ? ast_ctx->lookup_class_template_specialization(
+                          owner_type->get_primary_class_template(),
+                          owner_type
+                              ->get_template_specialization_arguments())
+                    : nullptr;
+            if (owner_entry) {
+                auto same_member_kind = [&](const FuncDecl* candidate) {
+                    if (!candidate || !selected_decl) {
+                        return false;
+                    }
+                    if (isa<CppConstructorDecl>(selected_decl)) {
+                        return isa<CppConstructorDecl>(candidate);
+                    }
+                    if (isa<CppDestructorDecl>(selected_decl)) {
+                        return isa<CppDestructorDecl>(candidate);
+                    }
+                    if (isa<CppMethodDecl>(selected_decl)) {
+                        return isa<CppMethodDecl>(candidate);
+                    }
+                    return false;
+                };
+                for (const auto& member_decl : owner_entry->member_decls) {
+                    auto* candidate =
+                        dyn_cast<FuncDecl>(member_decl.get());
+                    if (same_member_kind(candidate) &&
+                        type_matches_symbol(candidate) &&
+                        is_definition_bearing_decl(candidate)) {
+                        return candidate;
+                    }
+                }
+            }
         }
     }
 
-    return direct;
+    return selected_decl;
 }
 
 void ASTToLLVM::mark_function_symbol_odr_used(
