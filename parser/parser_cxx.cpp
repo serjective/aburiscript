@@ -164,6 +164,38 @@ void bump_template_arg_inconclusive_fallback() {
     }
 }
 
+void bump_template_arg_annotated_type_direct() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTemplateArgumentAnnotatedTypeDirect);
+    }
+}
+
+void bump_template_arg_annotated_type_fallback() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTemplateArgumentAnnotatedTypeFallback);
+    }
+}
+
+void bump_template_arg_annotated_type_complex_fallback() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTemplateArgumentAnnotatedTypeComplexFallback);
+    }
+}
+
+void bump_template_arg_tentative_type_avoided() {
+    if (auto* profiler = active_perf_profiler();
+        profiler && profiler->wants_full()) {
+        profiler->add_counter(
+            PerfCounter::ParserTemplateArgumentTentativeTypeAvoided);
+    }
+}
+
 void bump_type_scope_annotation_hit() {
     if (auto* profiler = active_perf_profiler();
         profiler && profiler->wants_full()) {
@@ -2953,132 +2985,9 @@ bool Parser::expr_depends_on_active_template_parameter(const Expr* expr) const {
            collect_->expression_depends_on_template_parameters(expr);
 }
 
-bool Parser::can_direct_parse_cpp_template_type_argument_for_lookahead() {
-    if (!is_cxx_mode_active() || !collect_) {
-        return false;
-    }
-
-    auto token_at = [&](size_t offset) {
-        return peek_token_shortcut(offset);
-    };
-
-    auto skip_decltype_specifier_at = [&](size_t& offset) {
-        if (token_at(offset).type != TokenType::DECLTYPE_KW) {
-            return false;
-        }
-        ++offset;
-        return skip_balanced_group_for_template_id_lookahead(
-            offset,
-            TokenType::LEFT_PAREN,
-            TokenType::RIGHT_PAREN);
-    };
-
-    auto builtin_type_argument_has_direct_follow = [&]() {
-        size_t offset = 0;
-        bool saw_type_specifier = false;
-        while (true) {
-            TokenType type = token_at(offset).type;
-            if (type == TokenType::CONST ||
-                type == TokenType::VOLATILE ||
-                type == TokenType::RESTRICT ||
-                type == TokenType::NULLABILITY_QUALIFIER) {
-                ++offset;
-                continue;
-            }
-            if (is_builtin_template_type_specifier_token(type)) {
-                saw_type_specifier = true;
-                ++offset;
-                continue;
-            }
-            if (type == TokenType::DECLTYPE_KW) {
-                saw_type_specifier = true;
-                if (!skip_decltype_specifier_at(offset)) {
-                    return false;
-                }
-                continue;
-            }
-            break;
-        }
-        return saw_type_specifier &&
-               is_cpp_template_argument_direct_type_follow_token(
-                   token_at(offset).type);
-    };
-
-    auto consume_scope_resolution_at = [&](size_t& offset) {
-        if (token_at(offset).type == TokenType::SCOPE_RESOLUTION) {
-            ++offset;
-            return true;
-        }
-        if (token_at(offset).type == TokenType::COLON &&
-            token_at(offset + 1).type == TokenType::COLON) {
-            offset += 2;
-            return true;
-        }
-        return false;
-    };
-
-    auto consume_named_component_at =
-        [&](size_t& offset,
-            bool allow_template_keyword,
-            bool* has_template_arguments) {
-        if (has_template_arguments) {
-            *has_template_arguments = false;
-        }
-        if (allow_template_keyword &&
-            token_at(offset).type == TokenType::TEMPLATE) {
-            ++offset;
-        }
-        if (token_at(offset).type != TokenType::IDENTIFIER) {
-            return false;
-        }
-        ++offset;
-        if (token_at(offset).type == TokenType::LESS_THAN) {
-            if (has_template_arguments) {
-                *has_template_arguments = true;
-            }
-            if (!skip_template_argument_list_for_expression_probe(offset)) {
-                return false;
-            }
-        }
-        return true;
-    };
-
-    auto named_type_argument_has_direct_follow = [&]() {
-        size_t offset = 0;
-        consume_scope_resolution_at(offset);
-        bool previous_component_has_template_arguments = false;
-        if (!consume_named_component_at(
-                offset,
-                /*allow_template_keyword=*/false,
-                &previous_component_has_template_arguments)) {
-            return false;
-        }
-        while (consume_scope_resolution_at(offset)) {
-            if (previous_component_has_template_arguments) {
-                return false;
-            }
-            if (!consume_named_component_at(
-                    offset,
-                    /*allow_template_keyword=*/true,
-                    &previous_component_has_template_arguments)) {
-                return false;
-            }
-        }
-        return is_cpp_template_argument_direct_type_follow_token(
-            token_at(offset).type);
-    };
-
-    if (builtin_type_argument_has_direct_follow()) {
-        return true;
-    }
-
-    return named_type_argument_has_direct_follow() &&
-           can_start_cpp_named_type_specifier_for_lookahead();
-}
-
 std::optional<Parser::ParsedCppTemplateTypeArgument>
-Parser::try_parse_cpp_direct_template_type_argument() {
-    if (!can_direct_parse_cpp_template_type_argument_for_lookahead()) {
+Parser::try_parse_cpp_template_type_argument_from_annotation() {
+    if (!is_cxx_mode_active() || !collect_) {
         return std::nullopt;
     }
 
@@ -3089,43 +2998,230 @@ Parser::try_parse_cpp_direct_template_type_argument() {
         tok_mgnt.set_split_token_state(saved_split_state);
     };
 
+    auto fallback = [&]() -> std::optional<ParsedCppTemplateTypeArgument> {
+        bump_template_arg_annotated_type_fallback();
+        restore();
+        return std::nullopt;
+    };
+
+    auto complex_fallback =
+        [&]() -> std::optional<ParsedCppTemplateTypeArgument> {
+        bump_template_arg_annotated_type_complex_fallback();
+        restore();
+        return std::nullopt;
+    };
+
+    auto consume_cv_qualifiers = [&]() {
+        uint8_t qualifiers = QUAL_NONE;
+        while (true) {
+            if (gentle_check_and_consume(TokenType::CONST)) {
+                qualifiers |= QUAL_CONST;
+            } else if (gentle_check_and_consume(TokenType::VOLATILE)) {
+                qualifiers |= QUAL_VOLATILE;
+            } else if (gentle_check_and_consume(TokenType::RESTRICT)) {
+                qualifiers |= QUAL_RESTRICT;
+            } else if (gentle_check_and_consume(TokenType::ATOMIC)) {
+                qualifiers |= QUAL_ATOMIC;
+            } else if (gentle_check_and_consume(
+                           TokenType::NULLABILITY_QUALIFIER)) {
+                // Nullability does not participate in the semantic type yet.
+            } else {
+                break;
+            }
+        }
+        return qualifiers;
+    };
+
+    auto consume_builtin_specifiers =
+        [&](uint8_t& base_qualifiers) -> QualType {
+        DeclarationParser::TypeTally tally;
+        bool saw_specifier = false;
+        SrcLoc begin_loc = current_token().loc;
+        while (true) {
+            switch (current_token().type) {
+                case TokenType::CONST:
+                case TokenType::VOLATILE:
+                case TokenType::RESTRICT:
+                case TokenType::ATOMIC:
+                case TokenType::NULLABILITY_QUALIFIER:
+                    base_qualifiers |= consume_cv_qualifiers();
+                    continue;
+                case TokenType::VOID:
+                    ++tally.void_count;
+                    break;
+                case TokenType::CHAR:
+                    ++tally.char_count;
+                    break;
+                case TokenType::SHORT:
+                    ++tally.short_count;
+                    break;
+                case TokenType::INT:
+                    ++tally.int_count;
+                    break;
+                case TokenType::LONG:
+                    ++tally.long_count;
+                    break;
+                case TokenType::FLOAT:
+                    ++tally.float_count;
+                    break;
+                case TokenType::DOUBLE:
+                    ++tally.double_count;
+                    break;
+                case TokenType::SIGNED:
+                    ++tally.signed_count;
+                    break;
+                case TokenType::UNSIGNED:
+                    ++tally.unsigned_count;
+                    break;
+                case TokenType::BOOL:
+                    ++tally.bool_count;
+                    break;
+                case TokenType::WCHAR_T:
+                    ++tally.wchar_count;
+                    break;
+                case TokenType::CHAR16_T:
+                    ++tally.char16_count;
+                    break;
+                case TokenType::CHAR32_T:
+                    ++tally.char32_count;
+                    break;
+                case TokenType::INT128:
+                    ++tally.int128_count;
+                    break;
+                case TokenType::UINT128_T:
+                    ++tally.int128_count;
+                    ++tally.unsigned_count;
+                    break;
+                case TokenType::COMPLEX:
+                    ++tally.complex_count;
+                    break;
+                case TokenType::FLOAT16:
+                    ++tally.float16_count;
+                    break;
+                default:
+                    if (!saw_specifier) {
+                        return QualType();
+                    }
+                    {
+                        DeclarationParser validator(this);
+                        validator.begin_loc = begin_loc;
+                        validator.validateTally(tally);
+                    }
+                    return QualType(
+                        DeclarationParser::resolveBuiltinType(
+                            tally,
+                            *type_ctx),
+                        base_qualifiers);
+            }
+            saw_specifier = true;
+            advance();
+        }
+    };
+
+    auto can_consume_annotated_type_base = [&]() {
+        auto annotation = classify_cpp_type_scope_for_lookahead(
+            ParserAnnotationCache::CppTypeScopeContext::TemplateArgument);
+        if (annotation.has_scope && annotation.has_template_id &&
+            !annotation.starts_with_typename &&
+            !annotation.starts_with_decltype) {
+            return false;
+        }
+        switch (annotation.kind) {
+            case ParserAnnotationCache::CppTypeScopeKind::TypeName:
+            case ParserAnnotationCache::CppTypeScopeKind::TypeTemplateId:
+            case ParserAnnotationCache::CppTypeScopeKind::DependentType:
+                return true;
+            default:
+                return false;
+        }
+    };
+
     auto finish = [&](QualType type)
         -> std::optional<ParsedCppTemplateTypeArgument> {
         if (!type ||
             !(is_cpp_template_argument_boundary_here() ||
               gentle_check(TokenType::ELLIPSIS) ||
               gentle_check(TokenType::LEFT_BRACE))) {
-            restore();
-            return std::nullopt;
+            return complex_fallback();
         }
         ParsedCppTemplateTypeArgument result;
         result.type = type;
         result.followed_by_left_brace = gentle_check(TokenType::LEFT_BRACE);
+        bump_template_arg_annotated_type_direct();
+        bump_template_arg_tentative_type_avoided();
         return result;
     };
 
     try {
-        TokenType start = current_token().type;
-        if (start == TokenType::IDENTIFIER ||
-            start == TokenType::SCOPE_RESOLUTION ||
-            (start == TokenType::COLON &&
-             peek_token().type == TokenType::COLON)) {
-            if (auto parsed_named_type = try_parse_cpp_named_type_specifier()) {
-                return finish(parsed_named_type->type);
-            }
-            restore();
-            return std::nullopt;
+        uint8_t base_qualifiers = consume_cv_qualifiers();
+        if (current_token().type == TokenType::Eof) {
+            return fallback();
         }
 
-        DeclarationParser type_parser(this);
-        auto parsed_type = type_parser.parse_declaration(false);
-        if (!parsed_type ||
-            !type_parser.name.empty() ||
-            type_parser.str_class != StorageClass::NONE) {
-            restore();
-            return std::nullopt;
+        if (!can_consume_annotated_type_base()) {
+            return fallback();
         }
-        return finish(QualType(parsed_type, type_parser.qualifiers));
+
+        QualType base_type;
+        TokenType start = current_token().type;
+        if (is_builtin_template_type_specifier_token(start)) {
+            base_type = consume_builtin_specifiers(base_qualifiers);
+        } else if (start == TokenType::DECLTYPE_KW) {
+            base_type = parse_cpp_decltype_type_specifier();
+        } else if (start == TokenType::TYPENAME ||
+                   start == TokenType::IDENTIFIER ||
+                   start == TokenType::SCOPE_RESOLUTION ||
+                   (start == TokenType::COLON &&
+                    peek_token().type == TokenType::COLON)) {
+            if (auto parsed_named_type = try_parse_cpp_named_type_specifier()) {
+                base_type = parsed_named_type->type;
+            } else {
+                return fallback();
+            }
+        } else {
+            return fallback();
+        }
+
+        if (!base_type) {
+            return fallback();
+        }
+
+        std::shared_ptr<CType> raw_type = base_type.get_shared();
+        uint8_t current_qualifiers =
+            static_cast<uint8_t>(base_type.get_qualifiers() |
+                                 base_qualifiers);
+
+        while (true) {
+            if (gentle_check_and_consume(TokenType::MULTIPLY)) {
+                raw_type = std::make_shared<PointerType>(
+                    QualType(raw_type, current_qualifiers));
+                current_qualifiers = consume_cv_qualifiers();
+                continue;
+            }
+            if (gentle_check(TokenType::BITWISE_AND) ||
+                gentle_check(TokenType::LOGICAL_AND)) {
+                bool is_rvalue_reference =
+                    gentle_check_and_consume(TokenType::LOGICAL_AND);
+                if (!is_rvalue_reference) {
+                    check_and_consume(TokenType::BITWISE_AND);
+                }
+                raw_type = std::make_shared<ReferenceType>(
+                    QualType(raw_type, current_qualifiers),
+                    is_rvalue_reference ? ReferenceKind::RValue
+                                        : ReferenceKind::LValue);
+                current_qualifiers = QUAL_NONE;
+                continue;
+            }
+            break;
+        }
+
+        if (gentle_check(TokenType::LEFT_PAREN) ||
+            gentle_check(TokenType::LEFT_BRACKET) ||
+            gentle_check(TokenType::BITWISE_XOR)) {
+            return complex_fallback();
+        }
+
+        return finish(QualType(raw_type, current_qualifiers));
     } catch (const ParseError&) {
         restore();
     } catch (const FatalErrorLimitReached&) {
@@ -3414,7 +3510,7 @@ TemplateArgument Parser::parse_cpp_template_argument() {
     }
 
     if (auto direct_type_argument =
-            try_parse_cpp_direct_template_type_argument()) {
+            try_parse_cpp_template_type_argument_from_annotation()) {
         if (direct_type_argument->followed_by_left_brace) {
             record_template_argument_branch(
                 TemplateArgumentBranch::TypedBracedValue);

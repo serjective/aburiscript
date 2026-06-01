@@ -766,9 +766,8 @@ private:
         QualType type;
         bool followed_by_left_brace = false;
     };
-    bool can_direct_parse_cpp_template_type_argument_for_lookahead();
     std::optional<ParsedCppTemplateTypeArgument>
-    try_parse_cpp_direct_template_type_argument();
+    try_parse_cpp_template_type_argument_from_annotation();
     std::unique_ptr<Expr>
     parse_cpp_typed_braced_template_argument_expr_after_type(
         QualType target_type);
