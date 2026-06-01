@@ -709,6 +709,71 @@ struct Collect::ClassTemplateSpecializationInstantiator {
 
     ASTContext* ast_ctx() const { return collect.ast_ctx_.get(); }
 
+    bool cached_semantics_match_selected_pattern(
+        const RecordSemanticState* state) const {
+        if (!state) {
+            return false;
+        }
+        if (!pattern || !pattern->is_definition) {
+            return true;
+        }
+        if (state->is_incomplete || state->is_template_pattern_provisional) {
+            return false;
+        }
+
+        const RecordSemanticState* selected_pattern_state =
+            pattern_semantic_decl
+                ? collect.query_lookup_record_semantics(pattern_semantic_decl)
+                : nullptr;
+        if (!selected_pattern_state) {
+            return true;
+        }
+
+        auto missing_required_member_group =
+            [](const auto& pattern_members, const auto& cached_members) {
+                return !pattern_members.empty() && cached_members.empty();
+            };
+        return !missing_required_member_group(
+                   selected_pattern_state->bases,
+                   state->bases) &&
+               !missing_required_member_group(
+                   selected_pattern_state->virtual_bases,
+                   state->virtual_bases) &&
+               !missing_required_member_group(
+                   selected_pattern_state->fields,
+                   state->fields) &&
+               !missing_required_member_group(
+                   selected_pattern_state->methods,
+                   state->methods) &&
+               !missing_required_member_group(
+                   selected_pattern_state->method_templates,
+                   state->method_templates) &&
+               !missing_required_member_group(
+                   selected_pattern_state->constructors,
+                   state->constructors) &&
+               !missing_required_member_group(
+                   selected_pattern_state->destructors,
+                   state->destructors) &&
+               !missing_required_member_group(
+                   selected_pattern_state->static_data_members,
+                   state->static_data_members) &&
+               !missing_required_member_group(
+                   selected_pattern_state->nested_types,
+                   state->nested_types) &&
+               !missing_required_member_group(
+                   selected_pattern_state->nested_templates,
+                   state->nested_templates) &&
+               !missing_required_member_group(
+                   selected_pattern_state->friend_functions,
+                   state->friend_functions) &&
+               !missing_required_member_group(
+                   selected_pattern_state->friend_types,
+                   state->friend_types) &&
+               !missing_required_member_group(
+                   selected_pattern_state->enumerator_members,
+                   state->enumerator_members);
+    }
+
     void repair_entry_after_tentative_semantic_rollback() {
         if (!entry || entry->is_instantiating || !entry->specialization_decl) {
             return;
@@ -720,7 +785,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         const RecordSemanticState* state =
             collect.query_lookup_record_semantics(
                 entry->specialization_decl.get());
-        if (state && (!pattern->is_definition || !state->is_incomplete)) {
+        if (cached_semantics_match_selected_pattern(state)) {
             return;
         }
 
@@ -1187,36 +1252,11 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 return false;
             }
         }
-        for (size_t idx = 0; idx < class_template->parameters.size(); ++idx) {
-            auto* non_type_parameter = dyn_cast<TemplateNonTypeParmDecl>(
-                class_template->parameters[idx].get());
-            if (!non_type_parameter || idx >= specialization_bindings.size()) {
-                continue;
-            }
-            if (specialization_bindings[idx].arguments.empty()) {
-                continue;
-            }
-            QualType expected_type = collect.substitute_template_type_with_bindings(
-                non_type_parameter->type,
+        if (!normalize_non_type_argument_bindings(
                 class_template->parameters,
                 specialization_bindings,
-                loc);
-            expected_type =
-                collect.finalize_deferred_semantic_type(expected_type, loc);
-            for (auto& bound_argument : specialization_bindings[idx].arguments) {
-                std::string normalize_error;
-                if (!normalize_concrete_template_value_argument(
-                        bound_argument,
-                        expected_type,
-                        &normalize_error)) {
-                    collect.report_error(
-                        normalize_error.empty()
-                            ? "failed to normalize class template value argument"
-                            : normalize_error,
-                        loc);
-                    return false;
-                }
-            }
+                "class template")) {
+            return false;
         }
 
         normalized_arguments =
@@ -1254,6 +1294,12 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     normalized_arguments,
                     partial_bindings)) {
                 continue;
+            }
+            if (!normalize_non_type_argument_bindings(
+                    partial_specialization->parameters,
+                    partial_bindings,
+                    "class template partial specialization")) {
+                return false;
             }
             auto partial_arguments =
                 flatten_template_argument_bindings(partial_bindings);
@@ -1316,6 +1362,58 @@ struct Collect::ClassTemplateSpecializationInstantiator {
         return true;
     }
 
+    bool normalize_non_type_argument_bindings(
+        const TemplateParameterList& parameters,
+        TemplateArgumentBindings& bindings,
+        const char* context_name) {
+        for (size_t idx = 0; idx < parameters.size(); ++idx) {
+            auto* non_type_parameter = dyn_cast<TemplateNonTypeParmDecl>(
+                parameters[idx].get());
+            if (!non_type_parameter || idx >= bindings.size()) {
+                continue;
+            }
+            if (bindings[idx].arguments.empty()) {
+                continue;
+            }
+            QualType expected_type = collect.substitute_template_type_with_bindings(
+                non_type_parameter->type,
+                parameters,
+                bindings,
+                loc);
+            expected_type =
+                collect.finalize_deferred_semantic_type(expected_type, loc);
+            for (auto& bound_argument : bindings[idx].arguments) {
+                std::string normalize_error;
+                if (!normalize_concrete_template_value_argument(
+                        bound_argument,
+                        expected_type,
+                        &normalize_error)) {
+                    collect.report_error(
+                        normalize_error.empty()
+                            ? "failed to normalize " +
+                                  std::string(context_name) +
+                                  " value argument"
+                            : normalize_error,
+                        loc);
+                    return false;
+                }
+            }
+        }
+
+        std::string invalid_value_error;
+        if (!template_argument_bindings_have_valid_nondependent_values(
+                bindings,
+                &invalid_value_error)) {
+            collect.report_error(
+                invalid_value_error.empty()
+                    ? "class template argument has invalid non-dependent value"
+                    : invalid_value_error,
+                loc);
+            return false;
+        }
+        return true;
+    }
+
     ObjectDecl* try_explicit_specialization() const {
         if (const auto* explicit_specialization =
                 find_class_template_explicit_specialization_for_lookup_identity(
@@ -1333,6 +1431,17 @@ struct Collect::ClassTemplateSpecializationInstantiator {
     }
 
     bool prepare_entry() {
+        std::string invalid_value_error;
+        if (!template_arguments_have_valid_nondependent_values(
+                normalized_arguments,
+                &invalid_value_error)) {
+            return fail_instantiation(
+                invalid_value_error.empty()
+                    ? "internal error: class template specialization key contains an invalid non-type value"
+                    : invalid_value_error,
+                loc);
+        }
+
         specialization_name = make_class_template_specialization_name(
             class_template,
             normalized_arguments);

@@ -3513,6 +3513,28 @@ std::unique_ptr<Expr> Collect::try_function_object_call_overload(
     if (!callee_record) {
         return nullptr;
     }
+    if (callee_record->is_class_template_specialization()) {
+        const ClassTemplateDecl* primary_template =
+            callee_record->get_primary_class_template();
+        if (primary_template) {
+            if (auto* realized_decl =
+                    try_instantiate_class_template_specialization(
+                        primary_template,
+                        callee_record->get_template_specialization_arguments(),
+                        loc)) {
+                if (auto realized_type = realized_decl->get_record_type()) {
+                    callee_record = realized_type;
+                }
+            }
+        }
+        auto completed =
+            collect_object_initialization_record_semantics(
+                QualType(callee_record),
+                loc);
+        if (completed.record_type) {
+            callee_record = completed.record_type;
+        }
+    }
 
     // Treat class objects in callee position as potential `operator()` dispatch.
     bool had_member_match = false;

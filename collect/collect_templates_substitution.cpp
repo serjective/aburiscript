@@ -2109,14 +2109,15 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments(
         loc);
 }
 
-std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindings(
+bool Collect::substitute_template_arguments_with_bindings_checked(
     const std::vector<TemplateArgument>& arguments,
     const TemplateParameterList& parameters,
     const TemplateArgumentBindings& argument_bindings,
     SrcLoc loc,
+    std::vector<TemplateArgument>& rewritten,
     bool allow_unsubstituted_parameters,
     ASTCloneContext* clone_context) {
-    std::vector<TemplateArgument> rewritten;
+    rewritten.clear();
     rewritten.reserve(arguments.size());
     // append_rewritten_argument handles pack expansion inline via recursion.
     // When argument.expands_parameter_pack is true:
@@ -2432,8 +2433,7 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                 ? "failed to substitute non-type template argument expression"
                                 : clone_error,
                             loc);
-                        rewritten.push_back(std::move(new_argument));
-                        return true;
+                        return false;
                     }
 
                     std::string resolve_error;
@@ -2532,8 +2532,7 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                 ? "failed to resolve non-type template argument expression after substitution"
                                 : resolve_error,
                             loc);
-                        rewritten.push_back(std::move(new_argument));
-                        return true;
+                        return false;
                     }
 
                     QualType resolved_value_type =
@@ -2581,6 +2580,12 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                     *this,
                                     new_argument,
                                     ast_ctx_.get());
+                            if (!new_argument.is_dependent) {
+                                report_error(
+                                    "non-type template argument substitution requires a concrete constant expression",
+                                    loc);
+                                return false;
+                            }
                         }
                     }
                 }
@@ -2602,6 +2607,7 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
                                 ? "failed to normalize template value argument"
                                 : normalize_error,
                             loc);
+                        return false;
                     }
                 }
                 break;
@@ -2612,8 +2618,27 @@ std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindin
 
     for (const auto& argument : arguments) {
         if (!append_rewritten_argument(argument, argument_bindings)) {
-            return rewritten;
+            return false;
         }
     }
+    return true;
+}
+
+std::vector<TemplateArgument> Collect::substitute_template_arguments_with_bindings(
+    const std::vector<TemplateArgument>& arguments,
+    const TemplateParameterList& parameters,
+    const TemplateArgumentBindings& argument_bindings,
+    SrcLoc loc,
+    bool allow_unsubstituted_parameters,
+    ASTCloneContext* clone_context) {
+    std::vector<TemplateArgument> rewritten;
+    substitute_template_arguments_with_bindings_checked(
+        arguments,
+        parameters,
+        argument_bindings,
+        loc,
+        rewritten,
+        allow_unsubstituted_parameters,
+        clone_context);
     return rewritten;
 }

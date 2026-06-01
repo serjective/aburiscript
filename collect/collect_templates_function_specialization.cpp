@@ -15,6 +15,8 @@ using collect_template_internal::rebind_member_expr_for_specialized_record;
 using collect_template_internal::rebind_specialized_function_owner;
 using collect_template_internal::substitute_cpp_explicit_specifier_for_specialization;
 using collect_template_internal::template_argument_has_known_payload;
+using collect_template_internal::template_argument_bindings_have_valid_nondependent_values;
+using collect_template_internal::template_arguments_have_valid_nondependent_values;
 using collect_template_internal::template_arguments_depend_on_template_parameters;
 using collect_template_internal::TemplateSubstitutionPass;
 
@@ -312,6 +314,16 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                         loc);
                 }
             }
+        }
+        std::string invalid_value_error;
+        if (!template_argument_bindings_have_valid_nondependent_values(
+                specialization_bindings,
+                &invalid_value_error)) {
+            return fail(
+                invalid_value_error.empty()
+                    ? "function template argument has invalid non-dependent value"
+                    : invalid_value_error,
+                loc);
         }
         return true;
     }
@@ -962,6 +974,17 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
     }
 
     bool prepare_entry() {
+        std::string invalid_value_error;
+        if (!template_arguments_have_valid_nondependent_values(
+                normalized_arguments,
+                &invalid_value_error)) {
+            return fail(
+                invalid_value_error.empty()
+                    ? "internal error: function template specialization key contains an invalid non-type value"
+                    : invalid_value_error,
+                loc);
+        }
+
         entry = ast_ctx()->lookup_function_template_specialization(
             function_template,
             normalized_arguments);

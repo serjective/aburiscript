@@ -409,6 +409,14 @@ bool normalize_concrete_template_value_argument(TemplateArgument& argument,
                                                 QualType target_type,
                                                 std::string* error_out);
 
+bool template_arguments_have_valid_nondependent_values(
+    const std::vector<TemplateArgument>& arguments,
+    std::string* error_out = nullptr);
+
+bool template_argument_bindings_have_valid_nondependent_values(
+    const TemplateArgumentBindings& bindings,
+    std::string* error_out = nullptr);
+
 std::unique_ptr<Expr> make_constant_expr_for_template_argument(
     const TemplateArgument& argument,
     ASTContext* ast_ctx,

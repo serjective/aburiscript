@@ -8,6 +8,8 @@ using collect_template_internal::is_variable_template_partial_specialization_mor
 using collect_template_internal::make_template_binding_clone_pass_builder;
 using collect_template_internal::normalize_concrete_template_value_argument;
 using collect_template_internal::template_argument_has_known_payload;
+using collect_template_internal::template_argument_bindings_have_valid_nondependent_values;
+using collect_template_internal::template_arguments_have_valid_nondependent_values;
 using collect_template_internal::template_arguments_depend_on_template_parameters;
 
 namespace {
@@ -251,6 +253,17 @@ struct Collect::VariableTemplateSpecializationInstantiator {
                         loc);
                 }
             }
+        }
+        std::string invalid_value_error;
+        if (!template_argument_bindings_have_valid_nondependent_values(
+                bindings,
+                &invalid_value_error)) {
+            return fail(
+                invalid_value_error.empty()
+                    ? std::string(context_name) +
+                          " argument has invalid non-dependent value"
+                    : invalid_value_error,
+                loc);
         }
         return true;
     }
@@ -641,6 +654,17 @@ struct Collect::VariableTemplateSpecializationInstantiator {
     }
 
     bool prepare_entry() {
+        std::string invalid_value_error;
+        if (!template_arguments_have_valid_nondependent_values(
+                normalized_arguments,
+                &invalid_value_error)) {
+            return fail(
+                invalid_value_error.empty()
+                    ? "internal error: variable template specialization key contains an invalid non-type value"
+                    : invalid_value_error,
+                loc);
+        }
+
         entry = ast_ctx()->lookup_variable_template_specialization(
             variable_template,
             normalized_arguments);

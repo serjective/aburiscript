@@ -168,6 +168,18 @@ QualType Collect::instantiate_alias_template_specialization(
             }
         }
     }
+    std::string invalid_value_error;
+    if (!collect_template_internal::
+            template_argument_bindings_have_valid_nondependent_values(
+                specialization_bindings,
+                &invalid_value_error)) {
+        report_error(
+            invalid_value_error.empty()
+                ? "alias template argument has invalid non-dependent value"
+                : invalid_value_error,
+            loc);
+        return QualType();
+    }
 
     auto rewritten = substitute_template_type_with_bindings(
         alias_decl->type,

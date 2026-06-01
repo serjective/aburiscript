@@ -842,6 +842,37 @@ bool template_argument_has_known_payload(const TemplateArgument& argument) {
     return false;
 }
 
+bool template_arguments_have_valid_nondependent_values(
+    const std::vector<TemplateArgument>& arguments,
+    std::string* error_out) {
+    for (const auto& argument : arguments) {
+        if (argument.kind != TemplateArgumentKind::Value ||
+            argument.is_dependent ||
+            argument.value.kind != ConstValueKind::Invalid) {
+            continue;
+        }
+        if (error_out && error_out->empty()) {
+            *error_out =
+                "non-dependent non-type template argument has no concrete constant value";
+        }
+        return false;
+    }
+    return true;
+}
+
+bool template_argument_bindings_have_valid_nondependent_values(
+    const TemplateArgumentBindings& bindings,
+    std::string* error_out) {
+    for (const auto& binding : bindings) {
+        if (!template_arguments_have_valid_nondependent_values(
+                binding.arguments,
+                error_out)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool normalize_concrete_template_value_argument(TemplateArgument& argument,
                                                 QualType target_type,
                                                 std::string* error_out) {
@@ -1620,13 +1651,19 @@ bool Collect::complete_template_argument_bindings_with_substituted_defaults(
                 "template argument count does not satisfy parameter defaults");
             return false;
         }
-        auto rewritten_defaults =
-            substitute_template_arguments_with_bindings(
+        std::vector<TemplateArgument> rewritten_defaults;
+        if (!substitute_template_arguments_with_bindings_checked(
                 {*default_argument},
                 template_decl->parameters,
                 bindings_out,
                 loc,
-                allow_unsubstituted_default_parameters);
+                rewritten_defaults,
+                allow_unsubstituted_default_parameters)) {
+            set_template_default_completion_error(
+                error_out,
+                "failed to rewrite default template argument");
+            return false;
+        }
         if (rewritten_defaults.size() != 1) {
             set_template_default_completion_error(
                 error_out,
@@ -1699,13 +1736,20 @@ bool Collect::refresh_defaulted_template_argument_bindings(
 
         TemplateArgumentBinding saved_binding = std::move(bindings_out[idx]);
         bindings_out[idx] = TemplateArgumentBinding{};
-        auto rewritten_defaults =
-            substitute_template_arguments_with_bindings(
+        std::vector<TemplateArgument> rewritten_defaults;
+        if (!substitute_template_arguments_with_bindings_checked(
                 {*default_argument},
                 template_decl->parameters,
                 bindings_out,
                 loc,
-                allow_unsubstituted_default_parameters);
+                rewritten_defaults,
+                allow_unsubstituted_default_parameters)) {
+            bindings_out[idx] = std::move(saved_binding);
+            set_template_default_completion_error(
+                error_out,
+                "failed to rewrite default template argument");
+            return false;
+        }
         bindings_out[idx] = std::move(saved_binding);
         if (rewritten_defaults.size() != 1) {
             set_template_default_completion_error(
@@ -1844,6 +1888,19 @@ bool Collect::bind_and_normalize_template_arguments_for_specialization(
                 return false;
             }
         }
+    }
+
+    std::string invalid_value_error;
+    if (!collect_template_internal::
+            template_argument_bindings_have_valid_nondependent_values(
+                bindings_out,
+                &invalid_value_error)) {
+        set_template_default_completion_error(
+            error_out,
+            invalid_value_error.empty()
+                ? "template argument has invalid non-dependent value"
+                : invalid_value_error);
+        return false;
     }
 
     normalized_arguments_out = flatten_template_argument_bindings(bindings_out);

@@ -2207,6 +2207,15 @@ private:
         bool allow_unsubstituted_parameters = false,
         ASTCloneContext* clone_context = nullptr) ;
 
+    bool substitute_template_arguments_with_bindings_checked(
+        const std::vector<TemplateArgument>& arguments,
+        const TemplateParameterList& parameters,
+        const TemplateArgumentBindings& argument_bindings,
+        SrcLoc loc,
+        std::vector<TemplateArgument>& rewritten_out,
+        bool allow_unsubstituted_parameters = false,
+        ASTCloneContext* clone_context = nullptr) ;
+
     QualType partially_substitute_template_type(
         QualType type,
         const TemplateParameterList& parameters,
