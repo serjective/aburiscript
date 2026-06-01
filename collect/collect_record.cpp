@@ -1633,6 +1633,33 @@ bool collect_defaulted_three_way_steps_for_type(
 
 } // namespace
 
+RecordSemanticState Collect::collect_record_make_publishable_semantic_state(
+    CollectRecordBuildContext& ctx,
+    RecordSemanticStateTransfer transfer) const {
+    auto assign_member =
+        [transfer](auto& destination, auto& source) {
+            if (transfer == RecordSemanticStateTransfer::Move) {
+                destination = std::move(source);
+            } else {
+                destination = source;
+            }
+        };
+    RecordSemanticState state = ctx.semantic_state;
+    assign_member(state.bases, ctx.bases);
+    assign_member(state.virtual_bases, ctx.virtual_bases);
+    assign_member(state.methods, ctx.methods);
+    assign_member(state.method_templates, ctx.method_templates);
+    assign_member(state.static_data_members, ctx.static_data_members);
+    assign_member(state.nested_types, ctx.nested_types);
+    assign_member(state.nested_templates, ctx.nested_templates);
+    assign_member(state.friend_functions, ctx.friend_functions);
+    assign_member(state.friend_types, ctx.friend_types);
+    assign_member(state.enumerator_members, ctx.enumerator_members);
+    assign_member(state.constructors, ctx.constructors);
+    assign_member(state.destructors, ctx.destructors);
+    return state;
+}
+
 class CollectRecordBuilder {
 public:
     CollectRecordBuilder(
@@ -1797,16 +1824,20 @@ public:
             collect_.collect_record_synthesize_implicit_members(ctx);
             collect_.collect_record_resolve_virtual_dispatch(ctx);
             collect_.collect_record_compute_layout(ctx);
-            collect_.collect_record_publish_semantics(ctx);
-            if (ctx.record_type) {
-                ctx.record_type->set_decl(ctx.semantic_decl);
-            }
+            RecordSemanticState deferred_state =
+                collect_.collect_record_make_publishable_semantic_state(
+                    ctx,
+                    Collect::RecordSemanticStateTransfer::Copy);
+            collect_.collect_record_publish_state(
+                ctx.semantic_decl,
+                ctx.record_type,
+                deferred_state);
 
             if (ctx.deferred_body_callback) {
                 ctx.deferred_body_callback(
                     *ctx.record,
                     ctx.record_type,
-                    ctx.semantic_state);
+                    deferred_state);
             }
 
             collect_.collect_record_complete_constructor_implicit_initializers(ctx);
@@ -6982,20 +7013,12 @@ void Collect::collect_record_publish_state(
 
 void Collect::collect_record_publish_semantics(
     CollectRecordBuildContext& ctx) {
-    ctx.semantic_state.bases = std::move(ctx.bases);
-    ctx.semantic_state.virtual_bases = std::move(ctx.virtual_bases);
-    ctx.semantic_state.methods = std::move(ctx.methods);
-    ctx.semantic_state.method_templates = std::move(ctx.method_templates);
-    ctx.semantic_state.static_data_members = std::move(ctx.static_data_members);
-    ctx.semantic_state.nested_types = std::move(ctx.nested_types);
-    ctx.semantic_state.nested_templates = std::move(ctx.nested_templates);
-    ctx.semantic_state.friend_functions = std::move(ctx.friend_functions);
-    ctx.semantic_state.friend_types = std::move(ctx.friend_types);
-    ctx.semantic_state.enumerator_members = std::move(ctx.enumerator_members);
-    ctx.semantic_state.constructors = std::move(ctx.constructors);
-    ctx.semantic_state.destructors = std::move(ctx.destructors);
+    ctx.semantic_state =
+        collect_record_make_publishable_semantic_state(
+            ctx,
+            RecordSemanticStateTransfer::Move);
     collect_record_publish_state(
         ctx.semantic_decl,
         ctx.record_type,
-        std::move(ctx.semantic_state));
+        ctx.semantic_state);
 }

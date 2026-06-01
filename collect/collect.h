@@ -1596,6 +1596,13 @@ private:
     void collect_record_publish_state(ObjectDecl* semantic_decl,
                                       const std::shared_ptr<ObjectType>& record_type,
                                       const RecordSemanticState& state);
+    enum class RecordSemanticStateTransfer {
+        Copy,
+        Move,
+    };
+    RecordSemanticState collect_record_make_publishable_semantic_state(
+        CollectRecordBuildContext& ctx,
+        RecordSemanticStateTransfer transfer) const;
     void collect_record_publish_semantics(CollectRecordBuildContext& ctx);
 
     struct FunctionDefinitionState {
