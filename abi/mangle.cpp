@@ -285,6 +285,30 @@ void append_itanium_unqualified_variable_name(
     const std::vector<std::string>& abi_tags,
     ItaniumMangleContext& ctx);
 
+bool is_itanium_std_namespace_component(std::string_view component) {
+    return component == "std";
+}
+
+bool has_only_itanium_std_namespace(
+    const std::vector<std::string_view>& components) {
+    return components.size() == 1 &&
+           is_itanium_std_namespace_component(components.front());
+}
+
+void append_itanium_namespace_components(
+    std::string& out,
+    const std::vector<std::string_view>& components) {
+    size_t index = 0;
+    if (!components.empty() &&
+        is_itanium_std_namespace_component(components.front())) {
+        out += "St";
+        index = 1;
+    }
+    for (; index < components.size(); ++index) {
+        append_source_name(out, components[index]);
+    }
+}
+
 std::shared_ptr<ObjectType> owner_object_type_for_naming(QualType owner_type) {
     return desugar_type(owner_type).as_shared<ObjectType>();
 }
@@ -335,6 +359,14 @@ void append_itanium_function_name(std::string& out,
     }
     size_t implicit_object_params =
         implicit_object_parameter_count(fn, qualifier_prefix, owner_type);
+    if (!owner_object &&
+        implicit_object_params == 0 &&
+        has_only_itanium_std_namespace(components)) {
+        out += "St";
+        append_itanium_unqualified_function_name(
+            out, name, specialization, abi_tags, ctx);
+        return;
+    }
     out += 'N';
     if (implicit_object_params > 0 && !fn.parameters.empty()) {
         if (auto this_param =
@@ -352,9 +384,7 @@ void append_itanium_function_name(std::string& out,
                 break;
         }
     }
-    for (auto component : components) {
-        append_source_name(out, component);
-    }
+    append_itanium_namespace_components(out, components);
     if (owner_object) {
         append_object_name_encoding(out, *owner_object, ctx);
     }
@@ -375,10 +405,13 @@ void append_itanium_unqualified_or_nested_name(std::string& out,
         append_itanium_unqualified_name(out, name);
         return;
     }
-    out += 'N';
-    for (auto component : components) {
-        append_source_name(out, component);
+    if (has_only_itanium_std_namespace(components)) {
+        out += "St";
+        append_itanium_unqualified_name(out, name);
+        return;
     }
+    out += 'N';
+    append_itanium_namespace_components(out, components);
     append_itanium_unqualified_name(out, name);
     out += 'E';
 }
@@ -1404,9 +1437,7 @@ void append_itanium_constructor_name(std::string& out,
         return;
     }
     out += 'N';
-    for (auto component : components) {
-        append_source_name(out, component);
-    }
+    append_itanium_namespace_components(out, components);
     if (owner_object) {
         append_object_name_encoding(out, *owner_object, ctx);
     }
@@ -1431,9 +1462,7 @@ void append_itanium_destructor_name(std::string& out,
         return;
     }
     out += 'N';
-    for (auto component : components) {
-        append_source_name(out, component);
-    }
+    append_itanium_namespace_components(out, components);
     if (owner_object) {
         append_object_name_encoding(out, *owner_object, ctx);
     }
@@ -1521,10 +1550,15 @@ std::string mangle_variable_entity_itanium(
         return out;
     }
 
-    out += 'N';
-    for (auto component : components) {
-        append_source_name(out, component);
+    if (!owner_object && has_only_itanium_std_namespace(components)) {
+        out += "St";
+        append_itanium_unqualified_variable_name(
+            out, name, specialization, abi_tags, ctx);
+        return out;
     }
+
+    out += 'N';
+    append_itanium_namespace_components(out, components);
     if (owner_object) {
         append_object_name_encoding(out, *owner_object, ctx);
     }
