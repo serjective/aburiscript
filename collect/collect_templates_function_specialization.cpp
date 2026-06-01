@@ -5,6 +5,7 @@ using collect_template_internal::build_pack_element_argument_bindings;
 using collect_template_internal::clone_and_finalize_ctor_initializers_for_specialization;
 using collect_template_internal::clone_function_body_for_specialization;
 using collect_template_internal::clone_function_parameters_for_specialization;
+using collect_template_internal::canonical_record_decl;
 using collect_template_internal::copy_cpp_member_decl_info;
 using collect_template_internal::lookup_symbol_remap_in_clone_context;
 using collect_template_internal::make_template_binding_clone_pass_builder;
@@ -1545,6 +1546,40 @@ struct Collect::FunctionTemplateSpecializationInstantiator {
                     collect.collect_make<CompoundStmt>(
                         std::vector<std::unique_ptr<Stmt>>{},
                         pattern->location);
+            }
+        }
+        if (auto* pattern_ctor = dyn_cast<CppConstructorDecl>(pattern)) {
+            auto* specialization_ctor =
+                dyn_cast<CppConstructorDecl>(specialization_decl_ptr);
+            if (specialization_ctor) {
+                QualType owner_type =
+                    get_func_decl_owner_record_type(specialization_ctor);
+                auto owner_object =
+                    desugar_type(owner_type, ast_ctx()).as_shared<ObjectType>();
+                const ObjectDecl* owner_decl =
+                    owner_object
+                        ? canonical_record_decl(
+                              dyn_cast<ObjectDecl>(owner_object->get_decl()))
+                        : nullptr;
+                const RecordSemanticState* owner_state = owner_decl
+                    ? collect.query_lookup_record_semantics(owner_decl)
+                    : nullptr;
+                if (!owner_state && owner_type) {
+                    owner_state =
+                        collect.ensure_record_semantics_available(owner_type, loc);
+                }
+                if (owner_state &&
+                    !collect.collect_complete_constructor_implicit_initializers(
+                        specialization_ctor,
+                        owner_decl,
+                        *owner_state,
+                        &clone_error)) {
+                    return fail_instantiation(
+                        clone_error.empty()
+                            ? "constructor template implicit initializer completion failed"
+                            : clone_error,
+                        pattern_ctor->location);
+                }
             }
         }
         specialization_symbol_ptr->type = QualType(specialization_decl_ptr->type);

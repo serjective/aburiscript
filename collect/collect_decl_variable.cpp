@@ -744,25 +744,20 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
         loc);
     decl->original_type = written_declared_type;
     if (selection.used_constructor_initialization && selection.constructor_symbol) {
-        if (!collect_ensure_defaulted_special_member_body(
+        if (auto finalize_error =
+                collect_finalize_constructor_initialization_symbol(
+                    selection.constructor_symbol,
+                    loc,
+                    "failed to instantiate selected constructor template specialization")) {
+            decl->init = std::move(finalize_error);
+        } else {
+            decl->init = collect_make<CppConstructExpr>(
                 selection.constructor_symbol,
-                loc)) {
-            report_error(
-                "failed to materialize defaulted constructor '" +
-                    selection.constructor_symbol->name + "'",
-                loc);
-        } else if (selection.constructor_symbol->is_deleted) {
-            report_error(
-                "call to deleted constructor '" +
-                    selection.constructor_symbol->name + "'",
+                std::move(selection.constructor_args),
+                declared_type,
+                selection.constructor_is_list_init,
                 loc);
         }
-        decl->init = collect_make<CppConstructExpr>(
-            selection.constructor_symbol,
-            std::move(selection.constructor_args),
-            declared_type,
-            selection.constructor_is_list_init,
-            loc);
     }
     if (selection.used_constructor_initialization) {
         validate_constexpr_initializer(decl->init.get());
@@ -816,6 +811,42 @@ std::unique_ptr<Expr> Collect::collect_member_initializer_expression(
         return init;
     }
     return process_initializer_for_type(std::move(init), member_type, loc);
+}
+
+std::unique_ptr<Expr> Collect::collect_finalize_constructor_initialization_symbol(
+    std::shared_ptr<Symbol>& constructor_symbol,
+    SrcLoc loc,
+    std::string_view failure_message) {
+    if (!constructor_symbol) {
+        return nullptr;
+    }
+
+    note_specialization_use_for_symbol(constructor_symbol, loc);
+    if (auto completion_error =
+            complete_selected_function_template_specialization_symbol(
+                constructor_symbol,
+                loc,
+                failure_message)) {
+        return completion_error;
+    }
+    note_specialization_use_for_symbol(constructor_symbol, loc);
+
+    if (!collect_ensure_defaulted_special_member_body(constructor_symbol, loc)) {
+        report_error(
+            "failed to materialize defaulted constructor '" +
+                constructor_symbol->name + "'",
+            loc);
+        return collect_make<ErrorExpr>(
+            "failed to materialize defaulted constructor", loc);
+    }
+    if (constructor_symbol->is_deleted) {
+        report_error(
+            "call to deleted constructor '" + constructor_symbol->name + "'",
+            loc);
+        return collect_make<ErrorExpr>("deleted constructor call", loc);
+    }
+
+    return nullptr;
 }
 
 std::unique_ptr<Expr> Collect::collect_class_object_initializer_expression(
@@ -980,22 +1011,12 @@ std::unique_ptr<Expr> Collect::collect_class_object_initializer_expression(
         if (!selection.constructor_symbol) {
             return nullptr;
         }
-        if (!collect_ensure_defaulted_special_member_body(
-                selection.constructor_symbol,
-                loc)) {
-            report_error(
-                "failed to materialize defaulted constructor '" +
-                    selection.constructor_symbol->name + "'",
-                loc);
-            return collect_make<ErrorExpr>(
-                "failed to materialize defaulted constructor", loc);
-        }
-        if (selection.constructor_symbol->is_deleted) {
-            report_error(
-                "call to deleted constructor '" +
-                    selection.constructor_symbol->name + "'",
-                loc);
-            return collect_make<ErrorExpr>("deleted constructor call", loc);
+        if (auto finalize_error =
+                collect_finalize_constructor_initialization_symbol(
+                    selection.constructor_symbol,
+                    loc,
+                    "failed to instantiate selected constructor template specialization")) {
+            return finalize_error;
         }
         return collect_make<CppConstructExpr>(
             selection.constructor_symbol,

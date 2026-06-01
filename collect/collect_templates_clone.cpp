@@ -2118,6 +2118,7 @@ bool clone_ctor_initializers_for_specialization(
             substitution_pass.rewrite_type(initializer.target_type);
         cloned_initializer.resolved_target_type =
             substitution_pass.rewrite_type(initializer.resolved_target_type);
+        cloned_initializer.is_implicit = initializer.is_implicit;
         cloned_initializer.is_base_initializer = initializer.is_base_initializer;
         cloned_initializer.is_delegating_initializer =
             initializer.is_delegating_initializer;

@@ -2,6 +2,7 @@
 #include "collect_internal.h"
 #include "lookup_engine.h"
 
+#include "../ast/expr_clone.h"
 #include "../ast/special_members.h"
 #include "../helpers/auto_type_utils.h"
 #include "../helpers/qualified_name_utils.h"
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <unordered_set>
 
 namespace {
 
@@ -1795,8 +1797,6 @@ public:
             collect_.collect_record_synthesize_implicit_members(ctx);
             collect_.collect_record_resolve_virtual_dispatch(ctx);
             collect_.collect_record_compute_layout(ctx);
-            collect_.collect_record_prepare_deferred_defaulted_method_bodies(ctx);
-            collect_.collect_record_infer_constexpr_special_members(ctx);
             collect_.collect_record_publish_semantics(ctx);
             if (ctx.record_type) {
                 ctx.record_type->set_decl(ctx.semantic_decl);
@@ -1808,6 +1808,11 @@ public:
                     ctx.record_type,
                     ctx.semantic_state);
             }
+
+            collect_.collect_record_complete_constructor_implicit_initializers(ctx);
+            collect_.collect_record_prepare_deferred_defaulted_method_bodies(ctx);
+            collect_.collect_record_infer_constexpr_special_members(ctx);
+            collect_.collect_record_publish_semantics(ctx);
 
             semantic_state = std::move(ctx.semantic_state);
         } else if (existing_obj_decl) {
@@ -4197,6 +4202,19 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
         if (!materialized) {
             continue;
         }
+        std::string completion_error;
+        if (!collect_complete_constructor_implicit_initializers(
+                ctor_decl,
+                ctx.semantic_decl,
+                owner_state,
+                &completion_error)) {
+            report_error(
+                completion_error.empty()
+                    ? "failed to complete constructor implicit initializers"
+                    : completion_error,
+                ctor_decl->location);
+            continue;
+        }
 
         ctor.is_deleted = ctor_decl->is_deleted;
         if (implicit_default_constructor_can_use_recursive_lowering(
@@ -4314,6 +4332,332 @@ void Collect::collect_record_materialize_defaulted_method_bodies(
         ctx.methods,
         ctx.destructors,
         ast_ctx_.get());
+}
+
+bool Collect::collect_complete_constructor_implicit_initializers(
+    CppConstructorDecl* ctor_decl,
+    const ObjectDecl* owner_record_decl,
+    const RecordSemanticState& owner_state,
+    std::string* error_out) {
+    if (!ctor_decl || !owner_record_decl || !owner_record_decl->get_record_type()) {
+        return true;
+    }
+    if (ctor_decl->implicit_initializers_completed ||
+        owner_state.is_incomplete ||
+        owner_state.is_template_pattern_provisional) {
+        return true;
+    }
+    if (!function_decl_defines_entity(ctor_decl)) {
+        return true;
+    }
+    for (const auto& initializer : ctor_decl->ctor_initializers) {
+        if (initializer.is_delegating_initializer) {
+            return true;
+        }
+    }
+
+    QualType owner_type(owner_record_decl->get_record_type());
+    auto publish_owner_state = [&]() {
+        query_publish_record_semantics(owner_record_decl, owner_state);
+        if (const ObjectDecl* canonical_decl =
+                canonical_cpp_record_decl(owner_record_decl);
+            canonical_decl && canonical_decl != owner_record_decl) {
+            query_publish_record_semantics(canonical_decl, owner_state);
+        }
+    };
+    publish_owner_state();
+
+    auto make_this_expr = [&]() -> std::unique_ptr<Expr> {
+        uint8_t pointee_quals = QUAL_NONE;
+        if (auto function_type =
+                QualType(ctor_decl->type).as_shared<FunctionType>();
+            function_type && !function_type->parameters.empty()) {
+            if (auto this_ptr =
+                    function_type->parameters.front().as_shared<PointerType>()) {
+                pointee_quals = this_ptr->pointed_type.get_qualifiers();
+            }
+        }
+        QualType qualified_owner(
+            owner_type.get_shared(),
+            static_cast<uint8_t>(owner_type.get_qualifiers() | pointee_quals));
+        QualType this_type(std::make_shared<PointerType>(qualified_owner));
+        return collect_make<CppThisExpr>(this_type, ctor_decl->location);
+    };
+
+    auto base_key = [](const std::string& name, QualType type) {
+        if (!name.empty()) {
+            return name;
+        }
+        return type ? type.to_string() : std::string();
+    };
+    auto record_decl_for_type = [&](QualType type) -> const ObjectDecl* {
+        auto object_type =
+            desugar_type(type, ast_ctx_.get()).as_shared<ObjectType>();
+        return object_type
+            ? canonical_cpp_record_decl(
+                  dyn_cast<ObjectDecl>(object_type->get_decl()))
+            : nullptr;
+    };
+    auto initializer_base_decl =
+        [&](const CppCtorInitializer& initializer) -> const ObjectDecl* {
+        if (!initializer.is_base_initializer) {
+            return nullptr;
+        }
+        if (const ObjectDecl* decl =
+                record_decl_for_type(initializer.resolved_target_type)) {
+            return decl;
+        }
+        return record_decl_for_type(initializer.target_type);
+    };
+
+    std::unordered_set<std::string> initialized_bases;
+    std::unordered_set<const ObjectDecl*> initialized_base_decls;
+    std::unordered_set<std::string> initialized_members;
+    for (const auto& initializer : ctor_decl->ctor_initializers) {
+        if (initializer.is_delegating_initializer) {
+            continue;
+        }
+        if (initializer.is_base_initializer) {
+            if (const ObjectDecl* base_decl = initializer_base_decl(initializer)) {
+                initialized_base_decls.insert(base_decl);
+            }
+            std::string key = initializer.member_name.empty()
+                ? initializer.target_spelling
+                : initializer.member_name;
+            if (key.empty()) {
+                key = initializer.resolved_target_type
+                    ? initializer.resolved_target_type.to_string()
+                    : initializer.target_type
+                        ? initializer.target_type.to_string()
+                        : std::string();
+            }
+            if (!key.empty()) {
+                initialized_bases.insert(std::move(key));
+            }
+            continue;
+        }
+        if (!initializer.member_name.empty()) {
+            initialized_members.insert(initializer.member_name);
+        }
+    }
+
+    bool all_implicit_work_represented = true;
+    bool ok = with_function_definition_state(
+        ctor_decl,
+        [&]() {
+            auto append_base_initializer =
+                [&](const std::string& name,
+                    QualType type,
+                    const ObjectDecl* record_decl) -> bool {
+                if (!type ||
+                    canonical_type_kind(type, ast_ctx_.get()) != TypeKind::Object) {
+                    return true;
+                }
+                const ObjectDecl* canonical_record_decl = record_decl
+                    ? canonical_cpp_record_decl(record_decl)
+                    : record_decl_for_type(type);
+                if (canonical_record_decl &&
+                    initialized_base_decls.contains(canonical_record_decl)) {
+                    return true;
+                }
+                const RecordSemanticState* base_state =
+                    canonical_record_decl
+                        ? record_semantics_cache_lookup(canonical_record_decl)
+                        : nullptr;
+                bool has_callable_default_constructor = false;
+                if (base_state) {
+                    for (const auto& ctor : base_state->constructors) {
+                        if (!cpp_constructor_is_viable_default_candidate(
+                                ctor,
+                                /*allow_protected_access=*/false)) {
+                            continue;
+                        }
+                        has_callable_default_constructor =
+                            static_cast<bool>(ctor.symbol);
+                        break;
+                    }
+                }
+                if (!has_callable_default_constructor) {
+                    all_implicit_work_represented = false;
+                    return true;
+                }
+                std::string key = base_key(name, type);
+                if (!key.empty() && initialized_bases.contains(key)) {
+                    return true;
+                }
+
+                std::vector<std::unique_ptr<Expr>> init_args;
+                auto init_expr = collect_member_initializer_expression(
+                    std::move(init_args),
+                    type,
+                    false,
+                    ctor_decl->location,
+                    true);
+                if (!init_expr || isa<ErrorExpr>(init_expr.get())) {
+                    all_implicit_work_represented = false;
+                    return true;
+                }
+
+                CppCtorInitializer implicit_init;
+                implicit_init.member_name = name;
+                implicit_init.target_spelling = name;
+                implicit_init.target_type = type;
+                implicit_init.resolved_target_type = type;
+                implicit_init.is_implicit = true;
+                implicit_init.is_base_initializer = true;
+                implicit_init.location = ctor_decl->location;
+                implicit_init.init_expr = std::move(init_expr);
+                ctor_decl->ctor_initializers.push_back(std::move(implicit_init));
+                if (canonical_record_decl) {
+                    initialized_base_decls.insert(canonical_record_decl);
+                }
+                if (!key.empty()) {
+                    initialized_bases.insert(std::move(key));
+                }
+                return true;
+            };
+
+            for (const auto& virtual_base : owner_state.virtual_bases) {
+                if (!append_base_initializer(
+                        virtual_base.name,
+                        virtual_base.type,
+                        virtual_base.record_decl)) {
+                    return false;
+                }
+            }
+            for (const auto& base : owner_state.bases) {
+                if (base.is_virtual) {
+                    continue;
+                }
+                if (!append_base_initializer(
+                        base.name,
+                        base.type,
+                        base.record_decl)) {
+                    return false;
+                }
+            }
+
+            for (const auto& field : owner_state.fields) {
+                if (field.is_base_subobject ||
+                    field.is_virtual_base_storage ||
+                    field.name.empty() ||
+                    initialized_members.contains(field.name)) {
+                    continue;
+                }
+
+                std::unique_ptr<Expr> init_expr;
+                if (field.decl && field.decl->has_default_member_initializer()) {
+                    std::string clone_error;
+                    init_expr = clone_expr_tree(
+                        field.decl->default_member_initializer.get(),
+                        ast_ctx_.get(),
+                        &clone_error);
+                    if (!init_expr) {
+                        if (error_out && error_out->empty()) {
+                            *error_out = clone_error.empty()
+                                ? "failed to clone default member initializer"
+                                : clone_error;
+                        }
+                        return false;
+                    }
+                    init_expr = collect_member_initializer_expression(
+                        std::move(init_expr),
+                        field.type,
+                        field.decl->default_member_initializer
+                            ? field.decl->default_member_initializer->location
+                            : ctor_decl->location);
+                } else if (type_needs_generated_default_constructor_initializer(
+                               field.type,
+                               ast_ctx_.get())) {
+                    init_expr =
+                        build_generated_default_constructor_initializer_expr(
+                            *this,
+                            ast_ctx_.get(),
+                            field.type,
+                            ctor_decl->location);
+                } else {
+                    continue;
+                }
+
+                if (!init_expr || isa<ErrorExpr>(init_expr.get())) {
+                    all_implicit_work_represented = false;
+                    continue;
+                }
+
+                auto member_expr = collect_member_expression(
+                    make_this_expr(),
+                    field.name,
+                    true,
+                    ctor_decl->location);
+                if (!member_expr || isa<ErrorExpr>(member_expr.get())) {
+                    all_implicit_work_represented = false;
+                    continue;
+                }
+
+                CppCtorInitializer implicit_init;
+                implicit_init.member_name = field.name;
+                implicit_init.target_spelling = field.name;
+                implicit_init.target_type = field.type;
+                implicit_init.resolved_target_type = field.type;
+                implicit_init.is_implicit = true;
+                implicit_init.location = ctor_decl->location;
+                implicit_init.member_expr = std::move(member_expr);
+                implicit_init.init_expr = std::move(init_expr);
+                ctor_decl->ctor_initializers.push_back(std::move(implicit_init));
+                initialized_members.insert(field.name);
+            }
+            return true;
+        });
+
+    if (!ok) {
+        return false;
+    }
+    ctor_decl->implicit_initializers_completed = all_implicit_work_represented;
+    return true;
+}
+
+bool Collect::collect_record_complete_constructor_implicit_initializers(
+    CollectRecordBuildContext& ctx) {
+    if (!ctx.semantic_decl) {
+        return true;
+    }
+
+    RecordSemanticState owner_state = ctx.semantic_state;
+    owner_state.bases = ctx.bases;
+    owner_state.virtual_bases = ctx.virtual_bases;
+    owner_state.fields = ctx.semantic_state.fields;
+    owner_state.methods = ctx.methods;
+    owner_state.method_templates = ctx.method_templates;
+    owner_state.static_data_members = ctx.static_data_members;
+    owner_state.nested_types = ctx.nested_types;
+    owner_state.nested_templates = ctx.nested_templates;
+    owner_state.friend_functions = ctx.friend_functions;
+    owner_state.friend_types = ctx.friend_types;
+    owner_state.enumerator_members = ctx.enumerator_members;
+    owner_state.constructors = ctx.constructors;
+    owner_state.destructors = ctx.destructors;
+
+    bool ok = true;
+    for (auto& ctor : ctx.constructors) {
+        auto* ctor_decl = const_cast<CppConstructorDecl*>(ctor.decl);
+        if (!ctor_decl) {
+            continue;
+        }
+        std::string error;
+        if (!collect_complete_constructor_implicit_initializers(
+                ctor_decl,
+                ctx.semantic_decl,
+                owner_state,
+                &error)) {
+            ok = false;
+            report_error(
+                error.empty()
+                    ? "failed to complete constructor implicit initializers"
+                    : error,
+                ctor_decl->location);
+        }
+    }
+    return ok;
 }
 
 void Collect::collect_record_prepare_deferred_defaulted_method_bodies(
@@ -4514,6 +4858,20 @@ bool Collect::collect_ensure_defaulted_special_member_body(
             ctor_decl,
             owner_record_decl,
             *owner_state);
+        std::string completion_error;
+        if (materialized &&
+            !collect_complete_constructor_implicit_initializers(
+                ctor_decl,
+                owner_record_decl,
+                *owner_state,
+                &completion_error)) {
+            report_error(
+                completion_error.empty()
+                    ? "failed to complete constructor implicit initializers"
+                    : completion_error,
+                ctor_decl->location);
+            return false;
+        }
     } else if (auto* method_decl = dyn_cast<CppMethodDecl>(function_decl)) {
         materialized = collect_materialize_defaulted_copy_assignment_body(
             method_decl,

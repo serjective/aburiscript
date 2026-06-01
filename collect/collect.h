@@ -1260,6 +1260,11 @@ public:
         bool allow_abstract_object_type_instantiation = false,
         const Expr* original_init_for_classification = nullptr) ;
 
+    std::unique_ptr<Expr> collect_finalize_constructor_initialization_symbol(
+        std::shared_ptr<Symbol>& constructor_symbol,
+        SrcLoc loc,
+        std::string_view failure_message) ;
+
     // === Template operations ===
 
     bool deduce_function_template_specialization_arguments(
@@ -1511,6 +1516,13 @@ public:
     void collect_record_materialize_defaulted_method_bodies(
         CollectRecordBuildContext& ctx);
     void collect_record_prepare_deferred_defaulted_method_bodies(
+        CollectRecordBuildContext& ctx);
+    bool collect_complete_constructor_implicit_initializers(
+        CppConstructorDecl* ctor_decl,
+        const ObjectDecl* owner_record_decl,
+        const RecordSemanticState& owner_state,
+        std::string* error_out = nullptr);
+    bool collect_record_complete_constructor_implicit_initializers(
         CollectRecordBuildContext& ctx);
     bool collect_ensure_defaulted_special_member_body(
         const std::shared_ptr<Symbol>& symbol,

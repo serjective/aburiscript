@@ -5123,6 +5123,7 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 substitution_pass.rewrite_type(initializer.target_type);
             cloned_initializer.resolved_target_type =
                 substitution_pass.rewrite_type(initializer.resolved_target_type);
+            cloned_initializer.is_implicit = initializer.is_implicit;
             cloned_initializer.is_base_initializer = initializer.is_base_initializer;
             cloned_initializer.is_delegating_initializer =
                 initializer.is_delegating_initializer;
@@ -5872,6 +5873,32 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                     : clone_error,
                 pattern_func ? pattern_func->location : loc);
             return false;
+        }
+        if (pattern_ctor && specialized_ctor) {
+            const RecordSemanticState* owner_state =
+                entry && entry->specialization_decl
+                    ? collect.query_lookup_record_semantics(
+                          entry->specialization_decl.get())
+                    : nullptr;
+            if (!owner_state && entry && entry->specialization_type) {
+                owner_state = collect.ensure_record_semantics_available(
+                    QualType(entry->specialization_type),
+                    specialized_ctor->location);
+            }
+            if (owner_state &&
+                !collect.collect_complete_constructor_implicit_initializers(
+                    specialized_ctor,
+                    entry ? entry->specialization_decl.get() : nullptr,
+                    *owner_state,
+                    &clone_error)) {
+                pending_body->failed = true;
+                collect.report_error(
+                    clone_error.empty()
+                        ? "class template constructor implicit initializer completion failed"
+                        : clone_error,
+                    pattern_ctor->location);
+                return false;
+            }
         }
 
         pending_body->is_materialized = true;

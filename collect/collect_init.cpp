@@ -1028,6 +1028,25 @@ std::unique_ptr<Expr> Collect::process_init_list_expression(std::unique_ptr<Init
         }
         if (lang_opts_.is_cxx_mode() &&
             canonical_type_kind(QualType(type), ast_ctx_.get()) == TypeKind::Object) {
+            if (init_list->elements.empty()) {
+                auto object_type =
+                    desugar_type(QualType(type), ast_ctx_.get())
+                        .as_shared<ObjectType>();
+                const ObjectDecl* object_decl =
+                    object_type
+                        ? dyn_cast<ObjectDecl>(object_type->get_decl())
+                        : nullptr;
+                const RecordSemanticState* object_state =
+                    object_decl ? record_semantics_cache_lookup(object_decl)
+                                : nullptr;
+                if (!object_state ||
+                    (object_state->constructors.empty() &&
+                     object_state->method_templates.empty())) {
+                    return collect_cpp_value_init_expression(
+                        QualType(type),
+                        init_list->location);
+                }
+            }
             std::vector<std::unique_ptr<Expr>> init_args;
             init_args.reserve(init_list->elements.size());
             for (auto& elem : init_list->elements) {

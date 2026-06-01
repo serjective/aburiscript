@@ -835,6 +835,7 @@ struct CppCtorInitializer {
     std::string target_spelling;
     QualType target_type = nullptr;
     QualType resolved_target_type = nullptr;
+    bool is_implicit = false;
     bool is_base_initializer = false;
     bool is_delegating_initializer = false;
     bool is_list_init = false;
@@ -849,6 +850,7 @@ struct CppCtorInitializer {
 struct CppConstructorDecl : FuncDecl {
     uint8_t is_explicit : 1;
     uint8_t has_deferred_inline_body_tokens : 1;
+    uint8_t implicit_initializers_completed : 1;
     size_t deferred_inline_body_begin_token_idx;
     size_t deferred_inline_body_end_token_idx;
     CppExplicitSpecifier explicit_specifier;
@@ -863,6 +865,7 @@ struct CppConstructorDecl : FuncDecl {
                    std::move(body), std::move(stmt_labels), storage_class, is_inline, loc),
           is_explicit(is_explicit),
           has_deferred_inline_body_tokens(false),
+          implicit_initializers_completed(false),
           deferred_inline_body_begin_token_idx(0),
           deferred_inline_body_end_token_idx(0) {}
 
@@ -870,6 +873,7 @@ struct CppConstructorDecl : FuncDecl {
         : FuncDecl(DeclKind::CppConstructorDecl, loc),
           is_explicit(false),
           has_deferred_inline_body_tokens(false),
+          implicit_initializers_completed(false),
           deferred_inline_body_begin_token_idx(0),
           deferred_inline_body_end_token_idx(0) {}
 

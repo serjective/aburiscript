@@ -599,6 +599,7 @@ void Parser::build_cpp_record_parse_deferred_bodies(
                 implicit_base_init.target_spelling = direct_base.name;
                 implicit_base_init.target_type = direct_base.type;
                 implicit_base_init.resolved_target_type = direct_base.type;
+                implicit_base_init.is_implicit = true;
                 implicit_base_init.is_base_initializer = true;
                 implicit_base_init.location = ctor->location;
                 std::vector<std::unique_ptr<Expr>> args;

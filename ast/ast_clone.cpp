@@ -2974,6 +2974,7 @@ bool clone_ctor_initializers(const std::vector<CppCtorInitializer>& source,
             rewrite_type(initializer.target_type, ctx);
         cloned_initializer.resolved_target_type =
             rewrite_type(initializer.resolved_target_type, ctx);
+        cloned_initializer.is_implicit = initializer.is_implicit;
         cloned_initializer.is_base_initializer =
             initializer.is_base_initializer;
         cloned_initializer.is_delegating_initializer =
@@ -3409,6 +3410,8 @@ std::unique_ptr<Decl> clone_decl_impl(const Decl* decl,
             result->is_explicit = ctor_decl->is_explicit;
             result->has_deferred_inline_body_tokens =
                 ctor_decl->has_deferred_inline_body_tokens;
+            result->implicit_initializers_completed =
+                ctor_decl->implicit_initializers_completed;
             result->deferred_inline_body_begin_token_idx =
                 ctor_decl->deferred_inline_body_begin_token_idx;
             result->deferred_inline_body_end_token_idx =

@@ -1003,13 +1003,39 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
 
         // Explicit base initializers win; otherwise we may synthesize an
         // implicit default-base constructor call when required by semantics.
+        auto ctor_initializer_record_decl =
+            [&](const CppCtorInitializer& mem_init) -> const ObjectDecl* {
+            auto resolve_type_decl = [&](QualType type) -> const ObjectDecl* {
+                auto object_type =
+                    desugar_type(type, ast_ctx.get()).as_shared<ObjectType>();
+                return object_type
+                    ? canonical_cpp_record_decl(
+                          dyn_cast<ObjectDecl>(object_type->get_decl()))
+                    : nullptr;
+            };
+            if (const ObjectDecl* decl =
+                    resolve_type_decl(mem_init.resolved_target_type)) {
+                return decl;
+            }
+            return resolve_type_decl(mem_init.target_type);
+        };
         auto find_explicit_base_initializer =
-            [&](const std::string& base_name) -> const CppCtorInitializer* {
+            [&](const std::string& base_name,
+                const ObjectDecl* base_record_decl) -> const CppCtorInitializer* {
+            const ObjectDecl* canonical_base_decl =
+                canonical_cpp_record_decl(base_record_decl);
             for (const auto& mem_init : ctor_decl->ctor_initializers) {
                 if (!mem_init.is_base_initializer || !mem_init.init_expr) {
                     continue;
                 }
-                if (mem_init.member_name == base_name) {
+                if (mem_init.member_name == base_name ||
+                    mem_init.target_spelling == base_name) {
+                    return &mem_init;
+                }
+                const ObjectDecl* initializer_decl =
+                    ctor_initializer_record_decl(mem_init);
+                if (canonical_base_decl && initializer_decl &&
+                    initializer_decl == canonical_base_decl) {
                     return &mem_init;
                 }
             }
@@ -1135,6 +1161,9 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
                     return;
                 }
             } else {
+                if (ctor_decl->implicit_initializers_completed) {
+                    return;
+                }
                 std::shared_ptr<Symbol> default_ctor_sym =
                     select_default_base_constructor_symbol(base_record_decl);
                 if (!default_ctor_sym) {
@@ -1194,7 +1223,9 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
             if (special_member_variant == CppCtorDtorVariant::Complete) {
                 for (const auto& virtual_base : constructor_record_state->virtual_bases) {
                     const CppCtorInitializer* explicit_init =
-                        find_explicit_base_initializer(virtual_base.name);
+                        find_explicit_base_initializer(
+                            virtual_base.name,
+                            virtual_base.record_decl);
                     SrcLoc init_loc = explicit_init ? explicit_init->location
                                                     : ctor_decl->location;
                     emit_base_initializer_call(virtual_base.name,
@@ -1210,7 +1241,9 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
                     continue;
                 }
                 const CppCtorInitializer* explicit_init =
-                    find_explicit_base_initializer(direct_base.name);
+                    find_explicit_base_initializer(
+                        direct_base.name,
+                        direct_base.record_decl);
                 SrcLoc init_loc = explicit_init ? explicit_init->location
                                                 : ctor_decl->location;
                 emit_base_initializer_call(direct_base.name,
@@ -1389,7 +1422,8 @@ void ASTToLLVM::emit_function_body(FuncDecl *node,
             (void)store;
         }
 
-        if (constructor_record_state && constructor_this_addr) {
+        if (constructor_record_state && constructor_this_addr &&
+            !ctor_decl->implicit_initializers_completed) {
             for (size_t field_index = 0;
                  field_index < constructor_record_state->fields.size();
                  ++field_index) {

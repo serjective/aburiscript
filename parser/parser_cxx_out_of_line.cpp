@@ -1355,6 +1355,7 @@ std::vector<std::unique_ptr<Decl>> Parser::parse_cpp_out_of_line_constructor_def
                         implicit_base_init.target_spelling = direct_base.name;
                         implicit_base_init.target_type = direct_base.type;
                         implicit_base_init.resolved_target_type = direct_base.type;
+                        implicit_base_init.is_implicit = true;
                         implicit_base_init.is_base_initializer = true;
                         implicit_base_init.location = ctor->location;
                         std::vector<std::unique_ptr<Expr>> args;
