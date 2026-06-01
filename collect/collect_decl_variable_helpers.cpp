@@ -920,6 +920,7 @@ bool Collect::materialize_variable_constructor_selection(
         selection.constructor_is_list_init = ctor_is_list_init;
         selection.constructor_args.clear();
         selection.constructor_symbol = nullptr;
+        selection.selected_implicit_default_constructor_without_symbol = true;
         return true;
     }
     if (chosen.ctor->is_implicit && !chosen.ctor->symbol) {
@@ -932,6 +933,7 @@ bool Collect::materialize_variable_constructor_selection(
         selection.constructor_is_list_init = ctor_is_list_init;
         selection.constructor_args.clear();
         selection.constructor_symbol = nullptr;
+        selection.selected_implicit_default_constructor_without_symbol = true;
         return true;
     }
     if (!chosen.ctor->symbol) {
@@ -1057,6 +1059,7 @@ bool Collect::select_constructor_for_variable_initialization(
     selection.constructor_symbol = nullptr;
     selection.constructor_args.clear();
     selection.constructor_is_list_init = false;
+    selection.selected_implicit_default_constructor_without_symbol = false;
     selection.nonconstructor_init_expr.reset();
 
     if (!record_type) {

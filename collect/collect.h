@@ -1902,6 +1902,7 @@ private:
         std::shared_ptr<Symbol> constructor_symbol = nullptr;
         std::vector<std::unique_ptr<Expr>> constructor_args;
         bool constructor_is_list_init = false;
+        bool selected_implicit_default_constructor_without_symbol = false;
         std::unique_ptr<Expr> nonconstructor_init_expr = nullptr;
         bool used_constructor_initialization = false;
         std::shared_ptr<Symbol> destructor_symbol = nullptr;

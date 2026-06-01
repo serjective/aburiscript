@@ -602,6 +602,7 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
                 ctor_args.push_back(std::move(init));
             }
 
+            bool has_empty_explicit_initializer = ctor_args.empty();
             if (select_constructor_for_variable_initialization(
                     record_type,
                     std::move(ctor_args),
@@ -613,6 +614,10 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
                 if (selection.nonconstructor_init_expr) {
                     selection.used_constructor_initialization = false;
                     init = std::move(selection.nonconstructor_init_expr);
+                } else if (selection.selected_implicit_default_constructor_without_symbol &&
+                           has_empty_explicit_initializer) {
+                    selection.used_constructor_initialization = false;
+                    init = collect_cpp_value_init_expression(declared_type, loc);
                 } else {
                     selection.used_constructor_initialization = true;
                     init.reset();
@@ -621,6 +626,15 @@ std::unique_ptr<Decl> Collect::collect_variable_declaration(QualType declared_ty
                 init = collect_make<ErrorExpr>("no matching constructor", loc);
             }
         }
+    }
+
+    if (lang_opts_.is_cxx_mode() &&
+        record_type &&
+        canonical_type_kind(declared_type, ast_ctx_.get()) == TypeKind::Object) {
+        record_semantics =
+            collect_object_initialization_record_semantics(declared_type, loc);
+        record_type = record_semantics.record_type;
+        record_state = record_semantics.state;
     }
 
     analysis.supports_non_automatic_destructor_cleanup =
@@ -969,6 +983,7 @@ std::unique_ptr<Expr> Collect::collect_class_object_initializer_expression(
             static_cast<InitListExpr*>(init_list.release()));
         std::vector<std::unique_ptr<Expr>> ctor_args;
         ctor_args.reserve(owned_list->elements.size());
+        bool has_empty_explicit_initializer = owned_list->elements.empty();
         for (auto& elem : owned_list->elements) {
             if (!elem.designators.empty()) {
                 report_error(
@@ -997,6 +1012,10 @@ std::unique_ptr<Expr> Collect::collect_class_object_initializer_expression(
         }
         if (selection.nonconstructor_init_expr) {
             return std::move(selection.nonconstructor_init_expr);
+        }
+        if (selection.selected_implicit_default_constructor_without_symbol &&
+            has_empty_explicit_initializer) {
+            return collect_cpp_value_init_expression(object_type, loc);
         }
         if (!selection.constructor_symbol) {
             return nullptr;

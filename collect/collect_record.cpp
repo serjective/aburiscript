@@ -4445,6 +4445,9 @@ bool Collect::collect_complete_constructor_implicit_initializers(
     if (!function_decl_defines_entity(ctor_decl)) {
         return true;
     }
+    if (ctor_decl->is_defaulted && ctor_decl->has_deferred_defaulted_body) {
+        return true;
+    }
     for (const auto& initializer : ctor_decl->ctor_initializers) {
         if (initializer.is_delegating_initializer) {
             return true;
@@ -4945,6 +4948,8 @@ bool Collect::collect_ensure_defaulted_special_member_body(
     if (!owner_state) {
         return false;
     }
+    RecordSemanticState owner_state_snapshot = *owner_state;
+    owner_state = &owner_state_snapshot;
     if (owner_state->is_incomplete ||
         owner_state->is_template_pattern_provisional) {
         sync_symbol();
