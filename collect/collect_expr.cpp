@@ -3859,6 +3859,16 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             }
             return canonical_type_kind(*type_arg, ast_ctx_.get()) == TypeKind::Array;
         }
+        case BuiltinKind::IS_BOUNDED_ARRAY: {
+            auto type_arg = get_canonical_arg(0);
+            if (!type_arg) {
+                return std::nullopt;
+            }
+            auto array_type = type_arg->as_shared<ArrayType>();
+            return array_type &&
+                   array_type->size_kind == ArraySizeKind::Constant &&
+                   array_type->size.has_value();
+        }
         case BuiltinKind::IS_UNION: {
             auto type_arg = get_canonical_arg(0);
             if (!type_arg) {

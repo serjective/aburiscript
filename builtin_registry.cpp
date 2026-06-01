@@ -25,6 +25,7 @@ bool is_builtin_type_trait_kind(BuiltinKind kind) {
         case BuiltinKind::HAS_VIRTUAL_DESTRUCTOR:
         case BuiltinKind::IS_ABSTRACT:
         case BuiltinKind::IS_ARRAY:
+        case BuiltinKind::IS_BOUNDED_ARRAY:
         case BuiltinKind::IS_UNION:
         case BuiltinKind::IS_VOLATILE:
         case BuiltinKind::IS_CONST:
@@ -92,6 +93,7 @@ BuiltinRegistry::BuiltinRegistry() {
     register_builtin({"__has_virtual_destructor", BuiltinKind::HAS_VIRTUAL_DESTRUCTOR, 1, 1, true, true});
     register_builtin({"__is_abstract", BuiltinKind::IS_ABSTRACT, 1, 1, true, true});
     register_builtin({"__is_array", BuiltinKind::IS_ARRAY, 1, 1, true, true});
+    register_builtin({"__is_bounded_array", BuiltinKind::IS_BOUNDED_ARRAY, 1, 1, true, true});
     register_builtin({"__is_union", BuiltinKind::IS_UNION, 1, 1, true, true});
     register_builtin({"__is_volatile", BuiltinKind::IS_VOLATILE, 1, 1, true, true});
     register_builtin({"__is_const", BuiltinKind::IS_CONST, 1, 1, true, true});

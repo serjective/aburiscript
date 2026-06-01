@@ -25,6 +25,7 @@ enum class BuiltinKind {
     HAS_VIRTUAL_DESTRUCTOR,
     IS_ABSTRACT,
     IS_ARRAY,
+    IS_BOUNDED_ARRAY,
     IS_UNION,
     IS_VOLATILE,
     IS_CONST,
