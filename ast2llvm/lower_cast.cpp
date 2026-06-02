@@ -146,19 +146,24 @@ llvm::Value* ASTToLLVM::convert_implicit_cast(ImplicitCast *expr) {
     if (expr->kind == ImplicitCastTypes::LVALUE_TO_RVALUE) {
         return lower_lvalue_to_rvalue(expr);
     }
-    if (expr->kind == ImplicitCastTypes::ARRAY_TO_POINTER) {
+    QualType source_expr_type =
+        expr->expr ? expr->expr->get_type() : QualType();
+    bool is_array_to_pointer_cast =
+        expr->kind == ImplicitCastTypes::ARRAY_TO_POINTER ||
+        (canonical_type_kind(source_expr_type, ast_ctx.get()) == TypeKind::Array &&
+         canonical_type_kind(expr->ctype, ast_ctx.get()) == TypeKind::Pointer);
+    if (is_array_to_pointer_cast) {
         // Array to pointer decay
         Expr* array_object_expr = unwrap_reference_binding_expr(expr->expr.get());
-        auto lvalue_tup = get_lvalue(array_object_expr);
-        llvm::Value* ptr = lvalue_tup.address;
-        if (!ptr) return nullptr;
-
-        // We have array. We want pointer to first element.
-        // GEP (0, 0)
         QualType source_array_type =
             desugar_type(
                 remove_reference(array_object_expr->get_type(), ast_ctx.get()),
                 ast_ctx.get());
+        auto lvalue_tup = get_lvalue(array_object_expr);
+        llvm::Value* ptr = lvalue_tup.address;
+
+        // We have array. We want pointer to first element.
+        // GEP (0, 0)
         auto arrType = source_array_type.as_shared<ArrayType>();
         if (!arrType && lvalue_tup.type) {
             source_array_type = desugar_type(QualType(lvalue_tup.type), ast_ctx.get());
@@ -175,6 +180,42 @@ llvm::Value* ASTToLLVM::convert_implicit_cast(ImplicitCast *expr) {
             return ptr;
         }
         llvm::Type* llvmArrType = convert_type(source_array_type.get_shared());
+        if (!llvmArrType) {
+            error("convert_implicit_cast(): failed to lower array type", expr->location);
+            return nullptr;
+        }
+        if (!ptr) {
+            llvm::Value* array_value = convert_expression(array_object_expr);
+            if (!array_value) {
+                error("convert_implicit_cast(): failed to lower array temporary for decay",
+                      expr->location);
+                return nullptr;
+            }
+            if (array_value->getType() != llvmArrType) {
+                error("convert_implicit_cast(): array temporary type mismatch during decay",
+                      expr->location);
+                return nullptr;
+            }
+            llvm::Function* fn =
+                builder.GetInsertBlock() ? builder.GetInsertBlock()->getParent() : nullptr;
+            if (!fn) {
+                error("convert_implicit_cast(): cannot materialize array temporary outside of function",
+                      expr->location);
+                return nullptr;
+            }
+            auto* tmp = create_entry_alloca(fn, llvmArrType, nullptr, "array.decay.tmp");
+            if (!tmp) {
+                error("convert_implicit_cast(): failed to allocate array decay temporary",
+                      expr->location);
+                return nullptr;
+            }
+            uint64_t alignment = semantic_type_alignment(source_array_type.get_shared());
+            if (alignment > 0) {
+                tmp->setAlignment(llvm::Align(alignment));
+            }
+            builder.CreateStore(array_value, tmp);
+            ptr = tmp;
+        }
 
         llvm::Value* zero = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
         llvm::Value* indices[] = {zero, zero};

@@ -2479,14 +2479,54 @@ std::unique_ptr<Stmt> clone_stmt_impl(const Stmt* stmt,
                 if_stmt->condition.declaration.get(), ctx, error_out);
             auto condition_expr = clone_expr_with_substitution(
                 if_stmt->condition.expression.get(), ctx, error_out);
-            auto then_stmt = clone_stmt_impl(if_stmt->then_stmt.get(), ctx, error_out);
-            auto else_stmt = clone_stmt_impl(if_stmt->else_stmt.get(), ctx, error_out);
             if ((if_stmt->init_stmt && !init_stmt) ||
                 (if_stmt->condition.declaration && !condition_decl) ||
-                (if_stmt->condition.expression && !condition_expr) ||
-                (if_stmt->then_stmt && !then_stmt) ||
-                (if_stmt->else_stmt && !else_stmt)) {
+                (if_stmt->condition.expression && !condition_expr)) {
                 return nullptr;
+            }
+
+            std::optional<bool> constexpr_condition_value =
+                if_stmt->constexpr_condition_value;
+            if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
+                condition_expr &&
+                !condition_decl) {
+                if (ctx.rewrite_expr &&
+                    !rewrite_expr_tree(condition_expr, ctx, error_out)) {
+                    return nullptr;
+                }
+                ConstEvalResult eval = evaluate_with_consteval_compat(
+                    condition_expr.get(),
+                    ConstEvalMode::cpp_core_constant_expression());
+                if (eval.status == ConstEvalStatus::Constant &&
+                    eval.int_value.has_value()) {
+                    constexpr_condition_value = *eval.int_value != 0;
+                }
+            }
+
+            std::unique_ptr<Stmt> then_stmt;
+            std::unique_ptr<Stmt> else_stmt;
+            if (if_stmt->statement_kind == IfStatementKind::Constexpr &&
+                constexpr_condition_value.has_value()) {
+                const Stmt* selected_pattern = *constexpr_condition_value
+                    ? if_stmt->then_stmt.get()
+                    : if_stmt->else_stmt.get();
+                auto selected_stmt =
+                    clone_stmt_impl(selected_pattern, ctx, error_out);
+                if (selected_pattern && !selected_stmt) {
+                    return nullptr;
+                }
+                if (*constexpr_condition_value) {
+                    then_stmt = std::move(selected_stmt);
+                } else {
+                    else_stmt = std::move(selected_stmt);
+                }
+            } else {
+                then_stmt = clone_stmt_impl(if_stmt->then_stmt.get(), ctx, error_out);
+                else_stmt = clone_stmt_impl(if_stmt->else_stmt.get(), ctx, error_out);
+                if ((if_stmt->then_stmt && !then_stmt) ||
+                    (if_stmt->else_stmt && !else_stmt)) {
+                    return nullptr;
+                }
             }
             auto result = std::make_unique<IfStmt>(
                 ControlCondition(
@@ -2498,7 +2538,7 @@ std::unique_ptr<Stmt> clone_stmt_impl(const Stmt* stmt,
                 if_stmt->statement_kind,
                 std::move(init_stmt),
                 if_stmt->scope,
-                if_stmt->constexpr_condition_value);
+                constexpr_condition_value);
             assign_node_id(result.get(), ctx.ast_ctx);
             return result;
         }

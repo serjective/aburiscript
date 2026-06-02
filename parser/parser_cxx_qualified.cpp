@@ -793,6 +793,18 @@ Parser::resolve_cpp_qualified_owner_chain(
             return this_ptr_type->pointed_type;
         };
 
+    auto current_record_instantiation_type =
+        [&](std::string_view record_name) -> QualType {
+            if (record_name.empty() || cxx_record_parse_stack_.empty()) {
+                return QualType();
+            }
+            const auto& current_record = cxx_record_parse_stack_.back();
+            if (current_record.name != record_name) {
+                return QualType();
+            }
+            return current_record.current_instantiation_type;
+        };
+
     auto current_record_matches =
         [&](std::string_view record_name) -> bool {
             if (!record_name.empty() &&
@@ -931,7 +943,10 @@ Parser::resolve_cpp_qualified_owner_chain(
                 }
                 if (!resolution.owner_type &&
                     current_record_matches(component.name)) {
-                    if (auto* current_class_template =
+                    if (QualType current_instantiation =
+                            current_record_instantiation_type(component.name)) {
+                        resolution.owner_type = current_instantiation;
+                    } else if (auto* current_class_template =
                             dyn_cast<ClassTemplateDecl>(
                                 const_cast<Decl*>(
                                     lookup_type_template_in_scope(
@@ -981,23 +996,28 @@ Parser::resolve_cpp_qualified_owner_chain(
                         component.name,
                         resolution.owner_type);
                 if (resolution.is_current_instantiation) {
-                    auto* current_class_template =
-                        dyn_cast<ClassTemplateDecl>(
-                            const_cast<Decl*>(
-                                lookup_type_template_in_scope(
-                                    resolution.lookup_scope,
-                                    allow_enclosing_lookup,
-                                    component.name)));
-                    if (auto current_arguments =
-                            build_cpp_current_instantiation_arguments(
-                                current_class_template,
-                                component.loc)) {
-                        resolution.owner_type =
-                            QualType(std::make_shared<TemplateSpecializationType>(
-                                component.name,
-                                current_class_template,
-                                *current_arguments,
-                                /*is_dependent=*/true));
+                    if (QualType current_instantiation =
+                            current_record_instantiation_type(component.name)) {
+                        resolution.owner_type = current_instantiation;
+                    } else {
+                        auto* current_class_template =
+                            dyn_cast<ClassTemplateDecl>(
+                                const_cast<Decl*>(
+                                    lookup_type_template_in_scope(
+                                        resolution.lookup_scope,
+                                        allow_enclosing_lookup,
+                                        component.name)));
+                        if (auto current_arguments =
+                                build_cpp_current_instantiation_arguments(
+                                    current_class_template,
+                                    component.loc)) {
+                            resolution.owner_type =
+                                QualType(std::make_shared<TemplateSpecializationType>(
+                                    component.name,
+                                    current_class_template,
+                                    *current_arguments,
+                                    /*is_dependent=*/true));
+                        }
                     }
                 }
                 resolution.is_dependent =

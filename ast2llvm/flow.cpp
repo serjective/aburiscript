@@ -2207,6 +2207,7 @@ void ASTToLLVM::convert_declaration(Decl *decl) {
         case DeclKind::CppAccessSpecDecl:
         case DeclKind::NamespaceDecl:
         case DeclKind::NopDecl:
+        case DeclKind::StaticAssertDecl:
         case DeclKind::CppUsingDeclarationDecl:
             return;
         case DeclKind::TypedefDecl: {

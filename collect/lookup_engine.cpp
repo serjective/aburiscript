@@ -57,6 +57,7 @@ struct LookupTraversalRequest {
 struct LookupTraversalResult {
     ContextLookupDisposition disposition = ContextLookupDisposition::NotFound;
     const DeclBinding* binding = nullptr;
+    std::shared_ptr<DeclBinding> owned_binding = nullptr;
     const DeclContext* owner_context = nullptr;
     TagDecl* decl = nullptr;
     std::shared_ptr<Symbol> symbol = nullptr;
@@ -388,6 +389,38 @@ std::shared_ptr<DeclBinding> synthesize_merged_function_binding(
     return merged;
 }
 
+void merge_template_binding_result(LookupTraversalResult& result,
+                                   LookupTraversalResult incoming,
+                                   const std::string& name) {
+    if (incoming.disposition == ContextLookupDisposition::NotFound) {
+        return;
+    }
+    if (incoming.disposition == ContextLookupDisposition::Blocked) {
+        if (result.disposition == ContextLookupDisposition::NotFound) {
+            result = std::move(incoming);
+        }
+        return;
+    }
+    if (result.disposition != ContextLookupDisposition::Found ||
+        !result.binding) {
+        result = std::move(incoming);
+        return;
+    }
+    std::vector<const DeclBinding*> bindings;
+    bindings.reserve(2);
+    bindings.push_back(result.binding);
+    bindings.push_back(incoming.binding);
+    result.owned_binding = synthesize_merged_function_binding(
+        name,
+        bindings,
+        LookupEngine::OrdinaryFilter::Any);
+    result.binding = result.owned_binding.get();
+    result.disposition = ContextLookupDisposition::Found;
+    if (!result.owner_context) {
+        result.owner_context = incoming.owner_context;
+    }
+}
+
 std::string scope_flags_to_string(ScopeFlags flags) {
     std::string out;
     if (scope_flags_contains(flags, ScopeFlags::FileScope)) out += "File|";
@@ -626,7 +659,7 @@ LookupTraversalResult lookup_in_context_graph(
                     result.disposition = ContextLookupDisposition::Found;
                     result.binding = binding;
                     result.owner_context = context;
-                    return result;
+                    break;
                 }
                 trace_named_step(
                     trace, "blocked by non-template binding: ", name);
@@ -657,8 +690,9 @@ LookupTraversalResult lookup_in_context_graph(
                         "blocked by non-matching qualified ordinary binding: ",
                         name);
                     result.disposition = ContextLookupDisposition::Blocked;
+                    return result;
                 }
-                return result;
+                break;
             }
             trace_named_step(
                 trace, "miss decl-context qualified ordinary: ", name);
@@ -724,9 +758,26 @@ LookupTraversalResult lookup_in_context_graph(
                     switch (request.kind) {
                         case LookupTraversalKind::Ordinary:
                         case LookupTraversalKind::Tag:
-                        case LookupTraversalKind::TemplateBinding:
                             if (nomination_result.disposition !=
                                 ContextLookupDisposition::NotFound) {
+                                result = std::move(nomination_result);
+                                stop = true;
+                                return true;
+                            }
+                            return false;
+                        case LookupTraversalKind::TemplateBinding:
+                            if (nomination_result.disposition ==
+                                ContextLookupDisposition::Found) {
+                                merge_template_binding_result(
+                                    result,
+                                    std::move(nomination_result),
+                                    name);
+                                return false;
+                            }
+                            if (nomination_result.disposition ==
+                                    ContextLookupDisposition::Blocked &&
+                                result.disposition ==
+                                    ContextLookupDisposition::NotFound) {
                                 result = std::move(nomination_result);
                                 stop = true;
                                 return true;
@@ -772,6 +823,9 @@ LookupTraversalResult lookup_in_context_graph(
             follow_nominations_of_kind(NamespaceNominationKind::InlineImplicit)) {
             return result;
         }
+        if (result.disposition == ContextLookupDisposition::Found) {
+            return result;
+        }
         if (namespace_reachability_includes_using(
                 request.namespace_reachability)) {
             follow_nominations_of_kind(NamespaceNominationKind::UsingDirective);
@@ -779,6 +833,10 @@ LookupTraversalResult lookup_in_context_graph(
         return result;
     }
     if (follow_nominations_of_kind(NamespaceNominationKind::InlineImplicit)) {
+        return result;
+    }
+    if (request.kind == LookupTraversalKind::TemplateBinding &&
+        result.disposition == ContextLookupDisposition::Found) {
         return result;
     }
     follow_nominations_of_kind(NamespaceNominationKind::UsingDirective);
@@ -1020,6 +1078,7 @@ LookupEngine::lookup_unqualified_template_binding_result(
         if (result.disposition == ContextLookupDisposition::Found) {
             return UnqualifiedTemplateLookupResult{
                 result.binding,
+                std::move(result.owned_binding),
                 frame.scope,
                 frame.decl_context,
                 result.owner_context,
@@ -1028,6 +1087,7 @@ LookupEngine::lookup_unqualified_template_binding_result(
         }
         if (result.disposition == ContextLookupDisposition::Blocked) {
             return UnqualifiedTemplateLookupResult{
+                nullptr,
                 nullptr,
                 frame.scope,
                 frame.decl_context,
@@ -1046,11 +1106,13 @@ const DeclBinding* LookupEngine::lookup_unqualified_template_binding(
     bool look_parents,
     LookupNamespace lookup_namespace,
     LookupTrace* trace) {
-    return lookup_unqualified_template_binding_result(
-        name, start_scope, look_parents, lookup_namespace, trace).binding;
+    auto result = lookup_unqualified_template_binding_result(
+        name, start_scope, look_parents, lookup_namespace, trace);
+    return result.owned_binding ? nullptr : result.binding;
 }
 
-const DeclBinding* LookupEngine::lookup_unqualified_template_binding_from_context(
+LookupEngine::UnqualifiedTemplateLookupResult
+LookupEngine::lookup_unqualified_template_binding_result_from_context(
     const std::string& name,
     const DeclContext* start_decl_context,
     bool look_parents,
@@ -1087,17 +1149,46 @@ const DeclBinding* LookupEngine::lookup_unqualified_template_binding_from_contex
             visited_context_graph,
             trace);
         if (result.disposition == ContextLookupDisposition::Found) {
-            return result.binding;
+            return UnqualifiedTemplateLookupResult{
+                result.binding,
+                std::move(result.owned_binding),
+                nullptr,
+                context,
+                result.owner_context,
+                0,
+                false};
         }
         if (result.disposition == ContextLookupDisposition::Blocked) {
-            return nullptr;
+            return UnqualifiedTemplateLookupResult{
+                nullptr,
+                nullptr,
+                nullptr,
+                context,
+                result.owner_context,
+                0,
+                true};
         }
         if (!look_parents) {
             break;
         }
     }
     trace_named_step(trace, "template lookup miss: ", name);
-    return nullptr;
+    return {};
+}
+
+const DeclBinding* LookupEngine::lookup_unqualified_template_binding_from_context(
+    const std::string& name,
+    const DeclContext* start_decl_context,
+    bool look_parents,
+    LookupNamespace lookup_namespace,
+    LookupTrace* trace) {
+    auto result = lookup_unqualified_template_binding_result_from_context(
+        name,
+        start_decl_context,
+        look_parents,
+        lookup_namespace,
+        trace);
+    return result.owned_binding ? nullptr : result.binding;
 }
 
 std::vector<LookupEngine::QualifiedOrdinaryBindingMatch>

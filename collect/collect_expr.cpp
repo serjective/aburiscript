@@ -3439,6 +3439,15 @@ std::optional<bool> Collect::evaluate_builtin_type_trait(
             }
 
             if (canonical_target->kind == TypeKind::Object) {
+                bool same_unqualified_type =
+                    source_type.equals_unqualified(to_type) ||
+                    canonical_source.equals_unqualified(canonical_target);
+                if (same_unqualified_type) {
+                    return true;
+                }
+                if (can_convert_derived_to_base_object(source_type, to_type)) {
+                    return true;
+                }
                 return trait_record_constructible_from(
                     canonical_target,
                     {from_type},

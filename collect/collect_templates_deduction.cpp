@@ -501,6 +501,25 @@ TemplateArgumentDeductionResult deduce_class_template_argument_binding(
             TemplateTypeDeductionMode::PartialOrdering);
     }
 
+    if (pattern_argument.kind == TemplateArgumentKind::Template) {
+        if (pattern_argument.is_dependent &&
+            pattern_argument.referenced_parameter) {
+            return bind_deduced_template_argument_value(
+                       pattern_argument.referenced_parameter,
+                       argument_argument,
+                       parameters,
+                       deduced_bindings)
+                ? TemplateArgumentDeductionResult::Match
+                : TemplateArgumentDeductionResult::Mismatch;
+        }
+        if (pattern_argument.is_dependent) {
+            return TemplateArgumentDeductionResult::NonDeduced;
+        }
+        return pattern_argument.equals(argument_argument)
+            ? TemplateArgumentDeductionResult::Match
+            : TemplateArgumentDeductionResult::Mismatch;
+    }
+
     if (pattern_argument.is_dependent &&
         pattern_argument.referenced_parameter) {
         return bind_deduced_template_argument_value(
@@ -534,6 +553,48 @@ TemplateArgumentDeductionResult deduce_class_template_argument_binding(
     return arguments_match
         ? TemplateArgumentDeductionResult::Match
         : TemplateArgumentDeductionResult::Mismatch;
+}
+
+bool partial_specialization_template_arguments_match(
+    Collect& collect,
+    const TemplateArgument& substituted,
+    const TemplateArgument& actual) {
+    if (substituted.kind != actual.kind) {
+        return false;
+    }
+
+    switch (substituted.kind) {
+        case TemplateArgumentKind::Type: {
+            QualType substituted_type =
+                collect.collect_try_realize_deferred_semantic_type(
+                    substituted.type);
+            QualType actual_type =
+                collect.collect_try_realize_deferred_semantic_type(actual.type);
+            return desugar_type(substituted_type).equals_qualified(
+                desugar_type(actual_type));
+        }
+        case TemplateArgumentKind::Template:
+            return substituted.equals(actual);
+        case TemplateArgumentKind::Value: {
+            TemplateArgument normalized_substituted = substituted;
+            TemplateArgument normalized_actual = actual;
+            QualType target_type = normalized_actual.value_type
+                ? normalized_actual.value_type
+                : normalized_substituted.value_type;
+            return collect_template_internal::
+                       normalize_concrete_template_value_argument(
+                           normalized_substituted,
+                           target_type,
+                           nullptr) &&
+                   collect_template_internal::
+                       normalize_concrete_template_value_argument(
+                           normalized_actual,
+                           target_type,
+                           nullptr) &&
+                   normalized_substituted.equals(normalized_actual);
+        }
+    }
+    return false;
 }
 
 bool deduce_class_template_specialization_argument_list_into_existing_bindings(
@@ -755,40 +816,10 @@ bool substituted_partial_specialization_arguments_match_actual(
     }
 
     for (size_t idx = 0; idx < substituted_arguments.size(); ++idx) {
-        const auto& substituted = substituted_arguments[idx];
-        const auto& actual = actual_arguments[idx];
-        if (substituted.kind != actual.kind) {
-            return false;
-        }
-
-        if (substituted.kind == TemplateArgumentKind::Type) {
-            QualType substituted_type =
-                collect.collect_try_realize_deferred_semantic_type(
-                    substituted.type);
-            QualType actual_type =
-                collect.collect_try_realize_deferred_semantic_type(
-                    actual.type);
-            if (!desugar_type(substituted_type).equals_qualified(
-                    desugar_type(actual_type))) {
-                return false;
-            }
-            continue;
-        }
-
-        TemplateArgument normalized_substituted = substituted;
-        TemplateArgument normalized_actual = actual;
-        QualType target_type = normalized_actual.value_type
-            ? normalized_actual.value_type
-            : normalized_substituted.value_type;
-        if (!collect_template_internal::normalize_concrete_template_value_argument(
-                normalized_substituted,
-                target_type,
-                nullptr) ||
-            !collect_template_internal::normalize_concrete_template_value_argument(
-                normalized_actual,
-                target_type,
-                nullptr) ||
-            !normalized_substituted.equals(normalized_actual)) {
+        if (!partial_specialization_template_arguments_match(
+                collect,
+                substituted_arguments[idx],
+                actual_arguments[idx])) {
             return false;
         }
     }

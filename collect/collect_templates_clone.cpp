@@ -438,6 +438,38 @@ void remap_template_argument_symbol_references(
     }
 }
 
+void realize_template_symbol_arguments_after_substitution(
+    Collect* collect,
+    std::vector<TemplateArgument>& arguments,
+    ASTCloneContext& clone_ctx,
+    SrcLoc fallback_loc) {
+    for (auto& argument : arguments) {
+        remap_template_argument_symbol_references(argument, clone_ctx);
+    }
+    if (collect) {
+        collect->realize_template_symbol_arguments_for_clone(
+            arguments,
+            fallback_loc);
+    }
+    for (auto& argument : arguments) {
+        if (argument.kind == TemplateArgumentKind::Type) {
+            auto canonical_type = desugar_type(argument.type, clone_ctx.ast_ctx);
+            if (canonical_type) {
+                argument.type = canonical_type;
+            }
+        } else if (argument.kind == TemplateArgumentKind::Value) {
+            auto canonical_value_type =
+                desugar_type(argument.value_type, clone_ctx.ast_ctx);
+            if (canonical_value_type) {
+                argument.value_type = canonical_value_type;
+            }
+        }
+        argument.is_dependent = template_argument_depends_on_template_parameters(
+            argument,
+            clone_ctx.ast_ctx);
+    }
+}
+
 TemplateClonePassBuilder make_template_binding_clone_pass_builder(
     ASTContext* ast_ctx,
     Collect* collect,
@@ -565,9 +597,11 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
                     ? rewrite_template_arguments_fn(
                           function_specialization_info->arguments)
                     : function_specialization_info->arguments;
-            for (auto& argument : rewritten_arguments) {
-                remap_template_argument_symbol_references(argument, clone_ctx);
-            }
+            realize_template_symbol_arguments_after_substitution(
+                collect,
+                rewritten_arguments,
+                clone_ctx,
+                fallback_loc);
             const auto* pattern_decl =
                 function_specialization_info->primary_template->function_decl();
             bool instantiate_definition =
@@ -600,21 +634,11 @@ TemplateClonePassBuilder make_template_binding_clone_pass_builder(
             rewrite_template_arguments_fn
                 ? rewrite_template_arguments_fn(specialization_info->arguments)
                 : specialization_info->arguments;
-        for (auto& argument : rewritten_arguments) {
-            if (argument.kind != TemplateArgumentKind::Type) {
-                continue;
-            }
-            auto canonical_type = desugar_type(argument.type, clone_ctx.ast_ctx);
-            if (canonical_type) {
-                argument.type = canonical_type;
-            }
-            argument.is_dependent = template_argument_depends_on_template_parameters(
-                argument,
-                clone_ctx.ast_ctx);
-        }
-        for (auto& argument : rewritten_arguments) {
-            remap_template_argument_symbol_references(argument, clone_ctx);
-        }
+        realize_template_symbol_arguments_after_substitution(
+            collect,
+            rewritten_arguments,
+            clone_ctx,
+            fallback_loc);
         std::shared_ptr<Symbol> specialization_symbol = nullptr;
         auto* specialization_decl =
             collect->instantiate_variable_template_specialization_for_clone(
@@ -2073,8 +2097,15 @@ bool clone_function_body_for_specialization(Collect& collect,
     }
 
     std::string clone_error;
+    resolution_pass.sync_from_substitution_pass(substitution_pass);
+    auto saved_substitution_rewrite_expr =
+        std::move(substitution_pass.context().rewrite_expr);
+    substitution_pass.context().rewrite_expr =
+        resolution_pass.context().rewrite_expr;
     auto cloned_body =
         substitution_pass.clone_stmt(pattern->body.get(), &clone_error);
+    substitution_pass.context().rewrite_expr =
+        std::move(saved_substitution_rewrite_expr);
     if (!cloned_body) {
         if (error_out) {
             *error_out =

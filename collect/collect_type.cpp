@@ -218,8 +218,40 @@ std::unique_ptr<Expr> Collect::cast_if_needed(std::unique_ptr<Expr> expr, QualTy
     if (expr_type->equals(*target_type.get_shared())) {
         return expr;
     }
+    auto expr_kind = canonical_type_kind(expr_type, ast_ctx_.get());
+    auto target_kind = canonical_type_kind(target_type, ast_ctx_.get());
+    if (expr_kind == TypeKind::Array && target_kind == TypeKind::Pointer) {
+        auto array_type =
+            desugar_type(expr_type, ast_ctx_.get()).as_shared<ArrayType>();
+        if (array_type) {
+            auto element_type =
+                array_type->element_type.with_qualifiers(expr_type.get_qualifiers());
+            QualType decayed_type(std::make_shared<PointerType>(element_type));
+            expr = collect_make<ImplicitCast>(
+                ImplicitCastTypes::ARRAY_TO_POINTER,
+                std::move(expr),
+                decayed_type);
+            if (decayed_type->equals(*target_type.get_shared())) {
+                return expr;
+            }
+            return collect_make<ImplicitCast>(std::move(expr), target_type);
+        }
+    }
+    if (expr_kind == TypeKind::Function && target_kind == TypeKind::Pointer) {
+        QualType decayed_type(
+            std::make_shared<PointerType>(
+                desugar_type(expr_type, ast_ctx_.get())));
+        expr = collect_make<ImplicitCast>(
+            ImplicitCastTypes::FUNCTION_TO_POINTER,
+            std::move(expr),
+            decayed_type);
+        if (decayed_type->equals(*target_type.get_shared())) {
+            return expr;
+        }
+        return collect_make<ImplicitCast>(std::move(expr), target_type);
+    }
     if (canonical_type_kind(target_type, ast_ctx_.get()) == TypeKind::Vector &&
-        canonical_type_kind(expr_type, ast_ctx_.get()) != TypeKind::Vector) {
+        expr_kind != TypeKind::Vector) {
         auto vec_ty = desugar_type(target_type, ast_ctx_.get()).as_shared<VectorType>();
         if (vec_ty) {
             expr = cast_if_needed(std::move(expr), vec_ty->element_type);

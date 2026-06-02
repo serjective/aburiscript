@@ -1512,6 +1512,10 @@ public:
             specialization_symbol_out);
     }
 
+    void realize_template_symbol_arguments_for_clone(
+        std::vector<TemplateArgument>& arguments,
+        SrcLoc loc);
+
     void collect_record_register_function_default_arguments(
         const std::shared_ptr<Symbol>& sym,
         const FuncDecl* decl,

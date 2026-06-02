@@ -690,7 +690,121 @@ bool Collect::PostSubstitutionExprResolver::resolve_dependent_expr_after_substit
         return true;
     };
 
+    auto resolve_template_argument_type_after_substitution =
+        [&](QualType type, SrcLoc loc) -> QualType {
+        QualType resolved = finalize_deferred_semantic_type(type, loc);
+        if (!resolved) {
+            return type;
+        }
+        QualType canonical = desugar_type(resolved, ast_ctx_.get());
+        if (canonical &&
+            !type_depends_on_template_parameters(canonical, ast_ctx_.get())) {
+            return canonical;
+        }
+
+        auto typedef_type = dyn_cast_shared<TypedefType>(resolved.get_shared());
+        if (!typedef_type) {
+            return canonical ? canonical : resolved;
+        }
+        auto rebound_symbol =
+            collect_.collect_lookup_typedef_symbol(typedef_type->name, true);
+        if (!rebound_symbol || !rebound_symbol->type) {
+            return canonical ? canonical : resolved;
+        }
+        QualType rebound_type = rebound_symbol->type.with_qualifiers(
+            static_cast<uint8_t>(
+                rebound_symbol->type.get_qualifiers() |
+                resolved.get_qualifiers()));
+        canonical = desugar_type(rebound_type, ast_ctx_.get());
+        return canonical ? canonical : rebound_type;
+    };
+
+    auto rekey_variable_template_ref_after_substitution =
+        [&](std::unique_ptr<Expr>& candidate) -> bool {
+        auto* var_ref = dyn_cast<VarRef>(candidate.get());
+        if (!var_ref || !var_ref->symref) {
+            return true;
+        }
+        const auto* specialization_info =
+            get_symbol_variable_template_specialization(var_ref->symref.get());
+        if (!specialization_info || !specialization_info->primary_template) {
+            return true;
+        }
+
+        std::vector<TemplateArgument> rewritten_arguments =
+            specialization_info->arguments;
+        bool changed = false;
+        for (auto& argument : rewritten_arguments) {
+            switch (argument.kind) {
+                case TemplateArgumentKind::Type: {
+                    QualType resolved_type =
+                        resolve_template_argument_type_after_substitution(
+                            argument.type,
+                            candidate->location);
+                    if (resolved_type &&
+                        !resolved_type.equals_qualified(argument.type)) {
+                        argument.type = resolved_type;
+                        changed = true;
+                    }
+                    break;
+                }
+                case TemplateArgumentKind::Value: {
+                    QualType resolved_type =
+                        resolve_template_argument_type_after_substitution(
+                            argument.value_type,
+                            candidate->location);
+                    if (resolved_type &&
+                        !resolved_type.equals_qualified(argument.value_type)) {
+                        argument.value_type = resolved_type;
+                        changed = true;
+                    }
+                    break;
+                }
+                case TemplateArgumentKind::Template:
+                    break;
+            }
+            bool dependent =
+                template_argument_depends_on_template_parameters(
+                    argument,
+                    ast_ctx_.get());
+            if (argument.is_dependent != dependent) {
+                argument.is_dependent = dependent;
+                changed = true;
+            }
+        }
+
+        if (collect_template_internal::template_arguments_depend_on_template_parameters(
+                rewritten_arguments)) {
+            return true;
+        }
+        if (!changed &&
+            !collect_template_internal::template_arguments_depend_on_template_parameters(
+                specialization_info->arguments)) {
+            return true;
+        }
+
+        std::shared_ptr<Symbol> specialization_symbol = nullptr;
+        auto* specialization_decl =
+            collect_.instantiate_variable_template_specialization_for_clone(
+                specialization_info->primary_template,
+                rewritten_arguments,
+                candidate->location,
+                &specialization_symbol);
+        if (!specialization_decl || !specialization_symbol) {
+            if (error_out && error_out->empty()) {
+                *error_out =
+                    "failed to rekey variable template specialization after substitution";
+            }
+            return false;
+        }
+        var_ref->symref = std::move(specialization_symbol);
+        return true;
+    };
+
     if (!rebind_qualified_var_ref_after_substitution(expr)) {
+        return false;
+    }
+    if (!rekey_variable_template_ref_after_substitution(expr)) {
         return false;
     }
 

@@ -84,6 +84,7 @@ public:
 
     struct UnqualifiedTemplateLookupResult {
         const DeclBinding* binding = nullptr;
+        std::shared_ptr<DeclBinding> owned_binding = nullptr;
         std::shared_ptr<Scope> scope = nullptr;
         const DeclContext* lookup_context = nullptr;
         const DeclContext* owner_context = nullptr;
@@ -127,6 +128,12 @@ public:
     static UnqualifiedTemplateLookupResult lookup_unqualified_template_binding_result(
         const std::string& name,
         const std::shared_ptr<Scope>& start_scope,
+        bool look_parents,
+        LookupNamespace lookup_namespace,
+        LookupTrace* trace = nullptr);
+    static UnqualifiedTemplateLookupResult lookup_unqualified_template_binding_result_from_context(
+        const std::string& name,
+        const DeclContext* start_decl_context,
         bool look_parents,
         LookupNamespace lookup_namespace,
         LookupTrace* trace = nullptr);

@@ -1210,6 +1210,17 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             }
             return QualType();
         };
+    auto current_record_instantiation_type =
+        [&](std::string_view record_name) -> QualType {
+            if (record_name.empty() || cxx_record_parse_stack_.empty()) {
+                return QualType();
+            }
+            const auto& current_record = cxx_record_parse_stack_.back();
+            if (current_record.name != record_name) {
+                return QualType();
+            }
+            return current_record.current_instantiation_type;
+        };
     Parser::CppQualifiedOwnerChainResolution owner_chain;
     bool used_single_qualifier_record_compat = false;
     if (!initial_owner &&
@@ -1222,11 +1233,18 @@ std::unique_ptr<Expr> Parser::parse_cpp_qualified_primary_expression() {
             qualifiers.front().name,
             /*allow_enclosing_lookup=*/true);
         if (compatibility_owner_type) {
-            owner_chain.owner_type = compatibility_owner_type;
-            owner_chain.is_current_instantiation =
+            bool is_current_instantiation =
                 cpp_qualifier_is_current_instantiation(
                     qualifiers.front().name,
                     compatibility_owner_type);
+            if (is_current_instantiation) {
+                if (QualType current_instantiation =
+                        current_record_instantiation_type(qualifiers.front().name)) {
+                    compatibility_owner_type = current_instantiation;
+                }
+            }
+            owner_chain.owner_type = compatibility_owner_type;
+            owner_chain.is_current_instantiation = is_current_instantiation;
             owner_chain.is_dependent =
                 type_depends_on_template_parameters(
                     compatibility_owner_type,

@@ -2678,6 +2678,15 @@ void Collect::rewrite_deferred_template_arguments_in_place(
     }
 }
 
+void Collect::realize_template_symbol_arguments_for_clone(
+    std::vector<TemplateArgument>& arguments,
+    SrcLoc loc) {
+    rewrite_deferred_template_arguments_in_place(
+        arguments,
+        loc,
+        DeferredTypeResolutionMode::TryRealize);
+}
+
 QualType Collect::resolve_deferred_template_specialization_type(
     TemplateSpecializationType& specialization,
     QualType original_type,

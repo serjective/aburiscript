@@ -1029,6 +1029,11 @@ std::unique_ptr<Expr> Collect::process_init_list_expression(std::unique_ptr<Init
                 /*allow_abstract_object_type_instantiation=*/false,
                 /*is_copy_initialization=*/true);
         }
+        if (lang_opts_.is_cxx_mode() && init_list->elements.empty()) {
+            return collect_cpp_value_init_expression(
+                QualType(type),
+                init_list->location);
+        }
         size_t idx = 0;
         return consume_for_type(init_list->elements, idx, type, false, 0);
     }

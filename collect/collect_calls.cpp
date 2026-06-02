@@ -315,14 +315,17 @@ std::vector<const FunctionTemplateDecl*> lookup_unqualified_function_templates(
     const std::shared_ptr<Scope>& current_scope,
     const std::shared_ptr<DeclContext>& current_context) {
     std::vector<const FunctionTemplateDecl*> template_candidates;
+    LookupEngine::UnqualifiedTemplateLookupResult context_template_lookup;
+    LookupEngine::UnqualifiedTemplateLookupResult scope_template_lookup;
     const DeclBinding* template_binding = nullptr;
     if (current_context) {
-        template_binding =
-            LookupEngine::lookup_unqualified_template_binding_from_context(
+        context_template_lookup =
+            LookupEngine::lookup_unqualified_template_binding_result_from_context(
                 std::string(callee_name),
                 current_context.get(),
                 true,
                 LookupNamespace::Ordinary);
+        template_binding = context_template_lookup.binding;
     }
     if (!template_binding) {
         auto lookup_scope =
@@ -330,12 +333,13 @@ std::vector<const FunctionTemplateDecl*> lookup_unqualified_function_templates(
         if (!lookup_scope) {
             return template_candidates;
         }
-        template_binding =
-            LookupEngine::lookup_unqualified_template_binding(
+        scope_template_lookup =
+            LookupEngine::lookup_unqualified_template_binding_result(
                 std::string(callee_name),
                 lookup_scope,
                 true,
                 LookupNamespace::Ordinary);
+        template_binding = scope_template_lookup.binding;
     }
     if (!template_binding) {
         return template_candidates;
@@ -355,14 +359,17 @@ std::vector<const VariableTemplateDecl*> lookup_unqualified_variable_templates(
     const std::shared_ptr<Scope>& current_scope,
     const std::shared_ptr<DeclContext>& current_context) {
     std::vector<const VariableTemplateDecl*> template_candidates;
+    LookupEngine::UnqualifiedTemplateLookupResult context_template_lookup;
+    LookupEngine::UnqualifiedTemplateLookupResult scope_template_lookup;
     const DeclBinding* template_binding = nullptr;
     if (current_context) {
-        template_binding =
-            LookupEngine::lookup_unqualified_template_binding_from_context(
+        context_template_lookup =
+            LookupEngine::lookup_unqualified_template_binding_result_from_context(
                 std::string(name),
                 current_context.get(),
                 true,
                 LookupNamespace::Ordinary);
+        template_binding = context_template_lookup.binding;
     }
     if (!template_binding) {
         auto lookup_scope =
@@ -370,12 +377,13 @@ std::vector<const VariableTemplateDecl*> lookup_unqualified_variable_templates(
         if (!lookup_scope) {
             return template_candidates;
         }
-        template_binding =
-            LookupEngine::lookup_unqualified_template_binding(
+        scope_template_lookup =
+            LookupEngine::lookup_unqualified_template_binding_result(
                 std::string(name),
                 lookup_scope,
                 true,
                 LookupNamespace::Ordinary);
+        template_binding = scope_template_lookup.binding;
     }
     if (!template_binding) {
         return template_candidates;
@@ -395,14 +403,17 @@ std::vector<const ConceptDecl*> lookup_unqualified_concepts(
     const std::shared_ptr<Scope>& current_scope,
     const std::shared_ptr<DeclContext>& current_context) {
     std::vector<const ConceptDecl*> concept_candidates;
+    LookupEngine::UnqualifiedTemplateLookupResult context_template_lookup;
+    LookupEngine::UnqualifiedTemplateLookupResult scope_template_lookup;
     const DeclBinding* template_binding = nullptr;
     if (current_context) {
-        template_binding =
-            LookupEngine::lookup_unqualified_template_binding_from_context(
+        context_template_lookup =
+            LookupEngine::lookup_unqualified_template_binding_result_from_context(
                 std::string(name),
                 current_context.get(),
                 true,
                 LookupNamespace::Ordinary);
+        template_binding = context_template_lookup.binding;
     }
     if (!template_binding) {
         auto lookup_scope =
@@ -410,12 +421,13 @@ std::vector<const ConceptDecl*> lookup_unqualified_concepts(
         if (!lookup_scope) {
             return concept_candidates;
         }
-        template_binding =
-            LookupEngine::lookup_unqualified_template_binding(
+        scope_template_lookup =
+            LookupEngine::lookup_unqualified_template_binding_result(
                 std::string(name),
                 lookup_scope,
                 true,
                 LookupNamespace::Ordinary);
+        template_binding = scope_template_lookup.binding;
     }
     if (!template_binding) {
         return concept_candidates;

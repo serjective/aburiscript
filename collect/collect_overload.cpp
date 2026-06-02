@@ -382,12 +382,13 @@ std::vector<const FunctionTemplateDecl*> lookup_unqualified_function_templates(
         return template_candidates;
     }
 
-    const DeclBinding* template_binding =
-        LookupEngine::lookup_unqualified_template_binding(
+    auto template_lookup =
+        LookupEngine::lookup_unqualified_template_binding_result(
             std::string(callee_name),
             current_scope,
             true,
             LookupNamespace::Ordinary);
+    const DeclBinding* template_binding = template_lookup.binding;
     if (!template_binding) {
         return template_candidates;
     }
