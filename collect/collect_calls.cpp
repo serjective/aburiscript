@@ -3040,16 +3040,19 @@ Collect::normalize_dependent_lookup_qualifier_after_substitution(
 
     QualType realized_type =
         try_realize_deferred_semantic_type(normalized.qualifier_type);
-    if (!realized_type &&
-        !type_depends_on_template_parameters(
-            normalized.qualifier_type,
-            ast_ctx_.get())) {
-        realized_type =
-            finalize_deferred_semantic_type(normalized.qualifier_type, loc);
+    QualType candidate_type =
+        realized_type ? realized_type : normalized.qualifier_type;
+    if (!type_depends_on_template_parameters(candidate_type, ast_ctx_.get()) &&
+        contains_deferred_semantic_type(candidate_type.get_shared())) {
+        QualType finalized_type =
+            finalize_deferred_semantic_type(candidate_type, loc);
+        if (finalized_type) {
+            candidate_type = finalized_type;
+        }
     }
-    if (realized_type) {
-        QualType semantic_type = desugar_type(realized_type, ast_ctx_.get());
-        normalized.qualifier_type = semantic_type ? semantic_type : realized_type;
+    if (candidate_type) {
+        QualType semantic_type = desugar_type(candidate_type, ast_ctx_.get());
+        normalized.qualifier_type = semantic_type ? semantic_type : candidate_type;
     }
 
     bool still_dependent =

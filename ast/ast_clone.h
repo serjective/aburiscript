@@ -28,7 +28,8 @@ struct ASTCloneContext {
         rewrite_symbol;
     std::function<void(const std::shared_ptr<Symbol>&)> register_symbol;
     std::function<bool(MemberExpr*, std::string*)> rewrite_member_expr;
-    std::function<bool(CppLambdaExpr&, std::string*)> finalize_lambda_expr;
+    std::function<bool(CppLambdaExpr&, ASTCloneContext&, std::string*)>
+        finalize_lambda_expr;
     std::function<bool(BlockExpr&, std::string*)> finalize_block_expr;
     std::function<bool(std::unique_ptr<Expr>&, std::string*)> rewrite_expr;
     std::function<bool(const Expr*,

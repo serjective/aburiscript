@@ -1480,7 +1480,7 @@ bool rewrite_expr_tree(std::unique_ptr<Expr>& expr,
                     static_cast<CompoundStmt*>(body_stmt.release()));
             }
             if (ctx.finalize_lambda_expr &&
-                !ctx.finalize_lambda_expr(*lambda, error_out)) {
+                !ctx.finalize_lambda_expr(*lambda, ctx, error_out)) {
                 return false;
             }
             return true;

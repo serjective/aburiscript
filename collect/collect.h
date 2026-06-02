@@ -392,6 +392,11 @@ public:
         return finalize_deferred_semantic_type(type, loc);
     }
 
+    bool collect_contains_deferred_semantic_type(
+        const std::shared_ptr<CType>& type) const {
+        return contains_deferred_semantic_type(type);
+    }
+
     bool collect_has_diagnostic_engine() const {
         return diag_engine_ != nullptr;
     }
@@ -588,6 +593,10 @@ public:
                                            std::string* error_out = nullptr) ;
     bool collect_finalize_cpp_lambda_expression(CppLambdaExpr& lambda,
                                                 std::string* error_out = nullptr) ;
+    bool collect_finalize_cpp_lambda_expression_with_clone_context(
+        CppLambdaExpr& lambda,
+        ASTCloneContext& clone_ctx,
+        std::string* error_out = nullptr) ;
 
     std::unique_ptr<Expr> collect_compound_literal_expression(QualType type,
                                                               std::unique_ptr<Expr> init,
@@ -1473,6 +1482,10 @@ private:
 public:
     bool finalize_cpp_lambda_semantics(CppLambdaExpr& lambda,
                                        std::string* error_out = nullptr);
+    bool finalize_cpp_lambda_semantics_with_clone_context(
+        CppLambdaExpr& lambda,
+        ASTCloneContext& clone_ctx,
+        std::string* error_out = nullptr);
 
     FuncDecl* instantiate_function_template_specialization_for_clone(
         const FunctionTemplateDecl* function_template,

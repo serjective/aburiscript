@@ -74,6 +74,32 @@ void strip_stale_object_initializer_cast(std::unique_ptr<Expr>& expr,
     }
 }
 
+bool type_has_unresolved_auto(QualType type) {
+    return type &&
+           auto_type_utils::auto_type_flavors_in(type.get_shared()) != 0;
+}
+
+QualType finalize_specialized_type_after_substitution(Collect& collect,
+                                                      QualType type,
+                                                      SrcLoc loc) {
+    if (!type) {
+        return type;
+    }
+
+    QualType realized =
+        collect.collect_try_realize_deferred_semantic_type(type);
+    QualType candidate = realized ? realized : type;
+    if (!type_depends_on_template_parameters(candidate) &&
+        collect.collect_contains_deferred_semantic_type(candidate.get_shared())) {
+        QualType finalized =
+            collect.collect_finalize_deferred_semantic_type(candidate, loc);
+        if (finalized) {
+            candidate = finalized;
+        }
+    }
+    return candidate;
+}
+
 class ScopedSpecializedScope {
 public:
     ScopedSpecializedScope(Collect& collect,
@@ -809,6 +835,24 @@ bool finalize_specialized_decl_semantics(Collect& collect,
                 using_decl->template_decls);
             return true;
         }
+        case DeclKind::TypedefDecl: {
+            auto* typedef_decl = static_cast<TypedefDecl*>(decl.get());
+            typedef_decl->type = finalize_specialized_type_after_substitution(
+                collect,
+                typedef_decl->type,
+                typedef_decl->location);
+            typedef_decl->underlying = desugar_type(typedef_decl->type);
+            if (typedef_decl->sym) {
+                auto typedef_type = std::make_shared<TypedefType>(
+                    typedef_decl->name,
+                    typedef_decl->type.without_qualifiers(),
+                    typedef_decl);
+                typedef_decl->sym->type = QualType(
+                    std::move(typedef_type),
+                    typedef_decl->type.get_qualifiers());
+            }
+            return true;
+        }
         case DeclKind::VariableDecl: {
             auto* variable = static_cast<VariableDecl*>(decl.get());
             if (!variable->init || variable->get_cpp_construct_init()) {
@@ -833,6 +877,9 @@ bool finalize_specialized_decl_semantics(Collect& collect,
                 }
                 return false;
             }
+            collect.realize_deferred_expr_type_after_substitution(
+                variable->init.get(),
+                true);
             variable->type =
                 collect_decl_internal::clone_top_level_incomplete_array(
                     variable->type);
@@ -845,6 +892,13 @@ bool finalize_specialized_decl_semantics(Collect& collect,
                 variable->sym,
                 variable->name,
                 variable->location);
+            if (type_has_unresolved_auto(variable->type)) {
+                if (error_out && error_out->empty()) {
+                    *error_out =
+                        "failed to deduce auto variable type after template substitution";
+                }
+                return false;
+            }
             auto rebuilt_init = collect.collect_variable_initializer_expression(
                 std::move(variable->init),
                 variable->type,

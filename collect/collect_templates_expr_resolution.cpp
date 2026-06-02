@@ -813,17 +813,15 @@ bool Collect::PostSubstitutionExprResolver::resolve_dependent_expr_after_substit
     }
 
     if (auto* this_expr = dyn_cast<CppThisExpr>(expr.get())) {
+        bool needs_this_type_rebind =
+            !this_expr->this_type ||
+            type_depends_on_template_parameters(
+                this_expr->this_type,
+                ast_ctx_.get()) ||
+            contains_deferred_semantic_type(
+                this_expr->this_type.get_shared());
         if (implicit_this_type &&
-            (!this_expr->this_type ||
-             type_depends_on_template_parameters(
-                 this_expr->this_type,
-                 ast_ctx_.get()) ||
-             contains_deferred_semantic_type(
-                 this_expr->this_type.get_shared()) ||
-             !types_equivalent_after_template_argument_canonicalization(
-                 this_expr->this_type,
-                 implicit_this_type,
-                 ast_ctx_.get()))) {
+            needs_this_type_rebind) {
             this_expr->this_type = implicit_this_type;
         }
         return true;
@@ -1813,6 +1811,46 @@ bool Collect::PostSubstitutionExprResolver::resolve_dependent_expr_after_substit
         return true;
     }
 
+    auto finalize_type_after_substitution =
+        [&](QualType type, SrcLoc loc) -> QualType {
+        if (!type) {
+            return type;
+        }
+        QualType realized = try_realize_deferred_semantic_type(type);
+        QualType candidate = realized ? realized : type;
+        if (!type_depends_on_template_parameters(candidate, ast_ctx_.get()) &&
+            contains_deferred_semantic_type(candidate.get_shared())) {
+            QualType finalized =
+                finalize_deferred_semantic_type(candidate, loc);
+            if (finalized) {
+                candidate = finalized;
+            }
+        }
+        return candidate;
+    };
+
+    auto finalize_explicit_template_arguments_after_substitution =
+        [&](std::optional<std::vector<TemplateArgument>>& arguments,
+            SrcLoc loc) {
+        if (!arguments.has_value()) {
+            return;
+        }
+        for (auto& argument : *arguments) {
+            if (argument.kind == TemplateArgumentKind::Type) {
+                argument.type =
+                    finalize_type_after_substitution(argument.type, loc);
+            } else if (argument.kind == TemplateArgumentKind::Value) {
+                argument.value_type = finalize_type_after_substitution(
+                    argument.value_type,
+                    loc);
+            }
+            argument.is_dependent =
+                template_argument_depends_on_template_parameters(
+                    argument,
+                    ast_ctx_.get());
+        }
+    };
+
     auto unresolved_member_still_dependent =
         [&](const UnresolvedMemberExpr* unresolved_member) -> bool {
             if (!unresolved_member) {
@@ -2503,6 +2541,17 @@ bool Collect::PostSubstitutionExprResolver::resolve_dependent_expr_after_substit
         expr = std::move(rewritten);
         return true;
     }
+    if (unresolved_member) {
+        finalize_explicit_template_arguments_after_substitution(
+            unresolved_member->explicit_template_arguments,
+            unresolved_member->location);
+    }
+    if (unresolved_lookup) {
+        finalize_explicit_template_arguments_after_substitution(
+            unresolved_lookup->explicit_template_arguments,
+            unresolved_lookup->location);
+    }
+
     if ((unresolved_member &&
          unresolved_member_still_dependent(unresolved_member)) ||
         (unresolved_lookup &&

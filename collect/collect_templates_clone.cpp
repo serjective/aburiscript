@@ -6,6 +6,21 @@
 
 namespace collect_template_internal {
 
+namespace {
+void install_context_aware_lambda_finalizer(Collect& collect,
+                                            ASTCloneContext& clone_ctx) {
+    clone_ctx.finalize_lambda_expr =
+        [&collect](CppLambdaExpr& lambda,
+                   ASTCloneContext& active_clone_ctx,
+                   std::string* error_out) -> bool {
+        return collect.collect_finalize_cpp_lambda_expression_with_clone_context(
+            lambda,
+            active_clone_ctx,
+            error_out);
+    };
+}
+} // namespace
+
 TemplateSubstitutionPass::TemplateSubstitutionPass() = default;
 
 TemplateSubstitutionPass::TemplateSubstitutionPass(
@@ -451,13 +466,35 @@ void realize_template_symbol_arguments_after_substitution(
             arguments,
             fallback_loc);
     }
+    auto finalize_argument_type = [&](QualType type) -> QualType {
+        if (!collect || !type) {
+            return type;
+        }
+        QualType realized =
+            collect->collect_try_realize_deferred_semantic_type(type);
+        QualType candidate = realized ? realized : type;
+        if (!type_depends_on_template_parameters(candidate, clone_ctx.ast_ctx) &&
+            collect->collect_contains_deferred_semantic_type(
+                candidate.get_shared())) {
+            QualType finalized =
+                collect->collect_finalize_deferred_semantic_type(
+                    candidate,
+                    fallback_loc);
+            if (finalized) {
+                candidate = finalized;
+            }
+        }
+        return candidate;
+    };
     for (auto& argument : arguments) {
         if (argument.kind == TemplateArgumentKind::Type) {
+            argument.type = finalize_argument_type(argument.type);
             auto canonical_type = desugar_type(argument.type, clone_ctx.ast_ctx);
             if (canonical_type) {
                 argument.type = canonical_type;
             }
         } else if (argument.kind == TemplateArgumentKind::Value) {
+            argument.value_type = finalize_argument_type(argument.value_type);
             auto canonical_value_type =
                 desugar_type(argument.value_type, clone_ctx.ast_ctx);
             if (canonical_value_type) {
@@ -1370,18 +1407,15 @@ bool rebind_member_expr_for_specialized_record(MemberExpr* member,
     if (!base_type) {
         return true;
     }
+    Expr* stripped_base =
+        member->base ? Collect::strip_implicit_casts(member->base.get()) : nullptr;
+    auto* fallback_this_expr = dyn_cast<CppThisExpr>(stripped_base);
     bool use_fallback_record =
         fallback_record_type &&
         (!member->base ||
-         isa<CppThisExpr>(Collect::strip_implicit_casts(member->base.get())) ||
          type_depends_on_template_parameters(base_type, ast_ctx));
     if (use_fallback_record) {
         base_type = fallback_record_type;
-        if (auto* this_expr = dyn_cast<CppThisExpr>(
-                Collect::strip_implicit_casts(member->base.get()))) {
-            this_expr->this_type =
-                QualType(std::make_shared<PointerType>(fallback_record_type));
-        }
     }
     bool treat_as_arrow = member->base && member->isArrow && !use_fallback_record;
 
@@ -1440,6 +1474,10 @@ bool rebind_member_expr_for_specialized_record(MemberExpr* member,
     }
 
     const auto& field = *lookup.field;
+    if (use_fallback_record && fallback_this_expr) {
+        fallback_this_expr->this_type =
+            QualType(std::make_shared<PointerType>(fallback_record_type));
+    }
     member->member_type = field.type;
     member->declared_member_type = field.type;
     member->virtual_base_record_decl = lookup.virtual_base_record_decl;
@@ -2115,6 +2153,9 @@ bool clone_function_body_for_specialization(Collect& collect,
         return false;
     }
     resolution_pass.sync_from_substitution_pass(substitution_pass);
+    install_context_aware_lambda_finalizer(
+        collect,
+        resolution_pass.context());
     enum class BodyCloneFailurePhase {
         None,
         LocalRecordCompletion,
@@ -2286,6 +2327,9 @@ bool clone_and_finalize_ctor_initializers_for_specialization(
         specialization,
         [&]() {
             specialization->ctor_initializers.clear();
+            install_context_aware_lambda_finalizer(
+                collect,
+                resolution_pass.context());
             if (!clone_ctor_initializers_for_specialization(
                     pattern,
                     specialization,

@@ -1392,23 +1392,33 @@ const ObjectDecl* lambda_this_record_identity(QualType this_type,
     return nullptr;
 }
 
+bool lambda_this_types_equal_after_desugar(QualType lhs,
+                                           QualType rhs,
+                                           const ASTContext* ast_ctx) {
+    if (!lhs || !rhs) {
+        return false;
+    }
+    if (lhs.equals_unqualified(rhs)) {
+        return true;
+    }
+
+    QualType lhs_canonical = desugar_type(lhs, ast_ctx);
+    QualType rhs_canonical = desugar_type(rhs, ast_ctx);
+    return lhs_canonical &&
+           rhs_canonical &&
+           lhs_canonical.equals_unqualified(rhs_canonical);
+}
+
 bool lambda_enclosing_this_types_match(QualType rewritten_this_type,
                                        QualType lexical_this_type,
                                        const ASTContext* ast_ctx) {
     if (!rewritten_this_type || !lexical_this_type) {
         return false;
     }
-    if (rewritten_this_type.equals_unqualified(lexical_this_type)) {
-        return true;
-    }
-
-    QualType rewritten_canonical =
-        desugar_type(rewritten_this_type, ast_ctx);
-    QualType lexical_canonical =
-        desugar_type(lexical_this_type, ast_ctx);
-    if (rewritten_canonical &&
-        lexical_canonical &&
-        rewritten_canonical.equals_unqualified(lexical_canonical)) {
+    if (lambda_this_types_equal_after_desugar(
+            rewritten_this_type,
+            lexical_this_type,
+            ast_ctx)) {
         return true;
     }
 
@@ -1887,8 +1897,19 @@ std::unique_ptr<Expr> Collect::collect_statement_expression(std::unique_ptr<Comp
     return node;
 }
 
-bool Collect::finalize_cpp_lambda_semantics(
+bool Collect::finalize_cpp_lambda_semantics(CppLambdaExpr& lambda,
+                                            std::string* error_out) {
+    ASTCloneContext clone_ctx;
+    clone_ctx.ast_ctx = ast_ctx_.get();
+    return finalize_cpp_lambda_semantics_with_clone_context(
+        lambda,
+        clone_ctx,
+        error_out);
+}
+
+bool Collect::finalize_cpp_lambda_semantics_with_clone_context(
     CppLambdaExpr& lambda,
+    ASTCloneContext& inherited_clone_ctx,
     std::string* error_out) {
     auto fail = [&](const std::string& message, SrcLoc loc) -> bool {
         report_error(message, loc);
@@ -2102,17 +2123,24 @@ bool Collect::finalize_cpp_lambda_semantics(
     collect_record_publish_semantics(closure_ctx);
     RecordSemanticState updated_state = std::move(closure_ctx.semantic_state);
 
-    if (!lambda.semantic_info.capture_initializers.empty()) {
-        auto init_list = collect_initializer_list_expression(lambda.location);
-        ASTCloneContext init_clone_ctx;
-        init_clone_ctx.ast_ctx = ast_ctx_.get();
-        init_clone_ctx.finalize_lambda_expr =
+    auto make_lambda_clone_context = [&]() -> ASTCloneContext {
+        ASTCloneContext ctx = inherited_clone_ctx;
+        ctx.ast_ctx = ast_ctx_.get();
+        ctx.finalize_lambda_expr =
             [this](CppLambdaExpr& nested_lambda,
+                   ASTCloneContext& nested_clone_ctx,
                    std::string* nested_error_out) -> bool {
-                return collect_finalize_cpp_lambda_expression(
+                return collect_finalize_cpp_lambda_expression_with_clone_context(
                     nested_lambda,
+                    nested_clone_ctx,
                     nested_error_out);
             };
+        return ctx;
+    };
+
+    if (!lambda.semantic_info.capture_initializers.empty()) {
+        auto init_list = collect_initializer_list_expression(lambda.location);
+        ASTCloneContext init_clone_ctx = make_lambda_clone_context();
         for (const auto& capture_init : lambda.semantic_info.capture_initializers) {
             if (!capture_init) {
                 continue;
@@ -2146,18 +2174,14 @@ bool Collect::finalize_cpp_lambda_semantics(
         }
     }
 
-    ASTCloneContext clone_ctx;
-    clone_ctx.ast_ctx = ast_ctx_.get();
-    clone_ctx.preserve_unexpanded_pack_expansions = lambda.is_generic;
-    clone_ctx.finalize_lambda_expr =
-        [this](CppLambdaExpr& nested_lambda,
-               std::string* nested_error_out) -> bool {
-            return collect_finalize_cpp_lambda_expression(
-                nested_lambda,
-                nested_error_out);
-        };
+    ASTCloneContext clone_ctx = make_lambda_clone_context();
+    clone_ctx.preserve_unexpanded_pack_expansions =
+        clone_ctx.preserve_unexpanded_pack_expansions || lambda.is_generic;
+    auto inherited_rewrite_var_ref = clone_ctx.rewrite_var_ref;
     clone_ctx.rewrite_var_ref =
-        [&](const VarRef* var_ref, std::string* error_out)
+        [&, inherited_rewrite_var_ref](
+            const VarRef* var_ref,
+            std::string* rewrite_error_out)
         -> std::unique_ptr<Expr> {
             if (!var_ref || !var_ref->symref) {
                 return nullptr;
@@ -2175,7 +2199,9 @@ bool Collect::finalize_cpp_lambda_semantics(
                 }
             }
             if (capture_it == capture_field_by_symbol.end() || !capture_it->second) {
-                return nullptr;
+                return inherited_rewrite_var_ref
+                    ? inherited_rewrite_var_ref(var_ref, rewrite_error_out)
+                    : nullptr;
             }
 
             auto this_expr = collect_make<CppThisExpr>(
@@ -2189,8 +2215,8 @@ bool Collect::finalize_cpp_lambda_semantics(
                 false,
                 false);
             if (!member_expr) {
-                if (error_out) {
-                    *error_out =
+                if (rewrite_error_out) {
+                    *rewrite_error_out =
                         "failed to rewrite lambda capture reference '" +
                         var_ref->get_name() + "'";
                 }
@@ -2200,44 +2226,52 @@ bool Collect::finalize_cpp_lambda_semantics(
             }
             return member_expr;
         };
+    auto inherited_rewrite_expr = clone_ctx.rewrite_expr;
     clone_ctx.rewrite_expr =
-        [&](std::unique_ptr<Expr>& expr, std::string* error_out) -> bool {
-            if (this_capture_field_name.empty() || !this_capture_field) {
-                return true;
-            }
+        [&, inherited_rewrite_expr](
+            std::unique_ptr<Expr>& expr,
+            std::string* rewrite_error_out) -> bool {
             auto* this_expr = dyn_cast<CppThisExpr>(expr.get());
-            if (!this_expr) {
-                return true;
-            }
-            if (!lambda.semantic_info.lexical_this_context.this_type ||
-                !this_expr->this_type) {
-                return true;
-            }
-            if (!lambda_enclosing_this_types_match(
+            bool is_closure_this =
+                this_expr &&
+                lambda_this_types_equal_after_desugar(
+                    this_expr->this_type,
+                    function_type->parameters.front(),
+                    ast_ctx_.get());
+            if (!this_capture_field_name.empty() &&
+                this_capture_field &&
+                this_expr &&
+                !is_closure_this &&
+                lambda.semantic_info.lexical_this_context.this_type &&
+                this_expr->this_type &&
+                lambda_enclosing_this_types_match(
                     this_expr->this_type,
                     lambda.semantic_info.lexical_this_context.this_type,
                     ast_ctx_.get())) {
-                return true;
+                auto closure_this_expr = collect_make<CppThisExpr>(
+                    function_type->parameters.front(),
+                    this_expr->location);
+                auto rewritten_this = collect_member_expression(
+                    std::move(closure_this_expr),
+                    this_capture_field_name,
+                    true,
+                    this_expr->location,
+                    false,
+                    false);
+                if (!rewritten_this) {
+                    if (rewrite_error_out) {
+                        *rewrite_error_out =
+                            "failed to rewrite lambda enclosing 'this' capture";
+                    }
+                    return false;
+                }
+                expr = std::move(rewritten_this);
             }
 
-            auto closure_this_expr = collect_make<CppThisExpr>(
-                function_type->parameters.front(),
-                this_expr->location);
-            auto rewritten_this = collect_member_expression(
-                std::move(closure_this_expr),
-                this_capture_field_name,
-                true,
-                this_expr->location,
-                false,
-                false);
-            if (!rewritten_this) {
-                if (error_out) {
-                    *error_out =
-                        "failed to rewrite lambda enclosing 'this' capture";
-                }
+            if (inherited_rewrite_expr &&
+                !inherited_rewrite_expr(expr, rewrite_error_out)) {
                 return false;
             }
-            expr = std::move(rewritten_this);
             return true;
         };
 
@@ -2389,8 +2423,179 @@ bool Collect::finalize_cpp_lambda_semantics(
         synthesized_method_type &&
         auto_type_utils::has_cxx_auto_type(
             synthesized_method_type->ret_type.get_shared());
+    std::function<bool(const Decl*)> decl_still_template_dependent;
+    std::function<bool(const Stmt*)> stmt_still_template_dependent;
+    decl_still_template_dependent = [&](const Decl* decl) -> bool {
+        if (!decl) {
+            return false;
+        }
+        if (const auto* variable = dyn_cast<VariableDecl>(decl)) {
+            return type_depends_on_template_parameters(variable->type) ||
+                   type_depends_on_template_parameters(
+                       QualType(variable->original_type)) ||
+                   expression_depends_on_template_parameters(
+                       variable->init.get());
+        }
+        if (const auto* param = dyn_cast<ParamDecl>(decl)) {
+            return type_depends_on_template_parameters(param->type);
+        }
+        if (const auto* typedef_decl = dyn_cast<TypedefDecl>(decl)) {
+            return type_depends_on_template_parameters(typedef_decl->type);
+        }
+        if (const auto* static_assert_decl = dyn_cast<StaticAssertDecl>(decl)) {
+            return expression_depends_on_template_parameters(
+                static_assert_decl->condition.get());
+        }
+        return false;
+    };
+    stmt_still_template_dependent = [&](const Stmt* stmt) -> bool {
+        if (!stmt) {
+            return false;
+        }
+        if (const auto* expr = dyn_cast<Expr>(stmt)) {
+            return expression_depends_on_template_parameters(expr);
+        }
+        switch (stmt->get_kind()) {
+            case StmtKind::CompoundStmt: {
+                const auto* compound = static_cast<const CompoundStmt*>(stmt);
+                for (const auto& child : compound->statements) {
+                    if (stmt_still_template_dependent(child.get())) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            case StmtKind::Decl2Stmt: {
+                const auto* decl_stmt = static_cast<const Decl2Stmt*>(stmt);
+                for (const auto& decl : decl_stmt->decls) {
+                    if (decl_still_template_dependent(decl.get())) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            case StmtKind::ReturnStmt:
+                return expression_depends_on_template_parameters(
+                    static_cast<const ReturnStmt*>(stmt)->expression.get());
+            case StmtKind::IfStmt: {
+                const auto* if_stmt = static_cast<const IfStmt*>(stmt);
+                return stmt_still_template_dependent(
+                           if_stmt->init_stmt.get()) ||
+                       stmt_still_template_dependent(
+                           if_stmt->condition.declaration.get()) ||
+                       expression_depends_on_template_parameters(
+                           if_stmt->condition.expression.get()) ||
+                       stmt_still_template_dependent(if_stmt->then_stmt.get()) ||
+                       stmt_still_template_dependent(if_stmt->else_stmt.get());
+            }
+            case StmtKind::SwitchStmt: {
+                const auto* switch_stmt = static_cast<const SwitchStmt*>(stmt);
+                return stmt_still_template_dependent(
+                           switch_stmt->condition.declaration.get()) ||
+                       expression_depends_on_template_parameters(
+                           switch_stmt->condition.expression.get()) ||
+                       stmt_still_template_dependent(switch_stmt->stmt.get());
+            }
+            case StmtKind::WhileStmt: {
+                const auto* while_stmt = static_cast<const WhileStmt*>(stmt);
+                return stmt_still_template_dependent(
+                           while_stmt->condition.declaration.get()) ||
+                       expression_depends_on_template_parameters(
+                           while_stmt->condition.expression.get()) ||
+                       stmt_still_template_dependent(
+                           while_stmt->body_stmt.get());
+            }
+            case StmtKind::DoWhileStmt: {
+                const auto* do_while_stmt =
+                    static_cast<const DoWhileStmt*>(stmt);
+                return stmt_still_template_dependent(
+                           do_while_stmt->body_stmt.get()) ||
+                       expression_depends_on_template_parameters(
+                           do_while_stmt->condition.get());
+            }
+            case StmtKind::ForStmt: {
+                const auto* for_stmt = static_cast<const ForStmt*>(stmt);
+                return stmt_still_template_dependent(for_stmt->init.get()) ||
+                       stmt_still_template_dependent(
+                           for_stmt->cond.declaration.get()) ||
+                       expression_depends_on_template_parameters(
+                           for_stmt->cond.expression.get()) ||
+                       expression_depends_on_template_parameters(
+                           for_stmt->action.get()) ||
+                       stmt_still_template_dependent(
+                           for_stmt->body_stmt.get());
+            }
+            case StmtKind::CppRangeForStmt: {
+                const auto* range_for =
+                    static_cast<const CppRangeForStmt*>(stmt);
+                if (stmt_still_template_dependent(
+                        range_for->init_statement.get()) ||
+                    decl_still_template_dependent(
+                        range_for->range_variable.get()) ||
+                    decl_still_template_dependent(
+                        range_for->begin_variable.get()) ||
+                    decl_still_template_dependent(
+                        range_for->end_variable.get()) ||
+                    decl_still_template_dependent(
+                        range_for->loop_variable.get()) ||
+                    expression_depends_on_template_parameters(
+                        range_for->condition.get()) ||
+                    expression_depends_on_template_parameters(
+                        range_for->increment.get()) ||
+                    stmt_still_template_dependent(
+                        range_for->body_stmt.get())) {
+                    return true;
+                }
+                for (const auto& decl :
+                     range_for->range_declaration_side_decls) {
+                    if (decl_still_template_dependent(decl.get())) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            case StmtKind::CaseStmt: {
+                const auto* case_stmt = static_cast<const CaseStmt*>(stmt);
+                return expression_depends_on_template_parameters(
+                           case_stmt->const_expr.get()) ||
+                       expression_depends_on_template_parameters(
+                           case_stmt->range_end.get()) ||
+                       stmt_still_template_dependent(case_stmt->stmt.get());
+            }
+            case StmtKind::DefaultStmt:
+                return stmt_still_template_dependent(
+                    static_cast<const DefaultStmt*>(stmt)->stmt.get());
+            case StmtKind::LabeledStmt:
+                return stmt_still_template_dependent(
+                    static_cast<const LabeledStmt*>(stmt)->stmt.get());
+            case StmtKind::ComputedGotoStmt:
+                return expression_depends_on_template_parameters(
+                    static_cast<const ComputedGotoStmt*>(stmt)->target.get());
+            case StmtKind::CppTryStmt: {
+                const auto* try_stmt = static_cast<const CppTryStmt*>(stmt);
+                if (stmt_still_template_dependent(
+                        try_stmt->try_block.get())) {
+                    return true;
+                }
+                for (const auto& handler : try_stmt->handlers) {
+                    if (stmt_still_template_dependent(
+                            handler.handler.get())) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            default:
+                return false;
+        }
+    };
+    bool has_post_substitution_context =
+        inherited_clone_ctx.rewrite_type || inherited_clone_ctx.rewrite_expr;
     bool should_finalize_cloned_body =
-        !lambda.is_generic && synthesized_method->body != nullptr;
+        !lambda.is_generic &&
+        synthesized_method->body != nullptr &&
+        (has_post_substitution_context ||
+         !stmt_still_template_dependent(synthesized_method->body.get()));
     if (should_finalize_cloned_body) {
         std::string finalize_error;
         if (!with_function_definition_state(
@@ -2623,6 +2828,16 @@ bool Collect::collect_finalize_cpp_lambda_expression(CppLambdaExpr& lambda,
     return finalize_cpp_lambda_semantics(lambda, error_out);
 }
 
+bool Collect::collect_finalize_cpp_lambda_expression_with_clone_context(
+    CppLambdaExpr& lambda,
+    ASTCloneContext& clone_ctx,
+    std::string* error_out) {
+    return finalize_cpp_lambda_semantics_with_clone_context(
+        lambda,
+        clone_ctx,
+        error_out);
+}
+
 bool Collect::collect_finalize_block_expression(BlockExpr& block,
                                                 std::string* error_out) {
     auto fail = [&](const std::string& message, SrcLoc loc) -> bool {
@@ -2778,9 +2993,11 @@ bool Collect::collect_finalize_block_expression(BlockExpr& block,
     clone_ctx.ast_ctx = ast_ctx_.get();
     clone_ctx.finalize_lambda_expr =
         [this](CppLambdaExpr& nested_lambda,
+               ASTCloneContext& nested_clone_ctx,
                std::string* nested_error_out) -> bool {
-            return collect_finalize_cpp_lambda_expression(
+            return collect_finalize_cpp_lambda_expression_with_clone_context(
                 nested_lambda,
+                nested_clone_ctx,
                 nested_error_out);
         };
     clone_ctx.finalize_block_expr =
