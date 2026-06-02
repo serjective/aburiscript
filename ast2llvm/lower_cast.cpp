@@ -62,6 +62,10 @@ llvm::Value* ASTToLLVM::convert_implicit_cast(ImplicitCast *expr) {
             return nullptr;
         }
         builder.CreateStore(bound_val, tmp);
+        register_cpp_temporary_cleanup(
+            ref_type->referred_type,
+            tmp,
+            expr->location);
         return tmp;
     }
 
@@ -699,6 +703,10 @@ llvm::Value* ASTToLLVM::convert_explicit_cast(ExplicitCast *expr) {
             return nullptr;
         }
         builder.CreateStore(bound_val, tmp);
+        register_cpp_temporary_cleanup(
+            ref_type->referred_type,
+            tmp,
+            expr->location);
         return tmp;
     }
 

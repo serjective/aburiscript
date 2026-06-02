@@ -292,6 +292,37 @@ void ASTToLLVM::emit_cleanups_to_depth(size_t target_depth) {
     }
 }
 
+bool ASTToLLVM::register_cpp_temporary_cleanup(QualType object_type,
+                                               llvm::Value* object_addr,
+                                               SrcLoc loc) {
+    if (!object_addr || cleanup_stack.empty()) {
+        return false;
+    }
+
+    QualType canonical_type = desugar_type(object_type, ast_ctx.get());
+    auto record_type = canonical_type.as_shared<ObjectType>();
+    if (!record_type || record_type->isIncomplete()) {
+        return false;
+    }
+
+    const auto* record_decl = dyn_cast<ObjectDecl>(record_type->get_decl());
+    const RecordSemanticState* record_state = lookup_cpp_record_state(record_decl);
+    auto destructor_symbol =
+        select_record_destructor_symbol(record_state, false);
+    if (!destructor_symbol) {
+        return false;
+    }
+
+    CleanupEntry cleanup;
+    cleanup.var_addr = object_addr;
+    cleanup.cxx_destructor_sym = destructor_symbol;
+    cleanup.cxx_destructor_object_type = canonical_type;
+    cleanup.location = loc;
+    cleanup.kind = CleanupEntry::Kind::CppDestructor;
+    cleanup_stack.back().push_back(std::move(cleanup));
+    return true;
+}
+
 void ASTToLLVM::collect_label_cleanup_depths(Stmt* stmt, size_t depth) {
     if (!stmt) {
         return;
@@ -563,7 +594,12 @@ void ASTToLLVM::convert_statement(Stmt *stmt) {
     }
 
     if (Expr::classof(stmt)) {
+        cleanup_stack.emplace_back();
         convert_expression(static_cast<Expr*>(stmt));
+        if (!builder.GetInsertBlock()->getTerminator()) {
+            emit_cleanups_for_scope();
+        }
+        cleanup_stack.pop_back();
         return;
     }
 

@@ -74,6 +74,10 @@ llvm::Value* materialize_indirect_aggregate_argument(ASTToLLVM& lower,
 
     auto* store = lower.builder.CreateStore(arg_val, tmp);
     store->setAlignment(agg_align);
+    lower.register_cpp_temporary_cleanup(
+        param_type,
+        tmp,
+        arg_expr->location);
     return tmp;
 }
 
@@ -129,6 +133,10 @@ llvm::Value* materialize_direct_aggregate_argument(ASTToLLVM& lower,
         tmp->setAlignment(agg_align);
         auto* store = lower.builder.CreateStore(arg_val, tmp);
         store->setAlignment(agg_align);
+        lower.register_cpp_temporary_cleanup(
+            param_type,
+            tmp,
+            arg_expr->location);
         src_ptr = tmp;
     }
 
@@ -309,6 +317,10 @@ llvm::Value* ASTToLLVM::convert_function_call(FuncCall *expr) {
                     return nullptr;
                 }
                 builder.CreateStore(arg_val, tmp);
+                register_cpp_temporary_cleanup(
+                    referred_type,
+                    tmp,
+                    arg_expr->location);
                 ref_ptr = tmp;
             }
             argsV.push_back(ref_ptr);
@@ -729,6 +741,10 @@ llvm::Value* ASTToLLVM::convert_cpp_member_call(CppMemberCallExpr *expr) {
                     return nullptr;
                 }
                 builder.CreateStore(materialized_arg, tmp);
+                register_cpp_temporary_cleanup(
+                    referred_type,
+                    tmp,
+                    arg_expr->location);
                 ref_ptr = tmp;
             }
             arg_val = ref_ptr;
@@ -1165,6 +1181,10 @@ llvm::Value* ASTToLLVM::emit_member_pointer_dispatch(
                     return nullptr;
                 }
                 builder.CreateStore(arg_val, tmp);
+                register_cpp_temporary_cleanup(
+                    referred_type,
+                    tmp,
+                    arg_expr->location);
                 ref_ptr = tmp;
             }
             argsV.push_back(ref_ptr);

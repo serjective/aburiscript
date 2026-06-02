@@ -186,6 +186,9 @@ public:
     void emit_cleanups_for_scope();
     void emit_all_cleanups();
     void emit_cleanups_to_depth(size_t target_depth);
+    bool register_cpp_temporary_cleanup(QualType object_type,
+                                        llvm::Value* object_addr,
+                                        SrcLoc loc);
     void collect_label_cleanup_depths(Stmt* stmt, size_t depth);
     void emit_cleanup_cpp_destructor(const CleanupEntry& entry,
                                      const std::string& context);

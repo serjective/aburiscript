@@ -142,6 +142,107 @@ bool initializer_target_type_requires_deferred_semantics(
     return false;
 }
 
+struct RecordFieldLookupResult {
+    const ObjectType::Field* field = nullptr;
+    const ObjectDecl* owner_record_decl = nullptr;
+    const ObjectDecl* virtual_base_record_decl = nullptr;
+    std::vector<uint32_t> path;
+    size_t byte_offset = 0;
+    size_t relative_byte_offset = 0;
+    int matches = 0;
+};
+
+void lookup_record_field_recursive(const ObjectType* record,
+                                   const std::string& name,
+                                   std::vector<uint32_t>& path,
+                                   size_t base_offset,
+                                   RecordFieldLookupResult& result,
+                                   ASTContext* ast_ctx = nullptr) {
+    if (!record) {
+        return;
+    }
+
+    const auto& fields = record->semantic_fields();
+    for (size_t i = 0; i < fields.size(); ++i) {
+        const auto& field = fields[i];
+        if (field.name == name) {
+            ++result.matches;
+            if (result.matches == 1) {
+                result.field = &field;
+                result.owner_record_decl =
+                    dyn_cast<ObjectDecl>(record->get_decl());
+                result.path = path;
+                result.path.push_back(static_cast<uint32_t>(i));
+                result.byte_offset = base_offset + field.offset;
+                result.relative_byte_offset = base_offset + field.offset;
+            }
+        }
+
+        if (field.name.empty()) {
+            auto nested =
+                desugar_type(field.type, ast_ctx).as_shared<ObjectType>();
+            if (nested && !nested->isIncomplete()) {
+                nested->getWidth();
+                path.push_back(static_cast<uint32_t>(i));
+                lookup_record_field_recursive(
+                    nested.get(),
+                    name,
+                    path,
+                    base_offset + field.offset,
+                    result,
+                    ast_ctx);
+                path.pop_back();
+            }
+        }
+    }
+
+    if (path.empty() && base_offset == 0) {
+        const auto* record_decl = dyn_cast<ObjectDecl>(record->get_decl());
+        const auto* record_state =
+            record_decl ? record_semantics_cache_lookup(record_decl, ast_ctx)
+                        : nullptr;
+        if (!record_state) {
+            return;
+        }
+
+        for (const auto& virtual_base : record_state->virtual_bases) {
+            auto virtual_record =
+                desugar_type(virtual_base.type, ast_ctx).as_shared<ObjectType>();
+            if (!virtual_record || !virtual_base.has_offset) {
+                continue;
+            }
+
+            std::vector<uint32_t> virtual_path;
+            RecordFieldLookupResult virtual_lookup;
+            lookup_record_field_recursive(
+                virtual_record.get(),
+                name,
+                virtual_path,
+                0,
+                virtual_lookup,
+                ast_ctx);
+            if (virtual_lookup.matches == 0) {
+                continue;
+            }
+
+            result.matches += virtual_lookup.matches;
+            if (result.matches == virtual_lookup.matches) {
+                result.field = virtual_lookup.field;
+                result.owner_record_decl = virtual_lookup.owner_record_decl;
+                result.virtual_base_record_decl =
+                    virtual_lookup.virtual_base_record_decl
+                        ? virtual_lookup.virtual_base_record_decl
+                        : dyn_cast<ObjectDecl>(virtual_record->get_decl());
+                result.path = virtual_lookup.path;
+                result.byte_offset =
+                    virtual_base.offset + virtual_lookup.byte_offset;
+                result.relative_byte_offset =
+                    virtual_lookup.relative_byte_offset;
+            }
+        }
+    }
+}
+
 std::string describe_consteval_failure(const ConstEvalResult& result) {
     if (!result.message.empty()) {
         return result.message;

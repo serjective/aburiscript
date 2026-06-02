@@ -1,4 +1,5 @@
 #include "collect_templates_internal.h"
+#include "collect_internal.h"
 #include "../helpers/auto_type_utils.h"
 
 #include <sstream>
@@ -1387,46 +1388,69 @@ bool rebind_member_expr_for_specialized_record(MemberExpr* member,
         return true;
     }
 
-    const auto& member_name = member->get_member_name();
-    for (size_t idx = 0; idx < state->fields.size(); ++idx) {
-        const auto& field = state->fields[idx];
-        if (field.is_base_subobject || field.is_virtual_base_storage ||
-            field.name != member_name) {
-            continue;
-        }
-
-        member->member_type = field.type;
-        member->virtual_base_record_decl = nullptr;
-        member->field_index = static_cast<uint32_t>(idx);
-        member->field_path.clear();
-        member->byte_offset = static_cast<uint32_t>(field.offset);
-        member->is_bitfield = field.is_bitfield;
-        if (field.is_bitfield && ast_ctx) {
-            ast_ctx->set_bitfield_info(
-                member->node_id,
-                BitfieldInfo{
-                    field.bit_offset,
-                    field.bit_width,
-                    field.storage_size});
-        }
-
-        uint8_t base_quals = QUAL_NONE;
-        if (treat_as_arrow) {
-            auto ptr_type =
-                remove_reference(desugar_type(base_type)).as_shared<PointerType>();
-            if (ptr_type) {
-                base_quals = ptr_type->pointed_type.get_qualifiers();
-            }
-        } else {
-            base_quals = remove_reference(base_type).get_qualifiers();
-        }
-        if (field.is_mutable) {
-            base_quals = static_cast<uint8_t>(base_quals & ~QUAL_CONST);
-        }
-        if (base_quals != QUAL_NONE && member->member_type) {
-            member->member_type = member->member_type.with_qualifiers(base_quals);
-        }
+    if (record_type->isIncomplete()) {
         return true;
+    }
+    record_type->getWidth();
+
+    const auto& member_name = member->get_member_name();
+    collect_internal::RecordFieldLookupResult lookup;
+    std::vector<uint32_t> path;
+    collect_internal::lookup_record_field_recursive(
+        record_type.get(),
+        member_name,
+        path,
+        0,
+        lookup,
+        ast_ctx);
+    if (lookup.matches == 0 || lookup.field == nullptr) {
+        return true;
+    }
+    if (lookup.matches > 1) {
+        if (error_out) {
+            *error_out =
+                "member '" + member_name +
+                "' is ambiguous after template specialization";
+        }
+        return false;
+    }
+
+    const auto& field = *lookup.field;
+    member->member_type = field.type;
+    member->declared_member_type = field.type;
+    member->virtual_base_record_decl = lookup.virtual_base_record_decl;
+    member->field_index = static_cast<uint32_t>(
+        lookup.path.empty() ? 0 : lookup.path.back());
+    member->field_path = lookup.path;
+    member->byte_offset = static_cast<uint32_t>(
+        lookup.virtual_base_record_decl
+            ? lookup.relative_byte_offset
+            : lookup.byte_offset);
+    member->is_bitfield = field.is_bitfield;
+    if (field.is_bitfield && ast_ctx) {
+        ast_ctx->set_bitfield_info(
+            member->node_id,
+            BitfieldInfo{
+                field.bit_offset,
+                field.bit_width,
+                field.storage_size});
+    }
+
+    uint8_t base_quals = QUAL_NONE;
+    if (treat_as_arrow) {
+        auto ptr_type =
+            remove_reference(desugar_type(base_type)).as_shared<PointerType>();
+        if (ptr_type) {
+            base_quals = ptr_type->pointed_type.get_qualifiers();
+        }
+    } else {
+        base_quals = remove_reference(base_type).get_qualifiers();
+    }
+    if (field.is_mutable) {
+        base_quals = static_cast<uint8_t>(base_quals & ~QUAL_CONST);
+    }
+    if (base_quals != QUAL_NONE && member->member_type) {
+        member->member_type = member->member_type.with_qualifiers(base_quals);
     }
 
     return true;

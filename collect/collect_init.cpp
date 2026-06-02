@@ -119,77 +119,28 @@ Expr* unwrap_initializer_parens(Expr* expr) {
 }
 
 void Collect::find_field_recursive(const ObjectType* record, const std::string& name, std::vector<uint32_t>& path, size_t base_offset, FieldLookupResult& result) const {
-
-    if (!record) {
-        return;
-    }
-    const auto& fields = record->semantic_fields();
-    for (size_t i = 0; i < fields.size(); ++i) {
-        const auto& field = fields[i];
-        if (field.name == name) {
-            ++result.matches;
-            if (result.matches == 1) {
-                result.field = &field;
-                result.owner_record_decl = dyn_cast<ObjectDecl>(record->get_decl());
-                result.path = path;
-                result.path.push_back(static_cast<uint32_t>(i));
-                result.byte_offset = base_offset + field.offset;
-                result.relative_byte_offset = base_offset + field.offset;
-            }
-        }
-        if (field.name.empty()) {
-            auto nested =
-                desugar_type(field.type, ast_ctx_.get()).as_shared<ObjectType>();
-            if (nested && !nested->isIncomplete()) {
-                nested->getWidth();
-                path.push_back(static_cast<uint32_t>(i));
-                find_field_recursive(nested.get(), name, path, base_offset + field.offset, result);
-                path.pop_back();
-            }
-        }
-    }
-
-    if (path.empty() && base_offset == 0) {
-        const auto* record_decl = dyn_cast<ObjectDecl>(record->get_decl());
-        const auto* record_state =
-            record_decl ? record_semantics_cache_lookup(record_decl) : nullptr;
-        if (!record_state) {
-            return;
-        }
-
-        for (const auto& virtual_base : record_state->virtual_bases) {
-            auto virtual_record =
-                desugar_type(virtual_base.type, ast_ctx_.get()).as_shared<ObjectType>();
-            if (!virtual_record || !virtual_base.has_offset) {
-                continue;
-            }
-
-            std::vector<uint32_t> virtual_path;
-            FieldLookupResult virtual_lookup;
-            find_field_recursive(
-                virtual_record.get(),
-                name,
-                virtual_path,
-                0,
-                virtual_lookup);
-            if (virtual_lookup.matches == 0) {
-                continue;
-            }
-
-            result.matches += virtual_lookup.matches;
-            if (result.matches == virtual_lookup.matches) {
-                result.field = virtual_lookup.field;
-                result.owner_record_decl = virtual_lookup.owner_record_decl;
-                result.virtual_base_record_decl =
-                    virtual_lookup.virtual_base_record_decl
-                        ? virtual_lookup.virtual_base_record_decl
-                        : dyn_cast<ObjectDecl>(virtual_record->get_decl());
-                result.path = virtual_lookup.path;
-                result.byte_offset = virtual_base.offset + virtual_lookup.byte_offset;
-                result.relative_byte_offset = virtual_lookup.relative_byte_offset;
-            }
-        }
-    }
+    collect_internal::RecordFieldLookupResult internal_result{
+        result.field,
+        result.owner_record_decl,
+        result.virtual_base_record_decl,
+        result.path,
+        result.byte_offset,
+        result.relative_byte_offset,
+        result.matches};
+    collect_internal::lookup_record_field_recursive(
+        record,
+        name,
+        path,
+        base_offset,
+        internal_result,
+        ast_ctx_.get());
+    result.field = internal_result.field;
+    result.owner_record_decl = internal_result.owner_record_decl;
+    result.virtual_base_record_decl = internal_result.virtual_base_record_decl;
+    result.path = internal_result.path;
+    result.byte_offset = internal_result.byte_offset;
+    result.relative_byte_offset = internal_result.relative_byte_offset;
+    result.matches = internal_result.matches;
 }
 
 
