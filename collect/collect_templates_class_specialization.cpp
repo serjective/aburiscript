@@ -2851,6 +2851,151 @@ struct Collect::ClassTemplateSpecializationInstantiator {
                 .record_type_remap[cloned_provisional_semantic_owner] =
                 QualType(record_type);
         }
+
+        auto pattern_nested_state =
+            nested_record->provisional_semantic_owner
+                ? collect.query_lookup_record_semantics(
+                      nested_record->provisional_semantic_owner)
+                : nullptr;
+        if (pattern_nested_state) {
+            std::unordered_map<const FuncDecl*, std::shared_ptr<Symbol>>
+                pattern_function_symbols;
+            std::unordered_map<const FuncDecl*, std::shared_ptr<Symbol>>
+                cloned_function_symbols;
+
+            auto add_pattern_function =
+                [&](const FuncDecl* decl,
+                    const std::shared_ptr<Symbol>& symbol) {
+                if (decl && symbol) {
+                    pattern_function_symbols.emplace(decl, symbol);
+                }
+            };
+            auto add_cloned_function =
+                [&](const FuncDecl* decl,
+                    const std::shared_ptr<Symbol>& symbol) {
+                if (decl && symbol) {
+                    cloned_function_symbols.emplace(decl, symbol);
+                }
+            };
+
+            for (const auto& method : pattern_nested_state->methods) {
+                add_pattern_function(method.decl, method.symbol);
+            }
+            for (const auto& ctor : pattern_nested_state->constructors) {
+                add_pattern_function(ctor.decl, ctor.symbol);
+            }
+            for (const auto& dtor : pattern_nested_state->destructors) {
+                add_pattern_function(dtor.decl, dtor.symbol);
+            }
+            for (const auto& method : ctx.semantic_state.methods) {
+                add_cloned_function(method.decl, method.symbol);
+            }
+            for (const auto& ctor : ctx.semantic_state.constructors) {
+                add_cloned_function(ctor.decl, ctor.symbol);
+            }
+            for (const auto& dtor : ctx.semantic_state.destructors) {
+                add_cloned_function(dtor.decl, dtor.symbol);
+            }
+
+            std::function<void(const CppRecordDecl*, const CppRecordDecl*)>
+                map_nested_function_symbols;
+            map_nested_function_symbols =
+                [&](const CppRecordDecl* pattern_record,
+                    const CppRecordDecl* specialized_record) {
+                if (!pattern_record || !specialized_record) {
+                    return;
+                }
+                size_t member_count = std::min(
+                    pattern_record->members.size(),
+                    specialized_record->members.size());
+                for (size_t idx = 0; idx < member_count; ++idx) {
+                    const auto& pattern_member = pattern_record->members[idx];
+                    const auto& specialized_member =
+                        specialized_record->members[idx];
+                    if (!pattern_member || !specialized_member) {
+                        continue;
+                    }
+                    auto* pattern_function =
+                        dyn_cast<FuncDecl>(pattern_member.get());
+                    auto* specialized_function =
+                        dyn_cast<FuncDecl>(specialized_member.get());
+                    if (pattern_function && specialized_function) {
+                        auto pattern_symbol_it =
+                            pattern_function_symbols.find(pattern_function);
+                        auto specialized_symbol_it =
+                            cloned_function_symbols.find(specialized_function);
+                        if (pattern_symbol_it != pattern_function_symbols.end() &&
+                            specialized_symbol_it != cloned_function_symbols.end()) {
+                            clone_pass.context().symbol_remap
+                                [pattern_symbol_it->second.get()] =
+                                    specialized_symbol_it->second;
+                        }
+                        continue;
+                    }
+                    auto* pattern_child_record =
+                        dyn_cast<CppRecordDecl>(pattern_member.get());
+                    auto* specialized_child_record =
+                        dyn_cast<CppRecordDecl>(specialized_member.get());
+                    if (pattern_child_record && specialized_child_record) {
+                        map_nested_function_symbols(
+                            pattern_child_record,
+                            specialized_child_record);
+                    }
+                }
+            };
+            map_nested_function_symbols(nested_record, cloned_record);
+
+            auto rewrite_nested_function_decls =
+                [&](auto&& self,
+                    CppRecordDecl* record,
+                    ASTCloneContext& rewrite_ctx) -> bool {
+                if (!record) {
+                    return true;
+                }
+                for (auto& member : record->members) {
+                    if (!member) {
+                        continue;
+                    }
+                    if (auto* function_decl =
+                            dyn_cast<FuncDecl>(member.get())) {
+                        if (!rewrite_decl_tree_in_place(
+                                member,
+                                rewrite_ctx,
+                                &clone_error)) {
+                            return false;
+                        }
+                        if (function_decl->body &&
+                            !rewrite_stmt_tree_in_place(
+                                function_decl->body,
+                                rewrite_ctx,
+                                &clone_error)) {
+                            return false;
+                        }
+                        continue;
+                    }
+                    if (auto* child_record =
+                            dyn_cast<CppRecordDecl>(member.get())) {
+                        if (!self(self, child_record, rewrite_ctx)) {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            };
+
+            ASTCloneContext body_rewrite_ctx = clone_pass.context();
+            if (!rewrite_nested_function_decls(
+                    rewrite_nested_function_decls,
+                    cloned_record,
+                    body_rewrite_ctx)) {
+                return fail_instantiation(
+                    clone_error.empty()
+                        ? "failed to remap class template nested record member bodies after substitution"
+                        : clone_error,
+                    nested_record->location);
+            }
+        }
+
         if (!collect_template_internal::finalize_specialized_record_member_bodies(
                 collect,
                 cloned_record,
