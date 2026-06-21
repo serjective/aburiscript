@@ -193,8 +193,8 @@ struct DriverPersonaParseResult {
 
 static DriverPersona driver_persona_from_invocation_name(std::string_view argv0);
 
-static constexpr const char* kAburiDisplayVersion = "0.1.0-dev";
-static constexpr const char* kAburiNumericVersion = "0.1.0";
+static constexpr const char* kAburiDisplayVersion = "0.1.1-republic-day";
+static constexpr const char* kAburiNumericVersion = "0.1.1";
 
 static bool starts_with(const std::string& value, const std::string& prefix) {
     return value.rfind(prefix, 0) == 0;
