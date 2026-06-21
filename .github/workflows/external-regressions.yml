@@ -3,6 +3,8 @@ name: External Regressions
 on:
   workflow_dispatch:
   pull_request:
+    branches:
+      - atta-mills
     paths:
       - "**/*.cpp"
       - "**/*.h"
@@ -12,7 +14,7 @@ on:
       - ".github/workflows/external-regressions.yml"
   push:
     branches:
-      - main
+      - atta-mills
     paths:
       - "**/*.cpp"
       - "**/*.h"
