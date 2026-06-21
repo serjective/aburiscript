@@ -70,7 +70,11 @@ llvm::Value* ASTToLLVM::convert_implicit_cast(ImplicitCast *expr) {
     }
 
     if (expr->kind == ImplicitCastTypes::FUNCTION_TO_POINTER) {
-        if (auto* varRef = dyn_cast<VarRef>(expr->expr.get())) {
+        Expr* function_expr = expr->expr.get();
+        while (auto* paren = dyn_cast<ParenExpr>(function_expr)) {
+            function_expr = paren->subexpr.get();
+        }
+        if (auto* varRef = dyn_cast<VarRef>(function_expr)) {
             if (varRef->symref && varRef->symref->kind == SymbolKind::FUNCTION) {
                 llvm::Function* fn =
                     get_or_create_function_symbol(varRef->symref, varRef->get_name());
