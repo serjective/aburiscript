@@ -1,4 +1,4 @@
-<img src="./media/logo.svg" width="256px"/>
+<img src="./media/logo.png" width="256px"/>
 
 
 Aburi, pronounced "Eh-bree," is a C and C++ compiler frontend. It currently lowers source code to LLVM IR, uses LLVM for optimization and final code emission, and exposes a GCC/Clang-like driver named `aburi`.
