@@ -3,15 +3,15 @@ project(aburi)
 
 set(ABURI_SUPPORTED_LLVM_MIN_VERSION 18.0.0)
 set(ABURI_SUPPORTED_LLVM_MAX_VERSION 19.0.0)
-option(ABURI_BUILD_PUBLIC_TESTS "Build Aburiscript public runtime smoke tests" OFF)
-option(ABURI_BUILD_TESTS "Build Aburiscript private test suite" OFF)
+option(ABURI_BUILD_PUBLIC_TESTS "Build Aburi public runtime smoke tests" OFF)
+option(ABURI_BUILD_TESTS "Build Aburi private test suite" OFF)
 
 find_package(LLVM REQUIRED CONFIG)
 
 if(LLVM_PACKAGE_VERSION VERSION_LESS ${ABURI_SUPPORTED_LLVM_MIN_VERSION}
         OR LLVM_PACKAGE_VERSION VERSION_GREATER_EQUAL ${ABURI_SUPPORTED_LLVM_MAX_VERSION})
         message(FATAL_ERROR
-                "Aburiscript currently supports LLVM 18.x only. "
+                "Aburi currently supports LLVM 18.x only. "
                 "Found LLVM ${LLVM_PACKAGE_VERSION} at ${LLVM_DIR}. "
                 "Point CMake at an LLVM 18 installation with "
                 "-DLLVM_DIR=<path-to-llvm-18>/lib/cmake/llvm or "

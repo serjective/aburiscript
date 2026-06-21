@@ -2322,7 +2322,7 @@ void ASTToLLVM::convert_translation_unit(Decl *decl) {
         di_cu = di_builder->createCompileUnit(
             llvm::dwarf::DW_LANG_C99,
             di_builder->createFile(filename, directory),
-            "Aburiscript",
+            "Aburi",
             optimization_level != "0",
             "",
             0

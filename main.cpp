@@ -27,7 +27,7 @@
 
 namespace cl = llvm::cl;
 
-static cl::OptionCategory AburiCategory("Aburiscript Options");
+static cl::OptionCategory AburiCategory("Aburi Options");
 
 static cl::list<std::string> InputFilenames(cl::Positional, cl::desc("<input files>"), cl::ZeroOrMore, cl::cat(AburiCategory));
 static cl::opt<std::string> OutputFilename("o", cl::desc("Output filename"), cl::value_desc("filename"), cl::cat(AburiCategory));
@@ -574,14 +574,14 @@ static void print_driver_banner(std::ostream& os,
                                 const std::string& installed_dir) {
     if (persona == DriverPersona::ClangCompat) {
         os << "clang version " << LLVM_VERSION_STRING
-           << " (Aburiscript " << kAburiDisplayVersion << ")\n";
+           << " (Aburi " << kAburiDisplayVersion << ")\n";
         os << "Target: " << target_triple << "\n";
         os << "Thread model: posix\n";
         os << "InstalledDir: " << installed_dir << "\n";
         return;
     }
 
-    os << "Aburiscript version " << kAburiDisplayVersion << "\n";
+    os << "Aburi version " << kAburiDisplayVersion << "\n";
     os << "LLVM backend version " << LLVM_VERSION_STRING << "\n";
     os << "Target: " << target_triple << "\n";
     os << "InstalledDir: " << installed_dir << "\n";
@@ -1341,7 +1341,7 @@ int main(int argc, char** argv) {
         }
         int parsed_argc = static_cast<int>(arg_ptrs.size());
         cl::HideUnrelatedOptions(AburiCategory);
-        cl::ParseCommandLineOptions(parsed_argc, arg_ptrs.data(), "Aburiscript compiler\n");
+        cl::ParseCommandLineOptions(parsed_argc, arg_ptrs.data(), "Aburi compiler\n");
         auto parsed_perf_detail = parse_perf_detail(FTimeReportDetail);
         if (!parsed_perf_detail.has_value()) {
             std::cerr << "Error: --ftime-report-detail must be 'summary', 'headers', or 'full'" << std::endl;

@@ -8,7 +8,7 @@ body:
     id: summary
     attributes:
       label: Summary
-      description: What would you like Aburiscript to support or improve?
+      description: What would you like Aburi to support or improve?
     validations:
       required: true
 

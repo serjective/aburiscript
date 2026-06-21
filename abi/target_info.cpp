@@ -139,7 +139,7 @@ std::vector<std::pair<std::string, std::string>> TargetInfo::get_builtin_macros(
     add("__clang_minor__", std::to_string(clang_minor));
     add("__clang_patchlevel__", std::to_string(clang_patch));
     add("__clang_version__", "\"" + std::to_string(clang_major) + "." +
-        std::to_string(clang_minor) + "." + std::to_string(clang_patch) + " (Aburiscript)\"");
+        std::to_string(clang_minor) + "." + std::to_string(clang_patch) + " (Aburi)\"");
 
     return out;
 }

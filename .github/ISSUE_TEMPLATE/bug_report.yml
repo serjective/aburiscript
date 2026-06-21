@@ -12,9 +12,9 @@ body:
   - type: input
     id: aburi_version
     attributes:
-      label: Aburiscript Version
+      label: Aburi Version
       description: Output of `aburi --version`
-      placeholder: "Aburiscript version 0.1.0-dev"
+      placeholder: "Aburi version 0.1.0-dev"
     validations:
       required: true
 
@@ -22,7 +22,7 @@ body:
     id: llvm_version
     attributes:
       label: LLVM Version
-      description: The LLVM version used to build Aburiscript
+      description: The LLVM version used to build Aburi
       placeholder: "18.1.8"
     validations:
       required: true
