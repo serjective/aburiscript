@@ -21,6 +21,14 @@ endif()
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
+list(FIND LLVM_TARGETS_TO_BUILD "AArch64" ABURI_LLVM_AARCH64_TARGET_INDEX)
+if(ABURI_LLVM_AARCH64_TARGET_INDEX EQUAL -1)
+        message(FATAL_ERROR
+                "Aburi requires an LLVM 18 build with the AArch64 target enabled "
+                "so non-Darwin hosts can emit the default Apple AArch64 output. "
+                "Found LLVM_TARGETS_TO_BUILD='${LLVM_TARGETS_TO_BUILD}'.")
+endif()
+
 include_directories(${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
@@ -189,7 +197,7 @@ target_include_directories(aburi_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(aburi main.cpp)
 
-llvm_map_components_to_libnames(llvm_libs support core irreader executionengine orcjit native scalaropts transformutils ipo analysis passes)
+llvm_map_components_to_libnames(llvm_libs support core irreader executionengine orcjit native AArch64 scalaropts transformutils ipo analysis passes)
 
 target_link_libraries(aburi_lib PUBLIC ${llvm_libs})
 target_link_libraries(aburi PRIVATE aburi_lib)

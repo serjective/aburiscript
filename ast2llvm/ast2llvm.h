@@ -36,6 +36,7 @@ public:
     };
 
     ASTToLLVM();
+    explicit ASTToLLVM(std::shared_ptr<TargetInfo> target_info);
     void dump();
     int run();
     std::string optimization_level = "0";

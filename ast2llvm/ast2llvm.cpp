@@ -363,6 +363,22 @@ bool collect_darwin_hfa_members(const QualType& type,
     }
     return element_count > 0 && element_count <= 4;
 }
+
+void initialize_codegen_targets() {
+    static const bool initialized = [] {
+        llvm::InitializeNativeTarget();
+        llvm::InitializeNativeTargetAsmPrinter();
+        llvm::InitializeNativeTargetAsmParser();
+
+        LLVMInitializeAArch64TargetInfo();
+        LLVMInitializeAArch64Target();
+        LLVMInitializeAArch64TargetMC();
+        LLVMInitializeAArch64AsmPrinter();
+        LLVMInitializeAArch64AsmParser();
+        return true;
+    }();
+    (void)initialized;
+}
 }
 
 extern "C" {
@@ -420,35 +436,42 @@ extern "C" void __emutls_register_common(void*) {
     // Darwin ORC JIT TLS paths currently only require __emutls_get_address.
 }
 
+ASTToLLVM::ASTToLLVM() : ASTToLLVM(TargetInfo::create_host()) {}
+
 // As of LLVM 18.1.8
-ASTToLLVM::ASTToLLVM() : context(std::make_unique<llvm::LLVMContext>()), builder(*context) {
+ASTToLLVM::ASTToLLVM(std::shared_ptr<TargetInfo> target_info)
+    : context(std::make_unique<llvm::LLVMContext>()), builder(*context) {
     module = std::make_unique<llvm::Module>("aburi_module", *context);
-    target = TargetInfo::create_host();
+    target = target_info ? std::move(target_info) : TargetInfo::create_host();
     type_ctx = std::make_shared<TypeContext>(target);
 
-    // Initialize target
-    llvm::InitializeNativeTarget();
-    llvm::InitializeNativeTargetAsmPrinter();
-    llvm::InitializeNativeTargetAsmParser();
+    initialize_codegen_targets();
 
     std::string triple = target->triple.empty()
         ? llvm::sys::getDefaultTargetTriple()
         : target->triple;
+    if (target->triple.empty()) {
+        target->triple = triple;
+    }
     module->setTargetTriple(triple);
 
     std::string error;
     auto llvm_target = llvm::TargetRegistry::lookupTarget(triple, error);
 
     if (!llvm_target) {
-        // Fallback or error
-    } else {
-        std::string cpu = "generic";
-        std::string features = "";
-        llvm::TargetOptions opt;
-        auto RM = llvm::Reloc::Model::PIC_;
-        auto targetMachine = llvm_target->createTargetMachine(triple, cpu, features, opt, RM);
-        module->setDataLayout(targetMachine->createDataLayout());
+        throw std::runtime_error("Could not create target: " + error);
     }
+
+    std::string cpu = "generic";
+    std::string features = "";
+    llvm::TargetOptions opt;
+    auto RM = llvm::Reloc::Model::PIC_;
+    std::unique_ptr<llvm::TargetMachine> targetMachine(
+        llvm_target->createTargetMachine(triple, cpu, features, opt, RM));
+    if (!targetMachine) {
+        throw std::runtime_error("Could not create target machine for " + triple);
+    }
+    module->setDataLayout(targetMachine->createDataLayout());
 }
 
 void ASTToLLVM::reset_entry_alloca_insertion_state() {

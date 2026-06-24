@@ -70,6 +70,12 @@ static cl::list<std::string> SystemIncludePaths("isystem",
 static cl::list<std::string> QuoteIncludePaths("iquote",
     cl::desc("Add quote-only include search path"), cl::ZeroOrMore,
     cl::value_desc("dir"), cl::Prefix, cl::cat(AburiCategory));
+static cl::list<std::string> ISysrootPaths("isysroot",
+    cl::desc("Set Darwin SDK/sysroot include root"), cl::ZeroOrMore,
+    cl::value_desc("dir"), cl::cat(AburiCategory));
+static cl::list<std::string> SysrootPaths("sysroot",
+    cl::desc("Set target sysroot"), cl::ZeroOrMore,
+    cl::value_desc("dir"), cl::cat(AburiCategory));
 static cl::opt<std::string> TargetTriple("target", cl::desc("Target triple"),
     cl::value_desc("triple"), cl::init(""), cl::cat(AburiCategory));
 static cl::opt<std::string> StdOption("std", cl::desc("Language standard (e.g. c89, gnu89, c99, c11, gnu11)"),
@@ -502,6 +508,39 @@ static std::optional<std::string> parse_target_triple_from_argv(int argc, char**
     return std::nullopt;
 }
 
+static std::vector<std::string> collect_driver_sysroots(int argc, char** argv) {
+    std::vector<std::string> sysroots;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (is_ignored_driver_arg(arg)) continue;
+        if ((arg == "-isysroot" || arg == "--sysroot") && i + 1 < argc) {
+            sysroots.push_back(argv[++i]);
+            continue;
+        }
+        if (starts_with(arg, "--sysroot=")) {
+            sysroots.push_back(arg.substr(std::string("--sysroot=").size()));
+            continue;
+        }
+        if (starts_with(arg, "-isysroot=")) {
+            sysroots.push_back(arg.substr(std::string("-isysroot=").size()));
+            continue;
+        }
+        if (starts_with(arg, "-isysroot") && arg.size() > std::string("-isysroot").size()) {
+            sysroots.push_back(arg.substr(std::string("-isysroot").size()));
+            continue;
+        }
+    }
+    return sysroots;
+}
+
+static bool host_is_darwin() {
+#ifdef __APPLE__
+    return true;
+#else
+    return false;
+#endif
+}
+
 static EarlyDriverQuery detect_early_driver_query(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -924,22 +963,17 @@ static void discover_aburi_builtin_includes(const char* argv0,
     }
 }
 
-static std::vector<std::string> discover_driver_macos_sdk_include_paths(const char* argv0) {
+static std::vector<std::string> discover_driver_macos_sdk_include_paths(
+    const char* argv0,
+    const std::vector<std::string>& sysroots) {
     std::vector<std::string> paths;
     std::unordered_set<std::string> seen;
 
     discover_aburi_builtin_includes(argv0, paths, seen);
 
-    if (const char* sdkroot = std::getenv("SDKROOT")) {
-        add_sdk_include_from_root(std::filesystem::path(sdkroot), paths, seen);
+    for (const auto& path : discover_macos_sdk_include_paths(argv0, sysroots)) {
+        try_add_include_path(path, paths, seen);
     }
-
-    add_sdk_from_dir("/Library/Developer/CommandLineTools/SDKs", paths, seen);
-    add_sdk_from_dir("/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs",
-        paths, seen);
-
-    // Add Clang resource headers (stdatomic.h, stdarg.h, etc.)
-    discover_clang_resource_includes(paths, seen);
 
     return paths;
 }
@@ -1275,6 +1309,16 @@ static std::optional<std::string> resolve_program_candidate(
     return std::nullopt;
 }
 
+static std::string resolve_c_family_driver(bool cxx_mode) {
+    std::vector<std::string> candidates = cxx_mode
+        ? std::vector<std::string>{"/usr/bin/c++", "c++", "clang++", "g++"}
+        : std::vector<std::string>{"/usr/bin/cc", "cc", "clang", "gcc"};
+    if (auto resolved = resolve_program_candidate(candidates)) {
+        return *resolved;
+    }
+    return cxx_mode ? "c++" : "cc";
+}
+
 static bool linker_disables_default_runtime(const std::vector<std::string>& linker_flags) {
     for (const auto& flag : linker_flags) {
         if (flag == "-nostdlib" || flag == "-nodefaultlibs" || flag == "-nostartfiles") {
@@ -1293,7 +1337,7 @@ int main(int argc, char** argv) {
         }
         DriverPersona driver_persona = persona_parse.persona;
         std::string early_target_triple =
-            parse_target_triple_from_argv(argc, argv).value_or(default_target_triple());
+            parse_target_triple_from_argv(argc, argv).value_or(default_driver_target_triple());
         auto early_query = detect_early_driver_query(argc, argv);
         if (early_query != EarlyDriverQuery::None) {
             return handle_early_driver_query(early_query, driver_persona,
@@ -1310,7 +1354,8 @@ int main(int argc, char** argv) {
             return 1;
         }
         DriverAbiOptions driver_abi_options = abi_parse.options;
-        auto feature_gate = TargetFeatureGate::from_driver_args(argc, argv, default_target_triple());
+        auto feature_gate = TargetFeatureGate::from_driver_args(
+            argc, argv, default_driver_target_triple());
         if (!explicit_compat_mode_requested) {
             if (auto incompatible_target_flag = detect_incompatible_target_feature_flag(
                     argc,
@@ -1416,9 +1461,9 @@ int main(int argc, char** argv) {
             forced_language_mode = probe.language_mode;
         }
         std::string target_triple =
-            parse_target_triple_from_argv(argc, argv).value_or(default_target_triple());
-        auto target_info = TargetInfo::create_host();
-        target_info->triple = target_triple;
+            parse_target_triple_from_argv(argc, argv).value_or(default_driver_target_triple());
+        auto target_info = TargetInfo::create_for_triple(target_triple);
+        auto driver_sysroots = collect_driver_sysroots(argc, argv);
         if (FBlocks && FNoBlocks) {
             std::cerr << "Error: cannot combine '-fblocks' with '-fno-blocks'" << std::endl;
             return 1;
@@ -1431,11 +1476,9 @@ int main(int argc, char** argv) {
             std::vector<std::string> probe_args = passthrough_compile_flags;
             probe_args.insert(probe_args.end(), linker_flags.begin(), linker_flags.end());
             if (!probe_args.empty()) {
-                std::string probe_driver =
-                    (forced_language_mode.has_value() &&
-                     *forced_language_mode == LanguageMode::CXX)
-                    ? "/usr/bin/c++"
-                    : "/usr/bin/cc";
+                std::string probe_driver = resolve_c_family_driver(
+                    forced_language_mode.has_value() &&
+                    *forced_language_mode == LanguageMode::CXX);
                 run_command(probe_driver, probe_args);
                 return 0;
             }
@@ -1455,15 +1498,26 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (GenerateDependenciesM || GenerateDependenciesMM) {
-            std::string dep_driver =
-                (forced_language_mode.has_value() &&
-                 *forced_language_mode == LanguageMode::CXX)
-                ? "/usr/bin/c++"
-                : "/usr/bin/cc";
+            std::string dep_driver = resolve_c_family_driver(
+                forced_language_mode.has_value() &&
+                *forced_language_mode == LanguageMode::CXX);
             std::vector<std::string> dep_args = passthrough_compile_flags;
             dep_args.insert(dep_args.end(), InputFilenames.begin(), InputFilenames.end());
             run_command(dep_driver, dep_args);
             return 0;
+        }
+        const bool target_producing_mode = !PreprocessOnly && !FSyntaxOnly;
+        if (target_producing_mode && target_info->os != TargetOS::MACOS) {
+            std::cerr << "Error: Aburi currently supports Darwin output targets only; "
+                      << "requested target '" << target_triple << "'" << std::endl;
+            return 1;
+        }
+        const bool object_or_link_mode =
+            target_producing_mode && !EmitAssembly && !EmitLLVM;
+        if (object_or_link_mode && target_info->os == TargetOS::MACOS && !host_is_darwin()) {
+            std::cerr << "Error: Apple object and executable output is not supported "
+                      << "on this host yet; use --emit-llvm or -S" << std::endl;
+            return 1;
         }
         std::vector<std::string> objectFiles;
         std::vector<std::string> tempFiles;
@@ -1507,6 +1561,7 @@ int main(int argc, char** argv) {
                 if (ext == ".mm") {
                     link_as_cxx = true;
                 }
+                const std::string passthrough_driver = resolve_c_family_driver(ext == ".mm");
                 if (DisableSourcePassthrough) {
                     std::cerr << "Error: source passthrough is disabled, cannot compile "
                               << inputFilename << " (extension '" << ext << "')" << std::endl;
@@ -1520,14 +1575,14 @@ int main(int argc, char** argv) {
                         ccArgs.push_back("-o");
                         ccArgs.push_back(OutputFilename);
                     }
-                    run_command("/usr/bin/cc", ccArgs);
+                    run_command(passthrough_driver, ccArgs);
                     continue;
                 }
                 if (FSyntaxOnly) {
                     std::vector<std::string> ccArgs = passthrough_compile_flags;
                     ccArgs.push_back("-fsyntax-only");
                     ccArgs.push_back(inputFilename);
-                    run_command("/usr/bin/cc", ccArgs);
+                    run_command(passthrough_driver, ccArgs);
                     continue;
                 }
                 if (EmitLLVM) {
@@ -1549,7 +1604,7 @@ int main(int argc, char** argv) {
                     ccArgs.push_back(inputFilename);
                     ccArgs.push_back("-o");
                     ccArgs.push_back(asmOut);
-                    run_command("/usr/bin/cc", ccArgs);
+                    run_command(passthrough_driver, ccArgs);
                     continue;
                 }
 
@@ -1563,7 +1618,7 @@ int main(int argc, char** argv) {
                 ccArgs.push_back(inputFilename);
                 ccArgs.push_back("-o");
                 ccArgs.push_back(objOut);
-                run_command("/usr/bin/cc", ccArgs);
+                run_command(passthrough_driver, ccArgs);
                 objectFiles.push_back(objOut);
                 if (!CompileOnly) {
                     tempFiles.push_back(objOut);
@@ -1619,7 +1674,8 @@ int main(int argc, char** argv) {
                     argc > 0 ? argv[0] : nullptr,
                     target_triple,
                     lang_opts.is_cxx_mode(),
-                    requested_stdlib);
+                    requested_stdlib,
+                    driver_sysroots);
                 pp.sm->cxx_stdlib_lookup_active = lang_opts.is_cxx_mode();
                 pp.sm->requested_cxx_stdlib = stdlib_kind_name(requested_stdlib);
                 pp.sm->resolved_cxx_stdlib = stdlib_kind_name(cxx_stdlib_paths.resolved);
@@ -1642,7 +1698,9 @@ int main(int argc, char** argv) {
                 }
                 if (target_info->os == TargetOS::MACOS) {
                     auto sdk_paths =
-                        discover_driver_macos_sdk_include_paths(argc > 0 ? argv[0] : nullptr);
+                        discover_driver_macos_sdk_include_paths(
+                            argc > 0 ? argv[0] : nullptr,
+                            driver_sysroots);
                     for (const auto& path : sdk_paths) {
                         try_add_include_path(path, include_paths, seen_paths);
                     }
@@ -1714,7 +1772,7 @@ int main(int argc, char** argv) {
             }
 
             // 3. CodeGen (Parser::parse() already performs semantic analysis)
-            ASTToLLVM codegen;
+            ASTToLLVM codegen(target_info);
             codegen.optimization_level = OptLevel;
             codegen.emit_debug_info = EmitDebugInfo;
             codegen.sm = pp.sm;
@@ -1812,10 +1870,7 @@ int main(int argc, char** argv) {
             for (const auto& obj : objectFiles) linkerArgs.push_back(obj);
             for (const auto& obj : linkerInputFiles) linkerArgs.push_back(obj);
 
-            std::string linker_driver = "/usr/bin/cc";
-            if (link_as_cxx) {
-                linker_driver = "/usr/bin/c++";
-            }
+            std::string linker_driver = resolve_c_family_driver(link_as_cxx);
 
             EhRuntimeKind eh_runtime =
                 driver_abi_options.eh_runtime.value_or(EhRuntimeKind::LLVM);

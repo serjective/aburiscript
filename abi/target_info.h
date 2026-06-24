@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -70,9 +71,10 @@ struct TargetInfo {
     std::string wchar_type_spelling() const;
     size_t max_pack_alignment_bytes() const { return max_alignment_bytes; }
 
-    // Create a TargetInfo for the host machine.
-    // Currently returns Apple ARM64 config.
+    // Create a TargetInfo for the native host machine.
     static std::shared_ptr<TargetInfo> create_host();
+    static std::shared_ptr<TargetInfo> create_apple_aarch64();
+    static std::shared_ptr<TargetInfo> create_for_triple(std::string_view triple);
 };
 
 #endif // ABURI_TARGET_INFO_H

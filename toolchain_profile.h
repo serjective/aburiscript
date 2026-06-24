@@ -14,6 +14,8 @@ enum class StdLibKind {
 
 std::optional<StdLibKind> parse_stdlib_kind(std::string_view value);
 std::string stdlib_kind_name(StdLibKind kind);
+std::string default_driver_target_triple();
+std::string native_host_triple();
 std::string default_target_triple();
 
 struct CxxStdlibDiscoveryResult {
@@ -28,7 +30,16 @@ CxxStdlibDiscoveryResult discover_cxx_stdlib_include_paths(
     std::string_view target_triple,
     bool cxx_mode,
     StdLibKind requested_kind);
+CxxStdlibDiscoveryResult discover_cxx_stdlib_include_paths(
+    const char* argv0,
+    std::string_view target_triple,
+    bool cxx_mode,
+    StdLibKind requested_kind,
+    const std::vector<std::string>& sysroots);
 
 std::vector<std::string> discover_macos_sdk_include_paths(const char* argv0);
+std::vector<std::string> discover_macos_sdk_include_paths(
+    const char* argv0,
+    const std::vector<std::string>& sysroots);
 
 #endif // ABURI_TOOLCHAIN_PROFILE_H

@@ -10,7 +10,7 @@
 int compile_run_program(std::string prg, LangOptions lang_opts) {
     auto target = TargetInfo::create_host();
     if (target->triple.empty()) {
-        target->triple = default_target_triple();
+        target->triple = native_host_triple();
     }
 
     const std::string input_name = lang_opts.is_cxx_mode() ? "main.cpp" : "main.c";
@@ -57,7 +57,7 @@ int compile_run_program(std::string prg, LangOptions lang_opts) {
         return -1;
     }
 
-    auto cvt2llvm = ASTToLLVM();
+    auto cvt2llvm = ASTToLLVM(target);
     cvt2llvm.sm = pp.sm;
     cvt2llvm.ast_ctx = parse.ast_ctx;
     cvt2llvm.lang_opts = lang_opts;

@@ -130,6 +130,7 @@ void add_latest_darwin_sdk_candidate(const std::filesystem::path& sdk_dir,
 }
 
 void add_darwin_libcxx_candidates(const char* argv0,
+                                  const std::vector<std::string>& sysroots,
                                   std::vector<std::string>& attempted_paths,
                                   std::unordered_set<std::string>& attempted_seen,
                                   std::vector<std::string>& include_paths,
@@ -142,6 +143,10 @@ void add_darwin_libcxx_candidates(const char* argv0,
 
     if (const char* sdkroot = std::getenv("SDKROOT")) {
         maybe_record_candidate(std::filesystem::path(sdkroot) / "usr" / "include" / "c++" / "v1",
+            attempted_paths, attempted_seen, include_paths, include_seen);
+    }
+    for (const auto& sysroot : sysroots) {
+        maybe_record_candidate(std::filesystem::path(sysroot) / "usr" / "include" / "c++" / "v1",
             attempted_paths, attempted_seen, include_paths, include_seen);
     }
     add_latest_darwin_sdk_candidate("/Library/Developer/CommandLineTools/SDKs",
@@ -298,7 +303,11 @@ std::string stdlib_kind_name(StdLibKind kind) {
     return "auto";
 }
 
-std::string default_target_triple() {
+std::string default_driver_target_triple() {
+    return "aarch64-apple-darwin";
+}
+
+std::string native_host_triple() {
 #if defined(__APPLE__) && defined(__aarch64__)
     return "aarch64-apple-darwin";
 #elif defined(__APPLE__) && defined(__arm64__)
@@ -314,11 +323,25 @@ std::string default_target_triple() {
 #endif
 }
 
+std::string default_target_triple() {
+    return default_driver_target_triple();
+}
+
 CxxStdlibDiscoveryResult discover_cxx_stdlib_include_paths(
     const char* argv0,
     std::string_view target_triple,
     bool cxx_mode,
     StdLibKind requested_kind) {
+    return discover_cxx_stdlib_include_paths(
+        argv0, target_triple, cxx_mode, requested_kind, {});
+}
+
+CxxStdlibDiscoveryResult discover_cxx_stdlib_include_paths(
+    const char* argv0,
+    std::string_view target_triple,
+    bool cxx_mode,
+    StdLibKind requested_kind,
+    const std::vector<std::string>& sysroots) {
     CxxStdlibDiscoveryResult result;
     result.requested = requested_kind;
     result.resolved = requested_kind;
@@ -341,6 +364,7 @@ CxxStdlibDiscoveryResult discover_cxx_stdlib_include_paths(
 
     if (target_os == TargetOS::MACOS && result.resolved == StdLibKind::LibCxx) {
         add_darwin_libcxx_candidates(argv0,
+            sysroots,
             result.attempted_paths,
             attempted_seen,
             result.include_paths,
@@ -357,10 +381,20 @@ CxxStdlibDiscoveryResult discover_cxx_stdlib_include_paths(
 }
 
 std::vector<std::string> discover_macos_sdk_include_paths(const char* argv0) {
+    return discover_macos_sdk_include_paths(argv0, {});
+}
+
+std::vector<std::string> discover_macos_sdk_include_paths(
+    const char* argv0,
+    const std::vector<std::string>& sysroots) {
     (void)argv0;
 
     std::vector<std::string> paths;
     std::unordered_set<std::string> seen;
+
+    for (const auto& sysroot : sysroots) {
+        add_sdk_include_from_root(std::filesystem::path(sysroot), paths, seen);
+    }
 
     if (const char* sdkroot = std::getenv("SDKROOT")) {
         add_sdk_include_from_root(std::filesystem::path(sdkroot), paths, seen);

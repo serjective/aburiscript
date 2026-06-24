@@ -1,6 +1,83 @@
 #include "target_info.h"
 #include "ast/types.h"
 #include <algorithm>
+#include <cctype>
+
+namespace {
+
+std::string lowercase_ascii(std::string_view value) {
+    std::string out(value);
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return out;
+}
+
+std::shared_ptr<TargetInfo> make_aarch64_darwin(std::string triple) {
+    auto ti = std::make_shared<TargetInfo>();
+    ti->arch = TargetArch::AARCH64;
+    ti->os = TargetOS::MACOS;
+    ti->pointer_width = 64;
+    ti->long_width = 64;
+    ti->long_double_width = 64;
+    ti->wchar_width = 32;
+    ti->wchar_is_unsigned = false;
+    ti->long_double_format = LongDoubleFormat::IEEE_DOUBLE;
+    ti->va_list_kind = VaListKind::CHAR_PTR;
+    ti->max_alignment_bytes = 16;
+    ti->triple = std::move(triple);
+    return ti;
+}
+
+std::shared_ptr<TargetInfo> make_x86_64_darwin(std::string triple) {
+    auto ti = std::make_shared<TargetInfo>();
+    ti->arch = TargetArch::X86_64;
+    ti->os = TargetOS::MACOS;
+    ti->pointer_width = 64;
+    ti->long_width = 64;
+    ti->long_double_width = 80;
+    ti->wchar_width = 32;
+    ti->wchar_is_unsigned = false;
+    ti->long_double_format = LongDoubleFormat::X87_EXTENDED;
+    ti->va_list_kind = VaListKind::X86_64_VA_LIST;
+    ti->max_alignment_bytes = 16;
+    ti->triple = std::move(triple);
+    return ti;
+}
+
+std::shared_ptr<TargetInfo> make_aarch64_linux(std::string triple) {
+    auto ti = std::make_shared<TargetInfo>();
+    ti->arch = TargetArch::AARCH64;
+    ti->os = TargetOS::LINUX;
+    ti->pointer_width = 64;
+    ti->long_width = 64;
+    ti->long_double_width = 128;
+    ti->wchar_width = 32;
+    ti->wchar_is_unsigned = false;
+    ti->long_double_format = LongDoubleFormat::IEEE_QUAD;
+    ti->va_list_kind = VaListKind::AARCH64_VA_LIST;
+    ti->max_alignment_bytes = 16;
+    ti->triple = std::move(triple);
+    return ti;
+}
+
+std::shared_ptr<TargetInfo> make_x86_64_linux(std::string triple) {
+    auto ti = std::make_shared<TargetInfo>();
+    ti->arch = TargetArch::X86_64;
+    ti->os = TargetOS::LINUX;
+    ti->pointer_width = 64;
+    ti->long_width = 64;
+    ti->long_double_width = 80;
+    ti->wchar_width = 32;
+    ti->wchar_is_unsigned = false;
+    ti->long_double_format = LongDoubleFormat::X87_EXTENDED;
+    ti->va_list_kind = VaListKind::X86_64_VA_LIST;
+    ti->max_alignment_bytes = 16;
+    ti->triple = std::move(triple);
+    return ti;
+}
+
+} // namespace
 
 std::shared_ptr<CType> TargetInfo::get_va_list_type(TypeContext& ctx) const {
     switch (va_list_kind) {
@@ -22,18 +99,61 @@ std::shared_ptr<CType> TargetInfo::get_va_list_type(TypeContext& ctx) const {
 }
 
 std::shared_ptr<TargetInfo> TargetInfo::create_host() {
-    auto ti = std::make_shared<TargetInfo>();
-    ti->arch = TargetArch::AARCH64;
-    ti->os = TargetOS::MACOS;
-    ti->pointer_width = 64;
-    ti->long_width = 64;
-    ti->long_double_width = 64;  // Apple ARM64: long double == double
-    ti->wchar_width = 32;
-    ti->wchar_is_unsigned = false;
-    ti->long_double_format = LongDoubleFormat::IEEE_DOUBLE;
-    ti->va_list_kind = VaListKind::CHAR_PTR;
-    ti->max_alignment_bytes = 16;
-    ti->triple = "";  // empty means use llvm::sys::getDefaultTargetTriple()
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+    return create_for_triple("aarch64-apple-darwin");
+#elif defined(__APPLE__) && defined(__x86_64__)
+    return create_for_triple("x86_64-apple-darwin");
+#elif defined(__linux__) && defined(__aarch64__)
+    return create_for_triple("aarch64-unknown-linux-gnu");
+#elif defined(__linux__) && defined(__x86_64__)
+    return create_for_triple("x86_64-unknown-linux-gnu");
+#else
+    auto ti = create_apple_aarch64();
+    ti->triple = "unknown-unknown-unknown";
+    ti->os = TargetOS::NONE;
+    return ti;
+#endif
+}
+
+std::shared_ptr<TargetInfo> TargetInfo::create_apple_aarch64() {
+    return make_aarch64_darwin("aarch64-apple-darwin");
+}
+
+std::shared_ptr<TargetInfo> TargetInfo::create_for_triple(std::string_view triple) {
+    const std::string original(triple);
+    const std::string lowered = lowercase_ascii(triple);
+
+    if ((lowered.find("aarch64") != std::string::npos ||
+         lowered.find("arm64") != std::string::npos) &&
+        (lowered.find("apple") != std::string::npos ||
+         lowered.find("darwin") != std::string::npos ||
+         lowered.find("macos") != std::string::npos)) {
+        return make_aarch64_darwin(original.empty() ? "aarch64-apple-darwin" : original);
+    }
+
+    if ((lowered.find("x86_64") != std::string::npos ||
+         lowered.find("amd64") != std::string::npos) &&
+        (lowered.find("apple") != std::string::npos ||
+         lowered.find("darwin") != std::string::npos ||
+         lowered.find("macos") != std::string::npos)) {
+        return make_x86_64_darwin(original.empty() ? "x86_64-apple-darwin" : original);
+    }
+
+    if ((lowered.find("aarch64") != std::string::npos ||
+         lowered.find("arm64") != std::string::npos) &&
+        lowered.find("linux") != std::string::npos) {
+        return make_aarch64_linux(original.empty() ? "aarch64-unknown-linux-gnu" : original);
+    }
+
+    if ((lowered.find("x86_64") != std::string::npos ||
+         lowered.find("amd64") != std::string::npos) &&
+        lowered.find("linux") != std::string::npos) {
+        return make_x86_64_linux(original.empty() ? "x86_64-unknown-linux-gnu" : original);
+    }
+
+    auto ti = create_apple_aarch64();
+    ti->triple = original;
+    ti->os = TargetOS::NONE;
     return ti;
 }
 
