@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstdint>
+#include <memory>
 // To manage token locations we will use a "giga-file" approach similar to clang (and rust?)
 // points to a location in our "mega-file"
 struct SrcLoc {

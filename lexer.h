@@ -7,6 +7,7 @@
 #include <deque>
 #include "source_mgnt.h"
 #include "lang_options.h"
+#include <memory>
 #include <set>
 #include <unordered_set>
 // Note: We always assume the source document is in UTF-8
