@@ -14,7 +14,7 @@
 namespace aburi::driver {
 
 inline constexpr const char* kAburiProductName = "aburi";
-inline constexpr const char* kAburiVersionString = "0.1";
+inline constexpr const char* kAburiVersionString = "0.2";
 
 inline constexpr int kGccPersonaMajor = 10;
 inline constexpr int kGccPersonaMinor = 2;
